@@ -6,6 +6,34 @@ Built at **Buildersgiving · Miami AI Hackathon**, with Mel driving six parallel
 
 An AI front-desk employee for Miami home-service small businesses. She answers the phone in English, Spanish, or both in the same sentence; triages emergencies; books the job; texts the customer a confirmation; collects an emergency deposit by payment link; and calls the owner at the end of the day with a 45-second voice note.
 
+**[Read the PRD →](PRD.md)** — problem framing, data model, agent design and the parallel work plan.
+
+## Screenshots
+
+Onboarding — paste a website URL, get a knowledge base, a voice agent and a phone number:
+
+![Onboarding: paste a URL, review the extracted knowledge base](docs/screenshots/onboarding.png)
+
+Dashboard — calls, bookings and today's revenue at a glance:
+
+![Dashboard with today's calls and bookings](docs/screenshots/dashboard.png)
+
+The demo console — drives the same seven HTTP tools the voice agent calls on a real call:
+
+![Demo console simulating an inbound call](docs/screenshots/demo.png)
+
+Call log and transcripts, including the generated end-of-day briefing:
+
+![Call log with transcripts and briefings](docs/screenshots/briefings.png)
+
+The emergency deposit page the customer receives by SMS:
+
+![Payment page for an emergency deposit](docs/screenshots/pay.png)
+
+Landing page:
+
+![Landing page](docs/screenshots/landing.png)
+
 ---
 
 ## Quick start
