@@ -1,6 +1,13 @@
 /**
  * Reset + load the demo dataset. Run: bun scripts/seed.ts
  * Idempotent: clears every table first, so it is safe mid-demo.
+ *
+ * Seeding replaces the stored knowledge base with the hand-written SYSTEM_PROMPT
+ * and nulls business.agent_id, which would leave the live ElevenLabs agent speaking
+ * a prompt that names only 3 of the 7 tools. So after loading we run the same
+ * provision step the onboarding UI does: regenerate the prompt from the seeded
+ * services/faqs (they are preserved) and re-register the agent. Pass --no-provision
+ * to skip that if you want the raw seed state.
  */
 import { clearAll, disconnect, prisma } from '../src/lib/db';
 import {
@@ -40,7 +47,71 @@ async function main() {
 
   console.log(`Seeded Postgres: ${JSON.stringify(counts)}`);
   console.log(`  business: Miami Cool Air Conditioning (${DEMO_BUSINESS_ID})`);
+
+  if (!process.argv.includes('--no-provision')) {
+    await provisionDemoAgent();
+  } else {
+    console.log('  --no-provision: agent not re-registered (prompt names only 3 of 7 tools)');
+  }
   await disconnect();
+}
+
+/**
+ * Bring the seeded business back to a live, correctly-prompted state by calling
+ * the app's own provision endpoint when one is running, and falling back to the
+ * library functions directly otherwise. Never fails the seed: an unreachable
+ * ElevenLabs must not leave the demo with no data.
+ */
+async function provisionDemoAgent() {
+  const base = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+  try {
+    const res = await fetch(`${base}/api/businesses/${DEMO_BUSINESS_ID}/provision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(60_000),
+    });
+    const json = await res.json().catch(() => null);
+    if (res.ok && json?.ok) {
+      const d = json.data;
+      console.log(`  provisioned via API: agent=${d.business.agent_id ?? 'none'} phone=${d.phone} prompt=${d.knowledge_base.system_prompt.length} chars`);
+      return;
+    }
+    console.warn(`  provision endpoint returned ${res.status}; provisioning in-process instead`);
+  } catch {
+    // No dev server running — do it locally against the same libs.
+  }
+
+  try {
+    const { getBusiness, getKnowledgeBase, updateBusiness, upsertKnowledgeBase } = await import('../src/lib/db');
+    const { generateKnowledgeBase } = await import('../src/lib/kb');
+    const { createOrUpdateAgent } = await import('../src/lib/voice/elevenlabs');
+
+    const business = await getBusiness(DEMO_BUSINESS_ID);
+    if (!business) return;
+    const kb = await getKnowledgeBase(DEMO_BUSINESS_ID);
+    if (!kb) return;
+
+    const regenerated = await upsertKnowledgeBase(DEMO_BUSINESS_ID, generateKnowledgeBase(
+      {
+        name: business.name,
+        services: kb.services,
+        hours: business.hours ?? {},
+        service_area: business.service_area ?? [],
+        faqs: kb.faqs,
+        pricing_notes: kb.pricing_notes,
+        confidence: 'high',
+        source: 'scrape',
+      },
+      business,
+    ));
+
+    const agent = await createOrUpdateAgent({ business, kb: regenerated });
+    if (!agent.mock && agent.agent_id) await updateBusiness(DEMO_BUSINESS_ID, { agent_id: agent.agent_id });
+    console.log(`  provisioned in-process: agent=${agent.agent_id} mock=${agent.mock} prompt=${regenerated.system_prompt.length} chars`);
+  } catch (err) {
+    console.warn('  agent re-registration skipped:', (err as Error).message);
+  }
 }
 
 main().catch(async (err) => {

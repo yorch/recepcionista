@@ -14,7 +14,28 @@ export const TOOL_NAMES = [
   'handoff_to_human',
 ] as const;
 
-const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
+const DAY_KEYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
+
+/** The seven voice tools the agent must be told about, by exact name. */
+export const REQUIRED_TOOLS = [
+  'check_availability', 'create_booking', 'send_sms', 'create_payment_link',
+  'flag_emergency', 'get_pricing', 'handoff_to_human',
+] as const;
+
+/**
+ * True when a stored prompt is missing something the voice agent needs to behave:
+ * an emergency definition, the card-number rule, or any of the 7 tool names.
+ * Lets provision/seed self-heal a weak curated prompt without churning one that
+ * already passes — owner edits are preserved either way (they live in services/faqs).
+ */
+export function promptIsDeficient(prompt: string | null | undefined): boolean {
+  if (!prompt || !prompt.trim()) return true;
+  const low = prompt.toLowerCase();
+  const hasAllTools = REQUIRED_TOOLS.every((t) => prompt.includes(t));
+  const hasEmergency = low.includes('water leaking') && low.includes('burning smell');
+  const hasCardRule = low.includes('card number');
+  return !(hasAllTools && hasEmergency && hasCardRule);
+}
 
 function fmtService(s: Service, i: number): string {
   const price = s.base_price != null ? `$${s.base_price} (starting price)` : 'price on diagnosis';
@@ -25,7 +46,7 @@ function fmtService(s: Service, i: number): string {
 function fmtHours(business: Business | null, kbHoursFallback?: string[]): string {
   const hours = business?.hours;
   if (hours && Object.keys(hours).length > 0) {
-    return DAYS
+    return DAY_KEYS
       .filter((d) => hours[d] !== undefined)
       .map((d) => {
         const h = hours[d];

@@ -38,7 +38,7 @@ export function templateResult(businessName = 'This Business'): ExtractionResult
       { question: 'Do you offer same-day service?', answer: 'Yes, we offer same-day emergency service — call and we will find the earliest slot.' },
       { question: 'How much does a repair cost?', answer: 'Repairs start around $120 depending on the issue; the technician confirms pricing after diagnosis.' },
     ],
-    pricing_notes: 'All prices are starting prices and vary by equipment and job scope. Estimates are confirmed before any work begins.',
+    pricing_notes: 'All prices are starting prices and vary by equipment and job scope. The technician confirms the exact price after diagnosis, before any work begins. Deposits are capped at $500 and collected only through a secure payment link sent by text.',
     confidence: 'low',
     source: 'template',
   };
@@ -49,11 +49,26 @@ export function normalizeUrl(raw: string): string | null {
   if (!raw || typeof raw !== 'string') return null;
   let s = raw.trim();
   if (!s) return null;
+  // A scheme-relative URL ("//host/path") has no protocol to trust, and a bare
+  // string with slashes but no host is not a site we can scrape.
+  if (s.startsWith('//')) return null;
+  // Reject an explicit non-web scheme BEFORE any prefixing, otherwise
+  // "ftp://host.com" would be mangled into a bogus https:// URL and slip past
+  // the protocol check below.
+  const scheme = s.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
+  if (scheme && !/^https?$/i.test(scheme[1])) return null;
   if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
   try {
     const u = new URL(s);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    if (!u.hostname.includes('.')) return null;
+    if (!u.hostname) return null;
+    // A real public hostname needs a dot in its last two labels, but bare
+    // single-label hosts are valid scrape targets: localhost, LAN names, *.local.
+    const labels = u.hostname.replace(/\.$/, '').split('.');
+    const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(u.hostname);
+    const looksLikeHost = (labels.length >= 2 && labels[labels.length - 1].length >= 2) || isIpv4;
+    const isLocalName = labels.length === 1 || u.hostname.endsWith('.local');
+    if (!looksLikeHost && !isLocalName) return null;
     return u.toString();
   } catch {
     return null;
@@ -180,18 +195,29 @@ function sanitize(raw: unknown, businessName: string, source: ExtractionResult['
   return { name, services, hours, service_area, faqs, pricing_notes, confidence, source };
 }
 
-export async function extractFromUrl(url: string): Promise<ExtractionResult> {
-  const guessName = (() => {
-    try {
-      const host = new URL(normalizeUrl(url) ?? `https://${url}`).hostname.replace(/^www\./, '');
-      const base = host.split('.')[0];
-      return base ? base[0].toUpperCase() + base.slice(1) : 'This Business';
-    } catch {
-      return 'This Business';
-    }
-  })();
+/** Turn a hostname into a presentable business-name guess. */
+function nameFromHost(rawUrl: string): string {
+  let host = rawUrl;
+  try {
+    host = new URL(normalizeUrl(rawUrl) ?? `https://${rawUrl}`).hostname;
+  } catch {
+    /* keep the raw string */
+  }
+  const label = host.replace(/^www\./, '').split('.')[0];
+  if (!label || label === 'localhost') return '';
+  const words = label
+    .replace(/[-_]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .trim();
+  if (!words) return '';
+  // Don't fabricate a brand out of generic TLD/hosting names.
+  if (/^(http|https|test|staging|dev|app|www)$/i.test(words)) return '';
+  return words.split(/\s+/).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+}
 
+export async function extractFromUrl(url: string): Promise<ExtractionResult> {
   const normalized = normalizeUrl(url);
+  const guessName = nameFromHost(url) || 'This Business';
   if (!normalized) return templateResult(guessName);
 
   let text: string;
