@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { extractFromUrl } from '@/lib/extraction';
-import type { ApiResult, ExtractionResult } from '@/lib/types';
+import type { ExtractionResult } from '@/lib/types';
 
 export async function POST(req: Request): Promise<ReturnType<typeof ok<ExtractionResult>> | ReturnType<typeof fail>> {
   try {

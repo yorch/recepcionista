@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings } from '@/lib/db';
-import type { ApiResult, Business, KnowledgeBase } from '@/lib/types';
+import type { Business, KnowledgeBase } from '@/lib/types';
 
 export interface BusinessDetail {
   business: Business;

@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { listBusinesses, createBusiness } from '@/lib/db';
-import type { ApiResult, Business } from '@/lib/types';
+import type { Business } from '@/lib/types';
 
 export async function GET(): Promise<ReturnType<typeof ok<Business[]>> | ReturnType<typeof fail>> {
   try {

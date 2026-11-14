@@ -3,7 +3,7 @@ import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase } fr
 import { extractFromUrl, templateResult } from '@/lib/extraction';
 import { generateKnowledgeBase } from '@/lib/kb';
 import { provisionNumber } from '@/lib/providers/twilio';
-import type { ApiResult, Business, KnowledgeBase } from '@/lib/types';
+import type { Business, KnowledgeBase } from '@/lib/types';
 
 export interface ProvisionResult {
   business: Business;

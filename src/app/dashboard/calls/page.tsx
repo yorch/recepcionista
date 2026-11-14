@@ -1,7 +1,7 @@
 import { listBusinesses, listCalls } from '@/lib/db';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
-import { relative, seconds, whenET } from '@/lib/format';
+import { relative, seconds } from '@/lib/format';
 
 export const dynamic = 'force-dynamic';
 

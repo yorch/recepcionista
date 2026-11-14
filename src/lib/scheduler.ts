@@ -57,7 +57,6 @@ export async function nextAvailable(business: Business, count = 3, durationMinut
 }
 
 export async function isWithinHours(business: Business, iso: string): Promise<boolean> {
-  const d = new Date(iso);
   const dateStr = iso.slice(0, 10);
   return (await slotsForDate(business, dateStr)).some((s) => s.available || s.start === iso);
 }

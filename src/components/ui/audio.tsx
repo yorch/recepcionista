@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { cn } from './cn';
 
 export function VoicePlayer({
@@ -8,9 +8,10 @@ export function VoicePlayer({
   const ref = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [missing, setMissing] = useState(!src);
-
-  useEffect(() => setMissing(!src), [src]);
+  // Derived, not synced: a new `src` clears a previous failure on its own, which an
+  // effect-based reset did not do.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const missing = !src || failedSrc === src;
 
   const toggle = () => {
     const el = ref.current;
@@ -87,7 +88,7 @@ export function VoicePlayer({
             const el = e.currentTarget;
             if (el.duration) setProgress(el.currentTime / el.duration);
           }}
-          onError={() => setMissing(true)}
+          onError={() => setFailedSrc(src ?? null)}
           className="hidden"
         />
       ) : null}

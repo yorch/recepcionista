@@ -32,7 +32,7 @@ const GRATITUDE_BOOKING = 'bk_demo_2';
 let pass = 0;
 let failCount = 0;
 
-function check(label: string, cond: boolean, detail?: unknown) {
+function check(label: string, cond: boolean | undefined, detail?: unknown) {
   if (cond) {
     pass++;
     console.log(`PASS — ${label}`);
@@ -42,6 +42,10 @@ function check(label: string, cond: boolean, detail?: unknown) {
   console.log(`FAIL — ${label}`);
   if (detail !== undefined) console.log('       got:', JSON.stringify(detail).slice(0, 600));
 }
+
+/** Body length, or Infinity when a route returned no body — such a probe fails the `<=`. */
+const bodyLen = (d?: { body?: string; sms?: { body?: string } }) =>
+  (d?.body ?? d?.sms?.body)?.length ?? Infinity;
 
 function seed() {
   execFileSync('bun', ['scripts/seed.ts'], { cwd: process.cwd(), stdio: 'ignore' });
@@ -57,9 +61,21 @@ function call(handler: (req: Request) => Promise<Response>, body: unknown) {
   );
 }
 
+/** Shape the routes return; every field optional because tests probe failures too. */
+type JsonBody = {
+  ok?: boolean;
+  data?: {
+    id?: string; body?: string; to_phone?: string; status?: string; kind?: string;
+    url?: string; mock?: boolean; routed?: string; deduped?: boolean;
+    amount_cents?: number;
+    link?: { url?: string; mock?: boolean; id?: string };
+    sms?: { id?: string; body?: string; kind?: string; status?: string; to_phone?: string; booking_id?: string | null };
+  };
+};
+
 async function postJson(handler: (req: Request) => Promise<Response>, body: unknown) {
   const res = await call(handler, body);
-  return { status: res.status, json: (await res.json().catch(() => null)) as any };
+  return { status: res.status, json: (await res.json().catch(() => null)) as JsonBody | null };
 }
 
 async function main() {
@@ -138,10 +154,10 @@ async function main() {
   });
   check('send → 200 + ok', raw.status === 200 && raw.json?.ok === true, raw.json);
   check('send returns the SmsLog',
-    Boolean(raw.json?.data?.id) && raw.json.data.body === 'Test ping from WS4.', raw.json?.data);
+    Boolean(raw.json?.data?.id) && raw.json?.data?.body === 'Test ping from WS4.', raw.json?.data);
   check('send normalizes the phone to E.164', raw.json?.data?.to_phone === '+13055550100', raw.json?.data?.to_phone);
   check('send logged a row', (await listSms(BIZ)).length === before + 1);
-  check('send status is sent or mock', ['sent', 'mock'].includes(raw.json?.data?.status), raw.json?.data?.status);
+  check('send status is sent or mock', ['sent', 'mock'].includes(String(raw.json?.data?.status)), raw.json?.data?.status);
   const badSend = await postJson(sendSmsRoute, { business_id: BIZ, to: '' });
   check('send rejects a missing body with 422', badSend.status === 422, badSend.status);
 
@@ -152,13 +168,13 @@ async function main() {
   check('confirmation returns {sms, body}',
     Boolean(confirm.json?.data?.sms?.id) && typeof confirm.json?.data?.body === 'string', confirm.json?.data);
   check('confirmation status is sent or mock',
-    ['sent', 'mock'].includes(confirm.json?.data?.sms?.status), confirm.json?.data?.sms?.status);
+    ['sent', 'mock'].includes(String(confirm.json?.data?.sms?.status)), confirm.json?.data?.sms?.status);
   check('confirmation SMS is logged in sms_log',
     (await listSms(BIZ)).some((s) => s.id === confirm.json?.data?.sms?.id), confirm.json?.data?.sms?.id);
   check('confirmation row has kind "confirmation"',
     confirm.json?.data?.sms?.kind === 'confirmation', confirm.json?.data?.sms?.kind);
   check('confirmation body <= 300 chars',
-    confirm.json?.data?.body?.length <= SMS_LIMIT, confirm.json?.data?.body?.length);
+    bodyLen(confirm.json?.data) <= SMS_LIMIT, confirm.json?.data?.body?.length);
   check('confirmation honored language: "es"',
     confirm.json?.data?.body?.includes('Confirmado'), confirm.json?.data?.body);
 
@@ -195,11 +211,11 @@ async function main() {
     Boolean(paySms.json?.data?.sms?.id) && typeof paySms.json?.data?.link?.url === 'string',
     paySms.json?.data);
   check('payment-link SMS contains that URL',
-    paySms.json?.data?.sms?.body?.includes(paySms.json?.data?.link?.url), paySms.json?.data?.sms?.body);
+    paySms.json?.data?.sms?.body?.includes(String(paySms.json?.data?.link?.url)), paySms.json?.data?.sms?.body);
   check('payment-link row kind is "payment_link"',
     paySms.json?.data?.sms?.kind === 'payment_link', paySms.json?.data?.sms?.kind);
   check('payment-link body <= 300 chars',
-    paySms.json?.data?.body?.length <= SMS_LIMIT, paySms.json?.data?.body?.length);
+    bodyLen(paySms.json?.data) <= SMS_LIMIT, paySms.json?.data?.body?.length);
 
   const providedUrl = await postJson(paymentLinkRoute, {
     business_id: BIZ, to: '+13055550177', amount_cents: 18900,
@@ -216,7 +232,7 @@ async function main() {
     Boolean(grat.json?.data?.sms?.id) && typeof grat.json?.data?.body === 'string', grat.json?.data);
   check('gratitude row kind is "gratitude"', grat.json?.data?.sms?.kind === 'gratitude', grat.json?.data?.sms?.kind);
   check('gratitude body asks 1-5', grat.json?.data?.body?.includes('1-5'), grat.json?.data?.body);
-  check('gratitude body <= 300 chars', grat.json?.data?.body?.length <= SMS_LIMIT, grat.json?.data?.body?.length);
+  check('gratitude body <= 300 chars', bodyLen(grat.json?.data) <= SMS_LIMIT, grat.json?.data?.body?.length);
 
   // ---------- 6. POST /api/sms/gratitude-reply ----------
   console.log('\n--- POST /api/sms/gratitude-reply ---');
@@ -241,7 +257,7 @@ async function main() {
   check('rating 2 sends no review link to anyone',
     !(unhappy.json?.data?.body ?? '').includes(reviewUrl()), unhappy.json?.data?.body);
   check('rating 2 body <= 300 chars',
-    unhappy.json?.data?.body?.length <= SMS_LIMIT, unhappy.json?.data?.body?.length);
+    bodyLen(unhappy.json?.data) <= SMS_LIMIT, unhappy.json?.data?.body?.length);
 
   const rating3 = await postJson(gratitudeReplyRoute, { booking_id: GRATITUDE_BOOKING, rating: 3 });
   check('rating 3 → routed:"owner" (boundary)', rating3.json?.data?.routed === 'owner', rating3.json?.data?.routed);

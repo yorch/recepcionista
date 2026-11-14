@@ -7,7 +7,6 @@ import { createBusiness, getBusiness, getKnowledgeBase, upsertKnowledgeBase, upd
 import { extractFromUrl, templateResult, normalizeUrl } from '../src/lib/extraction';
 import { generateKnowledgeBase, buildSystemPrompt, buildCallScript, TOOL_NAMES } from '../src/lib/kb';
 import { provisionNumber } from '../src/lib/providers/twilio';
-import type { Business } from '../src/lib/types';
 
 let pass = 0;
 let failCount = 0;
@@ -46,7 +45,7 @@ check('system_prompt mentions all 7 tools', TOOL_NAMES.every((t) => kb.system_pr
 check('system_prompt has Spanglish rule', kb.system_prompt.includes('Spanglish') && kb.system_prompt.includes('el AC'));
 check('system_prompt has deposit + emergency rules', kb.system_prompt.includes('$500') && kb.system_prompt.includes('burning smell'));
 
-const { phone, mock } = await provisionNumber('305');
+const { phone } = await provisionNumber('305');
 const updatedBiz = await updateBusiness(biz.id, { phone, status: 'live' });
 check('provision sets phone + live', !!updatedBiz?.phone && updatedBiz.status === 'live' && phone.startsWith('+1'));
 

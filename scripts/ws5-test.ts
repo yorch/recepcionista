@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 const run = promisify(execFile);
 import fs from 'node:fs';
 import path from 'node:path';
-import { getBusiness, listCalls, listBookings } from '../src/lib/db';
+import { getBusiness } from '../src/lib/db';
 import { fallbackScript, gather, wordCount, generateBriefing } from '../src/lib/briefing';
 import { classifyReply, findGratitudeCandidates, runGratitudeSweep } from '../src/lib/gratitude';
 

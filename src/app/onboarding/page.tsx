@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import type { ApiResult, Business, ExtractionResult, KnowledgeBase } from '@/lib/types';
@@ -91,10 +92,10 @@ export default function OnboardingPage() {
   return (
     <main className="mx-auto w-full max-w-3xl px-6 py-10">
       <div className="flex items-center justify-between">
-        <a href="/" className="flex items-center gap-2.5">
+        <Link href="/" className="flex items-center gap-2.5">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-[#ff6b35] text-[15px] font-bold text-[#150800]">R</span>
           <span className="text-[15px] font-semibold tracking-tight">Recepcionista</span>
-        </a>
+        </Link>
         <span className="text-[11px] text-[#5a6b80]">Step {stage === 'input' ? 1 : stage === 'done' ? 3 : 2} of 3</span>
       </div>
 

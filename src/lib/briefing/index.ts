@@ -43,9 +43,6 @@ function nameOf(booking: Booking): string {
   return booking.customer_name.split(' ')[0];
 }
 
-function isToday(iso: string, date: string): boolean {
-  return iso.startsWith(date);
-}
 
 function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;

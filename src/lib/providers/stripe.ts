@@ -9,7 +9,8 @@ export const hasStripe = () => Boolean(process.env.STRIPE_SECRET_KEY);
 export async function createPaymentLink(
   amountCents: number,
   description: string,
-  businessName = 'Service deposit',
+  /** Shown on the customer's card statement; Stripe truncates to 22 chars. */
+  businessName?: string,
 ): Promise<PaymentLink & { mock: boolean }> {
   if (!hasStripe()) {
     const id = `mock_${Math.random().toString(36).slice(2, 10)}`;
@@ -18,7 +19,7 @@ export async function createPaymentLink(
   try {
     const form = new URLSearchParams();
     form.set('line_items[0][price_data][currency]', 'usd');
-    form.set('line_items[0][price_data][product_data][name]', description);
+    form.set('line_items[0][price_data][product_data][name]', businessName ? `${businessName}: ${description}` : description);
     form.set('line_items[0][price_data][unit_amount]', String(amountCents));
     form.set('line_items[0][quantity]', '1');
     for (const method of ['card']) form.append('payment_method_types[]', method);

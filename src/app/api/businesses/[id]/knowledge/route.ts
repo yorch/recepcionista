@@ -1,7 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { getBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
 import { buildSystemPrompt } from '@/lib/kb';
-import type { ApiResult, FAQ, KnowledgeBase, Service } from '@/lib/types';
+import type { FAQ, KnowledgeBase, Service } from '@/lib/types';
 
 interface KnowledgePatch {
   services?: Service[];

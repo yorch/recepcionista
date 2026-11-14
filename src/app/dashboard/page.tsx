@@ -18,15 +18,17 @@ export default async function TodayPage() {
   const briefing = await getLatestBriefing(biz.id);
   const sms = await listSms(biz.id);
 
-  const today = new Date().toISOString().slice(0, 10);
+  // Read the clock once so the render stays pure and every value below agrees.
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
   const callsToday = calls.filter((c) => c.started_at.slice(0, 10) === today);
   const upcoming = bookings
-    .filter((b) => new Date(b.scheduled_at).getTime() > Date.now() - 3600_000 && b.status !== 'cancelled')
+    .filter((b) => new Date(b.scheduled_at).getTime() > now.getTime() - 3600_000 && b.status !== 'cancelled')
     .sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
   const deposits = bookings.reduce((s, b) => s + (b.deposit_paid ? b.deposit_amount ?? 0 : 0), 0);
   const needsYou = calls.filter((c) => c.flagged_reason);
 
-  const hour = new Date().getHours();
+  const hour = now.getHours();
   const greeting = hour < 12 ? 'Buenos días' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
 
   return (

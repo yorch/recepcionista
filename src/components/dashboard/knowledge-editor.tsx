@@ -10,7 +10,7 @@ export function KnowledgeEditor({
   businessId, initialPrompt, initialScript,
 }: { businessId: string; initialPrompt: string; initialScript: string }) {
   const router = useRouter();
-  const [prompt, setPrompt] = useState(initialPrompt);
+  const [prompt] = useState(initialPrompt);
   const [script, setScript] = useState(initialScript);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
