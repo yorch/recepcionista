@@ -1,0 +1,17 @@
+{
+  // MD013 (line-length) is enforced at 80 columns everywhere EXCEPT the two
+  // constructs where a line break is not available:
+  //
+  //   tables      — a newline ends the row, so a wide cell cannot be wrapped.
+  //                 The alternative is deleting information from the spec.
+  //   code_blocks — the ASCII architecture diagrams and prompt templates are
+  //                 laid out by column position; reflowing one destroys it.
+  //
+  // Prose, headings and list items are still checked at 80. Everything else in
+  // this file is markdownlint's default ruleset, unmodified.
+  "MD013": {
+    "line_length": 80,
+    "tables": false,
+    "code_blocks": false
+  }
+}

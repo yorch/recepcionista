@@ -1,9 +1,10 @@
 # 3-minute demo script
 
-**Setup before you walk up:** `/api/demo/reset`, open five tabs in order, phone on speaker with the number pre-dialed, laptop on hotspot tethering.
+**Setup before you walk up:** `/api/demo/reset`, open five tabs in order, phone
+on speaker with the number pre-dialed, laptop on hotspot tethering.
 
 | Time | Beat | Say | On screen |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 0:00 | The problem | "Miami HVAC shops lose half their calls. The owner is on a roof, the caller speaks Spanish, and nobody picks up." | Landing page |
 | 0:15 | Setup | "Ask me for any AC company in Miami." *(judge names one)* "I paste their site." | `/onboarding`, paste URL, Enter |
 | 0:35 | It reads | "She's reading their services, hours, and area — and writing her own call script. No forms." | Extraction checklist animating |
@@ -20,7 +21,7 @@
 ## Fallback plan
 
 | If | Then |
-|---|---|
+| --- | --- |
 | ElevenLabs latency spikes | Skip the live call. Run **Demo console → Español · Rutina**. Same endpoints, same artifacts, 3 seconds. |
 | Twilio SMS doesn't land | The SMS body is rendered in the demo console panel. Show that. |
 | Wi-Fi dies | Everything is local. Briefing audio is pre-generated on disk; the phone call is the only network dependency. |
@@ -29,4 +30,7 @@
 
 ## What to say if asked "is this real?"
 
-Yes — the booking writes to the database, the SMS goes through Twilio, the deposit link is a real Stripe test-mode link, and the voice note is real TTS. The only mocked piece is the calendar, which is ours by design (no OAuth in a 5-hour build).
+Yes — the booking writes to the database, the SMS goes through Twilio, the
+deposit link is a real Stripe test-mode link, and the voice note is real TTS.
+The only mocked piece is the calendar, which is ours by design (no OAuth in a
+5-hour build).
