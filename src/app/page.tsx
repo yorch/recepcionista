@@ -70,6 +70,13 @@ export default async function Home() {
           >
             Watch it work
           </Link>
+          <a
+            href={`tel:${process.env.ELEVENLABS_PHONE_NUMBER || ''}`}
+            className="inline-flex items-center gap-2 rounded-xl border border-[#1c4635] bg-[#10291f] px-5 py-3 text-sm font-mono text-[#6ee7b7] transition hover:border-[#3ddc97] hover:bg-[#162e22]"
+          >
+            <span className="h-2 w-2 rounded-full bg-[#3ddc97] animate-pulse" />
+            {process.env.ELEVENLABS_PHONE_NUMBER || 'Call her'}
+          </a>
         </div>
       </section>
 

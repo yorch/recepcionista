@@ -28,10 +28,16 @@ export default async function DemoPage() {
 
         <div className="flex flex-col gap-4 lg:col-span-2">
           <Card className="p-5">
-            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Her number</p>
-            <p className="mt-1.5 font-mono text-lg text-white">{biz.phone ?? '—'}</p>
+            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Call her now</p>
+            <a
+              href={`tel:${process.env.ELEVENLABS_PHONE_NUMBER || biz.phone || ''}`}
+              className="mt-2 flex items-center gap-2.5 rounded-xl border border-[#1c4635] bg-[#10291f] px-4 py-3 font-mono text-xl font-semibold text-white hover:border-[#3ddc97] hover:bg-[#162e22] transition-colors"
+            >
+              <span className="h-2 w-2 rounded-full bg-[#3ddc97] animate-pulse" />
+              {process.env.ELEVENLABS_PHONE_NUMBER || biz.phone || '—'}
+            </a>
             <p className="mt-3 text-[11px] leading-relaxed text-[#6b7b91]">
-              Dial this from any phone and speak Spanglish. Everything lands here within a second of hangup.
+              Dial from any phone — she answers in English or Spanish. Bookings, deposits, and emergencies all land here within seconds.
             </p>
           </Card>
 

@@ -43,10 +43,10 @@ export default async function TodayPage() {
           </h1>
         </div>
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-[#1c4635] bg-[#10291f] px-2.5 py-1 text-[11px] text-[#6ee7b0]">
+          <a href={`tel:${process.env.ELEVENLABS_PHONE_NUMBER || biz.phone || ''}`} className="inline-flex items-center gap-2 rounded-full border border-[#1c4635] bg-[#10291f] px-3 py-1.5 text-[13px] font-mono text-[#6ee7b0] hover:border-[#3ddc97] transition-colors">
             <span className="h-1.5 w-1.5 rounded-full bg-[#3ddc97] live-dot" />
-            {biz.phone ?? 'no number'}
-          </span>
+            {process.env.ELEVENLABS_PHONE_NUMBER || biz.phone || '—'}
+          </a>
         </div>
       </header>
 

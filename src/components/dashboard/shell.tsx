@@ -27,7 +27,13 @@ export function Sidebar({ businessName, phone, live }: { businessName: string; p
           <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-[#3ddc97] live-dot' : 'bg-[#5a6b80]')} />
           <span className="text-[11px] text-[#8b98ab]">{live ? 'Answering calls' : 'Not live'}</span>
         </div>
-        {phone ? <p className="mt-1 font-mono text-[11px] text-[#6b7b91]">{phone}</p> : null}
+        <a
+          href={`tel:${process.env.NEXT_PUBLIC_ELEVENLABS_PHONE_NUMBER || ''}`}
+          className="mt-2 flex items-center gap-2 rounded-lg border border-[#1c4635] px-2.5 py-1.5 font-mono text-[12px] text-[#6ee7b0] hover:border-[#3ddc97] transition-colors"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-[#3ddc97]" />
+          {process.env.NEXT_PUBLIC_ELEVENLABS_PHONE_NUMBER || phone || '—'}
+        </a>
       </div>
 
       <nav className="mt-6 flex flex-col gap-0.5">
