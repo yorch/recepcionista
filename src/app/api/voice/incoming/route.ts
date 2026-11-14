@@ -1,6 +1,6 @@
 import { ok, fail } from '@/lib/http';
 import { getBusinessByPhone, listBusinesses, createCall } from '@/lib/db';
-import { createOrUpdateAgent, getSignedUrl, firstMessageFor } from '@/lib/voice/elevenlabs';
+import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import type { Business } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -58,6 +58,9 @@ export async function POST(req: Request) {
       const agent = await createOrUpdateAgent({ business, kb: null });
       agentId = agent.agent_id;
       agentMock = agent.mock;
+      if (agentId && !agentMock) {
+        try { await bindPhoneNumber(agentId); } catch { /* best-effort */ }
+      }
     } catch (err) {
       console.warn('[voice/incoming] agent setup failed:', (err as Error).message);
     }

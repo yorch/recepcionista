@@ -322,3 +322,28 @@ export async function getSignedUrl(agentId: string): Promise<SignedUrlResult> {
     return { signed_url: null, agent_id: agentId, mock: true, error: (err as Error).message };
   }
 }
+
+/** Bind the single shared ElevenLabs phone number to an agent. */
+export async function bindPhoneNumber(agentId: string): Promise<void> {
+  const phoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
+  if (!phoneNumberId || !hasElevenLabs()) {
+    console.warn('[elevenlabs] bindPhoneNumber skipped — no phone number id or API key');
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/convai/phone-numbers/${encodeURIComponent(phoneNumberId)}`, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({ agent_id: agentId }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      console.warn(`[elevenlabs] bindPhoneNumber -> ${res.status} ${detail.slice(0, 200)}`);
+    } else {
+      console.log(`[elevenlabs] bound phone number ${phoneNumberId.slice(-6)} to agent ${agentId.slice(-6)}`);
+    }
+  } catch (err) {
+    console.warn('[elevenlabs] bindPhoneNumber error:', (err as Error).message);
+  }
+}

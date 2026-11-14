@@ -3,7 +3,8 @@ import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase } fr
 import { extractFromUrl, templateResult } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
 import { provisionNumber } from '@/lib/providers/twilio';
-import { createOrUpdateAgent } from '@/lib/voice/elevenlabs';
+import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
+import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import type { Business, KnowledgeBase } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -134,6 +135,13 @@ export async function POST(
       if (!agent.mock && agent.agent_id && agent.agent_id !== updated.agent_id) {
         const withAgent = await updateBusiness(id, { agent_id: agent.agent_id });
         if (withAgent) updated = withAgent;
+      }
+      if (!agent.mock && agentId) {
+        try { await bindPhoneNumber(agentId); } catch { /* best-effort */ }
+        const hook = await ensurePostCallWebhook();
+        if (hook.webhook_id) {
+          await registerPostCallWebhookOnAgent(agentId, hook.webhook_id);
+        }
       }
     } catch (err) {
       console.warn('[provision] agent registration failed:', (err as Error).message);
