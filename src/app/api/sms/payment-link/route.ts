@@ -56,6 +56,7 @@ export async function POST(req: Request) {
       to: body.to,
       body: text,
       kind: 'payment_link',
+      booking_id: booking?.id ?? null,
     });
 
     return ok<PaymentLinkSmsResult>({

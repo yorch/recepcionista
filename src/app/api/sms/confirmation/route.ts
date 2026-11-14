@@ -1,5 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
-import { getBooking, getBusiness, listSms } from '@/lib/db';
+import { findRecentSms, getBooking, getBusiness } from '@/lib/db';
 import { confirmationSms, type Lang } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
 import type { SmsLog } from '@/lib/types';
@@ -28,15 +28,13 @@ export async function POST(req: Request) {
     const business = await getBusiness(booking.business_id);
     if (!business) return fail('business not found', 404);
 
-    // SmsLog has no booking_id, so the phone number is the only join key we have:
-    // same customer + same kind inside the window ⇒ already texted.
-    const last10 = booking.customer_phone.replace(/\D/g, '').slice(-10);
-    const recent = (await listSms(business.id)).find(
-      (s) =>
-        s.kind === 'confirmation' &&
-        s.to_phone.replace(/\D/g, '').slice(-10) === last10 &&
-        Date.now() - new Date(s.created_at).getTime() < DEDUPE_WINDOW_MS,
-    );
+    // Keyed on the booking, so two jobs for the same customer in the same
+    // window still each get their own confirmation.
+    const recent = await findRecentSms(business.id, {
+      kind: 'confirmation',
+      bookingId: booking.id,
+      withinMs: DEDUPE_WINDOW_MS,
+    });
     if (recent) {
       return ok<ConfirmationResult>({ sms: recent, body: recent.body, deduped: true });
     }
@@ -47,6 +45,7 @@ export async function POST(req: Request) {
       to: booking.customer_phone,
       body,
       kind: 'confirmation',
+      booking_id: booking.id,
     });
 
     return ok<ConfirmationResult>({ sms, body, deduped: false });

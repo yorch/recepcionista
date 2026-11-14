@@ -13,6 +13,8 @@ export interface SendAndLogInput {
   to: string;
   body: string;
   kind: SmsLog['kind'];
+  /** Set whenever the message is about a specific job, so dedupe can be exact. */
+  booking_id?: string | null;
 }
 
 export interface SendAndLogOutput {
@@ -34,6 +36,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     to_phone: to,
     body: input.body,
     kind: input.kind,
+    booking_id: input.booking_id ?? null,
     provider_id: result.id || null,
     status: mapStatus(result.status),
   });

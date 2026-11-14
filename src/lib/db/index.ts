@@ -410,11 +410,16 @@ export async function listSms(businessId?: ID): Promise<SmsLog[]> {
 /** Sends inside a recent window — used for confirmation de-duplication. */
 export async function findRecentSms(
   businessId: ID,
-  opts: { kind: string; toLast10?: string; withinMs: number },
+  opts: { kind: string; bookingId?: string | null; toLast10?: string; withinMs: number },
 ): Promise<SmsLog | null> {
   const since = new Date(Date.now() - opts.withinMs);
   const rows = await prisma.smsLog.findMany({
-    where: { businessId, kind: opts.kind, createdAt: { gte: since } },
+    where: {
+      businessId,
+      kind: opts.kind,
+      ...(opts.bookingId ? { bookingId: opts.bookingId } : {}),
+      createdAt: { gte: since },
+    },
     orderBy: { createdAt: 'desc' },
   });
   const match = opts.toLast10

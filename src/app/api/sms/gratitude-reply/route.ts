@@ -44,6 +44,7 @@ export async function POST(req: Request) {
         to: booking.customer_phone,
         body,
         kind: 'review_request',
+      booking_id: booking?.id ?? null,
       });
       return ok<GratitudeReplyResult>({ routed: 'review', sms, body });
     }
@@ -64,6 +65,7 @@ export async function POST(req: Request) {
       to: business.owner_phone,
       body,
       kind: 'owner_alert',
+      booking_id: booking?.id ?? null,
     });
     return ok<GratitudeReplyResult>({ routed: 'owner', sms, body });
   } catch (err) {

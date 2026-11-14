@@ -30,6 +30,7 @@ export async function POST(req: Request) {
       to: booking.customer_phone,
       body,
       kind: 'gratitude',
+      booking_id: booking?.id ?? null,
     });
 
     return ok<GratitudeResult>({ sms, body });
