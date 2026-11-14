@@ -26,22 +26,49 @@ function extractJson(raw: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
+/**
+ * Some models (reasoning-only ones) reject any temperature other than the
+ * default, and reject max_tokens in favour of max_completion_tokens. Rather
+ * than pin a model-specific body, send the optional params and retry without
+ * whichever one the API names as unsupported — otherwise every call fails and
+ * silently degrades to templates.
+ */
+const unsupportedParams = new Set<string>();
+
 async function callOpenAi(messages: ChatMessage[], temperature: number): Promise<string> {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
+  const send = async (body: Record<string, unknown>) => {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      return json.choices?.[0]?.message?.content ?? '';
+    }
+    const text = await res.text();
+    const param = /"param":\s*"([^"]+)"/.exec(text)?.[1];
+    if (res.status === 400 && param && !unsupportedParams.has(param)) {
+      unsupportedParams.add(param);
+      return null;
+    }
+    throw new Error(`openai ${res.status}: ${text}`);
+  };
+
+  let attempt = 0;
+  while (attempt++ < 4) {
+    const body: Record<string, unknown> = {
       model: process.env.LLM_MODEL || 'gpt-4o-mini',
       messages,
-      temperature,
-    }),
-  });
-  if (!res.ok) throw new Error(`openai ${res.status}: ${await res.text()}`);
-  const json = await res.json();
-  return json.choices?.[0]?.message?.content ?? '';
+    };
+    if (!unsupportedParams.has('temperature')) body.temperature = temperature;
+    const out = await send(body);
+    if (out !== null) return out;
+  }
+  throw new Error('openai: gave up after repeated unsupported-parameter retries');
 }
 
 async function callAnthropic(messages: ChatMessage[], temperature: number): Promise<string> {

@@ -1,7 +1,7 @@
 /**
  * WS1 self-test. Run: bun scripts/ws1-test.ts
  * Exercises lib functions directly (no HTTP server needed).
- * NOTE: this writes a real business + KB into data/db.json; harmless for a demo.
+ * NOTE: this writes a real business + KB into Postgres; harmless for a demo.
  */
 import { createBusiness, getBusiness, getKnowledgeBase, upsertKnowledgeBase, updateBusiness } from '../src/lib/db';
 import { extractFromUrl, templateResult, normalizeUrl } from '../src/lib/extraction';
