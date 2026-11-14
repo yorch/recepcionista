@@ -15,7 +15,7 @@ export PATH="/opt/homebrew/bin:$HOME/.bun/bin:$PATH"
 bun install
 cp .env.example .env.local     # optional: add keys to go live
 
-docker compose up -d           # Postgres 17 on localhost:5433
+docker compose -f compose.dev.yaml up -d   # Postgres 17 on localhost:5433
 bunx prisma migrate deploy     # create the tables
 bun scripts/seed.ts            # demo business: Miami Cool Air Conditioning
 
@@ -23,18 +23,29 @@ bun dev                        # http://localhost:3000
 ```
 
 **Requirements:** Node/Bun, Docker. Nothing is installed system-wide — Postgres runs in a
-container and its data lives in a named volume, so `docker compose down` stops it without
-losing anything and `docker compose down -v` throws it away.
+container and its data lives in a named volume, so `docker compose -f compose.dev.yaml down`
+stops it without losing anything and `… down -v` throws it away.
 
 | Command | Does |
-|---|---|
-| `bun run db:up` / `db:down` | start / stop Postgres |
+| --- | --- |
+| `bun run db:up` / `db:down` | start / stop Postgres (`compose.dev.yaml`) |
 | `bun run db:migrate` | create a migration from `prisma/schema.prisma` |
 | `bun run db:seed` | reload the demo dataset |
 | `bun run db:reset` | drop, re-migrate, reseed |
 | `bun run db:studio` | browse the data at `localhost:5555` |
 
 Adding a key flips a service from mock to live with no code change.
+
+### Deploying it
+
+`compose.production.yaml` is a self-contained stack (app + Postgres + one-shot migrations)
+designed for a server that already runs Traefik. See [DEPLOY.md](DEPLOY.md); the short version:
+
+```sh
+cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, provider keys
+./deploy.sh             # build, migrate, start
+./deploy.sh --seed      # …plus the demo dataset
+```
 
 
 Verify it:

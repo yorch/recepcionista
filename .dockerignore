@@ -1,0 +1,33 @@
+# ── Dependencies ────────────────────────────────────────────────
+node_modules
+**/node_modules
+
+# ── Build output ────────────────────────────────────────────────
+# Copied from the builder stage, never from the context.
+.next
+**/.next
+tsconfig.tsbuildinfo
+next-env.d.ts
+
+# ── Env files ───────────────────────────────────────────────────
+# `.env.*` does not match `.env` itself, hence both lines; the negation comes
+# last so it wins. Without this, live provider keys from a developer's
+# .env.local would be baked into an image layer.
+.env
+.env.*
+!.env.example
+
+# ── VCS / editor / OS ───────────────────────────────────────────
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# ── Local infra state ───────────────────────────────────────────
+data/
+.postgres-data/
+
+# ── Docs and screenshots (not needed to build or run) ───────────
+*.md
+!README.md

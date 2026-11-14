@@ -1,8 +1,10 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  // The dashboard reads the local JSON store on every request; disabling the
-  // cache-components experiment keeps `dynamic = 'force-dynamic'` legal.
+  // Emit .next/standalone with a traced, minimal node_modules + server.js.
+  // The container runs `node server.js` from that bundle instead of `next start`,
+  // which is what keeps the runtime image small enough to ship.
+  output: 'standalone',
   turbopack: {
     rules: {
       '*.css': {

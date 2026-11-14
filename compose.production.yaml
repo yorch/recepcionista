@@ -1,0 +1,165 @@
+# Production stack for a host that already runs Traefik.
+#
+#   ./deploy.sh              # build, migrate, start
+#   ./deploy.sh --seed       # …and load the demo dataset
+#
+# Prerequisites on the host (both one-time):
+#   docker network create traefik
+#   a Traefik instance publishing 80/443 with the `websecure` entrypoint and the
+#   `webcert` ACME resolver — see ~/code/docker-compose-services/traefik.
+#
+# No ports are published. The app is reachable only through Traefik, which is
+# also what makes X-Forwarded-* trustworthy; the database is reachable only from
+# inside this project's private network.
+name: recepcionista
+
+# The connection string the database-touching services share. Defined once so
+# the app, the migrator and the seeder can never disagree about host or schema.
+# Long by nature, hence the inline yamllint directive rather than a wrapped
+# scalar: YAML's folding rules insert or drop characters depending on the
+# flavour, and a silently mangled connection string is not a fun bug.
+# yamllint disable-line rule:line-length
+x-database-url: &database_url "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      # `:?` fails the whole `compose up` when the value is missing, instead of
+      # booting a database the image will reject later and less clearly.
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      # No egress and no published port: the only clients are migrate and app.
+      - private
+    healthcheck:
+      # $$ escapes compose interpolation so the shell inside the container reads
+      # the container's own environment rather than compose re-substituting it.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+
+  # One-shot: applies pending migrations, then exits. A separate service rather
+  # than an entrypoint hook in `app` because it renders only after the database
+  # is healthy and can never race a second replica.
+  migrate:
+    build:
+      context: .
+      target: tools
+    image: ${TOOLS_IMAGE:-recepcionista-tools:local}
+    command: ["bunx", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: *database_url
+    networks:
+      - private
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # Opt-in demo data. Destructive by design: scripts/seed.ts clears every table
+  # first, so it is behind a profile and never runs on a plain `up`.
+  #   docker compose -f compose.production.yaml --profile seed run --rm seed
+  seed:
+    profiles: ["seed"]
+    build:
+      context: .
+      target: tools
+    image: ${TOOLS_IMAGE:-recepcionista-tools:local}
+    command: ["bun", "scripts/seed.ts"]
+    env_file:
+      - .env
+    environment:
+      # Explicit entries win over env_file, so the localhost URL in .env cannot
+      # leak in here.
+      DATABASE_URL: *database_url
+    networks:
+      - private
+      - egress
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      target: runner
+    image: ${APP_IMAGE:-recepcionista-app:local}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      # Pinned so an env_file can never move the listener off the port the
+      # healthcheck and Traefik label both assume.
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      # Built over the private network rather than read from .env, whose value
+      # points at localhost for native `bun dev`. Same expression as
+      # nextjs-mvp-super-template's docker-compose.app.yml; set
+      # DATABASE_URL_OVERRIDE to target a managed Postgres. A password holding
+      # URL-reserved characters (@ : / #) must be percent-encoded here.
+      # yamllint disable-line rule:line-length
+      DATABASE_URL: ${DATABASE_URL_OVERRIDE:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public}
+      # Twilio, ElevenLabs and Stripe all call back into the app, and Stripe's
+      # return URLs are built from this — so it must be the public https origin
+      # and must match DOMAIN. deploy.sh refuses to run when they disagree.
+      APP_URL: ${APP_URL:?Set APP_URL in .env (https://<DOMAIN>)}
+    volumes:
+      # Briefing audio is written at runtime and served as /audio/<file>.mp3.
+      # The volume overrides the image's (empty) directory, which is why the
+      # image pre-creates it node-writable.
+      - audio:/app/public/audio
+    networks:
+      - private
+      - egress
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.services.${TRAEFIK_NAME:-recepcionista}.loadbalancer.server.port=3000"
+      # yamllint disable-line rule:line-length
+      - "traefik.http.routers.${TRAEFIK_NAME:-recepcionista}.rule=Host(`${DOMAIN:?Set DOMAIN in .env}`)"
+      - "traefik.http.routers.${TRAEFIK_NAME:-recepcionista}.entrypoints=websecure"
+      - "traefik.http.routers.${TRAEFIK_NAME:-recepcionista}.tls=true"
+      - "traefik.http.routers.${TRAEFIK_NAME:-recepcionista}.tls.certResolver=webcert"
+      - "traefik.http.routers.${TRAEFIK_NAME:-recepcionista}.service=${TRAEFIK_NAME:-recepcionista}"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Hardening: the app serves HTTP and writes only to the audio volume, so the
+    # rest of the filesystem can be immutable. Next still wants a scratch cache
+    # directory, which is what the tmpfs provides.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache:uid=1000,gid=1000
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 30s
+
+networks:
+  # internal: no route out. Everything that touches Postgres lives here.
+  private:
+    internal: true
+  # Bridged, for the outbound calls to model/voice/SMS/payment providers.
+  egress: {}
+  # Created once on the host: `docker network create traefik`.
+  traefik:
+    external: true
+
+volumes:
+  pgdata: {}
+  audio: {}

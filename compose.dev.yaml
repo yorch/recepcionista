@@ -1,0 +1,36 @@
+# Local development database only — the app still runs natively via `bun dev`.
+#
+#   docker compose -f compose.dev.yaml up -d     # or: bun run db:up
+#
+# Production is compose.production.yaml, which brings its own Postgres. This
+# file exists separately so the dev port and credentials can never be mistaken
+# for the deployed ones.
+name: app
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: recepcionista-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: recepcionista
+      POSTGRES_PASSWORD: recepcionista
+      POSTGRES_DB: recepcionista
+    ports:
+      # Loopback only: a bare `5433:5432` publishes the database on every
+      # interface the laptop has, including coffee-shop wifi.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recepcionista -d recepcionista"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+    # Pinned to the name compose already created for this directory. Renaming it
+    # would silently start an empty database and leave the seeded demo data
+    # orphaned in the old volume.
+    name: app_recepcionista-pgdata
