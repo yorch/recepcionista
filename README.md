@@ -24,7 +24,7 @@ Verify it:
 bun scripts/smoke.ts     # 39 assertions, drives the whole product over HTTP
 bun scripts/ws1-test.ts  # 14 — extraction, KB, provisioning
 bun scripts/ws3-test.ts  # 40 — the seven voice tools
-bun scripts/ws4-test.ts  # 19 — bilingual SMS + payments
+bun scripts/ws4-test.ts  # 71 — bilingual SMS, payments, webhooks
 bun scripts/ws5-test.ts  # 17 — briefings, TTS, gratitude
 ```
 

@@ -18,14 +18,14 @@ The lead agent (this session) did four things and nothing else:
 | **WS1** | extraction, knowledge base, business + provisioning APIs | `extractFromUrl` with cheerio scrape + LLM structured extraction + template fallback; the 2-minute provisioning endpoint; system-prompt generation |
 | **WS2** (lead) | all UI — landing, onboarding, dashboard, calls, calendar, brain, briefings, demo console | 9 routes, dark-first design system, voice-note player with synthetic waveform |
 | **WS3** | the seven voice tools, ElevenLabs agent client, Twilio/ElevenLabs webhooks | tool implementations returning speakable `message` strings in EN + ES; post-call summarization |
-| **WS4** (lead) | bilingual SMS templates, Twilio send path, Stripe links, mock checkout | confirmation / payment-link / gratitude / review / owner-escalation copy; `/pay/[id]`; `scripts/ws4-test.ts` 19/19 |
+| **WS4** (lead) | bilingual SMS templates, Twilio send path, Stripe links, mock checkout | confirmation / payment-link / gratitude / review / owner-escalation copy; `/pay/[id]`; `scripts/ws4-test.ts` 71/71 |
 | **WS5** (lead) | briefing generation, TTS, gratitude sweep | 44-second Spanglish voice note with a strong deterministic fallback; ElevenLabs TTS with a `say`+`afconvert` local fallback; `scripts/ws5-test.ts` 17/17 |
 | **WS6** (lead) | demo orchestrator, seed, reset | `/api/demo/simulate-call` drives the *same* tool endpoints the voice agent uses |
 
 ## Why this scored on "agentic execution"
 
 - **Contracts over coordination.** Agents never messaged each other. The frozen route table did the coordination, so six builds ran without a single merge conflict in `src/lib/`.
-- **Every workstream shipped with a self-test.** Five suites, 129 assertions total: `ws1` (14) extraction/KB/provisioning, `ws3` (40) voice tools, `ws4` (19) messaging, `ws5` (17) briefings, plus `smoke` (39) which drives the whole product over HTTP — provisioning, all three call scripts, payment page, briefing audio, gratitude sweep.
+- **Every workstream shipped with a self-test.** Five suites, 181 assertions total: `ws1` (14) extraction/KB/provisioning, `ws3` (40) voice tools, `ws4` (71) messaging and webhooks, `ws5` (17) briefings, plus `smoke` (39) which drives the whole product over HTTP — provisioning, all three call scripts, payment page, briefing audio, gratitude sweep.
 - **Graceful degradation was a first-class requirement**, assigned to the lead and enforced by the adapter layer: the product demos end-to-end with zero API keys. That is what let six agents work in parallel without anyone blocking on a credential.
 - **The demo path exercises production code.** `/api/demo/simulate-call` calls `/api/voice/tools/createBooking` — the same endpoint ElevenLabs hits — rather than a mock branch. A judge watching the demo console is watching the real agent toolchain.
 
