@@ -1,24 +1,35 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { getBooking, getBusiness } from '@/lib/db';
-import {
-  ownerEscalationSms, reviewRequestSms, reviewUrl,
-} from '@/lib/messaging/templates';
+import { ownerEscalationSms, reviewRequestSms, reviewUrl } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
+import type { SmsLog } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
+export type GratitudeRoute = 'review' | 'owner';
+
+export interface GratitudeReplyResult {
+  routed: GratitudeRoute;
+  sms: SmsLog | null;
+  body: string;
+}
+
 /**
- * The gratitude loop's decision point: a happy customer is asked for a review,
- * an unhappy one never is — they go straight to the owner.
+ * The decision point of the gratitude loop. A 4–5 gets a public review ask; a
+ * 1–3 never does — it goes straight to the owner's phone, because a bad review
+ * is permanent and a callback is not.
  */
 export async function POST(req: Request) {
   try {
-    const { booking_id, rating } = await readJson<{ booking_id: string; rating: number | string }>(req);
+    const { booking_id, rating } = await readJson<{
+      booking_id?: string;
+      rating?: number | string;
+    }>(req);
     if (!booking_id) return fail('booking_id is required', 422);
 
     const score = Number(rating);
     if (!Number.isFinite(score) || score < 1 || score > 5) {
-      return fail('rating must be 1-5', 422);
+      return fail('rating must be a number from 1 to 5', 422);
     }
 
     const booking = getBooking(booking_id);
@@ -28,29 +39,33 @@ export async function POST(req: Request) {
 
     if (score >= 4) {
       const body = reviewRequestSms({ business, booking, reviewUrl: reviewUrl() });
-      const result = await sendAndLog({
+      const { sms } = await sendAndLog({
         business_id: business.id,
         to: booking.customer_phone,
         body,
         kind: 'review_request',
       });
-      return ok({ routed: 'review' as const, sms: result.sms, body });
+      return ok<GratitudeReplyResult>({ routed: 'review', sms, body });
     }
 
-    const reason = `Rated the ${booking.service} ${score}/5`;
-    if (business.owner_phone) {
-      await sendAndLog({
-        business_id: business.id,
-        to: business.owner_phone,
-        body: ownerEscalationSms({
-          business,
-          customer: booking.customer_name,
-          reason,
-        }),
-        kind: 'owner_alert',
-      });
+    const body = ownerEscalationSms({
+      business,
+      customer: `${booking.customer_name} (${booking.customer_phone})`,
+      reason: `rated the ${booking.service} ${score}/5`,
+    });
+
+    // No owner number on file: still report the routing so the dashboard can act.
+    if (!business.owner_phone) {
+      return ok<GratitudeReplyResult>({ routed: 'owner', sms: null, body });
     }
-    return ok({ routed: 'owner' as const, reason });
+
+    const { sms } = await sendAndLog({
+      business_id: business.id,
+      to: business.owner_phone,
+      body,
+      kind: 'owner_alert',
+    });
+    return ok<GratitudeReplyResult>({ routed: 'owner', sms, body });
   } catch (err) {
     return fail(err, 500);
   }

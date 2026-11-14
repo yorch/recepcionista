@@ -1,10 +1,11 @@
 /**
- * The only path to an outbound message: render -> send -> log.
- * Keeping logging here means the dashboard's "texts sent" is always truthful,
- * including in mock mode.
+ * The only path to an outbound message: send -> log.
+ * Logging lives here so "texts sent" on the dashboard is truthful in mock mode
+ * too, and so every route reports the same provider status.
  */
-import { getBusiness, logSms } from '@/lib/db';
-import { sendSms as sendSmsProvider, normalizePhone } from '@/lib/providers/twilio';
+import { logSms } from '@/lib/db';
+import { normalizePhone, sendSms } from '@/lib/providers/twilio';
+import type { SendSmsResult } from '@/lib/providers/twilio';
 import type { SmsLog } from '@/lib/types';
 
 export interface SendAndLogInput {
@@ -14,16 +15,19 @@ export interface SendAndLogInput {
   kind: SmsLog['kind'];
 }
 
-export interface SendAndLogResult {
+export interface SendAndLogOutput {
   sms: SmsLog;
-  status: 'sent' | 'mock' | 'failed';
-  provider_id?: string;
-  error?: string;
+  result: SendSmsResult;
 }
 
-export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogResult> {
+/** Status from the provider is already one of sent|mock|failed — pass it through. */
+export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutput> {
   const to = normalizePhone(input.to);
-  const result = await sendSmsProvider(to, input.body);
+  const result = await sendSms(to, input.body);
+
+  if (result.status === 'failed') {
+    console.warn(`[sms] failed -> ${to}: ${result.error ?? 'unknown error'}`);
+  }
 
   const sms = logSms({
     business_id: input.business_id,
@@ -31,20 +35,14 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogResu
     body: input.body,
     kind: input.kind,
     provider_id: result.id || null,
-    status: result.status,
+    status: mapStatus(result.status),
   });
 
-  if (!input.business_id || !getBusiness(input.business_id)) {
-    // The log row is still useful for the demo, but flag the bad reference.
-    console.warn(`[sms] unknown business ${input.business_id}`);
-  }
-
-  return { sms, status: result.status, provider_id: result.id, error: result.error };
+  return { sms, result };
 }
 
-export function recentFor(bookingPhone: string, businessId: string, windowMs = 120_000) {
-  void bookingPhone;
-  void businessId;
-  void windowMs;
-  return null;
+function mapStatus(status: SendSmsResult['status']): SmsLog['status'] {
+  if (status === 'sent') return 'sent';
+  if (status === 'mock') return 'mock';
+  return 'failed';
 }
