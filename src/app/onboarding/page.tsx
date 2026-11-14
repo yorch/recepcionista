@@ -244,7 +244,12 @@ export default function OnboardingPage() {
 
           <div className="mx-auto mt-7 max-w-sm rounded-2xl border border-[#2a3546] bg-[#0b1017] p-6">
             <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Your AI front desk</p>
-            <p className="mt-2 font-mono text-2xl tracking-tight text-white">{phone ?? business.phone}</p>
+            <a
+              href={`tel:${process.env.NEXT_PUBLIC_ELEVENLABS_PHONE_NUMBER || phone || ''}`}
+              className="mt-2 block font-mono text-2xl tracking-tight text-white hover:text-[#3ddc97] transition-colors"
+            >
+              {process.env.NEXT_PUBLIC_ELEVENLABS_PHONE_NUMBER || phone || business.phone}
+            </a>
             <div className="mt-3 flex items-center justify-center gap-2 text-[11px] text-[#3ddc97]">
               <span className="h-1.5 w-1.5 rounded-full bg-[#3ddc97] live-dot" /> live now
             </div>
