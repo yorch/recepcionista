@@ -38,12 +38,14 @@ export async function POST(req: Request) {
     const from = payload.From || payload.from || '';
 
     // Never dead-end the demo: fall back to the primary business.
-    const business: Business | null = (to ? getBusinessByPhone(to) : null) ?? listBusinesses()[0] ?? null;
+    const business: Business | null = (to ? await getBusinessByPhone(to) : null)
+      ?? (await listBusinesses())[0]
+      ?? null;
     if (!business) {
       return fail('no business configured — run scripts/seed.ts', 404);
     }
 
-    const call = createCall({
+    const call = await createCall({
       business_id: business.id,
       caller_phone: from || null,
       status: 'in_progress',
@@ -83,5 +85,5 @@ export async function POST(req: Request) {
 
 /** Twilio health-check / browser probe. */
 export async function GET() {
-  return ok({ ready: true, businesses: listBusinesses().length });
+  return ok({ ready: true, businesses: (await listBusinesses()).length });
 }

@@ -5,7 +5,7 @@ import { Sidebar } from '@/components/dashboard/shell';
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const businesses = listBusinesses();
+  const businesses = await listBusinesses();
   const biz = businesses[0];
   if (!biz) redirect('/onboarding');
 

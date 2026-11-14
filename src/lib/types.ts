@@ -104,6 +104,8 @@ export interface SmsLog {
   to_phone: string;
   body: string;
   kind: 'confirmation' | 'payment_link' | 'gratitude' | 'review_request' | 'owner_alert' | 'other';
+  /** Which booking this message belongs to — makes confirmation dedupe exact. */
+  booking_id?: ID | null;
   provider_id?: string | null;
   status: 'queued' | 'sent' | 'failed' | 'mock';
   created_at: string;

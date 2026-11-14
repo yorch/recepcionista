@@ -14,18 +14,18 @@ export async function GET(
 ): Promise<ReturnType<typeof ok<BusinessDetail>> | ReturnType<typeof fail>> {
   try {
     const { id } = await params;
-    const business = getBusiness(id);
+    const business = await getBusiness(id);
     if (!business) return fail('business not found', 404);
 
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
     const monthPrefix = now.toISOString().slice(0, 7);
 
-    const calls = listCalls(id);
-    const bookings = listBookings(id);
+    const calls = await listCalls(id);
+    const bookings = await listBookings(id);
 
     const stats = {
-      calls_today: listCalls(id, today).length,
+      calls_today: (await listCalls(id, today)).length,
       bookings_upcoming: bookings.filter((b) => b.scheduled_at > now.toISOString() && b.status !== 'cancelled').length,
       revenue_month: bookings
         .filter((b) => b.created_at.startsWith(monthPrefix) && (b.status === 'confirmed' || b.status === 'completed'))
@@ -33,7 +33,7 @@ export async function GET(
     };
     void calls;
 
-    return ok<BusinessDetail>({ business, knowledge_base: getKnowledgeBase(id), stats });
+    return ok<BusinessDetail>({ business, knowledge_base: await getKnowledgeBase(id), stats });
   } catch (err) {
     return fail(err, 500);
   }
@@ -46,7 +46,7 @@ export async function PATCH(
   try {
     const { id } = await params;
     const body = await readJson<Partial<Business>>(req);
-    const updated = updateBusiness(id, body);
+    const updated = await updateBusiness(id, body);
     if (!updated) return fail('business not found', 404);
     return ok<Business>(updated);
   } catch (err) {

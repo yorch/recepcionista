@@ -65,9 +65,9 @@ async function postJson(handler: (req: Request) => Promise<Response>, body: unkn
 async function main() {
   seed();
 
-  const business = getBusiness(BIZ);
-  const confirmBooking = getBooking(CONFIRM_BOOKING);
-  const gratBooking = getBooking(GRATITUDE_BOOKING);
+  const business = await getBusiness(BIZ);
+  const confirmBooking = await getBooking(CONFIRM_BOOKING);
+  const gratBooking = await getBooking(GRATITUDE_BOOKING);
   if (!business || !confirmBooking || !gratBooking) {
     console.log('FAIL — seeded fixtures missing (run bun scripts/seed.ts)');
     process.exit(1);
@@ -132,7 +132,7 @@ async function main() {
 
   // ---------- 2. POST /api/sms/send ----------
   console.log('\n--- POST /api/sms/send ---');
-  const before = listSms(BIZ).length;
+  const before = (await listSms(BIZ)).length;
   const raw = await postJson(sendSmsRoute, {
     business_id: BIZ, to: '+1 (305) 555-0100', body: 'Test ping from WS4.', kind: 'other',
   });
@@ -140,7 +140,7 @@ async function main() {
   check('send returns the SmsLog',
     Boolean(raw.json?.data?.id) && raw.json.data.body === 'Test ping from WS4.', raw.json?.data);
   check('send normalizes the phone to E.164', raw.json?.data?.to_phone === '+13055550100', raw.json?.data?.to_phone);
-  check('send logged a row', listSms(BIZ).length === before + 1);
+  check('send logged a row', (await listSms(BIZ)).length === before + 1);
   check('send status is sent or mock', ['sent', 'mock'].includes(raw.json?.data?.status), raw.json?.data?.status);
   const badSend = await postJson(sendSmsRoute, { business_id: BIZ, to: '' });
   check('send rejects a missing body with 422', badSend.status === 422, badSend.status);
@@ -154,7 +154,7 @@ async function main() {
   check('confirmation status is sent or mock',
     ['sent', 'mock'].includes(confirm.json?.data?.sms?.status), confirm.json?.data?.sms?.status);
   check('confirmation SMS is logged in sms_log',
-    listSms(BIZ).some((s) => s.id === confirm.json?.data?.sms?.id), confirm.json?.data?.sms?.id);
+    (await listSms(BIZ)).some((s) => s.id === confirm.json?.data?.sms?.id), confirm.json?.data?.sms?.id);
   check('confirmation row has kind "confirmation"',
     confirm.json?.data?.sms?.kind === 'confirmation', confirm.json?.data?.sms?.kind);
   check('confirmation body <= 300 chars',
@@ -258,7 +258,7 @@ async function main() {
   });
   check('webhook → 200', completed.status === 200, completed.status);
   check('webhook marks the matching booking deposit_paid',
-    getBooking('bk_demo_1')?.deposit_paid === true, getBooking('bk_demo_1'));
+    (await getBooking('bk_demo_1'))?.deposit_paid === true, await getBooking('bk_demo_1'));
 
   const unmatched = await call(webhookRoute, {
     type: 'checkout.session.completed',
@@ -266,8 +266,8 @@ async function main() {
   });
   check('webhook without booking_id still returns 200', unmatched.status === 200, unmatched.status);
   check('webhook without booking_id logs an owner_alert SMS summarizing the payment',
-    listSms(BIZ).some((s) => s.kind === 'owner_alert' && s.body.includes('$50')),
-    listSms(BIZ).filter((s) => s.kind === 'owner_alert'));
+    (await listSms(BIZ)).some((s) => s.kind === 'owner_alert' && s.body.includes('$50')),
+    (await listSms(BIZ)).filter((s) => s.kind === 'owner_alert'));
 
   const unrelated = await call(webhookRoute, { type: 'customer.created', data: { object: {} } });
   check('webhook ignores unrelated event types with 200', unrelated.status === 200, unrelated.status);
@@ -296,7 +296,7 @@ async function main() {
 
   // ---------- 9. global invariant ----------
   console.log('\n--- invariant: nothing over 300 chars ---');
-  const logged = listSms(BIZ);
+  const logged = await listSms(BIZ);
   const oversized = logged.filter((s) => s.body.length > SMS_LIMIT);
   check(`all ${logged.length} logged SMS bodies <= ${SMS_LIMIT} chars`, oversized.length === 0,
     oversized.map((s) => ({ len: s.body.length, kind: s.kind })));

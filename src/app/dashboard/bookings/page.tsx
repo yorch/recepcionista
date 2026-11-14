@@ -6,9 +6,9 @@ import { dayET, money, timeET } from '@/lib/format';
 export const dynamic = 'force-dynamic';
 
 export default async function BookingsPage() {
-  const biz = listBusinesses()[0];
+  const biz = (await listBusinesses())[0];
   if (!biz) return null;
-  const bookings = listBookings(biz.id);
+  const bookings = await listBookings(biz.id);
 
   const groups = new Map<string, typeof bookings>();
   for (const b of bookings) {

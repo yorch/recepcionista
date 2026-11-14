@@ -22,7 +22,7 @@ export async function POST(req: Request) {
       booking_id?: string;
     }>(req);
 
-    const business = body.business_id ? getBusiness(body.business_id) : null;
+    const business = body.business_id ? await getBusiness(body.business_id) : null;
     if (!business) return fail('business not found', 404);
 
     const amountCents = Number(body.amount_cents);

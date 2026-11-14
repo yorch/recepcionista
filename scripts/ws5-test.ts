@@ -1,7 +1,10 @@
 /**
  * WS5 self-test. Run: bun scripts/ws5-test.ts
  */
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const run = promisify(execFile);
 import fs from 'node:fs';
 import path from 'node:path';
 import { getBusiness, listCalls, listBookings } from '../src/lib/db';
@@ -21,11 +24,11 @@ function check(label: string, cond: boolean, detail?: unknown) {
 }
 
 async function main() {
-  execFileSync('bun', ['scripts/seed.ts'], { cwd: process.cwd(), stdio: 'ignore' });
+  await run('bun', ['scripts/seed.ts'], { cwd: process.cwd() });
 
-  const business = getBusiness(BIZ)!;
+  const business = (await getBusiness(BIZ))!;
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  const data = gather(BIZ, yesterday);
+  const data = await gather(BIZ, yesterday);
   const script = fallbackScript(business, data);
 
   // The demo-critical facts must survive into the deterministic path.
@@ -50,7 +53,7 @@ async function main() {
   );
   check('quiet day still speaks', quiet.includes('tranquilo'), quiet);
 
-  const candidates = findGratitudeCandidates(BIZ);
+  const candidates = await findGratitudeCandidates(BIZ);
   check('findGratitudeCandidates runs', Array.isArray(candidates));
 
   const sweep = await runGratitudeSweep(BIZ);
@@ -74,7 +77,7 @@ async function main() {
     failCount++;
   }
 
-  execFileSync('bun', ['scripts/seed.ts'], { cwd: process.cwd(), stdio: 'ignore' });
+  await run('bun', ['scripts/seed.ts'], { cwd: process.cwd() });
 
   console.log(`\n${failCount === 0 ? 'ALL PASS' : 'FAILURES'} (${pass}/${pass + failCount})`);
   if (failCount > 0) process.exit(1);

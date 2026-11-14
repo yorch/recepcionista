@@ -19,9 +19,9 @@ export async function POST(req: Request) {
     }>(req);
     if (!booking_id) return fail('booking_id is required', 422);
 
-    const booking = getBooking(booking_id);
+    const booking = await getBooking(booking_id);
     if (!booking) return fail('booking not found', 404);
-    const business = getBusiness(booking.business_id);
+    const business = await getBusiness(booking.business_id);
     if (!business) return fail('business not found', 404);
 
     const body = gratitudeSms({ business, booking, language: language ?? 'en' });

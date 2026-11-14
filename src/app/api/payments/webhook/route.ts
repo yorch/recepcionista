@@ -62,9 +62,10 @@ export async function POST(req: Request) {
   const businessId = metadata.business_id ?? metadata.businessId;
 
   if (bookingId) {
-    const booking = updateBooking(bookingId, { deposit_paid: true, status: 'confirmed' });
+    const booking = await updateBooking(bookingId, { deposit_paid: true, status: 'confirmed' });
     if (booking) {
-      const business = getBusiness(booking.business_id) ?? (businessId ? getBusiness(businessId) : null);
+      const business = (await getBusiness(booking.business_id))
+        ?? (businessId ? await getBusiness(businessId) : null);
       if (business?.owner_phone) {
         await sendAndLog({
           business_id: business.id,
@@ -82,7 +83,7 @@ export async function POST(req: Request) {
   }
 
   // Unmatched payment: never drop money on the floor — tell the owner instead.
-  const business = businessId ? getBusiness(businessId) : null;
+  const business = businessId ? await getBusiness(businessId) : null;
   if (business?.owner_phone) {
     await sendAndLog({
       business_id: business.id,

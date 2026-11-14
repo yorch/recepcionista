@@ -29,7 +29,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     console.warn(`[sms] failed -> ${to}: ${result.error ?? 'unknown error'}`);
   }
 
-  const sms = logSms({
+  const sms = await logSms({
     business_id: input.business_id,
     to_phone: to,
     body: input.body,

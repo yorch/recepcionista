@@ -1,0 +1,126 @@
+// Recepcionista data model.
+// Field names match src/lib/types.ts exactly — the DB layer maps snake_case
+// columns onto the camelCase Prisma fields, so no caller ever learns about either.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Business {
+  id          String   @id @default(uuid())
+  name        String
+  url         String?
+  phone       String?  @unique
+  ownerPhone  String?  @map("owner_phone")
+  ownerName   String?  @map("owner_name")
+  hours       Json     @default("{}")
+  serviceArea String[] @map("service_area")
+  status      String   @default("onboarding")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  knowledgeBase KnowledgeBase?
+  calls         Call[]
+  bookings      Booking[]
+  briefings     Briefing[]
+  smsLog        SmsLog[]
+
+  @@map("businesses")
+}
+
+model KnowledgeBase {
+  id           String   @id @default(uuid())
+  businessId   String   @unique @map("business_id")
+  services     Json     @default("[]")
+  faqs         Json     @default("[]")
+  pricingNotes String   @default("") @map("pricing_notes")
+  systemPrompt String   @default("") @map("system_prompt")
+  callScript   String   @default("") @map("call_script")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@map("knowledge_bases")
+}
+
+model Call {
+  id            String    @id @default(uuid())
+  businessId    String    @map("business_id")
+  callSid       String?   @unique @map("call_sid")
+  callerPhone   String?   @map("caller_phone")
+  callerName    String?   @map("caller_name")
+  startedAt     DateTime  @default(now()) @map("started_at")
+  endedAt       DateTime? @map("ended_at")
+  durationSec   Int?      @map("duration_sec")
+  language      String?
+  transcript    String?
+  summary       String?
+  urgency       String    @default("unsure")
+  status        String    @default("in_progress")
+  recordingUrl  String?   @map("recording_url")
+  flaggedReason String?   @map("flagged_reason")
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@index([businessId, startedAt])
+  @@map("calls")
+}
+
+model Booking {
+  id            String   @id @default(uuid())
+  callId        String?  @map("call_id")
+  businessId    String   @map("business_id")
+  customerName  String   @map("customer_name")
+  customerPhone String   @map("customer_phone")
+  service       String
+  scheduledAt   DateTime @map("scheduled_at")
+  address       String?
+  priceEstimate Int?     @map("price_estimate")
+  depositAmount Int?     @map("deposit_amount")
+  depositPaid   Boolean  @default(false) @map("deposit_paid")
+  status        String   @default("confirmed")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  call     Call?    @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, scheduledAt])
+  @@map("bookings")
+}
+
+model Briefing {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  date       String
+  audioUrl   String?  @map("audio_url")
+  transcript String
+  stats      Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, date])
+  @@map("briefings")
+}
+
+model SmsLog {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  toPhone    String   @map("to_phone")
+  body       String
+  kind       String
+  bookingId  String?  @map("booking_id")
+  providerId String?  @map("provider_id")
+  status     String   @default("queued")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, createdAt])
+  @@map("sms_log")
+}

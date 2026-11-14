@@ -7,9 +7,9 @@ import { money } from '@/lib/format';
 export const dynamic = 'force-dynamic';
 
 export default async function BriefingsPage() {
-  const biz = listBusinesses()[0];
+  const biz = (await listBusinesses())[0];
   if (!biz) return null;
-  const briefings = listBriefings(biz.id);
+  const briefings = await listBriefings(biz.id);
 
   return (
     <main className="mx-auto w-full max-w-3xl px-6 py-8">

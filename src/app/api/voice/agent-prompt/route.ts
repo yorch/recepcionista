@@ -21,14 +21,14 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const requestedId = url.searchParams.get('business_id') ?? '';
     const business = requestedId
-      ? getBusiness(requestedId)
-      : listBusinesses()[0] ?? null;
+      ? await getBusiness(requestedId)
+      : (await listBusinesses())[0] ?? null;
 
     if (!business) {
       return fail(requestedId ? `business ${requestedId} not found` : 'no business configured', 404);
     }
 
-    const kb = getKnowledgeBase(business.id);
+    const kb = await getKnowledgeBase(business.id);
     const systemPrompt = kb?.system_prompt?.trim()
       || buildSystemPrompt(business, {
         services: kb?.services ?? [],

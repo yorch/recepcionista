@@ -14,14 +14,14 @@ export function classifyReply(rating: number | string): 'review' | 'owner' {
   return Number(rating) >= 4 ? 'review' : 'owner';
 }
 
-export function findGratitudeCandidates(businessId?: string): Booking[] {
+export async function findGratitudeCandidates(businessId?: string): Promise<Booking[]> {
   const now = Date.now();
-  const gratitudeSms = listSms(businessId).filter((s) => s.kind === 'gratitude');
+  const gratitudeSms = (await listSms(businessId)).filter((s) => s.kind === 'gratitude');
   const alreadyTexted = new Set(
     gratitudeSms.map((s) => s.to_phone.replace(/\D/g, '').slice(-10)),
   );
 
-  return listBookings(businessId).filter((b) => {
+  return (await listBookings(businessId)).filter((b) => {
     if (b.status !== 'completed') return false;
     const age = now - new Date(b.scheduled_at).getTime();
     if (age < MIN_AGE_MS || age > MAX_AGE_MS) return false;
@@ -36,7 +36,7 @@ export interface SweepResult {
 }
 
 export async function runGratitudeSweep(businessId?: string): Promise<SweepResult> {
-  const candidates = findGratitudeCandidates(businessId);
+  const candidates = await findGratitudeCandidates(businessId);
   const ids: string[] = [];
   let skipped = 0;
 

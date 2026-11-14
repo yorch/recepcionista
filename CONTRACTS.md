@@ -19,7 +19,7 @@ Run dev server: `bun dev` (port 3000). Typecheck: `bunx tsc --noEmit`. Do NOT ru
 | `src/lib/providers/stripe.ts` | `createPaymentLink(amountCents, description, businessName)` → `{url, amount_cents, id, mock}`, `hasStripe()`, `appUrl()` |
 | `src/lib/scheduler.ts` | `slotsForDate(business, dateStr, duration)`, `nextAvailable(business, count, duration)` → `TimeSlot[]`, `isWithinHours` |
 | `src/lib/http.ts` | `ok(data)`, `fail(err, status)`, `readJson<T>(req)` — every route returns `ApiResult<T>` |
-| `data/db.json` | Seeded demo: business id `biz_miami_cool_air`, 4 calls, 3 bookings, 1 briefing |
+| Postgres (Docker, `localhost:5433`) | Seeded demo via `bun scripts/seed.ts`: business id `biz_miami_cool_air`, 4 calls, 3 bookings, 1 briefing |
 | `scripts/seed.ts` | Re-seed: `bun scripts/seed.ts` |
 
 **Rule:** never call `fetch` to OpenAI/Twilio/Stripe/ElevenLabs directly. Always go through `src/lib/providers/*`. That is what keeps the demo alive when a key is missing.

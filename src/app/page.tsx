@@ -5,11 +5,11 @@ import { money } from '@/lib/format';
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const businesses = listBusinesses();
+  const businesses = await listBusinesses();
   const demo = businesses[0];
-  const calls = demo ? listCalls(demo.id) : [];
-  const bookings = demo ? listBookings(demo.id) : [];
-  const briefing = demo ? getLatestBriefing(demo.id) : null;
+  const calls = demo ? await listCalls(demo.id) : [];
+  const bookings = demo ? await listBookings(demo.id) : [];
+  const briefing = demo ? await getLatestBriefing(demo.id) : null;
   const revenue = bookings.reduce((sum, b) => sum + (b.deposit_paid ? b.deposit_amount ?? 0 : 0), 0);
 
   return (

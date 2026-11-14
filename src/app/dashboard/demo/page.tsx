@@ -6,10 +6,10 @@ import { DemoTools } from '@/components/dashboard/demo-tools';
 export const dynamic = 'force-dynamic';
 
 export default async function DemoPage() {
-  const biz = listBusinesses()[0];
+  const biz = (await listBusinesses())[0];
   if (!biz) return null;
-  const kb = getKnowledgeBase(biz.id);
-  const calls = listCalls(biz.id);
+  const kb = await getKnowledgeBase(biz.id);
+  const calls = await listCalls(biz.id);
 
   return (
     <main className="mx-auto w-full max-w-4xl px-6 py-8">

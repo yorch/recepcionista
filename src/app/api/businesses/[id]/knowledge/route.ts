@@ -16,10 +16,10 @@ export async function PUT(
 ): Promise<ReturnType<typeof ok<KnowledgeBase>> | ReturnType<typeof fail>> {
   try {
     const { id } = await params;
-    const business = getBusiness(id);
+    const business = await getBusiness(id);
     if (!business) return fail('business not found', 404);
 
-    const existing = getKnowledgeBase(id);
+    const existing = await getKnowledgeBase(id);
     if (!existing) return fail('knowledge base not found — provision the business first', 404);
 
     const body = await readJson<KnowledgePatch>(req);
@@ -31,7 +31,7 @@ export async function PUT(
 
     const system_prompt = buildSystemPrompt(business, { services, faqs, pricing_notes });
 
-    const saved = upsertKnowledgeBase(id, { services, faqs, pricing_notes, call_script, system_prompt });
+    const saved = await upsertKnowledgeBase(id, { services, faqs, pricing_notes, call_script, system_prompt });
     return ok<KnowledgeBase>(saved);
   } catch (err) {
     return fail(err, 400);

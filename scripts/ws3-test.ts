@@ -55,7 +55,7 @@ check('checkAvailability(date) only offers that day',
 
 // 2. booking success
 const target = slots[0].start;
-const before = listBookings(BIZ).length;
+const before = (await listBookings(BIZ)).length;
 const booked = await createBooking({
   business_id: BIZ,
   customer_name: 'WS3 Tester',
@@ -67,7 +67,7 @@ const booked = await createBooking({
 });
 const bookingId = (booked.data as { booking?: { id: string; scheduled_at: string } } | undefined)?.booking?.id;
 check('createBooking succeeds for an open slot', booked.ok && !!bookingId, booked);
-check('createBooking writes exactly one booking', listBookings(BIZ).length === before + 1);
+check('createBooking writes exactly one booking', (await listBookings(BIZ)).length === before + 1);
 check('createBooking message confirms a real time', /You're all set for .+\. I'm sending your confirmation text now\.$/.test(booked.message), booked.message);
 check('createBooking Spanish message present',
   (await createBooking({
@@ -135,7 +135,7 @@ check('getPricing Spanish no-match message present',
   roofEs.message === 'Voy a pedirle al dueño que le confirme ese precio.', roofEs.message);
 
 // 5. emergency: flags the call + logs an owner SMS
-const smsBefore = listSms(BIZ).length;
+const smsBefore = (await listSms(BIZ)).length;
 const emergency = await flagEmergency({
   business_id: BIZ,
   reason: 'Water pouring from ceiling unit',
@@ -147,12 +147,12 @@ const emergencyData = emergency.data as {
   call?: { id: string; urgency: string; flagged_reason: string; status: string };
   owner_sms?: { kind: string; to_phone: string } | null;
 } | undefined;
-const ownerLogs = listSms(BIZ).filter((s) => s.kind === 'owner_alert');
+const ownerLogs = (await listSms(BIZ)).filter((s) => s.kind === 'owner_alert');
 check('flagEmergency marks the call urgency=emergency',
   emergencyData?.call?.urgency === 'emergency', emergency);
 check('flagEmergency stores the reason',
   (emergencyData?.call?.flagged_reason ?? '').includes('Water pouring'), emergency);
-check('flagEmergency logs an owner_alert SMS', ownerLogs.length >= 1 && listSms(BIZ).length > smsBefore, ownerLogs);
+check('flagEmergency logs an owner_alert SMS', ownerLogs.length >= 1 && (await listSms(BIZ)).length > smsBefore, ownerLogs);
 check('flagEmergency owner SMS goes to the owner phone',
   ownerLogs.some((s) => s.to_phone === '+13055550199'), ownerLogs);
 check('flagEmergency message is speakable',
@@ -171,7 +171,7 @@ check('handoffToHuman message is speakable',
 // 7. sms + payment link
 const sms = await sendSmsTool({ business_id: BIZ, to: '+13055551234', body: 'Your tech is on the way.' });
 check('sendSms logs an SMS with kind other',
-  sms.ok && listSms(BIZ).some((s) => s.body === 'Your tech is on the way.' && s.kind === 'other'), sms);
+  sms.ok && (await listSms(BIZ)).some((s) => s.body === 'Your tech is on the way.' && s.kind === 'other'), sms);
 check('sendSms Spanish message present',
   (await sendSmsTool({ business_id: BIZ, to: '+13055551234', body: 'Hola', language: 'es' }))
     .message.includes('Le acabo de mandar'));
@@ -206,7 +206,7 @@ check('runTool with no args never throws',
   typeof noArgs.message === 'string' && noArgs.message.length > 0, noArgs);
 
 // booking survived in the store with the right call linkage
-const savedBooking = listBookings(BIZ).find((b) => b.id === bookingId);
+const savedBooking = (await listBookings(BIZ)).find((b) => b.id === bookingId);
 check('booking persists with the requested service and time',
   savedBooking?.service === 'AC repair' && savedBooking?.scheduled_at === new Date(target).toISOString(),
   savedBooking);

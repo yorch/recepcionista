@@ -4,7 +4,7 @@ import type { ApiResult, Business } from '@/lib/types';
 
 export async function GET(): Promise<ReturnType<typeof ok<Business[]>> | ReturnType<typeof fail>> {
   try {
-    return ok<Business[]>(listBusinesses());
+    return ok<Business[]>(await listBusinesses());
   } catch (err) {
     return fail(err, 500);
   }
@@ -16,7 +16,7 @@ export async function POST(req: Request): Promise<ReturnType<typeof ok<Business>
     if (!body.name || typeof body.name !== 'string' || !body.name.trim()) {
       return fail('missing "name" in body');
     }
-    const business = createBusiness({
+    const business = await createBusiness({
       name: body.name.trim(),
       url: body.url?.trim() || null,
       owner_phone: body.owner_phone?.trim() || null,

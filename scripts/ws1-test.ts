@@ -29,7 +29,7 @@ check('normalizeUrl rejects ftp', normalizeUrl('ftp://example.com') === null);
 check('normalizeUrl rejects garbage', normalizeUrl('http://') === null);
 
 // 2. create business
-const biz = createBusiness({ name: `WS1 Test Co ${stamp}`, url: null, owner_phone: '+13055550111', owner_name: 'Test Owner' });
+const biz = await createBusiness({ name: `WS1 Test Co ${stamp}`, url: null, owner_phone: '+13055550111', owner_name: 'Test Owner' });
 check('createBusiness returns onboarding business', biz.status === 'onboarding' && !!biz.id);
 
 // 3. provision (no url → template extraction path)
@@ -40,26 +40,26 @@ try {
   extraction = templateResult(biz.name);
 }
 const generated = generateKnowledgeBase(extraction, biz);
-let kb = upsertKnowledgeBase(biz.id, generated);
+let kb = await upsertKnowledgeBase(biz.id, generated);
 check('generateKnowledgeBase produces services + prompt + script', kb.services.length > 0 && kb.system_prompt.length > 500 && kb.call_script.includes('OPENING'));
 check('system_prompt mentions all 7 tools', TOOL_NAMES.every((t) => kb.system_prompt.includes(t)));
 check('system_prompt has Spanglish rule', kb.system_prompt.includes('Spanglish') && kb.system_prompt.includes('el AC'));
 check('system_prompt has deposit + emergency rules', kb.system_prompt.includes('$500') && kb.system_prompt.includes('burning smell'));
 
 const { phone, mock } = await provisionNumber('305');
-const updatedBiz = updateBusiness(biz.id, { phone, status: 'live' });
+const updatedBiz = await updateBusiness(biz.id, { phone, status: 'live' });
 check('provision sets phone + live', !!updatedBiz?.phone && updatedBiz.status === 'live' && phone.startsWith('+1'));
 
 // 4. read back
-const readBack = getBusiness(biz.id);
+const readBack = await getBusiness(biz.id);
 check('getBusiness reads back the business', readBack?.id === biz.id && readBack?.status === 'live');
-const kbBack = getKnowledgeBase(biz.id);
+const kbBack = await getKnowledgeBase(biz.id);
 check('getKnowledgeBase reads back the KB', kbBack?.business_id === biz.id);
 
 // 5. patch KB and regenerate prompt
 const merged = { services: kb.services, faqs: [...kb.faqs, { question: 'Do you offer warranties?', answer: 'Yes, 1 year on repairs.' }], pricing_notes: 'Repairs carry a 1-year warranty.' };
 const regenerated = buildSystemPrompt(readBack!, merged);
-kb = upsertKnowledgeBase(biz.id, {
+kb = await upsertKnowledgeBase(biz.id, {
   faqs: merged.faqs,
   pricing_notes: merged.pricing_notes,
   system_prompt: regenerated,

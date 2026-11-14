@@ -18,11 +18,11 @@ export async function POST(
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
   try {
     const { id } = await params;
-    const business = getBusiness(id);
+    const business = await getBusiness(id);
     if (!business) return fail('business not found', 404);
 
     // 1. Knowledge base: reuse if present, otherwise extract (or template).
-    let kb = getKnowledgeBase(id);
+    let kb = await getKnowledgeBase(id);
     if (!kb) {
       let extraction;
       try {
@@ -31,12 +31,12 @@ export async function POST(
         extraction = templateResult(business.name);
       }
       const generated = generateKnowledgeBase(extraction, business);
-      kb = upsertKnowledgeBase(id, generated);
+      kb = await upsertKnowledgeBase(id, generated);
     }
 
     // 2. Provision the phone number and go live.
     const { phone, mock } = await provisionNumber('305');
-    const updated = updateBusiness(id, { phone, status: 'live' });
+    const updated = await updateBusiness(id, { phone, status: 'live' });
     if (!updated) return fail('business not found', 404);
 
     return ok<ProvisionResult>({ business: updated, knowledge_base: kb, phone, mock });

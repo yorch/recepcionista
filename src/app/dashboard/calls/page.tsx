@@ -9,9 +9,9 @@ const LANG_LABEL: Record<string, string> = { en: 'English', es: 'Español', mixe
 const LANG_TONE: Record<string, string> = { en: 'neutral', es: 'brand', mixed: 'sky' };
 
 export default async function CallsPage() {
-  const biz = listBusinesses()[0];
+  const biz = (await listBusinesses())[0];
   if (!biz) return null;
-  const calls = listCalls(biz.id);
+  const calls = await listCalls(biz.id);
 
   return (
     <main className="mx-auto w-full max-w-4xl px-6 py-8">

@@ -51,9 +51,9 @@ function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
-function gather(businessId: string, date: string) {
-  const calls = listCalls(businessId, date);
-  const allBookings = listBookings(businessId);
+async function gather(businessId: string, date: string) {
+  const calls = await listCalls(businessId, date);
+  const allBookings = await listBookings(businessId);
   const bookings = allBookings.filter(
     (b) => b.scheduled_at.startsWith(date) || b.created_at.startsWith(date),
   );
@@ -90,7 +90,7 @@ function gather(businessId: string, date: string) {
  */
 function fallbackScript(
   business: Business,
-  data: ReturnType<typeof gather>,
+  data: Awaited<ReturnType<typeof gather>>,
 ): string {
   const owner = business.owner_name || 'Jorge';
   const { calls, bookings, flagged, deposits } = data;
@@ -166,7 +166,7 @@ function fallbackScript(
 
 async function narrate(
   business: Business,
-  data: ReturnType<typeof gather>,
+  data: Awaited<ReturnType<typeof gather>>,
   date: string,
 ): Promise<string> {
   const fallback = fallbackScript(business, data);
@@ -225,15 +225,15 @@ async function narrate(
 }
 
 export async function generateBriefing(businessId: string, date?: string): Promise<Briefing> {
-  const business = getBusiness(businessId);
+  const business = await getBusiness(businessId);
   if (!business) throw new Error('business not found');
 
   const day = date ?? dayKey();
-  const data = gather(businessId, day);
+  const data = await gather(businessId, day);
   const transcript = await narrate(business, data, day);
   const audio = await synthesizeBriefing(transcript, { businessId, date: day });
 
-  return createBriefing({
+  return await createBriefing({
     business_id: businessId,
     date: day,
     transcript,

@@ -26,7 +26,7 @@ export async function POST(req: Request) {
       url?: string;
     }>(req);
 
-    const business = body.business_id ? getBusiness(body.business_id) : null;
+    const business = body.business_id ? await getBusiness(body.business_id) : null;
     if (!business) return fail('business not found', 404);
     if (!body.to) return fail('to is required', 422);
 
@@ -35,7 +35,7 @@ export async function POST(req: Request) {
       return fail('amount_cents must be between 100 and 50000', 422);
     }
 
-    const booking = body.booking_id ? getBooking(body.booking_id) : null;
+    const booking = body.booking_id ? await getBooking(body.booking_id) : null;
     const description = body.description?.trim()
       || `${business.name} deposit${booking ? ` — ${booking.service}` : ''}`;
 

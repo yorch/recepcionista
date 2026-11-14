@@ -10,13 +10,13 @@ import { VoicePlayer } from '@/components/ui/audio';
 export const dynamic = 'force-dynamic';
 
 export default async function TodayPage() {
-  const biz = listBusinesses()[0];
+  const biz = (await listBusinesses())[0];
   if (!biz) return null;
 
-  const calls = listCalls(biz.id);
-  const bookings = listBookings(biz.id);
-  const briefing = getLatestBriefing(biz.id);
-  const sms = listSms(biz.id);
+  const calls = await listCalls(biz.id);
+  const bookings = await listBookings(biz.id);
+  const briefing = await getLatestBriefing(biz.id);
+  const sms = await listSms(biz.id);
 
   const today = new Date().toISOString().slice(0, 10);
   const callsToday = calls.filter((c) => c.started_at.slice(0, 10) === today);

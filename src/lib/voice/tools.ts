@@ -145,8 +145,8 @@ function minutesOf(iso: string): number {
 }
 
 /** A short "I could do X instead" clause built from the real calendar. */
-function alternativeClause(business: Business, lang: ToolLanguage): string {
-  const slot = nextAvailable(business, 1)[0];
+async function alternativeClause(business: Business, lang: ToolLanguage): Promise<string> {
+  const slot = (await nextAvailable(business, 1))[0];
   if (!slot) {
     return say(lang,
       'Nothing is open in the next two weeks.',
@@ -165,7 +165,7 @@ function str(value: unknown): string {
   return '';
 }
 
-function resolveBusiness(args: BaseArgs): Business | null {
+async function resolveBusiness(args: BaseArgs): Promise<Business | null> {
   const id = str(args.business_id) || str((args as Record<string, unknown>).businessId);
   return id ? getBusiness(id) : null;
 }
@@ -179,14 +179,14 @@ function missingBusiness(lang: ToolLanguage): ToolResult {
   };
 }
 
-function activeCall(businessId: string, callId?: string): Call | null {
+async function activeCall(businessId: string, callId?: string): Promise<Call | null> {
   const explicit = str(callId);
   if (explicit) {
-    const call = getCall(explicit);
+    const call = await getCall(explicit);
     if (call) return call;
   }
   // Most recent in-progress call for this business.
-  return listCalls(businessId).find((c) => c.status === 'in_progress') ?? null;
+  return (await listCalls(businessId)).find((c) => c.status === 'in_progress') ?? null;
 }
 
 async function postInternal(path: string, body: unknown): Promise<unknown | null> {
@@ -209,7 +209,7 @@ async function alertOwner(business: Business, body: string): Promise<SmsLog | nu
   if (!business.owner_phone) return null;
   const to = normalizePhone(business.owner_phone);
   const sent = await sendSms(to, body);
-  return logSms({
+  return await logSms({
     business_id: business.id,
     to_phone: to,
     body,
@@ -229,7 +229,7 @@ export interface CheckAvailabilityArgs extends BaseArgs {
 export async function checkAvailability(args: CheckAvailabilityArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
-    const business = resolveBusiness(args);
+    const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
     const duration = Number(args.duration_minutes) || 60;
@@ -243,13 +243,13 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
     let slots: TimeSlot[];
     let dayFull = false;
     if (dateStr) {
-      slots = slotsForDate(business, dateStr, duration).filter((s) => s.available).slice(0, 3);
+      slots = (await slotsForDate(business, dateStr, duration)).filter((s) => s.available).slice(0, 3);
       if (slots.length === 0) {
         dayFull = true;
-        slots = nextAvailable(business, 3, duration);
+        slots = await nextAvailable(business, 3, duration);
       }
     } else {
-      slots = nextAvailable(business, 3, duration);
+      slots = await nextAvailable(business, 3, duration);
     }
 
     if (slots.length === 0) {
@@ -294,7 +294,7 @@ export interface CreateBookingArgs extends BaseArgs {
 export async function createBooking(args: CreateBookingArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
-    const business = resolveBusiness(args);
+    const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
     const name = str(args.customer_name);
@@ -325,47 +325,50 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     const dateKey = etParts(iso).dateKey;
 
     if (!insideOpenHours(business, iso)) {
+      const alt = await alternativeClause(business, lang);
       return {
         ok: false,
         message: say(lang,
-          `That is outside our hours. ${alternativeClause(business, lang)}`,
-          `Eso está fuera de nuestro horario. ${alternativeClause(business, lang)}`),
+          `That is outside our hours. ${alt}`,
+          `Eso está fuera de nuestro horario. ${alt}`),
         data: { reason: 'outside_hours', scheduled_at: iso },
       };
     }
 
     const bookedMinutes = new Set<number>([
-      ...getBookedSlots(business.id, dateKey).map(minutesOf),
-      ...listBookings(business.id)
+      ...(await getBookedSlots(business.id, dateKey)).map(minutesOf),
+      ...(await listBookings(business.id))
         .filter((b) => etParts(b.scheduled_at).dateKey === dateKey)
         .map((b) => minutesOf(b.scheduled_at)),
     ]);
     if (bookedMinutes.has(minutesOf(iso))) {
+      const alt = await alternativeClause(business, lang);
       return {
         ok: false,
         message: say(lang,
-          `That slot just got taken. ${alternativeClause(business, lang)}`,
-          `Ese horario se acaba de ocupar. ${alternativeClause(business, lang)}`),
+          `That slot just got taken. ${alt}`,
+          `Ese horario se acaba de ocupar. ${alt}`),
         data: { reason: 'slot_taken', scheduled_at: iso },
       };
     }
 
-    if (!isWithinHours(business, iso)) {
+    if (!(await isWithinHours(business, iso))) {
+      const alt = await alternativeClause(business, lang);
       return {
         ok: false,
         message: say(lang,
-          `I cannot fit that one in. ${alternativeClause(business, lang)}`,
-          `No puedo acomodar esa hora. ${alternativeClause(business, lang)}`),
+          `I cannot fit that one in. ${alt}`,
+          `No puedo acomodar esa hora. ${alt}`),
         data: { reason: 'not_within_hours', scheduled_at: iso },
       };
     }
 
-    const call = activeCall(business.id, args.call_id);
+    const call = await activeCall(business.id, args.call_id);
     const priceEstimate = args.price_estimate == null || str(args.price_estimate) === ''
       ? null
       : Number(args.price_estimate);
 
-    const booking = dbCreateBooking({
+    const booking = await dbCreateBooking({
       business_id: business.id,
       call_id: call?.id ?? null,
       customer_name: name,
@@ -376,7 +379,7 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
       price_estimate: priceEstimate != null && Number.isFinite(priceEstimate) ? priceEstimate : null,
     });
 
-    if (call && !call.caller_name) updateCall(call.id, { caller_name: name });
+    if (call && !call.caller_name) await updateCall(call.id, { caller_name: name });
 
     // The confirmation has to come back in the language they called in.
     const sms = await postInternal('/api/sms/confirmation', {
@@ -409,7 +412,7 @@ export interface SendSmsArgs extends BaseArgs {
 export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
-    const business = resolveBusiness(args);
+    const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
     const to = str(args.to);
@@ -425,7 +428,7 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
 
     const e164 = normalizePhone(to);
     const sent = await sendSms(e164, body);
-    const log = logSms({
+    const log = await logSms({
       business_id: business.id,
       to_phone: e164,
       body,
@@ -471,7 +474,7 @@ export interface CreatePaymentLinkArgs extends BaseArgs {
 export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
-    const business = resolveBusiness(args);
+    const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
     const requested = Math.round(Number(args.amount_cents));
@@ -489,9 +492,9 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
 
     const bookingId = str(args.booking_id);
     const booking = bookingId
-      ? listBookings(business.id).find((b) => b.id === bookingId) ?? null
+      ? (await listBookings(business.id)).find((b) => b.id === bookingId) ?? null
       : null;
-    const call = activeCall(business.id, args.call_id);
+    const call = await activeCall(business.id, args.call_id);
     const to = normalizePhone(
       str(args.to) || booking?.customer_phone || call?.caller_phone || '',
     );
@@ -546,7 +549,7 @@ export interface FlagEmergencyArgs extends BaseArgs {
 export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
-    const business = resolveBusiness(args);
+    const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
     const reason = str(args.reason) || 'Emergency reported on call';
@@ -554,10 +557,10 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     const callerPhone = str(args.customer_phone);
     const address = str(args.address);
 
-    let call = activeCall(business.id, args.call_id);
+    let call = await activeCall(business.id, args.call_id);
     if (!call) {
       // No live call to attach to (e.g. a tool call from the demo simulator).
-      call = createCall({
+      call = await createCall({
         business_id: business.id,
         caller_phone: callerPhone ? normalizePhone(callerPhone) : null,
         caller_name: callerName || null,
@@ -565,7 +568,7 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       });
     }
 
-    const updated = updateCall(call.id, {
+    const updated = await updateCall(call.id, {
       urgency: 'emergency',
       flagged_reason: reason,
       ...(callerName && !call.caller_name ? { caller_name: callerName } : {}),
@@ -648,10 +651,10 @@ export interface GetPricingArgs extends BaseArgs {
 export async function getPricing(args: GetPricingArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
-    const business = resolveBusiness(args);
+    const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
-    const kb = getKnowledgeBase(business.id);
+    const kb = await getKnowledgeBase(business.id);
     const services = kb?.services ?? [];
     if (services.length === 0) {
       return {
@@ -715,16 +718,16 @@ export interface HandoffArgs extends BaseArgs {
 export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
-    const business = resolveBusiness(args);
+    const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
     const reason = str(args.reason) || 'Caller asked for a human';
-    let call = activeCall(business.id, args.call_id);
+    let call = await activeCall(business.id, args.call_id);
     if (!call) {
-      call = createCall({ business_id: business.id, status: 'in_progress' });
+      call = await createCall({ business_id: business.id, status: 'in_progress' });
     }
 
-    const updated = updateCall(call.id, {
+    const updated = await updateCall(call.id, {
       status: 'handed_off',
       flagged_reason: reason,
     });

@@ -105,12 +105,12 @@ export async function POST(req: Request) {
     const scriptId: Script = body.script ?? 'routine';
     const script = SCRIPTS[scriptId] ?? SCRIPTS.routine;
 
-    const business = body.business_id ? getBusiness(body.business_id) : null;
+    const business = body.business_id ? await getBusiness(body.business_id) : null;
     if (!business) return fail('business not found', 404);
-    const kb = getKnowledgeBase(business.id);
+    const kb = await getKnowledgeBase(business.id);
     void kb;
 
-    const call = createCall({
+    const call = await createCall({
       business_id: business.id,
       caller_phone: body.caller_phone ?? '+13055550123',
       caller_name: body.caller_name ?? 'Demo Caller',
@@ -134,7 +134,7 @@ export async function POST(req: Request) {
       `${script.problem} → ${script.urgency}, ${script.service} at $${script.price}.`,
     );
 
-    updateCall(call.id, {
+    await updateCall(call.id, {
       summary: summary.value,
       flagged_reason: script.emergency
         ? 'Emergency: water leak, needs same-night tech'
@@ -143,7 +143,7 @@ export async function POST(req: Request) {
 
     // Next open slot from the business's own calendar.
     const { nextAvailable } = await import('@/lib/scheduler');
-    const slots = nextAvailable(business, 1, 60);
+    const slots = await nextAvailable(business, 1, 60);
     const scheduledAt = slots[0]?.start ?? new Date(Date.now() + 86400000).toISOString();
 
     const bookingPayload = await post<{ booking: Booking; sms_sent: boolean }>(
@@ -178,13 +178,13 @@ export async function POST(req: Request) {
     }
 
     // Whatever the tools logged for this caller in the last minute.
-    const sms = listSms(business.id).filter(
+    const sms = (await listSms(business.id)).filter(
       (s) =>
         s.to_phone === (body.caller_phone ?? '+13055550123') &&
         Date.now() - new Date(s.created_at).getTime() < 90_000,
     );
 
-    const finalCall = updateCall(call.id, {}) ?? call;
+    const finalCall = (await updateCall(call.id, {})) ?? call;
 
     const result: SimResult = {
       call: finalCall,

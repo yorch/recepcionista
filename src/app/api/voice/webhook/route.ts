@@ -122,16 +122,16 @@ export async function POST(req: Request) {
     // (ElevenLabs' telephony has no idea what our call_id is), else create one
     // so the artifact always lands somewhere.
     const explicitId = body.call_id || body.conversation_id || '';
-    let call: Call | null = explicitId ? getCall(explicitId) : null;
-    const businessId = body.business_id || call?.business_id || listBusinesses()[0]?.id || '';
+    let call: Call | null = explicitId ? await getCall(explicitId) : null;
+    const businessId = body.business_id || call?.business_id || (await listBusinesses())[0]?.id || '';
 
     if (!call && businessId) {
-      call = listCalls(businessId).find((c) => c.status === 'in_progress') ?? null;
+      call = (await listCalls(businessId)).find((c) => c.status === 'in_progress') ?? null;
       if (!call) {
         // Reuse a handed-off call only if it has no transcript of its own.
-        call = listCalls(businessId).find((c) => c.status === 'handed_off' && !c.transcript) ?? null;
+        call = (await listCalls(businessId)).find((c) => c.status === 'handed_off' && !c.transcript) ?? null;
       }
-      if (!call) call = createCall({ business_id: businessId, status: 'in_progress' });
+      if (!call) call = await createCall({ business_id: businessId, status: 'in_progress' });
     }
     if (!call) return fail('no business_id and no call_id — cannot attach the transcript', 400);
 
@@ -148,14 +148,14 @@ export async function POST(req: Request) {
         },
         {
           role: 'user',
-          content: `Business: ${getBusiness(call.business_id)?.name ?? call.business_id}\n`
+          content: `Business: ${(await getBusiness(call.business_id))?.name ?? call.business_id}\n`
             + `Urgency hint: ${urgency}\n\nTranscript:\n${transcript.slice(0, 6000)}`,
         },
       ],
       fallback,
     );
 
-    const updated = updateCall(call.id, {
+    const updated = await updateCall(call.id, {
       ended_at: call.ended_at ?? nowIso(),
       duration_sec: duration != null && Number.isFinite(Number(duration)) ? Number(duration) : call.duration_sec,
       transcript: transcript || call.transcript,

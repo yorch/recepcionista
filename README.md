@@ -14,9 +14,28 @@ An AI front-desk employee for Miami home-service small businesses. She answers t
 export PATH="/opt/homebrew/bin:$HOME/.bun/bin:$PATH"
 bun install
 cp .env.example .env.local     # optional: add keys to go live
+
+docker compose up -d           # Postgres 17 on localhost:5433
+bunx prisma migrate deploy     # create the tables
 bun scripts/seed.ts            # demo business: Miami Cool Air Conditioning
+
 bun dev                        # http://localhost:3000
 ```
+
+**Requirements:** Node/Bun, Docker. Nothing is installed system-wide — Postgres runs in a
+container and its data lives in a named volume, so `docker compose down` stops it without
+losing anything and `docker compose down -v` throws it away.
+
+| Command | Does |
+|---|---|
+| `bun run db:up` / `db:down` | start / stop Postgres |
+| `bun run db:migrate` | create a migration from `prisma/schema.prisma` |
+| `bun run db:seed` | reload the demo dataset |
+| `bun run db:reset` | drop, re-migrate, reseed |
+| `bun run db:studio` | browse the data at `localhost:5555` |
+
+Adding a key flips a service from mock to live with no code change.
+
 
 Verify it:
 
@@ -52,7 +71,7 @@ No keys are required to demo. Every external service runs through an adapter wit
 ## Architecture
 
 ```
-Next.js 16 (App Router) ── local JSON store (data/db.json) or Supabase
+Next.js 16 (App Router) ── Postgres 17 (Docker) via Prisma
         │
         ├── /api/businesses/[id]/provision   ← URL → KB → system prompt → phone
         ├── /api/voice/tools/[tool]          ← what ElevenLabs calls mid-conversation
@@ -81,7 +100,7 @@ console drives those exact same endpoints, so what judges see is the real pipeli
 
 ```
 src/lib/types.ts          every domain type (frozen contract)
-src/lib/db/               local JSON store behind a single import point
+src/lib/db/               Prisma client + async data layer (single import point)
 src/lib/providers/        llm · twilio · stripe — real-or-mock adapters
 src/lib/voice/            the seven tools + ElevenLabs agent client
 src/lib/briefing/         Spanglish script generation + TTS
@@ -113,4 +132,8 @@ See `MEL_USAGE.md`.
 
 - Calendar is internal by design — no OAuth, no external sync.
 - Stripe stays in test mode. No card data touches this app.
-- `data/db.json` is the source of truth for the demo. `POST /api/demo/reset` restores it.
+- **Postgres is the source of truth.** It runs in Docker (`docker compose up -d`), reachable at
+  `localhost:5433`. `POST /api/demo/reset` reseeds it in-process without leaving the browser.
+- Schema is in `prisma/schema.prisma`; migrations are checked in under `prisma/migrations/`.
+- Every function in `src/lib/db/` is async and returns plain domain objects from `@/lib/types` —
+  no caller ever imports a Prisma type.
