@@ -41,6 +41,7 @@ function toBusiness(row: any): Business {
     hours: (row.hours ?? DEFAULT_HOURS) as Hours,
     service_area: (row.serviceArea ?? []) as string[],
     status: row.status,
+    agent_id: row.agentId ?? null,
     created_at: isoReq(row.createdAt),
   };
 }
@@ -164,6 +165,7 @@ function businessPatch(patch: Partial<Business>) {
   if (patch.hours !== undefined) out.hours = patch.hours;
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
   if (patch.status !== undefined) out.status = patch.status;
+  if (patch.agent_id !== undefined) out.agentId = patch.agent_id;
   return out;
 }
 

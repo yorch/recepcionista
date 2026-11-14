@@ -21,6 +21,8 @@ model Business {
   hours       Json     @default("{}")
   serviceArea String[] @map("service_area")
   status      String   @default("onboarding")
+  /** ElevenLabs ConvAI agent id — persisted so a restart reuses the agent. */
+  agentId     String?  @map("agent_id")
   createdAt   DateTime @default(now()) @map("created_at")
 
   knowledgeBase KnowledgeBase?

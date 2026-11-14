@@ -34,6 +34,7 @@ export interface Business {
   hours: Hours;
   service_area: string[];
   status: BusinessStatus;
+  agent_id?: string | null;
   created_at: string;
 }
 

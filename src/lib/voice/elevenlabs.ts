@@ -4,6 +4,7 @@
  */
 import { appUrl } from '@/lib/providers/stripe';
 import { buildSystemPrompt } from '@/lib/kb';
+import { updateBusiness } from '@/lib/db';
 import type { Business, KnowledgeBase } from '@/lib/types';
 import { TOOL_NAMES, type ToolName } from '@/lib/voice/tools';
 
@@ -21,17 +22,21 @@ function headers(): Record<string, string> {
 }
 
 /**
- * The Business type has no agent column, so provisioned agents are cached in
- * process memory for the demo run instead of writing to the shared DB.
+ * The agent id is stored on the business row. It used to live in process
+ * memory, which meant every dev-server restart created a fresh ElevenLabs
+ * agent and orphaned the previous one.
  */
-const agentCache = new Map<string, string>();
-
 export function agentIdFor(business: Business): string {
-  return agentCache.get(business.id) || process.env.ELEVENLABS_AGENT_ID || '';
+  return business.agent_id || process.env.ELEVENLABS_AGENT_ID || '';
 }
 
-export function rememberAgent(businessId: string, agentId: string): void {
-  if (agentId) agentCache.set(businessId, agentId);
+export async function rememberAgent(businessId: string, agentId: string): Promise<void> {
+  if (!agentId) return;
+  try {
+    await updateBusiness(businessId, { agent_id: agentId });
+  } catch (err) {
+    console.warn('[elevenlabs] could not persist agent id:', (err as Error).message);
+  }
 }
 
 export function firstMessageFor(business: Business): string {
@@ -104,39 +109,89 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
   },
 };
 
-function toolPayload(name: ToolName) {
-  const spec = TOOL_SPECS[name];
-  return {
-    type: 'webhook' as const,
-    name,
-    description: spec.description,
-    api_schema: {
-      url: `${appUrl()}/api/voice/tools/${name}`,
-      method: 'POST' as const,
-      content_type: 'application/json' as const,
-      request_headers: { 'content-type': 'application/json' },
-      request_body_schema: {
-        type: 'object',
-        required: spec.required,
-        properties: {
-          business_id: { type: 'string', description: 'Current business id.' },
-          call_id: { type: 'string', description: 'Current call id.' },
-          language: { type: 'string', description: "Caller's language: en or es." },
-          ...spec.properties,
-        },
-      },
-      response_body_schema: {
-        type: 'object',
-        properties: {
-          ok: { type: 'boolean' },
-          message: { type: 'string', description: 'The sentence to say to the caller.' },
-        },
-      },
-    },
-  };
+/**
+ * ElevenLabs will not accept an inline webhook tool definition on the agent —
+ * each tool is created once via /convai/tools and then referenced by id. The
+ * inline form returns 422 for every property, which is what silently pushed
+ * every agent into mock mode.
+ */
+/** Reuse a workspace tool with the same name instead of piling up duplicates. */
+async function findToolByName(wireName: string): Promise<string | null> {
+  const res = await fetch(`${API}/convai/tools`, { headers: headers(), signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) return null;
+  const json = await res.json() as { tools?: { id?: string; tool_config?: { name?: string; type?: string } }[] };
+  const hit = (json.tools ?? []).find(
+    (t) => t.tool_config?.type === 'webhook' && t.tool_config?.name === wireName,
+  );
+  return hit?.id ?? null;
 }
 
-function agentBody(business: Business, kb: KnowledgeBase | null) {
+async function upsertTool(name: ToolName): Promise<string | null> {
+  const spec = TOOL_SPECS[name];
+  const wireName = name.replace(/_/g, '-').slice(0, 64);
+  const existingId = await findToolByName(wireName);
+  if (existingId) return existingId;
+  const res = await fetch(`${API}/convai/tools`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({
+      tool_config: {
+        type: 'webhook',
+        name: wireName,
+        description: spec.description,
+        response_timeout_secs: 20,
+        api_schema: {
+          url: `${appUrl()}/api/voice/tools/${name}`,
+          method: 'POST',
+          content_type: 'application/json',
+          request_headers: { 'content-type': 'application/json' },
+          request_body_schema: {
+            type: 'object',
+            description: `Arguments for ${name}`,
+            required: spec.required,
+            properties: {
+              business_id: { type: 'string', description: 'Current business id.' },
+              call_id: { type: 'string', description: 'Current call id.' },
+              language: { type: 'string', description: "Caller's language: en or es." },
+              ...spec.properties,
+            },
+          },
+          response_body_schema: {
+            type: 'object',
+            description: 'Tool result',
+            properties: {
+              ok: { type: 'boolean', description: 'Whether the action succeeded.' },
+              message: { type: 'string', description: 'The sentence to say to the caller.' },
+            },
+          },
+        },
+      },
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    console.warn(`[elevenlabs] tool ${name} -> ${res.status} ${(await res.text().catch(() => '')).slice(0, 160)}`);
+    return null;
+  }
+  const json = await res.json() as { id?: string };
+  return json.id ?? null;
+}
+
+/** Created once per process; seven round-trips on every call would be wasteful. */
+const toolIdCache = new Map<ToolName, string>();
+
+async function ensureToolIds(): Promise<string[]> {
+  const ids = await Promise.all(TOOL_NAMES.map(async (name) => {
+    const cached = toolIdCache.get(name);
+    if (cached) return cached;
+    const id = await upsertTool(name);
+    if (id) toolIdCache.set(name, id);
+    return id;
+  }));
+  return ids.filter((id): id is string => Boolean(id));
+}
+
+async function agentBody(business: Business, kb: KnowledgeBase | null) {
   const prompt = kb?.system_prompt?.trim()
     || buildSystemPrompt(business, {
       services: kb?.services ?? [],
@@ -156,12 +211,13 @@ function agentBody(business: Business, kb: KnowledgeBase | null) {
           llm: 'gpt-4o-mini',
           temperature: 0.4,
           timezone: 'America/New_York',
-          tools: TOOL_NAMES.map((t) => toolPayload(t)),
+          tool_ids: await ensureToolIds(),
         },
       },
       tts: {
         voice_id: process.env.ELEVENLABS_VOICE_ID || DEFAULT_VOICE_ID,
-        model_id: 'eleven_turbo_v2_5',
+        // Turbo v2 (not v2_5): ConvAI rejects v2_5 for English agents at 8kHz telephony.
+        model_id: 'eleven_turbo_v2',
         agent_output_audio_format: 'ulaw_8000',
       },
       asr: {
@@ -198,7 +254,7 @@ export async function createOrUpdateAgent(
     return { agent_id: existing || `mock_agent_${business.id}`, mock: true };
   }
 
-  const body = JSON.stringify(agentBody(business, kb));
+  const body = JSON.stringify(await agentBody(business, kb));
   try {
     if (existing && !existing.startsWith('mock_')) {
       const res = await fetch(`${API}/convai/agents/${existing}`, {
@@ -208,7 +264,7 @@ export async function createOrUpdateAgent(
         signal: AbortSignal.timeout(15_000),
       });
       if (res.ok) {
-        rememberAgent(business.id, existing);
+        await rememberAgent(business.id, existing);
         return { agent_id: existing, mock: false, created: false };
       }
       console.warn(`[elevenlabs] PATCH ${existing} -> ${res.status}; creating a new agent`);
@@ -228,7 +284,7 @@ export async function createOrUpdateAgent(
     const json = await res.json() as { agent_id?: string };
     const agentId = json.agent_id || '';
     if (!agentId) return { agent_id: existing, mock: true, error: 'no agent_id returned' };
-    rememberAgent(business.id, agentId);
+    await rememberAgent(business.id, agentId);
     return { agent_id: agentId, mock: false, created: true };
   } catch (err) {
     return {
