@@ -89,3 +89,9 @@ Never touch `src/lib/types.ts`, `src/lib/db/**`, `src/lib/providers/**`, `src/li
 
 ## Demo business
 `biz_miami_cool_air` — Miami Cool Air Conditioning, live, phone `+13055550142`, owner Jorge `+13055550199`.
+
+## Addendum (lead)
+- `next.config.ts` had `cacheComponents` removed; `dynamic = 'force-dynamic'` is required and legal now. Do not re-add it.
+- Dev server is running on :3000 (job 2). Do not start another one. Typecheck with `bunx tsc --noEmit`.
+- UI primitives available: `@/components/ui/{card,badge,button,audio,cn}`. `Card`, `CardHead`, `Badge` (tone: neutral|emergency|routine|unsure|brand|sky), `Button` (primary|ghost|outline|danger), `VoicePlayer`.
+- Formatters in `@/lib/format`: `timeET, dayET, whenET, money, seconds, relative, initials, firstName`.

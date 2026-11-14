@@ -1,69 +1,115 @@
-import Image from "next/image";
+import Link from 'next/link';
+import { getLatestBriefing, listBusinesses, listCalls, listBookings } from '@/lib/db';
+import { money } from '@/lib/format';
 
-export default function Home() {
+export const dynamic = 'force-dynamic';
+
+export default async function Home() {
+  const businesses = listBusinesses();
+  const demo = businesses[0];
+  const calls = demo ? listCalls(demo.id) : [];
+  const bookings = demo ? listBookings(demo.id) : [];
+  const briefing = demo ? getLatestBriefing(demo.id) : null;
+  const revenue = bookings.reduce((sum, b) => sum + (b.deposit_paid ? b.deposit_amount ?? 0 : 0), 0);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-8">
+      <header className="flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-[#ff6b35] text-[15px] font-bold text-[#150800]">R</span>
+          <span className="text-[15px] font-semibold tracking-tight">Recepcionista</span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+        <div className="flex items-center gap-2">
+          <Link
+            href="/dashboard"
+            className="rounded-xl px-3.5 py-2 text-[13px] text-[#a8b6c8] transition-colors hover:bg-[#131a24] hover:text-white"
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            See a live business
+          </Link>
+          <Link
+            href="/onboarding"
+            className="rounded-xl bg-[#ff6b35] px-4 py-2 text-[13px] font-medium text-[#150800] transition-colors hover:bg-[#ff8558]"
           >
-            Documentation
-          </a>
+            Hire yours →
+          </Link>
         </div>
-      </main>
-    </div>
+      </header>
+
+      <section className="rise mt-20 max-w-3xl">
+        <div className="inline-flex items-center gap-2 rounded-full border border-[#26313f] bg-[#0d131b] px-3 py-1 text-[11px] text-[#9fb0c5]">
+          <span className="h-1.5 w-1.5 rounded-full bg-[#3ddc97] live-dot" />
+          Answers in English, Spanish, y todo entre medio
+        </div>
+
+        <h1 className="mt-6 text-[44px] font-semibold leading-[1.06] tracking-[-0.03em] sm:text-[60px]">
+          Paste your website.
+          <br />
+          <span className="bg-gradient-to-r from-[#ff6b35] via-[#ff8f5e] to-[#ffc9a8] bg-clip-text text-transparent">
+            Get a bilingual employee
+          </span>
+          <br />
+          in two minutes.
+        </h1>
+
+        <p className="mt-6 max-w-xl text-[15px] leading-relaxed text-[#8b98ab]">
+          She answers the phone, triages emergencies, books the job, texts the customer,
+          takes the deposit, and calls you at the end of the day to tell you how it went.
+          No dispatcher. No hold music. No lost calls.
+        </p>
+
+        <div className="mt-9 flex flex-wrap items-center gap-3">
+          <Link
+            href="/onboarding"
+            className="rounded-xl bg-[#ff6b35] px-6 py-3 text-sm font-semibold text-[#150800] shadow-[0_16px_40px_-16px_rgba(255,107,53,.9)] transition hover:bg-[#ff8558]"
+          >
+            Set up my front desk
+          </Link>
+          <Link
+            href="/dashboard"
+            className="rounded-xl border border-[#2a3546] px-6 py-3 text-sm font-medium text-[#cbd7e6] transition hover:bg-[#131a24] hover:text-white"
+          >
+            Watch it work
+          </Link>
+        </div>
+      </section>
+
+      {demo ? (
+        <section className="rise mt-20 grid gap-4 sm:grid-cols-3">
+          <div className="rounded-2xl border border-[#1f2937] bg-[#0d1117]/80 p-5">
+            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Calls handled</p>
+            <p className="mt-2 text-3xl font-semibold tabular-nums">{calls.length}</p>
+            <p className="mt-1 text-xs text-[#8b98ab]">{calls.filter((c) => c.language === 'mixed' || c.language === 'es').length} en español</p>
+          </div>
+          <div className="rounded-2xl border border-[#1f2937] bg-[#0d1117]/80 p-5">
+            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Jobs booked</p>
+            <p className="mt-2 text-3xl font-semibold tabular-nums">{bookings.length}</p>
+            <p className="mt-1 text-xs text-[#8b98ab]">{money(revenue)} in deposits</p>
+          </div>
+          <div className="rounded-2xl border border-[#1f2937] bg-[#0d1117]/80 p-5">
+            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Owner briefing</p>
+            <p className="mt-2 text-3xl font-semibold">{briefing ? '1' : '0'}</p>
+            <p className="mt-1 text-xs text-[#8b98ab]">{calls.filter((c) => c.flagged_reason).length} item needs you</p>
+          </div>
+        </section>
+      ) : null}
+
+      <section className="mt-20 grid gap-px overflow-hidden rounded-2xl border border-[#1f2937] bg-[#1f2937] sm:grid-cols-2 lg:grid-cols-4">
+        {[
+          { t: 'Spanglish native', d: 'Switches mid-sentence. Replies in the language the caller actually uses.' },
+          { t: 'Books the job', d: 'Real availability, real confirmation text, real deposit link.' },
+          { t: 'Triages', d: 'Asks about leaks, heat, and vulnerable people before she quotes anything.' },
+          { t: 'Reports back', d: 'A 45-second voice note at 6 PM. You can answer it while driving home.' },
+        ].map((f) => (
+          <div key={f.t} className="bg-[#0b0f15] p-5">
+            <p className="text-[13px] font-semibold text-white">{f.t}</p>
+            <p className="mt-1.5 text-[12px] leading-relaxed text-[#7b8b9f]">{f.d}</p>
+          </div>
+        ))}
+      </section>
+
+      <footer className="mt-auto pt-16 text-[11px] text-[#5a6b80]">
+        Built at Buildersgiving · Miami AI Hackathon · ElevenLabs voice · Mel multi-agent
+      </footer>
+    </main>
   );
 }

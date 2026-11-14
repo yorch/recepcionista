@@ -1,0 +1,183 @@
+/**
+ * WS1 — knowledge base assembly + system-prompt generation.
+ * Deterministic: no LLM calls, so provisioning stays fast.
+ */
+import type { Business, ExtractionResult, FAQ, KnowledgeBase, Service } from '@/lib/types';
+
+export const TOOL_NAMES = [
+  'check_availability',
+  'create_booking',
+  'send_sms',
+  'create_payment_link',
+  'flag_emergency',
+  'get_pricing',
+  'handoff_to_human',
+] as const;
+
+const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
+
+function fmtService(s: Service, i: number): string {
+  const price = s.base_price != null ? `$${s.base_price} (starting price)` : 'price on diagnosis';
+  const dur = s.duration_minutes ? `, ~${s.duration_minutes} min` : '';
+  return `${i + 1}. ${s.name} — ${price}${dur}${s.description ? `. ${s.description}` : ''}`;
+}
+
+function fmtHours(business: Business | null, kbHoursFallback?: string[]): string {
+  const hours = business?.hours;
+  if (hours && Object.keys(hours).length > 0) {
+    return DAYS
+      .filter((d) => hours[d] !== undefined)
+      .map((d) => {
+        const h = hours[d];
+        return `- ${d[0].toUpperCase() + d.slice(1)}: ${h ? `${h.open}–${h.close}` : 'Closed'}`;
+      })
+      .join('\n');
+  }
+  return (kbHoursFallback ?? []).join('\n') || '- Hours not confirmed; offer to have the owner call back.';
+}
+
+function fmtList(items: string[]): string {
+  return items.length > 0 ? items.map((s) => `- ${s}`).join('\n') : '- (not specified — serve the local metro area)';
+}
+
+/**
+ * The full ElevenLabs system prompt for the AI receptionist.
+ * opts.language_mode === 'auto' (default) enables the bilingual Spanglish rule.
+ */
+export function buildSystemPrompt(
+  business: Business,
+  kb: Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes'>,
+  opts?: { language_mode?: 'auto' },
+): string {
+  const bilingual = opts?.language_mode === undefined || opts?.language_mode === 'auto';
+
+  const serviceList = kb.services.length > 0
+    ? kb.services.map(fmtService).join('\n')
+    : '1. General service call — price on diagnosis (ask clarifying questions)';
+
+  const faqBlock = kb.faqs.length > 0
+    ? kb.faqs.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join('\n\n')
+    : 'No FAQs collected yet.';
+
+  const pricingNotes = kb.pricing_notes?.trim()
+    || 'All prices are starting prices; final pricing is confirmed after diagnosis, before any work begins.';
+
+  const owner = business.owner_name || 'the owner';
+
+  return `You are the AI receptionist for ${business.name}${business.phone ? ` (you answer the phone line ${business.phone})` : ''}. You are friendly, efficient, and sound like a real human front-desk person for a home-services trade company. You handle inbound phone calls.
+
+## LANGUAGE (very important)
+${bilingual ? `You are bilingual in English and Spanish. Many callers are Spanish speakers or mix both ("Spanglish").
+- Reply in the caller's language. If they switch, you switch immediately and naturally.
+- If they mix (e.g. "Hola, my AC is not cooling"), mirror that mix — keep their trade terms as they say them, like "el AC", "la unidad", "the compressor".
+- Never translate the caller's own words back at them; never correct their language.` : `Reply in the caller's language.`}
+
+## BUSINESS IDENTITY
+- Business: ${business.name}
+- Owner: ${owner}${business.owner_phone ? ` (${business.owner_phone})` : ''}
+- Website: ${business.url || 'n/a'}
+- Service area:
+${fmtList(business.service_area)}
+
+## HOURS
+${fmtHours(business)}
+
+## SERVICES AND PRICES
+${serviceList}
+
+## PRICING RULES (hard rules)
+- Every price above is a STARTING price. The final price depends on the job.
+- NEVER invent, estimate, or quote a final price yourself. When asked, state the starting price for the service and say the technician confirms the exact price after diagnosis, before any work begins.
+- If a caller asks about something not on the list, say you'll check with the owner rather than guessing.
+- ${pricingNotes}
+
+## EMERGENCIES
+An emergency is any of:
+- Water leaking from the system or around it
+- No cooling AND a vulnerable occupant (baby, elderly, sick person) in the home
+- A burning smell or smoke from the unit
+- Complete system failure during extreme heat
+For an emergency: stay calm, tell the caller help is on the way, use flag_emergency immediately, and use handoff_to_human to reach ${owner} right away. Emergencies jump the schedule.
+
+## DEPOSITS AND PAYMENT
+- Deposits are capped at a maximum of $500.
+- Deposits are ONLY collected via a secure payment link sent by SMS (use create_payment_link, then send_sms).
+- NEVER ask for or accept a full card number over the phone. If the caller offers a card number, refuse politely and send the secure link instead.
+
+## HUMAN HANDOFF
+If the caller insists on a human, the request is outside your knowledge, the caller is angry or confused, or anything feels sensitive: use handoff_to_human to transfer to ${owner}. Never pretend to be human when asked directly — say you're the virtual assistant for ${business.name} and connect them.
+
+## CALL FLOW (5 steps)
+1. GREET: warm greeting, e.g. "Thank you for calling ${business.name}, how can I help you today?" / "¡Gracias por llamar a ${business.name}, ¿cómo le puedo ayudar?"
+2. IDENTIFY THE NEED: ask what's going on, get the address/zip and a callback number. Listen for the specific symptoms.
+3. TRIAGE FOR EMERGENCY: ask the emergency questions (water leaking? anyone vulnerable at home? burning smell? total failure in extreme heat?). If yes, jump to the emergency procedure above.
+4. BOOK OR ESCALATE: for routine calls, use check_availability to offer 2–3 time slots and create_booking to book. If nothing fits or it's complex, handoff_to_human.
+5. CONFIRM AND SEND SMS: repeat the booking details back (service, date, time, address, starting price), then send_sms so the customer has it in writing. Mention the deposit link if one applies.
+
+## YOUR TOOLS
+You have exactly these tools:
+- check_availability — find open appointment slots for a given date/duration
+- create_booking — book an appointment (customer name, phone, service, time, address)
+- send_sms — text the customer or the owner
+- create_payment_link — generate a secure deposit payment link (max $500)
+- flag_emergency — mark the call as an emergency so the owner is alerted
+- get_pricing — look up the starting price for a service
+- handoff_to_human — transfer the call to ${owner}
+Always use your tools rather than guessing answers. Prices come from get_pricing, never from memory of "typical" prices.
+
+## FAQ YOU CAN ANSWER
+${faqBlock}
+
+Keep answers short and conversational — this is a phone call, not an essay. Never read lists verbatim; summarize naturally.`;
+}
+
+/** Short bilingual opening/triage/booking/close script for the owner to review. */
+export function buildCallScript(kb: Pick<KnowledgeBase, 'services'>): string {
+  const top = kb.services.slice(0, 4).map((s) => s.name).join(', ') || 'our services';
+  return `CALL SCRIPT — ${top}
+
+1) OPENING
+  EN: "Thank you for calling! This is the front desk — how can I help you today?"
+  ES: "¡Gracias por llamar! Aquí la recepción, ¿cómo le puedo ayudar?"
+
+2) TRIAGE (ask within the first minute)
+  EN: "Before we book — is there any water leaking, a burning smell, or anyone at home who's elderly, a baby, or sick, with no cooling right now?"
+  ES: "Antes de agendar — ¿hay agua goteando, algún olor a quemado, o alguien en la casa (un bebé, un adulto mayor o alguien enfermo) sin aire ahora mismo?"
+  If YES → treat as emergency: reassure, flag it, and get the owner on the line.
+
+3) BOOKING
+  EN: "I can get a technician out to you. I have [slot 1] or [slot 2] — which works better? And what's the best callback number and the service address?"
+  ES: "Puedo mandarle un técnico. Tengo [opción 1] u [opción 2] — ¿cuál le queda mejor? ¿Y me deja su número y la dirección del servicio?"
+  Mention the starting price for the service and that the tech confirms the final price on site.
+
+4) CLOSE
+  EN: "You're all set — I'm texting you the confirmation right now. Anything else I can help with?"
+  ES: "¡Listo! Le mando la confirmación por texto ahorita. ¿Algo más en que le pueda ayudar?"
+`;
+}
+
+/**
+ * Deterministic KB assembly from an extraction + business. No LLM calls —
+ * the extraction already did the thinking. Fast and synchronous.
+ */
+export function generateKnowledgeBase(
+  extraction: ExtractionResult,
+  business: Business,
+): Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes' | 'system_prompt' | 'call_script'> {
+  const services: Service[] = extraction.services.length > 0
+    ? extraction.services.slice(0, 20)
+    : [{ name: 'Service call', description: 'General diagnosis and repair', base_price: null, duration_minutes: 90 }];
+
+  const faqs: FAQ[] = extraction.faqs.slice(0, 15);
+
+  const pricing_notes = extraction.pricing_notes?.trim() ||
+    'Prices are starting prices; the final price is confirmed after diagnosis and before work begins. Deposits (max $500) are collected only via a secure payment link, never by card number over the phone.';
+
+  const partialKb = { services, faqs, pricing_notes };
+
+  return {
+    ...partialKb,
+    system_prompt: buildSystemPrompt(business, partialKb),
+    call_script: buildCallScript({ services }),
+  };
+}
