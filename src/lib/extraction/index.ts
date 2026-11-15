@@ -1,6 +1,9 @@
 /**
- * WS1 — URL scraping + LLM extraction. Never throws: always returns a usable
- * ExtractionResult, falling back to the AC-repair template.
+ * WS1 — URL scraping + LLM extraction.
+ *
+ * Throws ExtractionError when the URL cannot be scraped or the LLM cannot
+ * extract usable data. Callers must handle this and show the user a clear
+ * message — we never silently fall back to hardcoded AC-repair data.
  */
 import * as cheerio from 'cheerio';
 import { generateJson, hasLlm } from '@/lib/providers/llm';
@@ -14,7 +17,18 @@ const EXTRA_PAGE_CAP = 4_000;
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
-/** AC-repair template fallback — usable even with zero external information. */
+/** Thrown when extraction cannot produce real data for the given URL. */
+export class ExtractionError extends Error {
+  constructor(message: string, public readonly reason: 'invalid_url' | 'fetch_failed' | 'empty_page' | 'no_llm' | 'llm_failed' | 'no_services' | 'parse_error') {
+    super(message);
+    this.name = 'ExtractionError';
+  }
+}
+
+/**
+ * AC-repair template — used ONLY when no URL is provided at all (the business
+ * was created manually). Never used as a silent fallback for a failed scrape.
+ */
 export function templateResult(businessName = 'This Business'): ExtractionResult {
   return {
     name: businessName,
@@ -49,12 +63,7 @@ export function normalizeUrl(raw: string): string | null {
   if (!raw || typeof raw !== 'string') return null;
   let s = raw.trim();
   if (!s) return null;
-  // A scheme-relative URL ("//host/path") has no protocol to trust, and a bare
-  // string with slashes but no host is not a site we can scrape.
   if (s.startsWith('//')) return null;
-  // Reject an explicit non-web scheme BEFORE any prefixing, otherwise
-  // "ftp://host.com" would be mangled into a bogus https:// URL and slip past
-  // the protocol check below.
   const scheme = s.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
   if (scheme && !/^https?$/i.test(scheme[1])) return null;
   if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
@@ -62,8 +71,6 @@ export function normalizeUrl(raw: string): string | null {
     const u = new URL(s);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
     if (!u.hostname) return null;
-    // A real public hostname needs a dot in its last two labels, but bare
-    // single-label hosts are valid scrape targets: localhost, LAN names, *.local.
     const labels = u.hostname.replace(/\.$/, '').split('.');
     const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(u.hostname);
     const looksLikeHost = (labels.length >= 2 && labels[labels.length - 1].length >= 2) || isIpv4;
@@ -210,15 +217,22 @@ function nameFromHost(rawUrl: string): string {
     .replace(/([a-z])([A-Z])/g, '$1 $2')
     .trim();
   if (!words) return '';
-  // Don't fabricate a brand out of generic TLD/hosting names.
   if (/^(http|https|test|staging|dev|app|www)$/i.test(words)) return '';
   return words.split(/\s+/).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
 }
 
+/**
+ * Extract structured business data from a website URL.
+ *
+ * @throws ExtractionError when the URL cannot be read, the LLM is unavailable,
+ *         or the extracted data has zero services. Callers should catch this
+ *         and show the user a clear message — never silently fall through
+ *         to hardcoded template data.
+ */
 export async function extractFromUrl(url: string): Promise<ExtractionResult> {
   const normalized = normalizeUrl(url);
   const guessName = nameFromHost(url) || 'This Business';
-  if (!normalized) return templateResult(guessName);
+  if (!normalized) throw new ExtractionError(`"${url}" is not a valid website URL`, 'invalid_url');
 
   let text: string;
   try {
@@ -232,12 +246,15 @@ export async function extractFromUrl(url: string): Promise<ExtractionResult> {
       }),
     ]);
     text = [home, ...extras.filter(Boolean)].join('\n\n=== ADDITIONAL PAGE ===\n\n').trim();
-    if (!text || text.replace(/\s/g, '').length < 40) return templateResult(guessName);
-  } catch {
-    return templateResult(guessName);
+    if (!text || text.replace(/\s/g, '').length < 40) {
+      throw new ExtractionError(`Could not read enough content from ${normalized} (page may be empty or blocked)`, 'empty_page');
+    }
+  } catch (err) {
+    if (err instanceof ExtractionError) throw err;
+    throw new ExtractionError(`Could not fetch ${normalized}: ${(err as Error).message}`, 'fetch_failed');
   }
 
-  if (!hasLlm()) return templateResult(guessName);
+  if (!hasLlm()) throw new ExtractionError('LLM API key is not configured — cannot extract business data', 'no_llm');
 
   const { value, mocked } = await generateJson<ExtractionResult>({
     messages: [
@@ -247,13 +264,16 @@ export async function extractFromUrl(url: string): Promise<ExtractionResult> {
     fallback: templateResult(guessName),
   });
 
-  if (mocked) return templateResult(guessName);
+  if (mocked) throw new ExtractionError('LLM call failed — could not extract data from the website', 'llm_failed');
 
   try {
     const result = sanitize(value, guessName, 'scrape');
-    if (result.services.length === 0) return templateResult(guessName);
+    if (result.services.length === 0) {
+      throw new ExtractionError('The website was read but no services could be found — try a site with a services or pricing page', 'no_services');
+    }
     return result;
-  } catch {
-    return templateResult(guessName);
+  } catch (err) {
+    if (err instanceof ExtractionError) throw err;
+    throw new ExtractionError(`Failed to parse extracted data: ${(err as Error).message}`, 'parse_error');
   }
 }

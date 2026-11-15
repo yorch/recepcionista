@@ -1,6 +1,6 @@
 import { ok, fail } from '@/lib/http';
 import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
-import { extractFromUrl, templateResult } from '@/lib/extraction';
+import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
 import { provisionNumber } from '@/lib/providers/twilio';
 import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
@@ -77,13 +77,14 @@ export async function POST(
           business,
         );
       } else {
-        let extraction;
-        try {
-          extraction = business.url ? await extractFromUrl(business.url) : templateResult(business.name);
-        } catch {
-          extraction = templateResult(business.name);
+        if (business.url) {
+          // A real URL that cannot be scraped must fail loudly — the user
+          // needs to know their agent would be talking about the wrong trade.
+          const extraction = await extractFromUrl(business.url);
+          generated = generateKnowledgeBase(extraction, business);
+        } else {
+          generated = generateKnowledgeBase(templateResult(business.name), business);
         }
-        generated = generateKnowledgeBase(extraction, business);
       }
       kb = await upsertKnowledgeBase(id, generated);
       regenerated = true;

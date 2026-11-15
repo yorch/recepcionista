@@ -1,5 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { extractFromUrl } from '@/lib/extraction';
+import { extractFromUrl, ExtractionError } from '@/lib/extraction';
 import type { ExtractionResult } from '@/lib/types';
 
 export async function POST(req: Request): Promise<ReturnType<typeof ok<ExtractionResult>> | ReturnType<typeof fail>> {
@@ -9,6 +9,7 @@ export async function POST(req: Request): Promise<ReturnType<typeof ok<Extractio
     const result = await extractFromUrl(url);
     return ok<ExtractionResult>(result);
   } catch (err) {
+    if (err instanceof ExtractionError) return fail(err.message, 422);
     return fail(err, 400);
   }
 }
