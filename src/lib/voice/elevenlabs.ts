@@ -325,6 +325,8 @@ export async function getSignedUrl(agentId: string): Promise<SignedUrlResult> {
 
 /** Bind the single shared ElevenLabs phone number to an agent. */
 export async function bindPhoneNumber(agentId: string): Promise<void> {
+  // Must be the phone_number_id UUID from GET /convai/phone-numbers,
+  // NOT the phone number digits. Example: "abc123def..." not "+12028972767".
   const phoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
   if (!phoneNumberId || !hasElevenLabs()) {
     console.warn('[elevenlabs] bindPhoneNumber skipped — no phone number id or API key');
