@@ -11,9 +11,12 @@ import {
   updateCall, createBooking as dbCreateBooking, getBookedSlots, logSms,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable, isWithinHours } from '@/lib/scheduler';
+import { logger } from '@/lib/log';
 import { sendSms, normalizePhone } from '@/lib/providers/twilio';
 import { createPaymentLink as providerCreatePaymentLink, appUrl } from '@/lib/providers/stripe';
 import type { Business, Call, SmsLog, TimeSlot } from '@/lib/types';
+
+const log = logger('voice-tools');
 
 export type ToolLanguage = 'en' | 'es';
 
@@ -788,7 +791,14 @@ export async function runTool(
 ): Promise<ToolResult> {
   const tool = canonicalTool(name);
   const lang = langOf(args?.language as string | undefined);
+  const started = Date.now();
+  const fields = {
+    tool: tool ?? name,
+    business: (args?.business_id as string | undefined) ?? undefined,
+    args: Object.keys(args).filter((k) => k !== 'business_id').join(','),
+  };
   if (!tool) {
+    log.warn('unknown', { ...fields, ms: Date.now() - started });
     return {
       ok: false,
       message: say(lang, 'Let me get the owner for that.', 'Permítame conseguir al dueño para eso.'),
@@ -796,21 +806,29 @@ export async function runTool(
   }
   const a = (args ?? {}) as Record<string, never>;
   try {
-    switch (tool) {
-      case 'check_availability': return await checkAvailability(a);
-      case 'create_booking': return await createBooking(a);
-      case 'send_sms': return await sendSmsTool(a);
-      case 'create_payment_link': return await createPaymentLink(a);
-      case 'flag_emergency': return await flagEmergency(a);
-      case 'get_pricing': return await getPricing(a);
-      case 'handoff_to_human': return await handoffToHuman(a);
-      default:
-        return {
-          ok: false,
-          message: say(lang, 'Let me get the owner for that.', 'Permítame conseguir al dueño para eso.'),
-        };
-    }
-  } catch {
+    const result = await (async (): Promise<ToolResult> => {
+      switch (tool) {
+        case 'check_availability': return await checkAvailability(a);
+        case 'create_booking': return await createBooking(a);
+        case 'send_sms': return await sendSmsTool(a);
+        case 'create_payment_link': return await createPaymentLink(a);
+        case 'flag_emergency': return await flagEmergency(a);
+        case 'get_pricing': return await getPricing(a);
+        case 'handoff_to_human': return await handoffToHuman(a);
+        default:
+          return {
+            ok: false,
+            message: say(lang, 'Let me get the owner for that.', 'Permítame conseguir al dueño para eso.'),
+          };
+      }
+    })();
+    const at = result.ok ? 'info' : 'warn';
+    log[at]('call', { ...fields, ok: result.ok, ms: Date.now() - started });
+    return result;
+  } catch (err) {
+    // Used to be a bare `catch {}`: the agent said "let me get the owner" and the
+    // reason (bad args, DB down, provider 500) disappeared.
+    log.error('call.failed', { ...fields, ms: Date.now() - started, err });
     return {
       ok: false,
       message: say(lang,

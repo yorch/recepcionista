@@ -7,6 +7,9 @@ import { buildSystemPrompt } from '@/lib/kb';
 import { updateBusiness } from '@/lib/db';
 import type { Business, KnowledgeBase } from '@/lib/types';
 import { TOOL_NAMES, type ToolName } from '@/lib/voice/tools';
+import { logger } from '@/lib/log';
+
+const log = logger('elevenlabs');
 
 const API = 'https://api.elevenlabs.io/v1';
 const DEFAULT_VOICE_ID = 'cgSgspJ2msm6clMCkdW9'; // ElevenLabs "Jessica" — warm front-desk read
@@ -35,7 +38,7 @@ export async function rememberAgent(businessId: string, agentId: string): Promis
   try {
     await updateBusiness(businessId, { agent_id: agentId });
   } catch (err) {
-    console.warn('[elevenlabs] could not persist agent id:', (err as Error).message);
+    log.warn('agent.persist_failed', { business: businessId, agent: agentId, err });
   }
 }
 
@@ -170,10 +173,15 @@ async function upsertTool(name: ToolName): Promise<string | null> {
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
-    console.warn(`[elevenlabs] tool ${name} -> ${res.status} ${(await res.text().catch(() => '')).slice(0, 160)}`);
+    log.warn('tool.register_failed', {
+      tool: name,
+      status: res.status,
+      detail: (await res.text().catch(() => '')).slice(0, 160),
+    });
     return null;
   }
   const json = await res.json() as { id?: string };
+  log.debug('tool.registered', { tool: name, id: json.id ?? null });
   return json.id ?? null;
 }
 
@@ -250,10 +258,11 @@ export async function createOrUpdateAgent(
   const { business, kb } = input;
   const existing = (input.agent_id || agentIdFor(business)).trim();
   if (!hasElevenLabs()) {
-    console.log(`[elevenlabs:mock] agent for ${business.name} (${business.id}) — no API key`);
+    log.warn('agent.mock', { business: business.id, name: business.name, reason: 'no API key' });
     return { agent_id: existing || `mock_agent_${business.id}`, mock: true };
   }
 
+  const started = Date.now();
   const body = JSON.stringify(await agentBody(business, kb));
   try {
     if (existing && !existing.startsWith('mock_')) {
@@ -265,9 +274,17 @@ export async function createOrUpdateAgent(
       });
       if (res.ok) {
         await rememberAgent(business.id, existing);
+        // Success was silent before, so the account drifted away from the DB with
+        // no local record of which agent was created, updated or by whom.
+        log.info('agent.updated', {
+          agent: existing,
+          business: business.id,
+          name: business.name,
+          ms: Date.now() - started,
+        });
         return { agent_id: existing, mock: false, created: false };
       }
-      console.warn(`[elevenlabs] PATCH ${existing} -> ${res.status}; creating a new agent`);
+      log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
     }
 
     const res = await fetch(`${API}/convai/agents/create`, {
@@ -278,13 +295,23 @@ export async function createOrUpdateAgent(
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      console.warn(`[elevenlabs] create -> ${res.status} ${detail.slice(0, 200)}`);
+      log.error('agent.create_failed', {
+        business: business.id,
+        status: res.status,
+        detail: detail.slice(0, 200),
+      });
       return { agent_id: existing || `mock_agent_${business.id}`, mock: true, error: `create ${res.status}` };
     }
     const json = await res.json() as { agent_id?: string };
     const agentId = json.agent_id || '';
     if (!agentId) return { agent_id: existing, mock: true, error: 'no agent_id returned' };
     await rememberAgent(business.id, agentId);
+    log.info('agent.created', {
+      agent: agentId,
+      business: business.id,
+      name: business.name,
+      ms: Date.now() - started,
+    });
     return { agent_id: agentId, mock: false, created: true };
   } catch (err) {
     return {
@@ -304,8 +331,12 @@ export interface SignedUrlResult {
 
 /** Signed WebSocket URL for a browser/mobile conversation. */
 export async function getSignedUrl(agentId: string): Promise<SignedUrlResult> {
-  if (!agentId) return { signed_url: null, agent_id: agentId, mock: true, error: 'no agent id' };
+  if (!agentId) {
+    log.warn('signed_url.no_agent');
+    return { signed_url: null, agent_id: agentId, mock: true, error: 'no agent id' };
+  }
   if (!hasElevenLabs()) {
+    log.warn('signed_url.mock', { agent: agentId, reason: 'no API key' });
     return { signed_url: null, agent_id: agentId, mock: true };
   }
   try {
@@ -314,9 +345,11 @@ export async function getSignedUrl(agentId: string): Promise<SignedUrlResult> {
       { headers: { 'xi-api-key': apiKey() }, signal: AbortSignal.timeout(10_000) },
     );
     if (!res.ok) {
+      log.warn('signed_url.failed', { agent: agentId, status: res.status });
       return { signed_url: null, agent_id: agentId, mock: true, error: `signed-url ${res.status}` };
     }
     const json = await res.json() as { signed_url?: string };
+    log.debug('signed_url.ok', { agent: agentId });
     return { signed_url: json.signed_url ?? null, agent_id: agentId, mock: !json.signed_url };
   } catch (err) {
     return { signed_url: null, agent_id: agentId, mock: true, error: (err as Error).message };
@@ -329,7 +362,9 @@ export async function bindPhoneNumber(agentId: string): Promise<void> {
   // NOT the phone number digits. Example: "abc123def..." not "+12028972767".
   const phoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
   if (!phoneNumberId || !hasElevenLabs()) {
-    console.warn('[elevenlabs] bindPhoneNumber skipped — no phone number id or API key');
+    log.warn('phone.bind_skipped', {
+      reason: !phoneNumberId ? 'no ELEVENLABS_PHONE_NUMBER_ID' : 'no API key',
+    });
     return;
   }
   try {
@@ -341,11 +376,16 @@ export async function bindPhoneNumber(agentId: string): Promise<void> {
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      console.warn(`[elevenlabs] bindPhoneNumber -> ${res.status} ${detail.slice(0, 200)}`);
+      log.warn('phone.bind_failed', {
+        phone_number_id: phoneNumberId,
+        agent: agentId,
+        status: res.status,
+        detail: detail.slice(0, 200),
+      });
     } else {
-      console.log(`[elevenlabs] bound phone number ${phoneNumberId.slice(-6)} to agent ${agentId.slice(-6)}`);
+      log.info('phone.bound', { phone_number_id: phoneNumberId, agent: agentId });
     }
   } catch (err) {
-    console.warn('[elevenlabs] bindPhoneNumber error:', (err as Error).message);
+    log.error('phone.bind_error', { phone_number_id: phoneNumberId, agent: agentId, err });
   }
 }

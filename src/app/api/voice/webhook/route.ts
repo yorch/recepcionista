@@ -3,9 +3,12 @@ import {
   createCall, getCall, updateCall, getBusiness, listBusinesses, listCalls, nowIso,
 } from '@/lib/db';
 import { generateTextSafe } from '@/lib/providers/llm';
+import { logger } from '@/lib/log';
 import type { Call, Urgency } from '@/lib/types';
 
 export const runtime = 'nodejs';
+
+const log = logger('voice/webhook');
 
 interface Turn { role?: string; message?: string | null; text?: string; content?: string }
 
@@ -99,6 +102,7 @@ function summaryFallback(transcript: string, urgency: Urgency, lang: string | nu
 }
 
 export async function POST(req: Request) {
+  const started = Date.now();
   try {
     const rawBody = await req.text();
     let body: WebhookBody = {};
@@ -133,7 +137,10 @@ export async function POST(req: Request) {
       }
       if (!call) call = await createCall({ business_id: businessId, status: 'in_progress' });
     }
-    if (!call) return fail('no business_id and no call_id — cannot attach the transcript', 400);
+    if (!call) {
+      log.error('unattachable', { business: businessId || null, explicit_id: explicitId || null });
+      return fail('no business_id and no call_id — cannot attach the transcript', 400);
+    }
 
     const alreadyHandedOff = call.status === 'handed_off';
 
@@ -167,8 +174,23 @@ export async function POST(req: Request) {
       status: alreadyHandedOff ? 'handed_off' : 'completed',
     });
 
+    if (!updated) log.warn('update_returned_null', { call: call.id });
+    const saved = updated ?? call;
+    log.info('call.completed', {
+      call: saved.id,
+      business: saved.business_id,
+      status: saved.status,
+      urgency: saved.urgency,
+      language: saved.language,
+      duration_sec: saved.duration_sec,
+      transcript_chars: (saved.transcript ?? '').length,
+      recording: Boolean(saved.recording_url),
+      resolved_via: explicitId ? 'call_id' : 'in_progress-match',
+      ms: Date.now() - started,
+    });
     return ok({ call: updated });
   } catch (err) {
+    log.error('failed', { ms: Date.now() - started, err });
     return fail(err, 500);
   }
 }

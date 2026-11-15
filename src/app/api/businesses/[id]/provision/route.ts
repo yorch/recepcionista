@@ -5,9 +5,12 @@ import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
 import { provisionNumber } from '@/lib/providers/twilio';
 import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
+import { logger } from '@/lib/log';
 import type { Business, KnowledgeBase } from '@/lib/types';
 
 export const runtime = 'nodejs';
+
+const log = logger('provision');
 
 export interface ProvisionResult {
   business: Business;
@@ -42,10 +45,14 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
+  const started = Date.now();
+  const { id } = await params;
   try {
-    const { id } = await params;
     const business = await getBusiness(id);
-    if (!business) return fail('business not found', 404);
+    if (!business) {
+      log.warn('business_not_found', { business: id });
+      return fail('business not found', 404);
+    }
 
     let force = false;
     try {
@@ -88,6 +95,7 @@ export async function POST(
       }
       kb = await upsertKnowledgeBase(id, generated);
       regenerated = true;
+      log.info('knowledge_base.ready', { business: id, force, kept_services: Boolean(keepServices) });
     }
 
     // Preserve the business's existing line: CONTRACTS.md documents the demo
@@ -104,6 +112,7 @@ export async function POST(
     }
     let updated = await updateBusiness(id, { phone, status: 'live' });
     if (!updated) return fail('business not found', 404);
+    log.info('number.assigned', { business: id, phone, mock });
 
     // Only rebuild the prompt when it genuinely fails our rules — a curated or
     // already-correct KB is left byte-identical so owners keep their edits.
@@ -145,8 +154,19 @@ export async function POST(
         }
       }
     } catch (err) {
-      console.warn('[provision] agent registration failed:', (err as Error).message);
+      log.error('agent.registration_failed', { business: id, err });
     }
+
+    log.info('done', {
+      business: id,
+      name: updated.name,
+      phone,
+      phone_mock: mock,
+      agent: agentId ?? null,
+      agent_mock: agentMock ?? null,
+      regenerated,
+      ms: Date.now() - started,
+    });
 
     return ok<ProvisionResult>({
       business: updated,
@@ -158,6 +178,10 @@ export async function POST(
       regenerated,
     });
   } catch (err) {
+    // A failed scrape must not provision an agent against the wrong trade, so it
+    // fails loudly — 422 with the reason when we know it, 500 otherwise.
+    log.error('failed', { business: id, ms: Date.now() - started, err });
+    if (err instanceof ExtractionError) return fail(err.message, 422);
     return fail(err, 500);
   }
 }

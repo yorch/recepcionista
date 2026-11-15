@@ -2,8 +2,11 @@ import { ok, fail } from '@/lib/http';
 import { getBusiness, updateBooking } from '@/lib/db';
 import { ownerAlertSms } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
+import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
+
+const log = logger('stripe.webhook');
 
 const RELEVANT = new Set([
   'checkout.session.completed',
@@ -31,12 +34,12 @@ export async function POST(req: Request) {
   if (secret) {
     const verdict = await verifySignature(raw, signature, secret);
     if (!verdict.ok) {
-      console.warn('[stripe] webhook signature rejected:', verdict.error);
+      log.warn('signature.rejected', { error: verdict.error });
       // 400 here on purpose: a forged payload is the one case worth failing.
       return fail(`signature ${verdict.error}`, 400);
     }
   } else {
-    console.warn('[stripe] STRIPE_WEBHOOK_SECRET unset — accepting unverified webhook (test mode)');
+    log.warn('signature.unverified', { reason: 'STRIPE_WEBHOOK_SECRET unset (test mode)' });
   }
 
   let event: {
@@ -51,7 +54,11 @@ export async function POST(req: Request) {
   }
 
   const type = event.type ?? '';
-  if (!RELEVANT.has(type)) return ok({ received: true, ignored: type });
+  if (!RELEVANT.has(type)) {
+    log.debug('event.ignored', { type, id: event.id ?? null });
+    return ok({ received: true, ignored: type });
+  }
+  log.info('event.received', { type, id: event.id ?? null });
 
   const object = event.data?.object ?? {};
   const metadata = (object.metadata ?? {}) as Record<string, string>;
@@ -79,7 +86,7 @@ export async function POST(req: Request) {
       }
       return ok({ received: true, booking_id: booking.id, deposit_paid: true });
     }
-    console.warn(`[stripe] webhook referenced unknown booking ${bookingId}`);
+    log.warn('booking.unknown', { booking: bookingId, type });
   }
 
   // Unmatched payment: never drop money on the floor — tell the owner instead.
@@ -95,7 +102,7 @@ export async function POST(req: Request) {
       kind: 'owner_alert',
     });
   } else {
-    console.warn(`[stripe] payment of ${money(amountCents)} (${type}) with no booking/business metadata`);
+    log.warn('payment.unattributed', { amount: money(amountCents), type });
   }
 
   return ok({ received: true, unmatched: true });

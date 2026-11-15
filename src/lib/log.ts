@@ -1,0 +1,146 @@
+/**
+ * One structured logger for the whole app. No dependencies, works in both the
+ * Node and Edge runtimes, and answers "what happened, to which business, and how
+ * long did it take?" from `journalctl` without grepping for ad-hoc strings.
+ *
+ * Output is one line per event so journald, `docker logs` and a pipe to `jq`
+ * all behave:
+ *
+ *   2026-11-15T09:40:12.345Z  info   provision   business.provisioned  business=… ms=5031 phone=+13055557879 agent=agent_94…
+ *
+ * Levels: LOG_LEVEL=debug|info|warn|error. Default is `debug` in development
+ * (this is a demo app — you want the trail) and `info` in production.
+ */
+export type Level = 'debug' | 'info' | 'warn' | 'error';
+
+export type Fields = Record<string, unknown>;
+
+const ORDER: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
+
+/** Anything whose key matches this is never printed, at any depth. */
+const SECRET_KEY = /(api[-_]?key|token|secret|password|authorization|signature|cookie)/i;
+
+const MAX_STRING = 240;
+const MAX_DEPTH = 2;
+const MAX_ITEMS = 12;
+
+function level(): Level {
+  const raw = (process.env.LOG_LEVEL || '').toLowerCase();
+  if (raw in ORDER) return raw as Level;
+  return process.env.NODE_ENV === 'production' ? 'info' : 'debug';
+}
+
+function enabled(at: Level): boolean {
+  return ORDER[at] >= ORDER[level()];
+}
+
+function clip(text: string, max = MAX_STRING): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+function isError(value: unknown): value is Error {
+  return value instanceof Error;
+}
+
+/** Message + first stack frame — enough to locate the throw, cheap to store. */
+export function serializeError(err: unknown): Fields {
+  if (!isError(err)) return { error: clip(String(err)) };
+  const frame = (err.stack ?? '')
+    .split('\n')
+    .slice(1)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('at '));
+  return {
+    error: clip(`${err.name}: ${err.message}`),
+    ...(frame ? { at: clip(frame.replace(/^at\s+/, ''), 120) } : {}),
+  };
+}
+
+function format(value: unknown, depth = 0): string {
+  if (value === null || value === undefined) return String(value);
+  if (isError(value)) return clip(`${value.name}: ${value.message}`);
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  if (typeof value === 'string') {
+    const flat = clip(value);
+    return /[\s"=]/.test(flat) ? JSON.stringify(flat) : flat;
+  }
+  if (depth >= MAX_DEPTH) return '«nested»';
+  if (Array.isArray(value)) {
+    const items = value.slice(0, MAX_ITEMS).map((v) => format(v, depth + 1));
+    return `[${items.join(',')}${value.length > MAX_ITEMS ? ',…' : ''}]`;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Fields).slice(0, MAX_ITEMS);
+    const body = entries
+      .map(([k, v]) => `${k}=${SECRET_KEY.test(k) ? '«redacted»' : format(v, depth + 1)}`)
+      .join(' ');
+    return `{${body}}`;
+  }
+  return String(value);
+}
+
+function render(at: Level, scope: string, event: string, fields?: Fields): string {
+  const head = `${new Date().toISOString()}  ${at.padEnd(5)}  ${scope.padEnd(12)}  ${event}`;
+  if (!fields) return head;
+  const pairs = Object.entries(fields)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${SECRET_KEY.test(k) ? '«redacted»' : format(v)}`);
+  return pairs.length ? `${head}  ${pairs.join(' ')}` : head;
+}
+
+export interface Logger {
+  debug(event: string, fields?: Fields): void;
+  info(event: string, fields?: Fields): void;
+  warn(event: string, fields?: Fields): void;
+  error(event: string, fields?: Fields): void;
+  /** Same logger with a narrower scope and fields merged into every line. */
+  child(scope: string, context?: Fields): Logger;
+  /**
+   * Runs `fn`, logging `<event>` with `ms` (and `<event>.failed` with the error
+   * when it throws — then rethrows, so callers keep their own error policy).
+   */
+  time<T>(event: string, fn: () => Promise<T>, fields?: Fields): Promise<T>;
+}
+
+export function logger(scope: string, context: Fields = {}): Logger {
+  const emit = (at: Level, event: string, fields?: Fields) => {
+    if (!enabled(at)) return;
+    const line = render(at, scope, event, fields ? { ...context, ...fields } : context);
+    // One call, one line: journald keeps stdout and stderr separate, and mixing
+    // them would reorder warnings behind later info lines.
+    if (at === 'error') console.error(line);
+    else if (at === 'warn') console.warn(line);
+    else console.log(line);
+  };
+
+  return {
+    debug: (event, fields) => emit('debug', event, fields),
+    info: (event, fields) => emit('info', event, fields),
+    warn: (event, fields) => emit('warn', event, fields),
+    error: (event, fields) => emit('error', event, fields),
+    child: (childScope, childContext = {}) => logger(childScope, { ...context, ...childContext }),
+    async time(event, fn, fields) {
+      const started = Date.now();
+      try {
+        const out = await fn();
+        emit('debug', event, { ...fields, ms: Date.now() - started });
+        return out;
+      } catch (err) {
+        emit('error', `${event}.failed`, {
+          ...fields,
+          ms: Date.now() - started,
+          ...serializeError(err),
+        });
+        throw err;
+      }
+    },
+  };
+}
+
+/** Scope for a Next.js route handler: `api/businesses/[id]/provision`. */
+export function routeLogger(routePath: string): Logger {
+  return logger(routePath);
+}

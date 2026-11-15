@@ -11,6 +11,9 @@
  */
 
 import { appUrl } from '@/lib/providers/stripe';
+import { logger } from '@/lib/log';
+
+const log = logger('postcall');
 
 const API = 'https://api.elevenlabs.io/v1';
 
@@ -84,9 +87,10 @@ export async function ensurePostCallWebhook(): Promise<{
     });
     if (!createRes.ok) {
       const detail = await createRes.text().catch(() => '');
-      console.warn(
-        `[postcall] create webhook -> ${createRes.status} ${detail.slice(0, 200)}`,
-      );
+      log.warn('webhook.create_failed', {
+        status: createRes.status,
+        detail: detail.slice(0, 200),
+      });
       return {
         webhook_id: null,
         mock: true,
@@ -97,7 +101,7 @@ export async function ensurePostCallWebhook(): Promise<{
     return { webhook_id: json.webhook_id ?? null, mock: !json.webhook_id };
   } catch (err) {
     const msg = (err as Error).message;
-    console.warn('[postcall] ensurePostCallWebhook error:', msg);
+    log.warn('webhook.ensure_failed', { error: msg });
     return { webhook_id: null, mock: true, error: msg };
   }
 }
@@ -133,15 +137,17 @@ export async function registerPostCallWebhookOnAgent(
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      console.warn(
-        `[postcall] register on agent ${agentId} -> ${res.status} ${detail.slice(0, 200)}`,
-      );
+      log.warn('webhook.register_failed', {
+        agent: agentId,
+        status: res.status,
+        detail: detail.slice(0, 200),
+      });
       return { ok: false, error: `PATCH ${res.status}: ${detail.slice(0, 160)}` };
     }
     return { ok: true };
   } catch (err) {
     const msg = (err as Error).message;
-    console.warn('[postcall] registerPostCallWebhookOnAgent error:', msg);
+    log.warn('webhook.register_error', { agent: agentId, error: msg });
     return { ok: false, error: msg };
   }
 }

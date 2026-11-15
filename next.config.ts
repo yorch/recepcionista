@@ -5,6 +5,13 @@ const nextConfig: NextConfig = {
   // The container runs `node server.js` from that bundle instead of `next start`,
   // which is what keeps the runtime image small enough to ship.
   output: 'standalone',
+  // One line per request (method, path, status, duration) in dev, and dev-only
+  // browser console forwarding at warn+ so client errors reach journalctl too.
+  logging: {
+    incomingRequests: true,
+    browserToTerminal: 'warn',
+    fetches: { fullUrl: false },
+  },
   turbopack: {
     rules: {
       '*.css': {

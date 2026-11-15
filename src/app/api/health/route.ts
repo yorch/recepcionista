@@ -13,6 +13,9 @@
  */
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/client';
+import { logger } from '@/lib/log';
+
+const log = logger('health');
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -41,7 +44,7 @@ export async function GET() {
     const error = err instanceof Error ? err.message : String(err);
     // 503, not 500: this is "not ready yet", which is a state the orchestrator
     // is expected to retry, not a bug in the request.
-    console.error('[health] database unreachable:', error);
+    log.error('unreachable', { err: error, timeout_ms: TIMEOUT_MS });
     return NextResponse.json(
       { ok: false, db: 'down', error },
       { status: 503, headers: { 'cache-control': 'no-store' } },

@@ -2,6 +2,9 @@
  * LLM adapter. Uses OpenAI if OPENAI_API_KEY is set, Anthropic if only that is,
  * otherwise returns deterministic mock content so the app still runs end-to-end.
  */
+import { logger } from '@/lib/log';
+
+const log = logger('llm');
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
 export interface LlmJsonOptions<T> {
@@ -53,6 +56,7 @@ async function callOpenAi(messages: ChatMessage[], temperature: number): Promise
     const param = /"param":\s*"([^"]+)"/.exec(text)?.[1];
     if (res.status === 400 && param && !unsupportedParams.has(param)) {
       unsupportedParams.add(param);
+      log.warn('openai.param_unsupported', { param, retrying: true });
       return null;
     }
     throw new Error(`openai ${res.status}: ${text}`);
@@ -99,19 +103,40 @@ export async function generateText(
   messages: ChatMessage[],
   temperature = 0.4,
 ): Promise<string> {
-  if (process.env.OPENAI_API_KEY) return callOpenAi(messages, temperature);
-  if (process.env.ANTHROPIC_API_KEY) return callAnthropic(messages, temperature);
-  throw new Error('no llm key configured');
+  const provider = process.env.OPENAI_API_KEY
+    ? 'openai'
+    : process.env.ANTHROPIC_API_KEY
+      ? 'anthropic'
+      : null;
+  if (!provider) {
+    log.debug('call.skipped', { reason: 'no key', messages: messages.length });
+    throw new Error('no llm key configured');
+  }
+  return log.time(
+    'call',
+    () => (provider === 'openai' ? callOpenAi(messages, temperature) : callAnthropic(messages, temperature)),
+    {
+      provider,
+      model: (provider === 'openai' ? process.env.LLM_MODEL : process.env.ANTHROPIC_MODEL) || 'default',
+      messages: messages.length,
+      chars: messages.reduce((n, m) => n + m.content.length, 0),
+    },
+  );
 }
 
 /** Returns parsed JSON, or the provided fallback on any failure. Never throws. */
 export async function generateJson<T>(opts: LlmJsonOptions<T>): Promise<{ value: T; mocked: boolean }> {
-  if (!hasLlm()) return { value: opts.fallback, mocked: true };
+  if (!hasLlm()) {
+    log.debug('json.template', { reason: 'no key' });
+    return { value: opts.fallback, mocked: true };
+  }
   try {
     const raw = await generateText(opts.messages, opts.temperature ?? 0.2);
-    return { value: extractJson(raw) as T, mocked: false };
+    const value = extractJson(raw) as T;
+    log.debug('json.ok', { chars: raw.length });
+    return { value, mocked: false };
   } catch (err) {
-    console.warn('[llm] falling back:', (err as Error).message);
+    log.warn('json.fallback', { reason: 'call or parse failed', err });
     return { value: opts.fallback, mocked: true };
   }
 }
@@ -121,11 +146,14 @@ export async function generateTextSafe(
   fallback: string,
   temperature = 0.5,
 ): Promise<{ value: string; mocked: boolean }> {
-  if (!hasLlm()) return { value: fallback, mocked: true };
+  if (!hasLlm()) {
+    log.debug('text.template', { reason: 'no key' });
+    return { value: fallback, mocked: true };
+  }
   try {
     return { value: await generateText(messages, temperature), mocked: false };
   } catch (err) {
-    console.warn('[llm] text fallback:', (err as Error).message);
+    log.warn('text.fallback', { err });
     return { value: fallback, mocked: true };
   }
 }

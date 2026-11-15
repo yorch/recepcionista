@@ -1,7 +1,10 @@
 import { ok, fail } from '@/lib/http';
 import { getBusinessByPhone, listBusinesses, createCall } from '@/lib/db';
 import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber } from '@/lib/voice/elevenlabs';
+import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
+
+const log = logger('voice/incoming');
 
 export const runtime = 'nodejs';
 
@@ -38,12 +41,18 @@ export async function POST(req: Request) {
     const from = payload.From || payload.from || '';
 
     // Never dead-end the demo: fall back to the primary business.
-    const business: Business | null = (to ? await getBusinessByPhone(to) : null)
-      ?? (await listBusinesses())[0]
-      ?? null;
+    const matched = to ? await getBusinessByPhone(to) : null;
+    const business: Business | null = matched ?? (await listBusinesses())[0] ?? null;
     if (!business) {
+      log.error('no_business', { to: to || null, from: from || null });
       return fail('no business configured — run scripts/seed.ts', 404);
     }
+    log.info('routed', {
+      to: to || null,
+      from: from || null,
+      business: business.id,
+      matched: matched ? 'phone' : 'fallback-first-business',
+    });
 
     const call = await createCall({
       business_id: business.id,
@@ -62,14 +71,21 @@ export async function POST(req: Request) {
         try { await bindPhoneNumber(agentId); } catch { /* best-effort */ }
       }
     } catch (err) {
-      console.warn('[voice/incoming] agent setup failed:', (err as Error).message);
+      log.error('agent_setup_failed', { business: business.id, err });
     }
 
     let wsUrl: string | null = null;
     if (agentId) {
       const signed = await getSignedUrl(agentId);
       wsUrl = signed.signed_url;
+      if (!wsUrl) log.warn('no_signed_url', { business: business.id, agent: agentId });
     }
+    log.info('call_started', {
+      business: business.id,
+      call: call.id,
+      agent: agentId || null,
+      live: Boolean(agentId && wsUrl),
+    });
 
     return ok({
       agent_id: agentId,

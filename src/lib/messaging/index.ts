@@ -4,9 +4,12 @@
  * too, and so every route reports the same provider status.
  */
 import { logSms } from '@/lib/db';
+import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
 import type { SmsLog } from '@/lib/types';
+
+const log = logger('sms');
 
 export interface SendAndLogInput {
   business_id: string;
@@ -25,10 +28,26 @@ export interface SendAndLogOutput {
 /** Status from the provider is already one of sent|mock|failed — pass it through. */
 export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutput> {
   const to = normalizePhone(input.to);
+  const started = Date.now();
   const result = await sendSms(to, input.body);
 
   if (result.status === 'failed') {
-    console.warn(`[sms] failed -> ${to}: ${result.error ?? 'unknown error'}`);
+    log.warn('send.failed', {
+      business: input.business_id,
+      kind: input.kind,
+      to,
+      ms: Date.now() - started,
+      error: result.error ?? 'unknown error',
+    });
+  } else {
+    log.info('send', {
+      business: input.business_id,
+      kind: input.kind,
+      to,
+      status: result.status,
+      booking: input.booking_id ?? null,
+      ms: Date.now() - started,
+    });
   }
 
   const sms = await logSms({
@@ -41,6 +60,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     status: mapStatus(result.status),
   });
 
+  log.debug('send.logged', { sms: sms.id, status: sms.status });
   return { sms, result };
 }
 

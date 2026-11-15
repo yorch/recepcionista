@@ -3,6 +3,9 @@
  * convincing test checkout, so the demo works before keys are wired.
  */
 import type { PaymentLink } from '@/lib/types';
+import { logger } from '@/lib/log';
+
+const log = logger('stripe');
 
 export const hasStripe = () => Boolean(process.env.STRIPE_SECRET_KEY);
 
@@ -14,9 +17,11 @@ export async function createPaymentLink(
 ): Promise<PaymentLink & { mock: boolean }> {
   if (!hasStripe()) {
     const id = `mock_${Math.random().toString(36).slice(2, 10)}`;
+    log.warn('link.mock', { reason: 'no STRIPE_SECRET_KEY', amount_cents: amountCents, id });
     return { id, url: `${appUrl()}/pay/${id}`, amount_cents: amountCents, mock: true };
   }
   try {
+    const started = Date.now();
     const form = new URLSearchParams();
     form.set('line_items[0][price_data][currency]', 'usd');
     form.set('line_items[0][price_data][product_data][name]', businessName ? `${businessName}: ${description}` : description);
@@ -33,9 +38,14 @@ export async function createPaymentLink(
     });
     const json = await res.json();
     if (!res.ok) throw new Error(json.error?.message ?? String(res.status));
+    log.info('link.created', {
+      id: json.id,
+      amount_cents: amountCents,
+      ms: Date.now() - started,
+    });
     return { id: json.id, url: json.url, amount_cents: amountCents, mock: false };
   } catch (err) {
-    console.warn('[stripe] fallback to mock:', (err as Error).message);
+    log.warn('link.fallback_to_mock', { amount_cents: amountCents, err });
     const id = `mock_${Math.random().toString(36).slice(2, 10)}`;
     return { id, url: `${appUrl()}/pay/${id}`, amount_cents: amountCents, mock: true };
   }

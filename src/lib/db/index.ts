@@ -6,6 +6,7 @@
  * tool ever touches Prisma types directly.
  */
 import { prisma } from './client';
+import { logger } from '@/lib/log';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
   Service, FAQ, BriefingStats,
@@ -13,6 +14,9 @@ import type {
 
 export { prisma };
 export { newId, nowIso } from './ids';
+
+/** Every write logs what changed; reads stay quiet (they are the hot path). */
+const log = logger('db');
 
 const DEFAULT_HOURS: Hours = {
   monday: { open: '08:00', close: '18:00' },
@@ -209,6 +213,7 @@ export async function createBusiness(
       status: input.status ?? 'onboarding',
     },
   });
+  log.info('business.created', { id: row.id, name: row.name, url: row.url });
   return toBusiness(row);
 }
 
@@ -217,8 +222,12 @@ export async function updateBusiness(id: ID, patch: Partial<Business>): Promise<
   if (Object.keys(data).length === 0) return getBusiness(id);
   try {
     const row = await prisma.business.update({ where: { id }, data });
+    log.debug('business.updated', { id, fields: Object.keys(data) });
     return toBusiness(row);
-  } catch {
+  } catch (err) {
+    // Swallowed on purpose (callers treat a missing row as a 404), but a silent
+    // null used to be indistinguishable from "nothing to update".
+    log.warn('business.update_failed', { id, fields: Object.keys(data), err });
     return null;
   }
 }
@@ -245,6 +254,13 @@ export async function upsertKnowledgeBase(
   const row = existing
     ? await prisma.knowledgeBase.update({ where: { businessId }, data })
     : await prisma.knowledgeBase.create({ data: { businessId, ...data } });
+  log.debug('knowledge_base.saved', {
+    business: businessId,
+    created: !existing,
+    services: (patch.services ?? []).length,
+    faqs: (patch.faqs ?? []).length,
+    prompt_chars: (patch.system_prompt ?? '').length,
+  });
   return toKnowledgeBase(row);
 }
 
@@ -267,6 +283,13 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
       flaggedReason: input.flagged_reason ?? null,
     },
   });
+  log.info('call.created', {
+    id: row.id,
+    business: input.business_id,
+    from: input.caller_phone ?? null,
+    urgency: input.urgency ?? 'unsure',
+    status: input.status ?? 'in_progress',
+  });
   return toCall(row);
 }
 
@@ -275,8 +298,10 @@ export async function updateCall(id: ID, patch: Partial<Call>): Promise<Call | n
   if (Object.keys(data).length === 0) return getCall(id);
   try {
     const row = await prisma.call.update({ where: { id }, data });
+    log.debug('call.updated', { id, fields: Object.keys(data) });
     return toCall(row);
-  } catch {
+  } catch (err) {
+    log.warn('call.update_failed', { id, fields: Object.keys(data), err });
     return null;
   }
 }
@@ -317,6 +342,13 @@ export async function createBooking(input: Partial<Booking> & {
       status: input.status ?? 'confirmed',
     },
   });
+  log.info('booking.created', {
+    id: row.id,
+    business: input.business_id,
+    service: input.service,
+    at: input.scheduled_at,
+    deposit: input.deposit_amount ?? null,
+  });
   return toBooking(row);
 }
 
@@ -341,8 +373,10 @@ export async function updateBooking(id: ID, patch: Partial<Booking>): Promise<Bo
   if (Object.keys(data).length === 0) return getBooking(id);
   try {
     const row = await prisma.booking.update({ where: { id }, data });
+    log.debug('booking.updated', { id, fields: Object.keys(data) });
     return toBooking(row);
-  } catch {
+  } catch (err) {
+    log.warn('booking.update_failed', { id, fields: Object.keys(data), err });
     return null;
   }
 }
@@ -365,6 +399,12 @@ export async function createBriefing(input: Partial<Briefing> & {
     where: { businessId_date: { businessId: input.business_id, date: input.date } },
     update: data,
     create: { businessId: input.business_id, date: input.date, ...data },
+  });
+  log.info('briefing.saved', {
+    business: input.business_id,
+    date: input.date,
+    audio: input.audio_url ?? null,
+    words: input.transcript.split(/\s+/).filter(Boolean).length,
   });
   return toBriefing(row);
 }
@@ -397,6 +437,12 @@ export async function logSms(entry: Omit<SmsLog, 'id' | 'created_at'>): Promise<
       providerId: entry.provider_id ?? null,
       status: entry.status,
     },
+  });
+  log.debug('sms.logged', {
+    business: entry.business_id,
+    to: entry.to_phone,
+    kind: entry.kind,
+    status: entry.status,
   });
   return toSms(row);
 }
@@ -433,6 +479,9 @@ export async function findRecentSms(
 // ---------- lifecycle ----------
 /** Deletes every row. Used by the seed script and the demo reset. */
 export async function clearAll(): Promise<void> {
+  // Destructive and reachable over HTTP (POST /api/demo/reset): always warn,
+  // even at info-level logging, so a wiped database is never a mystery.
+  log.warn('clear_all');
   await prisma.$transaction([
     prisma.smsLog.deleteMany(),
     prisma.briefing.deleteMany(),

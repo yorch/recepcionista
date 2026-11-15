@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ok, fail } from '@/lib/http';
 import { clearAll, prisma } from '@/lib/db';
+import { logger } from '@/lib/log';
 import {
   DEMO_BUSINESS_ID, demoBookings, demoBriefing, demoBusiness, demoCalls,
   demoMessages, DEMO_FAQS, DEMO_PRICING_NOTES, DEMO_SERVICES, SYSTEM_PROMPT, CALL_SCRIPT,
@@ -14,8 +15,12 @@ import {
 
 export const dynamic = 'force-dynamic';
 
+const log = logger('api/demo/reset');
+
 export async function POST() {
+  const started = Date.now();
   try {
+    log.warn('requested', { effect: 'wipes every table, reseeds demo data' });
     await clearAll();
 
     await prisma.business.create({ data: demoBusiness() });
@@ -40,8 +45,10 @@ export async function POST() {
         if (/^briefing-/.test(f)) fs.unlinkSync(path.join(audioDir, f));
       }
     }
+    log.info('done', { ms: Date.now() - started });
     return ok({ reset: true });
   } catch (err) {
+    log.error('failed', { ms: Date.now() - started, err });
     return fail(err, 500);
   }
 }

@@ -9,6 +9,9 @@ import {
 } from '@/lib/db';
 import type { Booking, Briefing, Business, Call } from '@/lib/types';
 import { synthesizeBriefing } from './tts';
+import { logger } from '@/lib/log';
+
+const log = logger('briefing');
 
 const TZ = 'America/New_York';
 const MIN_WORDS = 90;
@@ -215,28 +218,50 @@ async function narrate(
   const words = wordCount(value);
   // Guard the length contract; a runaway model would blow past the 45 seconds.
   if (words < MIN_WORDS || words > MAX_WORDS) {
-    console.warn(`[briefing] LLM script was ${words} words, using deterministic fallback`);
+    log.warn('narrate.words_out_of_range', { words, min: MIN_WORDS, max: MAX_WORDS, used_fallback: true });
     return fallback;
   }
+  log.debug('narrate.ok', { words });
   return value.trim();
 }
 
 export async function generateBriefing(businessId: string, date?: string): Promise<Briefing> {
+  const started = Date.now();
   const business = await getBusiness(businessId);
-  if (!business) throw new Error('business not found');
+  if (!business) {
+    log.warn('generate.business_not_found', { business: businessId });
+    throw new Error('business not found');
+  }
 
   const day = date ?? dayKey();
   const data = await gather(businessId, day);
+  log.info('generate.start', {
+    business: businessId,
+    date: day,
+    calls: data.calls.length,
+    bookings: data.bookings.length,
+    flags: data.stats.flags,
+    revenue: data.stats.revenue,
+  });
+
   const transcript = await narrate(business, data, day);
   const audio = await synthesizeBriefing(transcript, { businessId, date: day });
 
-  return await createBriefing({
+  const briefing = await createBriefing({
     business_id: businessId,
     date: day,
     transcript,
     audio_url: audio.audio_url,
     stats: data.stats,
   });
+  log.info('generate.done', {
+    business: businessId,
+    date: day,
+    words: wordCount(transcript),
+    audio: audio.audio_url ?? null,
+    ms: Date.now() - started,
+  });
+  return briefing;
 }
 
 export { fallbackScript, gather, wordCount };

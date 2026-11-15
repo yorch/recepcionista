@@ -170,6 +170,42 @@ scripts/seed.ts           demo data
 CONTRACTS.md              the interface contract six agents built against
 ```
 
+## Logs
+
+Every meaningful step is logged as one line through `src/lib/log.ts` — a
+dependency-free structured logger — plus `src/instrumentation.ts`, which prints
+the boot configuration and catches server errors that routes never see.
+
+```text
+2026-11-15T14:02:11.418Z  info   provision     number.assigned   business=… phone=+13055557879 mock=true
+2026-11-15T14:02:16.902Z  info   elevenlabs    agent.created     agent=agent_9401… business=… ms=4981
+2026-11-15T14:02:16.980Z  info   elevenlabs    phone.bound       phone_number_id=phnum_7301… agent=agent_9401…
+2026-11-15T14:02:16.983Z  info   provision     done              business=… phone_mock=true agent_mock=false ms=5031
+```
+
+| Field | Meaning |
+| --- | --- |
+| `scope` | where the event happened — `db`, `llm`, `twilio`, `sms`, `tts`, `provision`, `voice-tools`, `http`, … |
+| `event` | what happened, dotted: `business.created`, `agent.create_failed`, `sweep.done` |
+| `key=value` | structured context; strings with spaces are quoted, secrets are `«redacted»` |
+| `ms` | set on anything that crossed a network or a transaction |
+
+- Set `LOG_LEVEL=debug|info|warn|error` to change the verbosity. Default is
+  `debug` outside production and `info` inside it.
+- `[sms:mock]` lines still print the full message body — that is what the demo
+  console shows when no Twilio key is configured.
+- Nothing sensitive is logged: provider keys, tokens and `authorization` headers
+  are redacted by key name, and `DATABASE_URL` is reduced to
+  `host:port/database`.
+- In development Next also prints one line per request and forwards browser
+  `warn`/`error` to the terminal (`logging` in `next.config.ts`).
+
+```bash
+LOG_LEVEL=debug bun dev                        # everything, including LLM/DB timing
+journalctl --user -u recepcionista-dev -f      # live trail
+journalctl --user -u recepcionista-dev | grep ' agent\.'  # every agent create/update
+```
+
 ## How Mel was used
 
 Six workstreams ran in parallel against a frozen interface contract

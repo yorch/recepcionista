@@ -6,6 +6,9 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { logger } from '@/lib/log';
+
+const log = logger('tts');
 
 const run = promisify(execFile);
 
@@ -80,19 +83,27 @@ export async function synthesizeBriefing(
 ): Promise<TtsResult> {
   ensureAudioDir();
   const base = `briefing-${opts.businessId}-${opts.date}`;
+  const started = Date.now();
+  const fields = { business: opts.businessId, date: opts.date, chars: text.length };
 
   if (hasElevenLabsTts()) {
     try {
-      return await elevenLabs(text, base);
+      const out = await elevenLabs(text, base);
+      log.info('synthesized', { ...fields, provider: 'elevenlabs', bytes: out.bytes, ms: Date.now() - started });
+      return out;
     } catch (err) {
-      console.warn('[tts] elevenlabs failed, using local voice:', (err as Error).message);
+      log.warn('elevenlabs.fallback_to_local', { ...fields, err });
     }
+  } else {
+    log.debug('elevenlabs.skipped', { ...fields, reason: 'key or voice id missing' });
   }
 
   try {
-    return await localSay(text, base);
+    const out = await localSay(text, base);
+    log.info('synthesized', { ...fields, provider: 'local-say', bytes: out.bytes, ms: Date.now() - started });
+    return out;
   } catch (err) {
-    console.warn('[tts] local voice failed:', (err as Error).message);
+    log.error('local.failed', { ...fields, err, ms: Date.now() - started });
     return { audio_url: null, mock: true };
   }
 }

@@ -10,9 +10,12 @@ import {
 import { appUrl } from '@/lib/providers/stripe';
 import { generateTextSafe } from '@/lib/providers/llm';
 import { ok, fail, readJson } from '@/lib/http';
+import { logger } from '@/lib/log';
 import type { Booking, Call, PaymentLink, SmsLog } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
+
+const log = logger('demo/simulate');
 
 type Script = 'routine' | 'emergency' | 'spanish';
 
@@ -106,7 +109,12 @@ export async function POST(req: Request) {
     const script = SCRIPTS[scriptId] ?? SCRIPTS.routine;
 
     const business = body.business_id ? await getBusiness(body.business_id) : null;
-    if (!business) return fail('business not found', 404);
+    if (!business) {
+      log.warn('business_not_found', { business: body.business_id ?? null });
+      return fail('business not found', 404);
+    }
+    const started = Date.now();
+    log.info('start', { business: business.id, script: scriptId, caller: body.caller_phone ?? null });
     const kb = await getKnowledgeBase(business.id);
     void kb;
 
@@ -193,6 +201,16 @@ export async function POST(req: Request) {
       sms,
       simulated: !booking,
     };
+    log.info('done', {
+      business: business.id,
+      script: scriptId,
+      call: finalCall.id,
+      booking: booking?.id ?? null,
+      payment_link: paymentLink?.id ?? null,
+      sms: sms.length,
+      simulated: !booking,
+      ms: Date.now() - started,
+    });
     return ok(result);
   } catch (err) {
     return fail(err, 500);

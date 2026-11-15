@@ -6,8 +6,11 @@
  * message — we never silently fall back to hardcoded AC-repair data.
  */
 import * as cheerio from 'cheerio';
+import { logger } from '@/lib/log';
 import { generateJson, hasLlm } from '@/lib/providers/llm';
 import type { ExtractionResult, FAQ, Hours, Service } from '@/lib/types';
+
+const log = logger('extract');
 
 const DAY_KEYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
 
@@ -85,6 +88,7 @@ export function normalizeUrl(raw: string): string | null {
 async function fetchText(url: string, cap: number): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12_000);
+  const started = Date.now();
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -93,7 +97,18 @@ async function fetchText(url: string, cap: number): Promise<string> {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const html = await res.text();
-    return stripToText(html).slice(0, cap);
+    const text = stripToText(html).slice(0, cap);
+    log.debug('fetch.ok', {
+      url,
+      status: res.status,
+      html_bytes: html.length,
+      text_chars: text.length,
+      ms: Date.now() - started,
+    });
+    return text;
+  } catch (err) {
+    log.warn('fetch.failed', { url, ms: Date.now() - started, err });
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -230,9 +245,13 @@ function nameFromHost(rawUrl: string): string {
  *         to hardcoded template data.
  */
 export async function extractFromUrl(url: string): Promise<ExtractionResult> {
+  const started = Date.now();
   const normalized = normalizeUrl(url);
   const guessName = nameFromHost(url) || 'This Business';
-  if (!normalized) throw new ExtractionError(`"${url}" is not a valid website URL`, 'invalid_url');
+  if (!normalized) {
+    log.warn('bad_url', { url, ms: Date.now() - started });
+    throw new ExtractionError(`"${url}" is not a valid website URL`, 'invalid_url');
+  }
 
   let text: string;
   try {
@@ -247,14 +266,27 @@ export async function extractFromUrl(url: string): Promise<ExtractionResult> {
     ]);
     text = [home, ...extras.filter(Boolean)].join('\n\n=== ADDITIONAL PAGE ===\n\n').trim();
     if (!text || text.replace(/\s/g, '').length < 40) {
+      log.warn('thin_site', { url: normalized, chars: text.length, ms: Date.now() - started });
       throw new ExtractionError(`Could not read enough content from ${normalized} (page may be empty or blocked)`, 'empty_page');
     }
+    log.debug('scraped', {
+      url: normalized,
+      pages: 1 + extras.filter(Boolean).length,
+      chars: text.length,
+    });
   } catch (err) {
-    if (err instanceof ExtractionError) throw err;
+    if (err instanceof ExtractionError) {
+      log.warn('empty_page', { url: normalized, ms: Date.now() - started });
+      throw err;
+    }
+    log.warn('scrape_failed', { url: normalized, ms: Date.now() - started, err });
     throw new ExtractionError(`Could not fetch ${normalized}: ${(err as Error).message}`, 'fetch_failed');
   }
 
-  if (!hasLlm()) throw new ExtractionError('LLM API key is not configured — cannot extract business data', 'no_llm');
+  if (!hasLlm()) {
+    log.error('no_llm', { url: normalized, reason: 'no API key' });
+    throw new ExtractionError('LLM API key is not configured — cannot extract business data', 'no_llm');
+  }
 
   const { value, mocked } = await generateJson<ExtractionResult>({
     messages: [
@@ -264,16 +296,30 @@ export async function extractFromUrl(url: string): Promise<ExtractionResult> {
     fallback: templateResult(guessName),
   });
 
-  if (mocked) throw new ExtractionError('LLM call failed — could not extract data from the website', 'llm_failed');
+  if (mocked) {
+    log.error('llm_failed', { url: normalized, ms: Date.now() - started });
+    throw new ExtractionError('LLM call failed — could not extract data from the website', 'llm_failed');
+  }
 
   try {
     const result = sanitize(value, guessName, 'scrape');
     if (result.services.length === 0) {
+      log.warn('no_services', { url: normalized, ms: Date.now() - started });
       throw new ExtractionError('The website was read but no services could be found — try a site with a services or pricing page', 'no_services');
     }
+    log.info('done', {
+      url: normalized,
+      name: result.name,
+      services: result.services.length,
+      faqs: result.faqs.length,
+      confidence: result.confidence,
+      source: result.source,
+      ms: Date.now() - started,
+    });
     return result;
   } catch (err) {
     if (err instanceof ExtractionError) throw err;
+    log.error('parse_failed', { url: normalized, ms: Date.now() - started, err });
     throw new ExtractionError(`Failed to parse extracted data: ${(err as Error).message}`, 'parse_error');
   }
 }
