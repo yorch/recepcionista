@@ -8,6 +8,7 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/components/ui/cn';
 import { money } from '@/lib/format';
+import { normalizeUrl } from '@/lib/extraction';
 
 type Stage = 'input' | 'extracting' | 'review' | 'provisioning' | 'done';
 
@@ -33,12 +34,21 @@ export default function OnboardingPage() {
   const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
   const [kb, setKb] = useState<KnowledgeBase | null>(null);
   const [phone, setPhone] = useState<string | null>(null);
+  const [urlError, setUrlError] = useState<string | null>(null);
 
   async function start() {
     if (!url.trim()) {
+      setUrlError('Paste your website or Google Business link first');
       toast.error('Paste your website or Google Business link first');
       return;
     }
+    const normalized = normalizeUrl(url);
+    if (!normalized) {
+      setUrlError('That does not look like a website URL — try something like miamicoolair.com');
+      toast.error('That does not look like a website URL');
+      return;
+    }
+    setUrlError(null);
     setStage('extracting');
     setStep(0);
 
@@ -116,11 +126,16 @@ export default function OnboardingPage() {
             <input
               autoFocus
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => { setUrl(e.target.value); setUrlError(null); }}
               onKeyDown={(e) => e.key === 'Enter' && start()}
               placeholder="miamicoolair.com"
-              className="mt-2 w-full rounded-xl border border-[#26313f] bg-[#080b10] px-4 py-3 text-[15px] text-white outline-none transition placeholder:text-[#4a5b70] focus:border-[#ff6b35]/60"
+              aria-invalid={Boolean(urlError)}
+              className={cn(
+                'mt-2 w-full rounded-xl border bg-[#080b10] px-4 py-3 text-[15px] text-white outline-none transition placeholder:text-[#4a5b70]',
+                urlError ? 'border-[#e5484d]/70' : 'border-[#26313f] focus:border-[#ff6b35]/60',
+              )}
             />
+            {urlError ? <p className="mt-2 text-[12px] text-[#e5484d]">{urlError}</p> : null}
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <div>
                 <label className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Your name</label>
