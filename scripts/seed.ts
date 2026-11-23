@@ -67,7 +67,10 @@ async function provisionDemoAgent() {
   try {
     const res = await fetch(`${base}/api/businesses/${DEMO_BUSINESS_ID}/provision`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...(process.env.ADMIN_TOKEN ? { authorization: `Bearer ${process.env.ADMIN_TOKEN}` } : {}),
+      },
       body: '{}',
       signal: AbortSignal.timeout(60_000),
     });

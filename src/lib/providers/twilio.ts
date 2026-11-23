@@ -2,6 +2,9 @@
  * SMS adapter. Real Twilio when credentials exist; otherwise logs to the local
  * sms_log so the dashboard and demo still show a message being "sent".
  */
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { insecureDevAllowed } from '@/lib/auth';
+import { validateRecipient } from '@/lib/messaging/recipient';
 import { logger } from '@/lib/log';
 
 export interface SendSmsResult { id: string; status: 'sent' | 'mock' | 'failed'; error?: string }
@@ -12,9 +15,64 @@ export const hasTwilio = () =>
   Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_PHONE_NUMBER);
 
 const MOCK_DELAY_MS = 60;
+const TWILIO_TIMEOUT_MS = 15_000;
+
+/**
+ * Public origin Twilio signed. Prefer PUBLIC_BASE_URL (behind a proxy the
+ * request's own host can differ), then APP_URL, then the request URL.
+ */
+function publicBase(): string {
+  return (process.env.PUBLIC_BASE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/+$/, '');
+}
+
+/**
+ * Validate X-Twilio-Signature (HMAC-SHA1, base64) per Twilio's spec:
+ * sign `url + concat(sorted key + value)`. `params` are the decoded
+ * application/x-www-form-urlencoded POST fields (empty for GET / JSON).
+ *
+ * Fails closed unless ALLOW_INSECURE_DEV=true (non-production only). Multi-valued params are not supported by
+ * our routes (first value is used by callers).
+ */
+export function verifyTwilioSignature(
+  req: Request,
+  params: Record<string, string>,
+): { ok: true; skipped?: boolean } | { ok: false; error: string } {
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (!token) {
+    if (!insecureDevAllowed()) {
+      log.error('signature.no_token', { reason: 'TWILIO_AUTH_TOKEN unset (set it, or ALLOW_INSECURE_DEV=true for local dev)' });
+      return { ok: false, error: 'webhook verification not configured' };
+    }
+    log.warn('signature.skipped', { reason: 'TWILIO_AUTH_TOKEN unset (ALLOW_INSECURE_DEV)' });
+    return { ok: true, skipped: true };
+  }
+  const header = req.headers.get('x-twilio-signature');
+  if (!header) return { ok: false, error: 'missing signature' };
+
+  const reqUrl = new URL(req.url);
+  const base = publicBase();
+  const urls = new Set<string>();
+  if (base) urls.add(`${base}${reqUrl.pathname}${reqUrl.search}`);
+  urls.add(reqUrl.toString());
+
+  const data = Object.keys(params).sort().reduce((acc, k) => acc + k + params[k], '');
+  const given = Buffer.from(header);
+  for (const url of urls) {
+    const expected = Buffer.from(createHmac('sha1', token).update(url + data, 'utf8').digest('base64'));
+    if (expected.length === given.length && timingSafeEqual(expected, given)) return { ok: true };
+  }
+  return { ok: false, error: 'invalid signature' };
+}
 
 export async function sendSms(to: string, body: string): Promise<SendSmsResult> {
-  const e164 = normalizePhone(to);
+  // Single enforcement point for E.164 + SMS_ALLOWED_COUNTRY_CODES: every text
+  // (tools, confirmations, payment links, alerts, routes) ends up here.
+  const check = validateRecipient(to);
+  if (!check.ok) {
+    log.warn('sms.recipient_rejected', { reason: check.error });
+    return { id: '', status: 'failed', error: check.error };
+  }
+  const e164 = check.to;
   if (!hasTwilio()) {
     await new Promise((r) => setTimeout(r, MOCK_DELAY_MS));
     log.warn('sms.mock', { to: e164, reason: 'TWILIO_* incomplete', chars: body.length });
@@ -38,6 +96,7 @@ export async function sendSms(to: string, body: string): Promise<SendSmsResult> 
           From: process.env.TWILIO_PHONE_NUMBER as string,
           Body: body,
         }),
+        signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
       },
     );
     const json = await res.json();
@@ -66,7 +125,7 @@ export async function provisionNumber(areaCode = '305'): Promise<{ phone: string
   try {
     const search = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${sid}/AvailablePhoneNumbers/US/Local.json?AreaCode=${areaCode}&SmsEnabled=true&VoiceEnabled=true`,
-      { headers: auth },
+      { headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS) },
     );
     const list = await search.json();
     const candidate = list.available_phone_numbers?.[0]?.phone_number;
@@ -79,6 +138,7 @@ export async function provisionNumber(areaCode = '305'): Promise<{ phone: string
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ PhoneNumber: candidate }),
+      signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
     });
     const bought = await buy.json();
     if (!buy.ok) {

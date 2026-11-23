@@ -1,7 +1,7 @@
 import { fail, ok, readJson } from '@/lib/http';
-import { getBooking, getBusiness } from '@/lib/db';
-import { gratitudeSms, type Lang } from '@/lib/messaging/templates';
-import { sendAndLog } from '@/lib/messaging';
+import { guardAdmin } from '@/lib/admin-guard';
+import { sendGratitude, ActionError } from '@/lib/messaging/actions';
+import type { Lang } from '@/lib/messaging/templates';
 import type { SmsLog } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -12,29 +12,14 @@ export interface GratitudeResult {
 }
 
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
-    const { booking_id, language } = await readJson<{
-      booking_id?: string;
-      language?: Lang;
-    }>(req);
+    const { booking_id, language } = await readJson<{ booking_id?: string; language?: Lang }>(req);
     if (!booking_id) return fail('booking_id is required', 422);
-
-    const booking = await getBooking(booking_id);
-    if (!booking) return fail('booking not found', 404);
-    const business = await getBusiness(booking.business_id);
-    if (!business) return fail('business not found', 404);
-
-    const body = gratitudeSms({ business, booking, language: language ?? 'en' });
-    const { sms } = await sendAndLog({
-      business_id: business.id,
-      to: booking.customer_phone,
-      body,
-      kind: 'gratitude',
-      booking_id: booking?.id ?? null,
-    });
-
-    return ok<GratitudeResult>({ sms, body });
+    return ok<GratitudeResult>(await sendGratitude(booking_id, language ?? 'en'));
   } catch (err) {
+    if (err instanceof ActionError) return fail(err.message, err.status);
     return fail(err, 500);
   }
 }

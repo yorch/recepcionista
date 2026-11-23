@@ -1,10 +1,41 @@
 import { ok, fail, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings } from '@/lib/db';
-import type { Business, KnowledgeBase } from '@/lib/types';
+import type { Business, Hours, KnowledgeBase } from '@/lib/types';
+
+function publicBusiness(b: Business): Business {
+  const { owner_phone: _p, agent_id: _a, ...rest } = b;
+  void _p; void _a;
+  return rest as Business;
+}
+
+const E164 = /^\+[1-9]\d{6,14}$/;
+const str = (max: number) => (v: unknown) =>
+  typeof v === 'string' && v.trim().length > 0 && v.length <= max ? v.trim() : undefined;
+
+/** Only these fields may be changed through PATCH; everything else is rejected. */
+const PATCHABLE: Record<string, (v: unknown) => unknown> = {
+  name: str(200),
+  url: (v) => (v === null ? null : typeof v === 'string' && v.length <= 2048 ? v.trim() : undefined),
+  owner_name: (v) => (v === null ? null : str(200)(v)),
+  owner_phone: (v) => (v === null ? null : typeof v === 'string' && E164.test(v.replace(/[\s().-]/g, '')) ? v.replace(/[\s().-]/g, '') : undefined),
+  service_area: (v) =>
+    Array.isArray(v) && v.length <= 100 && v.every((x) => typeof x === 'string' && x.length <= 100) ? v : undefined,
+  hours: (v) => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    for (const d of Object.values(v as Record<string, unknown>)) {
+      if (d === null) continue;
+      const o = d as { open?: unknown; close?: unknown };
+      if (!o || typeof o.open !== 'string' || typeof o.close !== 'string') return undefined;
+    }
+    return v as Hours;
+  },
+};
 
 export interface BusinessDetail {
   business: Business;
   knowledge_base: KnowledgeBase | null;
+  /** revenue_month is integer CENTS. */
   stats: { calls_today: number; bookings_upcoming: number; revenue_month: number };
 }
 
@@ -12,6 +43,8 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<BusinessDetail>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const { id } = await params;
     const business = await getBusiness(id);
@@ -33,7 +66,7 @@ export async function GET(
     };
     void calls;
 
-    return ok<BusinessDetail>({ business, knowledge_base: await getKnowledgeBase(id), stats });
+    return ok<BusinessDetail>({ business: publicBusiness(business), knowledge_base: await getKnowledgeBase(id), stats });
   } catch (err) {
     return fail(err, 500);
   }
@@ -43,12 +76,23 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<Business>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const { id } = await params;
-    const body = await readJson<Partial<Business>>(req);
-    const updated = await updateBusiness(id, body);
+    const body = await readJson<Record<string, unknown>>(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return fail('invalid body', 422);
+    const patch: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(body)) {
+      const validate = PATCHABLE[key];
+      if (!validate) return fail(`field "${key}" cannot be updated`, 422);
+      const clean = validate(value);
+      if (clean === undefined) return fail(`invalid value for "${key}"`, 422);
+      patch[key] = clean;
+    }
+    const updated = await updateBusiness(id, patch as Partial<Business>);
     if (!updated) return fail('business not found', 404);
-    return ok<Business>(updated);
+    return ok<Business>(publicBusiness(updated));
   } catch (err) {
     return fail(err, 400);
   }

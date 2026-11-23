@@ -47,3 +47,6 @@ public/audio/*
 
 # prisma CLI reads .env (Next reads .env.local)
 .env
+
+# local database backups
+backups/

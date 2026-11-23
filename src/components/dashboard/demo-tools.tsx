@@ -142,7 +142,7 @@ export function DemoTools({ businessId, phone }: { businessId: string; phone?: s
               >
                 {result.payment_link.url}
               </a>
-              <p className="mt-1 text-[11px] text-[#7b8b9f]">{money(result.payment_link.amount_cents / 100)}</p>
+              <p className="mt-1 text-[11px] text-[#7b8b9f]">{money(result.payment_link.amount_cents)}</p>
             </div>
           ) : null}
 

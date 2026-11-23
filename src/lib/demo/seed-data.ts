@@ -3,17 +3,22 @@
  * /api/demo/reset route so both produce identical demo state.
  */
 import crypto from 'node:crypto';
+import { addDaysToDateKey, DEFAULT_TIMEZONE, localDateKey, zonedTimeToUtc } from '../time';
+import { phoneKey } from '../format';
 
 const id = () => crypto.randomUUID();
 
 export const DEMO_BUSINESS_ID = 'biz_miami_cool_air';
 
-const now = new Date();
+export const DEMO_TIMEZONE = DEFAULT_TIMEZONE; // Miami
+
+/**
+ * Wall-clock `h:m` on the local day `offset` days from today, in the demo business's zone.
+ * Evaluated on every call (never frozen at import) so a long-running server stays fresh.
+ */
 const day = (offset: number, h: number, m = 0) => {
-  const d = new Date(now);
-  d.setDate(d.getDate() + offset);
-  d.setHours(h, m, 0, 0);
-  return d;
+  const today = localDateKey(new Date(), DEMO_TIMEZONE);
+  return zonedTimeToUtc(addDaysToDateKey(today, offset), { h, m }, DEMO_TIMEZONE);
 };
 
 export const SYSTEM_PROMPT = `Eres Maria, la recepcionista bilingüe de Miami Cool Air Conditioning.
@@ -85,6 +90,8 @@ export function demoBusiness() {
     name: 'Miami Cool Air Conditioning',
     url: 'https://miamicoolair.example.com',
     phone: '+13055550142',
+    phoneKey: phoneKey('+13055550142'),
+    timezone: DEMO_TIMEZONE,
     ownerPhone: '+13055550199',
     ownerName: 'Jorge',
     hours: DEMO_HOURS,
@@ -131,20 +138,20 @@ export function demoBookings() {
   return [
     {
       id: 'bk_demo_1', callId: 'call_demo_1', businessId: DEMO_BUSINESS_ID, customerName: 'Marisol Vega',
-      customerPhone: '+13055550188', service: 'AC repair', scheduledAt: day(0, 14),
-      address: '1420 SW 8th St, Miami, FL 33135', priceEstimate: 150, depositAmount: null,
+      customerPhone: '+13055550188', service: 'AC repair', scheduledAt: day(0, 14), durationMinutes: 120,
+      address: '1420 SW 8th St, Miami, FL 33135', priceEstimate: 15000, depositAmount: null,
       depositPaid: false, status: 'confirmed', createdAt: day(-1, 9, 16),
     },
     {
       id: 'bk_demo_2', callId: 'call_demo_2', businessId: DEMO_BUSINESS_ID, customerName: 'Danny Ortiz',
-      customerPhone: '+13055550177', service: 'Emergency after-hours service', scheduledAt: day(-1, 20),
-      address: '880 NE 79th St, Miami, FL 33138', priceEstimate: 189, depositAmount: 189,
+      customerPhone: '+13055550177', service: 'Emergency after-hours service', scheduledAt: day(-1, 20), durationMinutes: 90,
+      address: '880 NE 79th St, Miami, FL 33138', priceEstimate: 18900, depositAmount: 18900,
       depositPaid: true, status: 'completed', createdAt: day(-1, 14, 8),
     },
     {
       id: 'bk_demo_3', callId: 'call_demo_3', businessId: DEMO_BUSINESS_ID, customerName: 'Rosa Menendez',
-      customerPhone: '+13055550166', service: 'Seasonal maintenance', scheduledAt: day(2, 9),
-      address: '2290 W Flagler St, Miami, FL 33135', priceEstimate: 129, depositAmount: null,
+      customerPhone: '+13055550166', service: 'Seasonal maintenance', scheduledAt: day(2, 9), durationMinutes: 60,
+      address: '2290 W Flagler St, Miami, FL 33135', priceEstimate: 12900, depositAmount: null,
       depositPaid: false, status: 'confirmed', createdAt: day(0, 8, 44),
     },
   ];
@@ -154,11 +161,11 @@ export function demoBriefing() {
   return {
     id: 'br_demo_1',
     businessId: DEMO_BUSINESS_ID,
-    date: new Date(day(-1, 18)).toISOString().slice(0, 10),
+    date: addDaysToDateKey(localDateKey(new Date(), DEMO_TIMEZONE), -1),
     audioUrl: null,
     transcript:
       'Hola Jorge. Ayer tuviste tres llamadas. Dos se convirtieron en citas: Marisol Vega hoy a las dos de la tarde por reparacion de AC, y Rosa Menendez el sabado a las nueve para mantenimiento. Also Danny Ortiz — an emergency water leak, he paid the one-eighty-nine deposit, tech finished last night. Se cobro $189 en depositos. Una cosa necesita tu atencion: Luis pidio una cotizacion de mini-split para garaje, te deje el numero. Eso es todo. Buen trabajo.',
-    stats: { calls: 3, bookings: 2, revenue: 189, flags: 1 },
+    stats: { calls: 3, bookings: 2, revenue: 18900, flags: 1 }, // revenue in integer cents
     createdAt: day(-1, 18),
   };
 }

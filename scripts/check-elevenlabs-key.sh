@@ -1,11 +1,22 @@
 #!/bin/sh
 # WS1: confirm whether the ElevenLabs key in .env.local is populated AND live.
 # Prints only lengths and HTTP status codes, never secret material.
-cd /Users/yorch/hackathon-prd/app || exit 1
+#
+# Reads ./.env.local at the repo root by default. Override with ENV_FILE=/path.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env.local}"
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "ERROR: $ENV_FILE not found. Copy .env.example there or set ENV_FILE." >&2
+  exit 1
+fi
 
 val() {
   # $1 = key name; strips optional quotes, ignores comments
-  awk -v k="$1" 'index($0,k"=")==1 { v=substr($0,length(k)+2); gsub(/^[ \t]*["'\'']|["'\''][ \t]*$/,"",v); print v; exit }' .env.local
+  awk -v k="$1" 'index($0,k"=")==1 { v=substr($0,length(k)+2); gsub(/^[ \t]*["'\'']|["'\''][ \t]*$/,"",v); print v; exit }' "$ENV_FILE"
 }
 
 KEY=$(val ELEVENLABS_API_KEY)

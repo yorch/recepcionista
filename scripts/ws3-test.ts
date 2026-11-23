@@ -177,7 +177,7 @@ check('sendSms Spanish message present',
     .message.includes('Le acabo de mandar'));
 
 const pay = await createPaymentLink({
-  business_id: BIZ, amount_cents: 18900, description: 'Emergency deposit', to: '+13055551234',
+  business_id: BIZ, amount_cents: 18900, description: 'Emergency deposit', caller_phone: '+13055551234',
 });
 const payData = pay.data as { amount_cents?: number; link?: { url: string } } | undefined;
 check('createPaymentLink returns a link for $189',

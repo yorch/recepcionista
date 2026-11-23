@@ -4,8 +4,10 @@
  * batch rather than a child Bun process racing the dev server's connection.
  */
 import fs from 'node:fs';
+import { guardAdmin } from '@/lib/admin-guard';
 import path from 'node:path';
 import { ok, fail } from '@/lib/http';
+import { demoModeEnabled } from '@/lib/auth';
 import { clearAll, prisma } from '@/lib/db';
 import { logger } from '@/lib/log';
 import {
@@ -18,6 +20,9 @@ export const dynamic = 'force-dynamic';
 const log = logger('api/demo/reset');
 
 export async function POST() {
+  const denied = await guardAdmin();
+  if (denied) return denied;
+  if (!demoModeEnabled()) return fail('not found', 404);
   const started = Date.now();
   try {
     log.warn('requested', { effect: 'wipes every table, reseeds demo data' });

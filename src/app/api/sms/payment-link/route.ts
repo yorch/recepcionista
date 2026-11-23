@@ -1,8 +1,9 @@
 import { fail, ok, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBooking, getBusiness } from '@/lib/db';
-import { paymentLinkSms, type Lang } from '@/lib/messaging/templates';
-import { sendAndLog } from '@/lib/messaging';
-import { createPaymentLink } from '@/lib/providers/stripe';
+import type { Lang } from '@/lib/messaging/templates';
+import { createAndSendPaymentLink } from '@/lib/messaging/actions';
+import { limitRequest } from '@/lib/ratelimit';
 import type { SmsLog } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -14,6 +15,10 @@ export interface PaymentLinkSmsResult {
 }
 
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
+  const limited = limitRequest(req, 'sms/payment-link', 10);
+  if (limited) return limited;
   try {
     const body = await readJson<{
       business_id?: string;
@@ -22,8 +27,6 @@ export async function POST(req: Request) {
       amount_cents?: number;
       description?: string;
       language?: Lang;
-      /** Pre-built link from the voice tool's create_payment_link — reuse it. */
-      url?: string;
     }>(req);
 
     const business = body.business_id ? await getBusiness(body.business_id) : null;
@@ -35,28 +38,17 @@ export async function POST(req: Request) {
       return fail('amount_cents must be between 100 and 50000', 422);
     }
 
+    // Always generate the link server-side; any caller-supplied `url` is ignored
+    // (otherwise this route is an open "SMS arbitrary link" primitive).
     const booking = body.booking_id ? await getBooking(body.booking_id) : null;
-    const description = body.description?.trim()
-      || `${business.name} deposit${booking ? ` — ${booking.service}` : ''}`;
-
-    const link = body.url
-      ? { url: body.url, id: '', amount_cents: amountCents, mock: true }
-      : await createPaymentLink(amountCents, description, business.name);
-
-    const text = paymentLinkSms({
+    if (booking && booking.business_id !== business.id) return fail('booking not found', 404);
+    const { sms, body: text, link } = await createAndSendPaymentLink({
       business,
-      amount_cents: amountCents,
-      url: link.url,
-      service: booking?.service ?? description,
-      language: body.language ?? 'en',
-    });
-
-    const { sms } = await sendAndLog({
-      business_id: business.id,
+      booking,
       to: body.to,
-      body: text,
-      kind: 'payment_link',
-      booking_id: booking?.id ?? null,
+      amountCents,
+      description: body.description,
+      language: body.language,
     });
 
     return ok<PaymentLinkSmsResult>({

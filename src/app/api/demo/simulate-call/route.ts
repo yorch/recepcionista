@@ -1,15 +1,18 @@
 /**
  * Demo orchestrator. Replays a full call by driving the same HTTP contracts the
  * voice agent's tools use — so the demo exercises the real pipeline, not a
- * separate code path. Degrades gracefully if a downstream route is missing.
+ * separate code path. Development/demo only (DEMO_MODE=true): it runs the tools in-process,
+ * bypassing the ElevenLabs tool secret and agent-id tenant binding that guard the real routes.
  */
 import { NextResponse } from 'next/server';
+import { guardAdmin } from '@/lib/admin-guard';
 import {
   createCall, getBusiness, getKnowledgeBase, listSms, updateCall,
 } from '@/lib/db';
-import { appUrl } from '@/lib/providers/stripe';
+import { runTool } from '@/lib/voice/tools';
 import { generateTextSafe } from '@/lib/providers/llm';
 import { ok, fail, readJson } from '@/lib/http';
+import { demoModeEnabled } from '@/lib/auth';
 import { logger } from '@/lib/log';
 import type { Booking, Call, PaymentLink, SmsLog } from '@/lib/types';
 
@@ -87,22 +90,24 @@ const SCRIPTS: Record<Script, {
   },
 };
 
-async function post<T>(path: string, body: unknown): Promise<T | null> {
+/**
+ * Run a voice tool in-process (same code path as the webhook route, minus the
+ * ElevenLabs shared-secret/agent-id plumbing, which only the real platform can supply).
+ */
+async function tool<T>(name: string, args: Record<string, unknown>): Promise<{ data: T | null; message: string }> {
   try {
-    const res = await fetch(`${appUrl()}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json();
-    if (!json?.ok) return null;
-    return json.data as T;
-  } catch {
-    return null;
+    const res = await runTool(name, args);
+    return { data: res.ok ? (res.data as T) : null, message: res.message };
+  } catch (err) {
+    log.warn('tool.failed', { tool: name, err });
+    return { data: null, message: '' };
   }
 }
 
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
+  if (!demoModeEnabled()) return fail('not found', 404);
   try {
     const body = await readJson<Body>(req);
     const scriptId: Script = body.script ?? 'routine';
@@ -154,8 +159,11 @@ export async function POST(req: Request) {
     const slots = await nextAvailable(business, 1, 60);
     const scheduledAt = slots[0]?.start ?? new Date(Date.now() + 86400000).toISOString();
 
-    const bookingPayload = await post<{ booking: Booking; sms_sent: boolean }>(
-      '/api/voice/tools/createBooking',
+    // price_estimate is DOLLARS at the tool boundary (the agent speaks dollars); the tool
+    // converts to integer cents exactly once. A rejected slot (BookingRejectedError) comes
+    // back as ok:false with a spoken alternative, so the demo just shows no booking.
+    const bookingResult = await tool<{ booking: Booking; sms_sent: boolean }>(
+      'create_booking',
       {
         business_id: business.id,
         call_id: call.id,
@@ -168,20 +176,23 @@ export async function POST(req: Request) {
         language: script.language === 'es' ? 'es' : 'en',
       },
     );
+    const bookingPayload = bookingResult.data;
     const booking = bookingPayload?.booking ?? null;
+    if (!booking) log.warn('booking.rejected', { business: business.id, message: bookingResult.message });
 
     let paymentLink: (PaymentLink & { mock?: boolean }) | null = null;
     if (script.emergency) {
-      const linkPayload = await post<{ link: PaymentLink & { mock?: boolean } }>(
-        '/api/voice/tools/createPaymentLink',
+      const linkPayload = (await tool<{ link: PaymentLink & { mock?: boolean } }>(
+        'create_payment_link',
         {
           business_id: business.id,
+          call_id: call.id,
           amount_cents: script.price * 100,
           description: `${business.name} — emergency deposit`,
           booking_id: booking?.id,
           language: script.language === 'es' ? 'es' : 'en',
         },
-      );
+      )).data;
       paymentLink = linkPayload?.link ?? null;
     }
 
@@ -218,5 +229,7 @@ export async function POST(req: Request) {
 }
 
 export async function GET() {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   return NextResponse.json({ ok: true, data: { scripts: Object.keys(SCRIPTS) } });
 }

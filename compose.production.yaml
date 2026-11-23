@@ -115,6 +115,18 @@ services:
       # return URLs are built from this — so it must be the public https origin
       # and must match DOMAIN. deploy.sh refuses to run when they disagree.
       APP_URL: ${APP_URL:?Set APP_URL in .env (https://<DOMAIN>)}
+      # Fail closed: without these, the owner dashboard/API is unauthenticated
+      # and Stripe webhooks can be forged. deploy.sh also checks both.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env (openssl rand -hex 32)}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?Set STRIPE_WEBHOOK_SECRET in .env}
+      # Required in production (the app fails closed without them). Empty
+      # defaults keep a no-voice deployment possible; deploy.sh enforces them
+      # whenever ELEVENLABS_API_KEY is set.
+      ELEVENLABS_TOOL_SECRET: ${ELEVENLABS_TOOL_SECRET:-}
+      ELEVENLABS_WEBHOOK_SECRET: ${ELEVENLABS_WEBHOOK_SECRET:-}
+      # Only set true when Traefik is the sole path to the app (it overwrites X-Forwarded-For).
+      TRUSTED_PROXY: ${TRUSTED_PROXY:-true}
+      ALLOW_INSECURE_DEV: "false"
     volumes:
       # Briefing audio is written at runtime and served as /audio/<file>.mp3.
       # The volume overrides the image's (empty) directory, which is why the

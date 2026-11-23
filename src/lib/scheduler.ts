@@ -1,62 +1,57 @@
 /**
  * Availability over the business's own hours + existing bookings. Internal
- * calendar by design — no external calendar API in the MVP.
+ * calendar by design — no external calendar API in the MVP. All maths happens in
+ * the business's time zone (see lib/time.ts), whatever the process TZ is.
  */
-import { getBookedSlots } from '@/lib/db';
+import { listBlockingIntervals } from '@/lib/db';
+import {
+  buildSlots, clampDuration, upcomingDateKeys, validateSlot, type SlotRejection,
+} from '@/lib/availability';
+import { dayRange, isDateKey, tzOf } from '@/lib/time';
 import type { Business, TimeSlot } from '@/lib/types';
-
-const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-
-function atTime(dateStr: string, hhmm: string): Date {
-  const [h, m] = hhmm.split(':').map(Number);
-  const d = new Date(`${dateStr}T00:00:00`);
-  d.setHours(h, m, 0, 0);
-  return d;
-}
 
 export async function slotsForDate(
   business: Business,
   dateStr: string,
   durationMinutes = 60,
 ): Promise<TimeSlot[]> {
-  const dow = DAY_KEYS[new Date(`${dateStr}T12:00:00`).getDay()];
-  const hours = business.hours?.[dow];
-  if (!hours) return [];
-
-  const booked = new Set((await getBookedSlots(business.id, dateStr)).map((s) => new Date(s).getTime()));
-  const open = atTime(dateStr, hours.open);
-  const close = atTime(dateStr, hours.close);
-  const slots: TimeSlot[] = [];
-
-  for (let t = open.getTime(); t + durationMinutes * 60000 <= close.getTime(); t += 60 * 60000) {
-    slots.push({
-      start: new Date(t).toISOString(),
-      end: new Date(t + durationMinutes * 60000).toISOString(),
-      available: !booked.has(t),
-    });
-  }
-  return slots;
+  if (!isDateKey(dateStr)) return [];
+  const tz = tzOf(business);
+  const duration = clampDuration(durationMinutes);
+  const { gte, lt } = dayRange(dateStr, tz);
+  const busy = await listBlockingIntervals(business.id, gte.getTime(), lt.getTime());
+  return buildSlots(business.hours, dateStr, tz, duration, busy, { nowMs: Date.now() });
 }
 
-/** Next N available slots starting today, skipping past times. */
+/** Next N available slots starting today, skipping past times (needs ~1h lead). */
 export async function nextAvailable(business: Business, count = 3, durationMinutes = 60): Promise<TimeSlot[]> {
+  const tz = tzOf(business);
+  const duration = clampDuration(durationMinutes);
+  const nowMs = Date.now();
+  const days = upcomingDateKeys(nowMs, tz, 14);
+  const from = dayRange(days[0], tz).gte.getTime();
+  const to = dayRange(days[days.length - 1], tz).lt.getTime();
+  const busy = await listBlockingIntervals(business.id, from, to); // one query for the whole range
+
   const out: TimeSlot[] = [];
-  const now = Date.now();
-  for (let dayOffset = 0; dayOffset < 14 && out.length < count; dayOffset++) {
-    const d = new Date();
-    d.setDate(d.getDate() + dayOffset);
-    const dateStr = d.toISOString().slice(0, 10);
-    for (const slot of await slotsForDate(business, dateStr, durationMinutes)) {
-      if (slot.available && new Date(slot.start).getTime() > now + 60 * 60000) {
+  for (const dateKey of days) {
+    for (const slot of buildSlots(business.hours, dateKey, tz, duration, busy, { nowMs, leadMin: 60 })) {
+      if (slot.available) {
         out.push(slot);
-        if (out.length >= count) break;
+        if (out.length >= count) return out;
       }
     }
   }
   return out;
 }
 
-export async function isWithinHours(business: Business, iso: string): Promise<boolean> {
-  const dateStr = iso.slice(0, 10);
-  return (await slotsForDate(business, dateStr)).some((s) => s.available || s.start === iso);
+/** Does [iso, iso+duration) fit the opening hours (ignoring other bookings)? */
+export function isWithinHours(
+  business: Business,
+  iso: string,
+  durationMinutes = 60,
+): { ok: true } | { ok: false; reason: SlotRejection } {
+  return validateSlot(
+    business.hours, new Date(iso).getTime(), clampDuration(durationMinutes), tzOf(business), Date.now(),
+  );
 }

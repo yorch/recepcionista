@@ -65,24 +65,35 @@ app sits
 
 ```sh
 cp .env.example .env
-$EDITOR .env          # DOMAIN, APP_URL, POSTGRES_PASSWORD at minimum
+$EDITOR .env          # DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN,
+                      # STRIPE_WEBHOOK_SECRET at minimum
 
-./deploy.sh           # build → migrate → start → wait for healthy
-./deploy.sh --seed    # optional: load the Miami Cool Air demo dataset
+./deploy.sh           # build → back up DB → migrate → start → wait for healthy
+./deploy.sh --seed --i-know-this-wipes-data   # optional: demo dataset (wipes data)
 ```
 
-`deploy.sh` refuses to start when `DOMAIN`, `APP_URL` or `POSTGRES_PASSWORD` are
-blank, or
-when `APP_URL` is not exactly `https://${DOMAIN}`. That last check exists
-because the two
-drifting apart produces the worst failure mode: Traefik serves one hostname
-while the app
-tells Stripe and Twilio to call back on another, and webhooks silently never
-arrive.
+`deploy.sh` refuses to start when any of these are blank:
 
-`--seed` is not implied. `scripts/seed.ts` truncates every table before
-inserting, so it is
-safe to re-run but destructive on purpose.
+- `DOMAIN`, `APP_URL`, `POSTGRES_PASSWORD`
+- `ADMIN_TOKEN`: generate with `openssl rand -hex 32`
+- `STRIPE_WEBHOOK_SECRET`: without it the Stripe webhook must not be trusted
+
+It also refuses when `APP_URL` is not exactly `https://${DOMAIN}`. That last
+check exists because the two drifting apart produces the worst failure mode:
+Traefik serves one hostname while the app tells Stripe and Twilio to call back
+on another, and webhooks silently never arrive.
+
+If the app does not report healthy within 60 seconds, `deploy.sh` prints the
+last log lines and exits non-zero.
+
+**Backups happen automatically.** Before `up -d` runs `migrate`, `deploy.sh`
+writes a gzipped `pg_dump` to `./backups/` (override with `BACKUP_DIR`) when the
+database container is running. A first deploy has no database yet, so it has
+nothing to back up. Keep `backups/` out of git.
+
+`--seed` is not implied, and it needs `--i-know-this-wipes-data` as well.
+`scripts/seed.ts` truncates every table before inserting, so the flag makes the
+destructive step deliberate.
 
 ## Pointing the providers at it
 
@@ -97,12 +108,10 @@ Every one of these must use the public origin from `APP_URL`:
 | Twilio (inbound SMS, gratitude replies) | `POST /api/sms/gratitude-reply` |
 
 **Set `STRIPE_WEBHOOK_SECRET` in production.** Without it,
-`/api/payments/webhook` logs a
-warning and accepts *unsigned* payloads — anyone who finds the URL can mark a
-deposit as
-paid. The code comment says this is a demo affordance; on a public host it is a
-hole.
-`deploy.sh` warns, but does not fail, when it is unset.
+`/api/payments/webhook` would accept *unsigned* payloads, and anyone who finds
+the URL could mark a deposit as paid. `deploy.sh` refuses to deploy when it is
+unset, and `compose.production.yaml` fails `compose up` for the same reason.
+`STRIPE_ALLOW_UNSIGNED` is a dev-only override and must not be set here.
 
 ## Operating it
 
@@ -124,12 +133,17 @@ nightly
 dump is the difference between a bad afternoon and a lost demo:
 
 ```sh
+# The variables must expand inside the db container, where they are set. The
+# single quotes keep the host shell from expanding them (they are unset here).
 docker compose -f compose.production.yaml exec -T db \
-  pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > backup-$(date +%F).sql.gz
+  sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > backup-$(date +%F).sql.gz
 ```
 
+`deploy.sh` also writes a dump to `./backups/` before each migration. The manual
+command above is for a nightly job or an extra copy off the host.
+
 Restore with
-`gunzip -c backup.sql.gz | docker compose … exec -T db psql -U … -d …`.
+`gunzip -c backup.sql.gz | docker compose -f compose.production.yaml exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`.
 If you want this automated, `prodrigestivill/postgres-backup-local` is the
 service
 `~/code/tradr/deployment/compose.yml` uses; it drops in as a fourth service
@@ -174,11 +188,24 @@ Set the key for the demo.
 
 ## Hardening, and what is still open
 
-Applied: non-root (`node`), `read_only` rootfs with tmpfs for `/tmp` and the
+Applied: non-root (the app runs as `node`, uid 1000, and the migrate image runs
+as uid 1000 too), `read_only` rootfs with tmpfs for `/tmp` and the
 Next cache,
 `cap_drop: ALL`, `no-new-privileges`, no published ports, fail-closed env
-interpolation,
-and Postgres isolated on an internal network.
+interpolation (including `ADMIN_TOKEN` and `STRIPE_WEBHOOK_SECRET`), and
+Postgres isolated on an internal network.
+
+## Access control
+
+The owner dashboard and the JSON API are protected by `ADMIN_TOKEN`: sign in at
+`/login`, or send `Authorization: Bearer <token>`. Provider webhooks are checked
+with their own signatures. See the Authentication section of the README.
+
+Before you point a provider at the host, confirm on the deployed build that
+these return 401 without a token: `/dashboard`, `/api/businesses`,
+`/api/sms/send`, and `/api/extract`. Also confirm that `/api/demo/*` is not
+reachable (`DEMO_MODE` unset). The full pre-launch list is in the README
+security checklist.
 
 Not applied, worth knowing:
 

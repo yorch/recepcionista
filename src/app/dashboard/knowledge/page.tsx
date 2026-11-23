@@ -3,6 +3,7 @@ import { Card, CardHead } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { KnowledgeEditor } from '@/components/dashboard/knowledge-editor';
 import { money } from '@/lib/format';
+import { dollarsToCents } from '@/lib/money';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,7 +39,7 @@ export default async function KnowledgePage() {
                       {s.description ? <p className="mt-0.5 text-[11px] leading-relaxed text-[#6b7b91]">{s.description}</p> : null}
                     </div>
                     <span className="shrink-0 tabular-nums text-[13px] text-[#9fb0c5]">
-                      {s.base_price ? `from ${money(s.base_price)}` : 'quote'}
+                      {s.base_price ? `from ${money(dollarsToCents(s.base_price))}` : 'quote'}
                     </span>
                   </li>
                 ))}

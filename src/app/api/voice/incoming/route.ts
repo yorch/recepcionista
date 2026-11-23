@@ -1,6 +1,7 @@
 import { ok, fail } from '@/lib/http';
 import { getBusinessByPhone, listBusinesses, createCall } from '@/lib/db';
 import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber } from '@/lib/voice/elevenlabs';
+import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
 
@@ -16,27 +17,32 @@ interface IncomingPayload {
   from?: string;
 }
 
-/** Twilio posts form-encoded; the demo UI posts JSON. Accept both. */
-async function readPayload(req: Request): Promise<IncomingPayload> {
+/** Twilio posts form-encoded (signed); the demo UI posts JSON (unsigned, dev only). Accept both. */
+async function readPayload(req: Request): Promise<{ payload: IncomingPayload; form: Record<string, string> }> {
   const contentType = req.headers.get('content-type') ?? '';
   try {
     if (contentType.includes('application/json')) {
-      return (await req.json()) as IncomingPayload;
+      return { payload: (await req.json()) as IncomingPayload, form: {} };
     }
     const form = await req.formData();
     const out: Record<string, string> = {};
     form.forEach((value, key) => {
       if (typeof value === 'string') out[key] = value;
     });
-    return out as IncomingPayload;
+    return { payload: out as IncomingPayload, form: out };
   } catch {
-    return {};
+    return { payload: {}, form: {} };
   }
 }
 
 export async function POST(req: Request) {
   try {
-    const payload = await readPayload(req);
+    const { payload, form } = await readPayload(req);
+    const verdict = verifyTwilioSignature(req, form);
+    if (!verdict.ok) {
+      log.warn('signature.rejected', { error: verdict.error });
+      return fail('forbidden', 403);
+    }
     const to = payload.To || payload.to || '';
     const from = payload.From || payload.from || '';
 

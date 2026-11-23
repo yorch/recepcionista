@@ -1,5 +1,6 @@
 import { ok, fail } from '@/lib/http';
-import { getBusiness, updateBooking } from '@/lib/db';
+import { insecureDevAllowed } from '@/lib/auth';
+import { getBooking, getBusiness, markDepositPaid } from '@/lib/db';
 import { ownerAlertSms } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
 import { logger } from '@/lib/log';
@@ -15,10 +16,27 @@ const RELEVANT = new Set([
 ]);
 
 /**
- * Stripe webhook. Signature verification is enforced only when a secret is
- * configured; in test mode we accept and say so in the log, because a demo run
- * has no way to generate a valid signature. Always answers 200 so Stripe does
- * not disable the endpoint over a payload we did not need.
+ * Event ids and bookings already handled (process-local; Stripe retries land within hours).
+ * TODO(multi-instance): this dedupe is per process, so with several instances a retry can reach a
+ * different one and re-send the owner alert. markDepositPaid is idempotent, so no money state is
+ * affected; persist processed event ids (e.g. a stripe_events table) if the alert must be exactly-once.
+ */
+const SEEN_TTL_MS = 24 * 60 * 60 * 1000;
+const seenEvents = new Map<string, number>();
+const alertedBookings = new Map<string, number>();
+
+function seen(map: Map<string, number>, key: string): boolean {
+  const now = Date.now();
+  for (const [k, t] of map) if (now - t > SEEN_TTL_MS) map.delete(k);
+  return map.has(key);
+}
+
+/**
+ * Stripe webhook. Signature verification is MANDATORY: with no
+ * STRIPE_WEBHOOK_SECRET the request is refused (503). The only escape hatch is
+ * STRIPE_ALLOW_UNSIGNED=true, which is ignored when NODE_ENV=production.
+ * Verified payloads that we cannot use still answer 200 so Stripe does not
+ * disable the endpoint.
  */
 export async function POST(req: Request) {
   let raw = '';
@@ -30,16 +48,19 @@ export async function POST(req: Request) {
 
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   const signature = req.headers.get('stripe-signature');
+  const allowUnsigned = process.env.STRIPE_ALLOW_UNSIGNED === 'true' && insecureDevAllowed();
 
   if (secret) {
     const verdict = await verifySignature(raw, signature, secret);
     if (!verdict.ok) {
       log.warn('signature.rejected', { error: verdict.error });
-      // 400 here on purpose: a forged payload is the one case worth failing.
-      return fail(`signature ${verdict.error}`, 400);
+      return fail('invalid signature', 400);
     }
+  } else if (allowUnsigned) {
+    log.warn('signature.unverified', { reason: 'STRIPE_ALLOW_UNSIGNED=true (development only)' });
   } else {
-    log.warn('signature.unverified', { reason: 'STRIPE_WEBHOOK_SECRET unset (test mode)' });
+    log.error('signature.no_secret', { reason: 'STRIPE_WEBHOOK_SECRET unset; refusing webhook' });
+    return fail('webhook verification not configured', 503);
   }
 
   let event: {
@@ -58,35 +79,54 @@ export async function POST(req: Request) {
     log.debug('event.ignored', { type, id: event.id ?? null });
     return ok({ received: true, ignored: type });
   }
+  if (event.id && seen(seenEvents, event.id)) {
+    log.info('event.duplicate', { type, id: event.id });
+    return ok({ received: true, duplicate: true });
+  }
   log.info('event.received', { type, id: event.id ?? null });
 
   const object = event.data?.object ?? {};
   const metadata = (object.metadata ?? {}) as Record<string, string>;
-  const amountCents = Number(object.amount_total ?? object.amount_total_cents ?? object.amount ?? 0);
+  // Integer cents. Checkout sessions use amount_total; PaymentIntents amount_received/amount.
+  const rawAmount = Number(object.amount_total ?? object.amount_received ?? object.amount ?? 0);
+  const amountCents = Number.isFinite(rawAmount) ? Math.round(rawAmount) : 0;
 
-  // Preferred path: the link was created with a booking_id in metadata.
+  // A checkout session that is not paid yet (async payment methods) is not a deposit.
+  if (type === 'checkout.session.completed' && object.payment_status && object.payment_status !== 'paid') {
+    log.info('event.unpaid', { id: event.id ?? null, payment_status: object.payment_status });
+    return ok({ received: true, ignored: 'not paid yet' });
+  }
+
   const bookingId = metadata.booking_id ?? metadata.bookingId;
   const businessId = metadata.business_id ?? metadata.businessId;
 
+  let response: Response;
   if (bookingId) {
-    const booking = await updateBooking(bookingId, { deposit_paid: true, status: 'confirmed' });
-    if (booking) {
-      const business = (await getBusiness(booking.business_id))
-        ?? (businessId ? await getBusiness(businessId) : null);
-      if (business?.owner_phone) {
-        await sendAndLog({
-          business_id: business.id,
-          to: business.owner_phone,
-          body: ownerAlertSms({
-            business,
-            text: `Deposit ${money(amountCents)} paid by ${booking.customer_name} for ${booking.service}. Booking confirmed.`,
-          }),
-          kind: 'owner_alert',
-        });
+    const booking = await getBooking(bookingId);
+    // The metadata is ours, but never trust a booking that belongs to another business.
+    if (booking && (!businessId || booking.business_id === businessId) && amountCents > 0) {
+      const { updated } = await markDepositPaid(booking.id, amountCents);
+      if (updated && !seen(alertedBookings, booking.id)) {
+        alertedBookings.set(booking.id, Date.now());
+        const business = await getBusiness(booking.business_id);
+        if (business?.owner_phone) {
+          await sendAndLog({
+            business_id: business.id,
+            to: business.owner_phone,
+            body: ownerAlertSms({
+              business,
+              text: `Deposit ${money(amountCents)} paid by ${booking.customer_name} for ${booking.service}.`,
+            }),
+            kind: 'owner_alert',
+            booking_id: booking.id,
+          });
+        }
       }
-      return ok({ received: true, booking_id: booking.id, deposit_paid: true });
+      response = ok({ received: true, booking_id: booking.id, deposit_paid: updated });
+      if (event.id) seenEvents.set(event.id, Date.now());
+      return response;
     }
-    log.warn('booking.unknown', { booking: bookingId, type });
+    log.warn('booking.unmatched', { booking: bookingId, type, amount_cents: amountCents });
   }
 
   // Unmatched payment: never drop money on the floor — tell the owner instead.
@@ -105,6 +145,7 @@ export async function POST(req: Request) {
     log.warn('payment.unattributed', { amount: money(amountCents), type });
   }
 
+  if (event.id) seenEvents.set(event.id, Date.now());
   return ok({ received: true, unmatched: true });
 }
 
@@ -123,14 +164,17 @@ async function verifySignature(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!header) return { ok: false, error: 'missing stripe-signature header' };
 
-  const parts = header.split(',').reduce<Record<string, string>>((acc, part) => {
-    const [k, v] = part.split('=');
-    if (k && v) acc[k.trim()] = v.trim();
-    return acc;
-  }, {});
-  const timestamp = parts.t;
-  const provided = parts.v1;
-  if (!timestamp || !provided) return { ok: false, error: 'malformed stripe-signature header' };
+  let timestamp = '';
+  const candidates: string[] = [];
+  for (const part of header.split(',')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim();
+    const v = part.slice(i + 1).trim();
+    if (k === 't') timestamp = v;
+    else if (k === 'v1' && v) candidates.push(v);
+  }
+  if (!timestamp || candidates.length === 0) return { ok: false, error: 'malformed stripe-signature header' };
 
   // 5 minutes of tolerance, as Stripe recommends, so a replay is not accepted.
   const age = Math.abs(Date.now() / 1000 - Number(timestamp));
@@ -152,7 +196,7 @@ async function verifySignature(
     const expected = Array.from(new Uint8Array(mac))
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
-    return timingSafeEqual(expected, provided)
+    return candidates.some((c) => timingSafeEqual(expected, c))
       ? { ok: true }
       : { ok: false, error: 'mismatch' };
   } catch (err) {

@@ -12,6 +12,14 @@ const NAV = [
   { href: '/dashboard/demo', label: 'Demo console', icon: 'M9 3h6l1 4h3v14H5V7h3l1-4Zm0 10h6m-3-3v6' },
 ] as const;
 
+async function logout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } finally {
+    window.location.href = '/login';
+  }
+}
+
 export function Sidebar({ businessName, phone, live }: { businessName: string; phone?: string | null; live: boolean }) {
   const path = usePathname();
   return (
@@ -57,7 +65,18 @@ export function Sidebar({ businessName, phone, live }: { businessName: string; p
         })}
       </nav>
 
-      <div className="mt-auto rounded-xl border border-[#1b2430] bg-[#0b1017] p-3">
+      <button
+        type="button"
+        onClick={logout}
+        className="mt-auto flex items-center gap-3 rounded-lg px-3 py-2 text-left text-[13px] text-[#8b98ab] transition-colors hover:bg-[#111823] hover:text-[#cbd7e6]"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9" />
+        </svg>
+        Log out
+      </button>
+
+      <div className="mt-3 rounded-xl border border-[#1b2430] bg-[#0b1017] p-3">
         <p className="text-[11px] font-medium text-[#cbd7e6]">Bilingual by default</p>
         <p className="mt-1 text-[11px] leading-relaxed text-[#6b7b91]">
           English, Spanish, or both in the same sentence. She follows the caller.

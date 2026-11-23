@@ -1,5 +1,39 @@
 # PRD: AI Front-Desk Employee for Miami Home-Service SMBs
 
+> **Implementation status vs PRD (as of 2026-11-23).** This is the original
+> hackathon plan (v1.0), kept for history. It is not the current spec. The
+> items below are **not implemented**, or only partly implemented, in the build:
+>
+> - **Supabase** schema and client (Sec. 5, WS1): the app uses Postgres 17 with
+>   Prisma. The `SUPABASE_*` env vars are not read by the code.
+> - **Next.js 14** (Sec. 7): the app uses Next.js 16.
+> - **6 PM auto-briefing** (FR-3.1): briefings are generated on demand only.
+>   Nothing schedules them.
+> - **Owner voice reply to the briefing** (FR-3 step 4, stretch): not implemented.
+> - **24h gratitude SMS** (FR-4.1, stretch): the sweep exists, but nothing
+>   schedules it.
+> - **Settings panel** for voice and hours (Sec. 5): no route or UI.
+> - **Calendar grid** (Sec. 5): the bookings page is a list.
+> - **Call recording player** (Sec. 5): `recording_url` is stored, but no player.
+> - **Live human transfer** (FR-2.6): `handoff_to_human` flags a callback. It
+>   does not transfer the call.
+> - **Phone provisioning via Twilio** (FR-1.3): mock fallback. Live inbound
+>   routing uses ElevenLabs phone binding.
+> - **Spanglish detection** (FR-2.1): prompt-driven. No detection in code.
+> - **Gas-leak and carbon-monoxide guidance** (guardrails, Sec. 6): only in the
+>   demo prompt. Not in production prompts.
+> - **Recording consent and AI disclosure**: not in any prompt or greeting.
+> - **SMS opt-out (STOP/HELP) and 10DLC/A2P registration**: not implemented.
+> - **Live KB correction by voice and live transcript** (stretch): not implemented.
+> - **Stripe test mode enforcement** (Sec. 2): test keys by convention only.
+> - **Unsourced claims**: the "30-50% of calls lost" figure, the market
+>   underservice claim, and the demo phone number (`+1-305-555-0199`, which
+>   differs from the seeded number in CONTRACTS.md) have no source here.
+>
+> Shipped as described: URL-to-KB extraction, the seven voice tools, booking
+> with availability checks, bilingual SMS confirmations, emergency deposit links
+> (with the $500 cap), the briefing content, and the 4-5 star review routing.
+
 ## Buildersgiving: Miami AI Hackathon — November 14, 2026
 
 **One-liner:** Paste your website, and in 2 minutes you have a bilingual

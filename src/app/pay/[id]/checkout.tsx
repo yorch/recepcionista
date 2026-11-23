@@ -14,22 +14,46 @@ export interface CheckoutProps {
   amountCents: number;
   label: string;
   businessName: string;
+  /** When set, Pay records the deposit via POST /api/pay/mock-complete (demo mode only). */
+  bookingId?: string;
 }
 
-export function Checkout({ reference, amountCents, label, businessName }: CheckoutProps) {
+export function Checkout({ reference, amountCents, label, businessName, bookingId }: CheckoutProps) {
   const [card, setCard] = useState('4242 4242 4242 4242');
   const [exp, setExp] = useState('12 / 29');
   const [cvc, setCvc] = useState('123');
   const [zip, setZip] = useState('33131');
   const [state, setState] = useState<'idle' | 'paying' | 'paid'>('idle');
+  const [error, setError] = useState<string | null>(null);
 
   const amount = formatMoney(amountCents);
 
-  function pay(e: React.FormEvent) {
+  async function pay(e: React.FormEvent) {
     e.preventDefault();
     setState('paying');
+    setError(null);
     // Short beat so the button press reads as a real network call.
-    setTimeout(() => setState('paid'), 900);
+    const beat = new Promise((r) => setTimeout(r, 900));
+    if (bookingId) {
+      try {
+        const res = await fetch('/api/pay/mock-complete', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ booking_id: bookingId }),
+        });
+        if (!res.ok) {
+          setError(res.status === 404 ? 'Demo payments are not enabled on this server.' : 'Payment could not be recorded. Please try again.');
+          setState('idle');
+          return;
+        }
+      } catch {
+        setError('Network error. Please try again.');
+        setState('idle');
+        return;
+      }
+    }
+    await beat;
+    setState('paid');
   }
 
   if (state === 'paid') {
@@ -117,6 +141,7 @@ export function Checkout({ reference, amountCents, label, businessName }: Checko
         >
           {state === 'paying' ? 'Processing…' : `Pay ${amount}`}
         </button>
+        {error ? <p role="alert" className="text-center text-[12px] text-[#f2c86b]">{error}</p> : null}
       </form>
 
       <div className="mt-5 flex items-center justify-center gap-1.5 text-[10.5px] text-[#5a6b80]">

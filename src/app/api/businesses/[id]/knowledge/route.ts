@@ -1,4 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
 import { buildSystemPrompt } from '@/lib/kb';
 import type { FAQ, KnowledgeBase, Service } from '@/lib/types';
@@ -14,6 +15,8 @@ export async function PUT(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<KnowledgeBase>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const { id } = await params;
     const business = await getBusiness(id);

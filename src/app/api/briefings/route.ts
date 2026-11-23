@@ -1,9 +1,12 @@
 import { fail, ok } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBusiness, listBriefings } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const businessId = new URL(req.url).searchParams.get('business_id');
     if (!businessId) return fail('business_id is required', 422);
