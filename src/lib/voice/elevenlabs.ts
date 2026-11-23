@@ -4,7 +4,8 @@
  */
 import { appUrl } from '@/lib/providers/stripe';
 import { insecureDevAllowed } from '@/lib/auth';
-import { buildSystemPrompt } from '@/lib/kb';
+import { buildSystemPrompt, complianceRules, COMPLIANCE_MARKER } from '@/lib/kb';
+import { disclosureFor } from '@/lib/kb/disclosure';
 import { listBusinesses, listBusinessesByAgentId, updateBusiness } from '@/lib/db';
 import type { Business, KnowledgeBase } from '@/lib/types';
 import { TOOL_NAMES, type ToolName } from '@/lib/voice/tools';
@@ -134,7 +135,9 @@ export async function rememberAgent(businessId: string, agentId: string): Promis
 }
 
 export function firstMessageFor(business: Business): string {
-  return `Thanks for calling ${business.name}, this is Maria. How can I help you? — `
+  // The disclosure always comes first, before any greeting or question.
+  return `${disclosureFor(business)} — `
+    + `Thanks for calling ${business.name}, this is Maria. How can I help you? — `
     + `Gracias por llamar a ${business.name}, le habla Maria. ¿En qué le puedo ayudar?`;
 }
 
@@ -199,6 +202,7 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     description: 'Transfer the caller to the owner. Use when the caller insists, is upset, or asks about something outside the knowledge base.',
     properties: {
       reason: { type: 'string', description: 'Why the caller needs the owner.' },
+      consent_declined: { type: 'boolean', description: 'Set true ONLY when the caller objected to the call being AI-handled, recorded or transcribed, or told you to stop. Marks the call so no transcript is kept; take a message for a human callback.' },
     },
     required: ['reason'],
   },
@@ -323,12 +327,15 @@ async function ensureToolIds(): Promise<string[]> {
 }
 
 async function agentBody(business: Business, kb: KnowledgeBase | null) {
-  const prompt = kb?.system_prompt?.trim()
+  let prompt = kb?.system_prompt?.trim()
     || buildSystemPrompt(business, {
       services: kb?.services ?? [],
       faqs: kb?.faqs ?? [],
       pricing_notes: kb?.pricing_notes ?? '',
     });
+  // Older stored prompts predate the compliance block: add it. Never sync the owner's phone to the provider.
+  if (!prompt.includes(COMPLIANCE_MARKER)) prompt = `${prompt}\n\n${complianceRules(business)}`;
+  if (business.owner_phone) prompt = prompt.split(business.owner_phone).join('[owner phone withheld]');
 
   const clock = `# Current date, time and time zone\n${describeNow(business)}\nscheduled_at is LOCAL wall-clock time in ${business.timezone || 'the business zone'} with NO UTC offset (e.g. 2026-11-24T10:00:00); never convert to UTC. price_estimate is in whole dollars.`;
 

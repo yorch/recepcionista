@@ -9,13 +9,14 @@ name: app
 
 services:
   db:
-    image: postgres:17-alpine
+    # postgres:17-alpine (multi-arch index digest, resolved 2026-11-23)
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     container_name: recepcionista-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: recepcionista
       POSTGRES_PASSWORD: recepcionista
-      POSTGRES_DB: recepcionista
+      POSTGRES_DB: recepcionista_dev
     ports:
       # Loopback only: a bare `5433:5432` publishes the database on every
       # interface the laptop has, including coffee-shop wifi.
@@ -23,7 +24,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U recepcionista -d recepcionista"]
+      test: ["CMD-SHELL", "pg_isready -U recepcionista -d recepcionista_dev"]
       interval: 5s
       timeout: 5s
       retries: 10

@@ -98,6 +98,9 @@ export interface ConfirmationArgs {
   language?: Lang;
 }
 
+/** The wording that tells a customer about follow-up texts. `followupNoticePresent` checks for it before consent is recorded. */
+export const FOLLOWUP_NOTICE_RE = /(may text you after your visit|podemos escribirle despu[eé]s de su visita)/i;
+
 export function confirmationSms({ business, booking, language = 'en' }: ConfirmationArgs): string {
   const name = firstName(booking.customer_name);
   const when = formatWhen(booking.scheduled_at, language, business.timezone);
@@ -109,17 +112,17 @@ export function confirmationSms({ business, booking, language = 'en' }: Confirma
   if (language === 'es') {
     const estimate = price ? ` Aprox. ${price}.` : '';
     return clip(
-      `${business.name}: Confirmado — ${service}, ${when}${where}.${estimate} Responda C para cancelar. ¡Gracias ${name}!`,
+      `${business.name}: Confirmado — ${service}, ${when}${where}.${estimate} Responda C para cancelar. Podemos escribirle después de su visita. ¡Gracias ${name}!`,
     );
   }
   const estimate = price ? ` Estimate ${price}.` : '';
   if (language === 'mixed') {
     return clip(
-      `${business.name}: You're all set — ${service}, ${when}${where}.${estimate} Text C to cancel. ¡Gracias ${name}!`,
+      `${business.name}: You're all set — ${service}, ${when}${where}.${estimate} Text C to cancel. We may text you after your visit. ¡Gracias ${name}!`,
     );
   }
   return clip(
-    `${business.name}: Confirmed — ${service}, ${when}${where}.${estimate} Reply C to cancel. Thanks ${name}!`,
+    `${business.name}: Confirmed — ${service}, ${when}${where}.${estimate} Reply C to cancel. We may text you after your visit. Thanks ${name}!`,
   );
 }
 

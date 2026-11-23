@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
-import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings } from '@/lib/db';
+import { authenticate, authErrorResponse, hasRole, requireBusinessAccess } from '@/lib/session';
+import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings, isOptedOut } from '@/lib/db';
 import type { Business, Hours, KnowledgeBase } from '@/lib/types';
 
 function publicBusiness(b: Business): Business {
@@ -40,13 +40,14 @@ export interface BusinessDetail {
 }
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<BusinessDetail>> | ReturnType<typeof fail>> {
-  const denied = await guardAdmin();
-  if (denied) return denied;
+  const auth = await authenticate(req);
+  if (!auth.ok) return auth.response;
   try {
     const { id } = await params;
+    requireBusinessAccess(auth.principal, id);
     const business = await getBusiness(id);
     if (!business) return fail('business not found', 404);
 
@@ -66,9 +67,12 @@ export async function GET(
     };
     void calls;
 
-    return ok<BusinessDetail>({ business: publicBusiness(business), knowledge_base: await getKnowledgeBase(id), stats });
+    // The stored system prompt is the owner's configuration (it can name the owner and internal rules): staff get the knowledge, not the prompt.
+    const kb = await getKnowledgeBase(id);
+    const knowledge_base = kb && !hasRole(auth.principal, 'owner') ? { ...kb, system_prompt: '', call_script: '' } : kb;
+    return ok<BusinessDetail>({ business: publicBusiness(business), knowledge_base, stats });
   } catch (err) {
-    return fail(err, 500);
+    return authErrorResponse(err) ?? fail(err, 500);
   }
 }
 
@@ -76,10 +80,11 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<Business>> | ReturnType<typeof fail>> {
-  const denied = await guardAdmin();
-  if (denied) return denied;
+  const auth = await authenticate(req, { role: 'owner' }); // staff cannot change business settings
+  if (!auth.ok) return auth.response;
   try {
     const { id } = await params;
+    requireBusinessAccess(auth.principal, id);
     const body = await readJson<Record<string, unknown>>(req);
     if (!body || typeof body !== 'object' || Array.isArray(body)) return fail('invalid body', 422);
     const patch: Record<string, unknown> = {};
@@ -90,10 +95,15 @@ export async function PATCH(
       if (clean === undefined) return fail(`invalid value for "${key}"`, 422);
       patch[key] = clean;
     }
+    // owner_alert texts to the owner phone are exempt from customer opt-outs: that number must never be one
+    // that opted out of this business's texts (otherwise re-pointing it would defeat a customer's STOP).
+    if (typeof patch.owner_phone === 'string' && (await isOptedOut(id, patch.owner_phone))) {
+      return fail('owner_phone is a number that opted out of texts from this business', 422);
+    }
     const updated = await updateBusiness(id, patch as Partial<Business>);
     if (!updated) return fail('business not found', 404);
     return ok<Business>(publicBusiness(updated));
   } catch (err) {
-    return fail(err, 400);
+    return authErrorResponse(err) ?? fail(err, 400);
   }
 }

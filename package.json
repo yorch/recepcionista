@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "bun test",
+    "test:integration": "bun test tests/integration",
     "typecheck": "tsc --noEmit",
     "db:up": "docker compose -f compose.dev.yaml up -d",
     "db:down": "docker compose -f compose.dev.yaml down",
@@ -15,7 +16,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "bun scripts/seed.ts",
-    "db:reset": "prisma migrate reset --force && bun scripts/seed.ts",
+    "db:reset": "bun scripts/db-reset.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {

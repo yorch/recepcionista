@@ -10,6 +10,9 @@ import path from 'node:path';
 import { getBusiness } from '../src/lib/db';
 import { fallbackScript, gather, wordCount, generateBriefing } from '../src/lib/briefing';
 import { classifyReply, findGratitudeCandidates, runGratitudeSweep } from '../src/lib/gratitude';
+import { assertSafeDatabase, forwardedArgs } from './_safe-db';
+
+assertSafeDatabase('ws5-test');
 
 const BIZ = 'biz_miami_cool_air';
 let pass = 0;
@@ -24,7 +27,7 @@ function check(label: string, cond: boolean, detail?: unknown) {
 }
 
 async function main() {
-  await run('bun', ['scripts/seed.ts'], { cwd: process.cwd() });
+  await run('bun', ['scripts/seed.ts', ...forwardedArgs()], { cwd: process.cwd() });
 
   const business = (await getBusiness(BIZ))!;
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -77,7 +80,7 @@ async function main() {
     failCount++;
   }
 
-  await run('bun', ['scripts/seed.ts'], { cwd: process.cwd() });
+  await run('bun', ['scripts/seed.ts', ...forwardedArgs()], { cwd: process.cwd() });
 
   console.log(`\n${failCount === 0 ? 'ALL PASS' : 'FAILURES'} (${pass}/${pass + failCount})`);
   if (failCount > 0) process.exit(1);

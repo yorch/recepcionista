@@ -14,6 +14,9 @@ import {
   DEMO_BUSINESS_ID, demoBookings, demoBriefing, demoBusiness, demoCalls,
   demoMessages, DEMO_FAQS, DEMO_PRICING_NOTES, DEMO_SERVICES, SYSTEM_PROMPT, CALL_SCRIPT,
 } from '../src/lib/demo/seed-data';
+import { assertSafeDatabase } from './_safe-db';
+
+assertSafeDatabase('seed');
 
 async function main() {
   await clearAll();

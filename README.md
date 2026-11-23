@@ -60,7 +60,21 @@ bun scripts/seed.ts            # demo business: Miami Cool Air Conditioning
 bun dev                        # http://localhost:3000  (set ADMIN_TOKEN, or ALLOW_INSECURE_DEV=true for local-only no-auth dev)
 ```
 
-The `DATABASE_URL` line in `.env.example` already matches `compose.dev.yaml`.
+The `DATABASE_URL` line in `.env.example` already matches `compose.dev.yaml` (database `recepcionista_dev`).
+
+**Renaming the dev database (one time, existing local volumes only).** `POSTGRES_DB` only applies when the
+volume is first created, so a volume from before the rename still has a database named `recepcionista`, which
+`db:seed` refuses. Either rename it in place:
+
+```bash
+docker compose -f compose.dev.yaml up -d
+docker exec recepcionista-db psql -U recepcionista -d postgres \
+  -c 'ALTER DATABASE recepcionista RENAME TO recepcionista_dev;'
+```
+
+(close any open connections first, e.g. stop `bun dev`), or throw the data away with
+`docker compose -f compose.dev.yaml down -v && bun run db:up` and reseed. Then update `DATABASE_URL` in your
+`.env` to end in `/recepcionista_dev?schema=public`.
 Add provider keys to `.env` to go live; leave them blank to keep the mocks.
 
 **Requirements:** Node/Bun, Docker. Nothing is installed system-wide — Postgres
@@ -123,9 +137,17 @@ response (`webhook_secret`). The app does not store or log it: copy it to
 `ELEVENLABS_WEBHOOK_SECRET` in `.env` and redeploy. If you lose it, delete the
 webhook in the ElevenLabs workspace and re-provision.
 
-**Login rate limit.** `X-Forwarded-For` is trusted only with `TRUSTED_PROXY=true`
-(set it only behind Traefik). Otherwise all clients share one bucket, plus a global
-per-route cap.
+**Login throttling.** `X-Forwarded-For` is trusted only with `TRUSTED_PROXY=true`
+(set it only behind Traefik; behind a CDN *and* Traefik also set `TRUSTED_PROXY_HOPS=2` so the key is
+the client, not the CDN). Login is limited per client IP (attempts) and per (account, client IP)
+with an exponential backoff on failures only: one address guessing at an account never locks that
+account out for anyone else, and anonymous junk traffic only exhausts its own address. Without a trusted
+proxy all clients share one key, so the thresholds are far looser.
+
+**Data retention is opt-in.** Set `RETENTION_JOB=on` only after reviewing each business's retention window;
+until then nothing is auto-deleted and boot logs what a purge would remove. Inspect with
+`POST /api/admin/retention {"dry_run":true}`. Twilio's inbound-SMS webhook must be `POST /api/sms/inbound`
+(see DEPLOY.md and `docs/compliance.md`).
 
 ## Security checklist before going live
 

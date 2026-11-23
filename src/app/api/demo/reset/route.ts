@@ -3,9 +3,8 @@
  * in-process against Postgres (no subprocess), so a reset is one transaction
  * batch rather than a child Bun process racing the dev server's connection.
  */
-import fs from 'node:fs';
 import { guardAdmin } from '@/lib/admin-guard';
-import path from 'node:path';
+import { removeAllBriefingAudio } from '@/lib/briefing/audio-files';
 import { ok, fail } from '@/lib/http';
 import { demoModeEnabled } from '@/lib/auth';
 import { clearAll, prisma } from '@/lib/db';
@@ -19,8 +18,8 @@ export const dynamic = 'force-dynamic';
 
 const log = logger('api/demo/reset');
 
-export async function POST() {
-  const denied = await guardAdmin();
+export async function POST(req: Request) {
+  const denied = await guardAdmin(req);
   if (denied) return denied;
   if (!demoModeEnabled()) return fail('not found', 404);
   const started = Date.now();
@@ -44,12 +43,7 @@ export async function POST() {
     await prisma.briefing.create({ data: demoBriefing() });
     await prisma.smsLog.createMany({ data: demoMessages() });
 
-    const audioDir = path.join(process.cwd(), 'public/audio');
-    if (fs.existsSync(audioDir)) {
-      for (const f of fs.readdirSync(audioDir)) {
-        if (/^briefing-/.test(f)) fs.unlinkSync(path.join(audioDir, f));
-      }
-    }
+    removeAllBriefingAudio();
     log.info('done', { ms: Date.now() - started });
     return ok({ reset: true });
   } catch (err) {

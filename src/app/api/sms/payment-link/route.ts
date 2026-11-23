@@ -1,5 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
+import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { getBooking, getBusiness } from '@/lib/db';
 import type { Lang } from '@/lib/messaging/templates';
 import { createAndSendPaymentLink } from '@/lib/messaging/actions';
@@ -15,23 +15,30 @@ export interface PaymentLinkSmsResult {
 }
 
 export async function POST(req: Request) {
-  const denied = await guardAdmin();
-  if (denied) return denied;
-  const limited = limitRequest(req, 'sms/payment-link', 10);
+  const auth = await authenticate(req, { role: 'owner' }); // money + SMS: owner+
+  if (!auth.ok) return auth.response;
+  const limited = await limitRequest(req, 'sms/payment-link', 10, 60_000, { globalLimit: 500 });
   if (limited) return limited;
   try {
     const body = await readJson<{
       business_id?: string;
       booking_id?: string;
-      to?: string;
       amount_cents?: number;
-      description?: string;
       language?: Lang;
+      to?: unknown;
+      description?: unknown;
     }>(req);
+    // The recipient and the wording are server-decided: the link goes only to the booking's own number and the
+    // text is built from the booking (no caller-supplied free text, no caller-supplied number).
+    if (body.to !== undefined || body.description !== undefined) {
+      return fail('to and description cannot be set: the link is texted to the booking\'s own number', 422);
+    }
 
-    const business = body.business_id ? await getBusiness(body.business_id) : null;
+    const scoped = scopeBusinessId(auth.principal, body.business_id);
+    if (scoped) requireBusinessAccess(auth.principal, scoped);
+    const business = scoped ? await getBusiness(scoped) : null;
     if (!business) return fail('business not found', 404);
-    if (!body.to) return fail('to is required', 422);
+    if (!body.booking_id || typeof body.booking_id !== 'string') return fail('booking_id is required', 422);
 
     const amountCents = Number(body.amount_cents);
     if (!Number.isFinite(amountCents) || amountCents < 100 || amountCents > 50000) {
@@ -40,14 +47,14 @@ export async function POST(req: Request) {
 
     // Always generate the link server-side; any caller-supplied `url` is ignored
     // (otherwise this route is an open "SMS arbitrary link" primitive).
-    const booking = body.booking_id ? await getBooking(body.booking_id) : null;
-    if (booking && booking.business_id !== business.id) return fail('booking not found', 404);
+    const booking = await getBooking(body.booking_id);
+    if (!booking || booking.business_id !== business.id) return fail('booking not found', 404);
+    if (booking.anonymized_at || !booking.customer_phone) return fail('booking has no customer phone on file', 422);
     const { sms, body: text, link } = await createAndSendPaymentLink({
       business,
       booking,
-      to: body.to,
+      to: booking.customer_phone,
       amountCents,
-      description: body.description,
       language: body.language,
     });
 
@@ -57,6 +64,6 @@ export async function POST(req: Request) {
       body: text,
     });
   } catch (err) {
-    return fail(err, 500);
+    return authErrorResponse(err) ?? fail(err, 500);
   }
 }

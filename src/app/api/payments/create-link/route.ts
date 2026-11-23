@@ -1,5 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
+import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { getBooking, getBusiness, updateBooking } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { createPaymentLink } from '@/lib/providers/stripe';
@@ -16,9 +16,9 @@ export interface CreateLinkResult extends PaymentLink {
 }
 
 export async function POST(req: Request) {
-  const denied = await guardAdmin();
-  if (denied) return denied;
-  const limited = limitRequest(req, 'payments/create-link', 20);
+  const auth = await authenticate(req, { role: 'owner' }); // money: owner+
+  if (!auth.ok) return auth.response;
+  const limited = await limitRequest(req, 'payments/create-link', 20);
   if (limited) return limited;
   try {
     const body = await readJson<{
@@ -28,7 +28,9 @@ export async function POST(req: Request) {
       booking_id?: string;
     }>(req);
 
-    const business = body.business_id ? await getBusiness(body.business_id) : null;
+    const scoped = scopeBusinessId(auth.principal, body.business_id);
+    if (scoped) requireBusinessAccess(auth.principal, scoped);
+    const business = scoped ? await getBusiness(scoped) : null;
     if (!business) return fail('business not found', 404);
 
     const amountCents = Number(body.amount_cents);
@@ -50,6 +52,6 @@ export async function POST(req: Request) {
 
     return ok<CreateLinkResult>({ ...link, booking_id: found?.id ?? null });
   } catch (err) {
-    return fail(err, 500);
+    return authErrorResponse(err) ?? fail(err, 500);
   }
 }

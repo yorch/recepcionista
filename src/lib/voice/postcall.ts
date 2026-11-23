@@ -13,8 +13,10 @@
 import { appUrl } from '@/lib/providers/stripe';
 import { logger } from '@/lib/log';
 import {
-  createCall, getBusiness, getBusinessByAgentId, getCall, getCallBySid, listCalls, nowIso, updateCall,
+  claimEvent, completeEvent, createCall, getBusiness, getBusinessByAgentId, getCall, getCallByConversationId, getCallBySid,
+  nowIso, prisma, releaseEvent, updateCall,
 } from '@/lib/db';
+import { disclosureSpokenIn } from '@/lib/kb/disclosure';
 import { generateTextSafe } from '@/lib/providers/llm';
 import type { Business, Call, Urgency } from '@/lib/types';
 
@@ -259,12 +261,18 @@ interface PostCallData {
   recording_url?: string;
   audio_url?: string;
   analysis?: { transcript_summary?: string; call_summary?: string };
+  call_sid?: string;
   metadata?: {
     call_duration_secs?: number;
     start_time_unix_secs?: number;
     main_language?: string;
+    /** Present for phone calls: the Twilio CallSid (same value the agent saw as system__call_sid). */
+    phone_call?: { call_sid?: string };
   };
-  conversation_initiation_client_data?: { dynamic_variables?: Record<string, unknown> };
+  conversation_initiation_client_data?: {
+    dynamic_variables?: Record<string, unknown>;
+    conversation_config_override?: { agent?: { first_message?: string } };
+  };
 }
 
 export interface PostCallEnvelope extends PostCallData {
@@ -277,15 +285,7 @@ export type PostCallOutcome =
   | { status: 200; body: { call: Call | null } | { ignored: string } }
   | { status: 400; error: string };
 
-/** Conversations already stored (process-local guard against webhook retries). */
-const processedConversations = new Map<string, number>();
-const PROCESSED_TTL_MS = 6 * 60 * 60 * 1000;
-
-function remember(conversationId: string): void {
-  const now = Date.now();
-  for (const [k, t] of processedConversations) if (now - t > PROCESSED_TTL_MS) processedConversations.delete(k);
-  processedConversations.set(conversationId, now);
-}
+const CLAIM_SOURCE = 'elevenlabs-postcall';
 
 async function businessForAgent(agentId: string): Promise<Business | null> {
   if (!agentId) return null;
@@ -306,12 +306,71 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
   }
   const body: PostCallData = envelope.data && typeof envelope.data === 'object' ? envelope.data : envelope;
 
+  // DB-backed idempotency: the first delivery claims the conversation; retries are ignored.
+  // A failed attempt releases the claim so the sender's retry is processed.
   const conversationId = String(body.conversation_id ?? '');
-  const agentId = String(body.agent_id ?? '');
-  if (conversationId && processedConversations.has(conversationId)) {
+  if (conversationId && !(await claimEvent(CLAIM_SOURCE, conversationId))) {
     log.info('duplicate', { conversation: conversationId });
     return { status: 200, body: { ignored: 'duplicate' } };
   }
+  try {
+    const outcome = await storePostCall(body, conversationId);
+    if (conversationId) {
+      if (outcome.status !== 200) await releaseEvent(CLAIM_SOURCE, conversationId);
+      else await completeEvent(CLAIM_SOURCE, conversationId);
+    }
+    return outcome;
+  } catch (err) {
+    if (conversationId) await releaseEvent(CLAIM_SOURCE, conversationId);
+    throw err;
+  }
+}
+
+/** Caller turns only: a conservative, privacy-safe signal that the caller objected to recording. */
+const DECLINE_PATTERNS: RegExp[] = [
+  /\b(?:don'?t|do not|dont|not|never)\b[^.?!]{0,40}\b(?:want|consent|agree|allow|permission)\b[^.?!]{0,40}\b(?:record|recorded|recording|transcrib\w*|talk to (?:an? )?(?:ai|robot|machine|bot))/i,
+  /\b(?:stop|no)\s+record(?:ing)?\b/i,
+  /\bdon'?t\s+record\b/i,
+  /\bno\s+(?:quiero|consiento|acepto|permito)\b[^.?!]{0,40}\b(?:grab\w*|record\w*|transcrib\w*|robot|m[aá]quina|inteligencia artificial)/i,
+  /\bno\s+(?:me\s+)?grab(?:e|es|en)\b/i,
+];
+
+/** Plain agent/user turns from the structured transcript (empty for the legacy string form). */
+function turnsOf(raw: unknown): { role: string; text: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((turn) => {
+    const t = (turn ?? {}) as Turn;
+    return { role: String(t.role ?? '').toLowerCase(), text: String(t.message ?? t.text ?? t.content ?? '') };
+  });
+}
+
+export function callerDeclinedRecording(raw: unknown): boolean {
+  return turnsOf(raw).some((t) => t.role === 'user' && DECLINE_PATTERNS.some((re) => re.test(t.text)));
+}
+
+/**
+ * Server-side evidence the disclosure was the agent's opening: the first_message ElevenLabs reports it used for
+ * this conversation, else the first AGENT turn. Caller turns are never consulted.
+ */
+function openingMessage(body: PostCallData): string {
+  const override = body.conversation_initiation_client_data?.conversation_config_override?.agent?.first_message;
+  if (typeof override === 'string' && override.trim()) return override;
+  return turnsOf(body.transcript).find((t) => t.role === 'agent' && t.text.trim())?.text ?? '';
+}
+
+/** Rows already in `declined` state that no key can tie to a conversation (a keyless handoff): any unmatched call may be theirs. */
+async function hasUnkeyedDeclinedCall(businessId: string, sinceMs: number): Promise<boolean> {
+  const n = await prisma.call.count({
+    where: {
+      businessId, consentStatus: 'declined', callSid: null, conversationId: null,
+      startedAt: { gte: new Date(sinceMs - 5 * 60 * 1000) },
+    },
+  });
+  return n > 0;
+}
+
+async function storePostCall(body: PostCallData, conversationId: string): Promise<PostCallOutcome> {
+  const agentId = String(body.agent_id ?? '');
 
   const transcript = transcriptText(body.transcript);
   const duration = body.duration_sec
@@ -330,44 +389,91 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
     business = id ? await getBusiness(id) : null;
   }
 
-  // Call: explicit (legacy) call_id, else a single unambiguous live call inside this conversation's time window.
-  let call: Call | null = null;
-  const explicit = body.call_id || '';
-  if (explicit) {
-    const c = await getCall(explicit);
-    if (c && (!business || c.business_id === business.id)) call = c;
+  // Correlate ONLY on exact keys: the explicit (legacy) call id, the conversation id (the key tool-created rows
+  // carry), and the telephony SID (the key /api/voice/incoming rows carry). There is no "single live call"
+  // guess: a wrong guess attaches one caller's transcript to another caller's consent state.
+  const dyn = body.conversation_initiation_client_data?.dynamic_variables ?? {};
+  const sidCandidates = [
+    body.metadata?.phone_call?.call_sid, dyn.system__call_sid, dyn.call_sid, body.call_sid,
+  ].filter((v): v is string => typeof v === 'string' && v.trim() !== '').map((v) => v.trim());
+  const owns = (c: Awaited<ReturnType<typeof getCall>>) => (c && (!business || c.business_id === business.id) ? c : null);
+
+  let call = body.call_id ? owns(await getCall(body.call_id)) : null;
+  if (!call && conversationId) call = owns(await getCallByConversationId(conversationId)) ?? owns(await getCallBySid(conversationId));
+  for (const sid of sidCandidates) {
+    if (call) break;
+    call = owns(await getCallBySid(sid));
   }
-  // A call row created by a tool during the call is keyed by the conversation id.
-  if (!call && conversationId) {
-    const c = await getCallBySid(conversationId);
-    if (c && (!business || c.business_id === business.id)) call = c;
-  }
+  const sid = sidCandidates[0];
+
+  let correlated = Boolean(call);
   if (!call && business) {
-    const startedMs = body.metadata?.start_time_unix_secs
-      ? body.metadata.start_time_unix_secs * 1000
-      : Date.now() - 30 * 60 * 1000;
-    const candidates = (await listCalls(business.id)).filter((c) =>
-      (c.status === 'in_progress' || (c.status === 'handed_off' && !c.transcript))
-      && !c.transcript
-      && new Date(c.started_at).getTime() >= startedMs - 2 * 60 * 1000);
-    if (candidates.length === 1) call = candidates[0];
-    else if (candidates.length > 1) log.warn('ambiguous_call', { business: business.id, candidates: candidates.length });
-  }
-  if (!call && business) {
-    call = await createCall({ business_id: business.id, call_sid: conversationId || null, status: 'in_progress', started_at: body.metadata?.start_time_unix_secs
-      ? new Date(body.metadata.start_time_unix_secs * 1000).toISOString() : undefined });
+    // No row carries this conversation's keys: it is a call no tool touched (so none can have recorded an
+    // objection under these keys). Record it, but when the call cannot be tied to a conversation at all, or an
+    // unkeyed declined call exists in the window, consent cannot be determined: metadata only.
+    const startedMs = body.metadata?.start_time_unix_secs ? body.metadata.start_time_unix_secs * 1000 : Date.now();
+    correlated = Boolean(conversationId || sid) && !(await hasUnkeyedDeclinedCall(business.id, startedMs));
+    try {
+      call = await createCall({
+        business_id: business.id,
+        conversation_id: conversationId || null,
+        call_sid: sid && !(await getCallBySid(sid)) ? sid : null,
+        status: 'in_progress',
+        started_at: body.metadata?.start_time_unix_secs ? new Date(body.metadata.start_time_unix_secs * 1000).toISOString() : undefined,
+      });
+    } catch (err) {
+      // A concurrent tool call created the row between our lookup and insert: use it.
+      call = conversationId ? await getCallByConversationId(conversationId) : null;
+      if (!call) throw err;
+      correlated = true;
+    }
   }
   if (!call) {
     log.warn('unattachable', { agent: agentId || null, conversation: conversationId || null });
     return { status: 400, error: 'cannot attach post-call data: unknown agent or call' };
   }
+  if (conversationId && !call.conversation_id && call.call_sid !== conversationId) {
+    await updateCall(call.id, { conversation_id: conversationId });
+  }
 
   const alreadyHandedOff = call.status === 'handed_off';
+  const biz = business ?? (await getBusiness(call.business_id));
+
+  // ---- consent: only a recorded objection or SERVER-SIDE evidence of disclosure counts ----------------------
+  let consent = call.consent_status ?? 'unknown';
+  if (consent !== 'declined' && callerDeclinedRecording(body.transcript)) {
+    consent = 'declined';
+    await updateCall(call.id, { consent_status: 'declined' });
+  }
+  if (consent === 'unknown' && correlated && biz && disclosureSpokenIn(openingMessage(body), biz)) {
+    consent = 'disclosed';
+    await updateCall(call.id, { recording_disclosed: true, consent_status: 'disclosed' });
+  }
+
+  // Declined, or consent not established for this call: keep minimal metadata only. No transcript, summary,
+  // recording URL or language is stored. For a declined call the provider-side conversation is also deleted.
+  if (consent !== 'disclosed') {
+    const declined = consent === 'declined';
+    const updated = await updateCall(call.id, {
+      ended_at: call.ended_at ?? nowIso(),
+      duration_sec:
+        duration != null && Number.isFinite(Number(duration)) ? Math.round(Number(duration)) : call.duration_sec,
+      transcript: null,
+      summary: declined
+        ? 'Caller declined recording; no transcript kept. Call back requested.'
+        : 'Transcript not stored: recording consent could not be confirmed for this call.',
+      recording_url: null,
+      status: alreadyHandedOff ? 'handed_off' : 'completed',
+    });
+    if (declined && conversationId) await deleteProviderConversation(conversationId);
+    log.info(declined ? 'stored.declined' : 'stored.consent_unconfirmed', { call: call.id, business: call.business_id, correlated });
+    return { status: 200, body: { call: updated } };
+  }
+
   const fallback = summaryFallback(transcript, urgency, language);
   const provided = body.analysis?.transcript_summary || body.analysis?.call_summary || '';
   let summary = provided.trim();
   if (!summary) {
-    const biz = business ?? (await getBusiness(call.business_id));
     summary = (await generateTextSafe(
       [
         {
@@ -402,9 +508,23 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
     urgency: call.urgency === 'emergency' ? 'emergency' : urgency,
     status: alreadyHandedOff ? 'handed_off' : 'completed',
   });
-  if (conversationId) remember(conversationId);
   log.info('stored', { call: call.id, business: call.business_id, conversation: conversationId || null });
   return { status: 200, body: { call: updated } };
+}
+
+/** Best-effort removal of the provider-side conversation (audio + transcript) for a declined call. */
+async function deleteProviderConversation(conversationId: string): Promise<void> {
+  if (!hasKey()) return;
+  try {
+    const res = await fetch(`${API}/convai/conversations/${encodeURIComponent(conversationId)}`, {
+      method: 'DELETE',
+      headers: { 'xi-api-key': apiKey() },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) log.warn('provider_delete.failed', { conversation: conversationId, status: res.status });
+  } catch (err) {
+    log.warn('provider_delete.error', { conversation: conversationId, err });
+  }
 }
 
 /** Parse a webhook body (JSON, or form-encoded for legacy senders). */

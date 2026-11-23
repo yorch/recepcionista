@@ -1,5 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
+import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
 import { generateBriefing } from '@/lib/briefing';
 
@@ -13,17 +13,19 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  const denied = await guardAdmin();
-  if (denied) return denied;
-  const limited = limitRequest(req, 'briefings/generate', 5);
+  const auth = await authenticate(req, { role: 'owner' }); // spends LLM/TTS budget: owner+
+  if (!auth.ok) return auth.response;
+  const limited = await limitRequest(req, 'briefings/generate', 5);
   if (limited) return limited;
   try {
     const body = await readJson<{ business_id?: string; date?: string }>(req);
-    if (!body.business_id) return fail('business_id is required', 422);
+    const businessId = scopeBusinessId(auth.principal, body.business_id);
+    if (!businessId) return fail('business_id is required', 422);
+    requireBusinessAccess(auth.principal, businessId);
     if (body.date !== undefined && !isValidDate(body.date)) return fail('date must be YYYY-MM-DD', 422);
-    const briefing = await generateBriefing(body.business_id, body.date);
+    const briefing = await generateBriefing(businessId, body.date);
     return ok(briefing);
   } catch (err) {
-    return fail(err, 500);
+    return authErrorResponse(err) ?? fail(err, 500);
   }
 }

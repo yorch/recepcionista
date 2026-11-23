@@ -1,0 +1,26 @@
+# Keeps the base images, GitHub Actions and npm dependencies current.
+# Weekly, to avoid a constant stream of PRs. Security advisories are raised by
+# Dependabot immediately regardless of this schedule.
+version: 2
+updates:
+  # Base images in the Dockerfile. Dependabot's docker ecosystem only reads
+  # Dockerfiles and compose files with the standard names, so the image refs in
+  # compose.*.yaml are not covered and need a manual bump.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # package.json and bun.lock. Dependabot reads the lockfile for resolution.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10

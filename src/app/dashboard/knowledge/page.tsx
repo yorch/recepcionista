@@ -1,4 +1,6 @@
-import { getKnowledgeBase, listBusinesses } from '@/lib/db';
+import { getKnowledgeBase } from '@/lib/db';
+import { hasRole } from '@/lib/session';
+import { getDashboardContext } from '@/lib/dashboard-context';
 import { Card, CardHead } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { KnowledgeEditor } from '@/components/dashboard/knowledge-editor';
@@ -8,8 +10,8 @@ import { dollarsToCents } from '@/lib/money';
 export const dynamic = 'force-dynamic';
 
 export default async function KnowledgePage() {
-  const biz = (await listBusinesses())[0];
-  if (!biz) return null;
+  const ctx = await getDashboardContext();
+  const biz = ctx.business;
   const kb = await getKnowledgeBase(biz.id);
 
   return (
@@ -60,7 +62,9 @@ export default async function KnowledgePage() {
           </div>
 
           <div className="flex flex-col gap-4 lg:col-span-2">
-            <KnowledgeEditor businessId={biz.id} initialPrompt={kb.system_prompt} initialScript={kb.call_script} />
+            {hasRole(ctx.principal, 'owner') ? (
+              <KnowledgeEditor businessId={biz.id} initialPrompt={kb.system_prompt} initialScript={kb.call_script} />
+            ) : null}
             <Card className="p-5">
               <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Serving</p>
               <p className="mt-1.5 text-[12.5px] leading-relaxed text-[#cbd7e6]">{biz.service_area.join(' · ')}</p>

@@ -4,7 +4,8 @@
  * authenticated HTTP hop to ourselves and guarantees ONE side effect per call.
  */
 import { findRecentSms, getBooking, getBusiness, updateBooking } from '@/lib/db';
-import { confirmationSms, gratitudeSms, paymentLinkSms, type Lang } from '@/lib/messaging/templates';
+import { confirmationSms, FOLLOWUP_NOTICE_RE, gratitudeSms, paymentLinkSms, type Lang } from '@/lib/messaging/templates';
+import { phoneKey } from '@/lib/format';
 import { sendAndLog } from '@/lib/messaging';
 import { createPaymentLink } from '@/lib/providers/stripe';
 import type { Business, Booking, SmsLog } from '@/lib/types';
@@ -26,10 +27,20 @@ async function load(bookingId: string): Promise<{ booking: Booking; business: Bu
   return { booking, business };
 }
 
+/** Where a recorded follow-up consent came from. */
+export const FOLLOWUP_CONSENT_SOURCE = 'confirmation_sms_notice';
+
+/**
+ * Text the booking confirmation. By default it goes to the booking's own number (dashboard / API use);
+ * voice tools pass `to` = the VERIFIED caller number. The follow-up-text consent is recorded on the booking
+ * ONLY when the confirmation, carrying the follow-up notice, was actually delivered to the booking's own
+ * number: that is the sole thing that later lets a gratitude text go to that number.
+ */
 export async function sendConfirmation(
-  bookingId: string, language: Lang = 'en',
+  bookingId: string, language: Lang = 'en', opts: { to?: string } = {},
 ): Promise<{ sms: SmsLog; body: string; deduped: boolean }> {
   const { booking, business } = await load(bookingId);
+  const to = opts.to ?? booking.customer_phone;
   // Keyed on the booking, so two jobs for the same customer still each get a text.
   const recent = await findRecentSms(business.id, {
     kind: 'confirmation', bookingId: booking.id, withinMs: DEDUPE_WINDOW_MS,
@@ -38,9 +49,14 @@ export async function sendConfirmation(
 
   const body = confirmationSms({ business, booking, language });
   const { sms } = await sendAndLog({
-    business_id: business.id, to: booking.customer_phone, body, kind: 'confirmation', booking_id: booking.id,
+    business_id: business.id, to, body, kind: 'confirmation', booking_id: booking.id,
   });
-  return { sms, body, deduped: false };
+  const delivered = sms.status === 'sent' || sms.status === 'mock';
+  if (delivered && FOLLOWUP_NOTICE_RE.test(body) && phoneKey(to) && phoneKey(to) === phoneKey(booking.customer_phone)
+    && !booking.followup_consent_at) {
+    await updateBooking(booking.id, { followup_consent_at: new Date().toISOString(), followup_consent_source: FOLLOWUP_CONSENT_SOURCE });
+  }
+  return { sms, body: sms.body, deduped: false };
 }
 
 export async function sendGratitude(
@@ -48,10 +64,12 @@ export async function sendGratitude(
 ): Promise<{ sms: SmsLog; body: string }> {
   const { booking, business } = await load(bookingId);
   const body = gratitudeSms({ business, booking, language });
+  // The consent basis is DERIVED from what was recorded, never asserted: no recorded follow-up consent => blocked_no_consent.
   const { sms } = await sendAndLog({
     business_id: business.id, to: booking.customer_phone, body, kind: 'gratitude', booking_id: booking.id,
+    consent_basis: booking.followup_consent_at ? 'booking_followup' : null,
   });
-  return { sms, body };
+  return { sms, body: sms.body };
 }
 
 export interface PaymentLinkInput {
@@ -84,5 +102,5 @@ export async function createAndSendPaymentLink(input: PaymentLinkInput) {
   const { sms } = await sendAndLog({
     business_id: business.id, to: input.to, body: text, kind: 'payment_link', booking_id: booking?.id ?? null,
   });
-  return { sms, body: text, link };
+  return { sms, body: sms.body, link };
 }

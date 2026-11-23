@@ -1,45 +1,123 @@
 /**
- * Tiny in-memory sliding-window limiter. Per-process only: with multiple
- * instances each keeps its own window (use Redis/DB for a global limit).
+ * Postgres-backed rate limiter shared by every instance (table `rate_limit_buckets`).
+ *
+ * Algorithm: fixed windows with a sliding-window estimate. One atomic
+ * `INSERT .. ON CONFLICT DO UPDATE SET count = count + 1 RETURNING` bumps the current window;
+ * the previous window's count is weighted by how much of it still overlaps the sliding window:
+ *   estimate = current + previous * (1 - elapsed/window).
+ * Rejected attempts still count, so a client that keeps hammering stays blocked.
+ * Time comes from the database clock, so instance clock skew is irrelevant.
+ *
+ * Handler-level only (Node runtime, uses Prisma). src/proxy.ts must NOT import this file.
+ *
+ * Database failure policy: `failClosed` routes (login) answer 503; all others log and allow.
+ * There is deliberately no in-memory fallback: a per-process limiter would silently weaken the
+ * limit exactly when the shared store is unhealthy.
  */
+import { prisma } from '@/lib/db/client';
 import { clientKey } from '@/lib/auth';
+import { logger } from '@/lib/log';
 
-const hits = new Map<string, number[]>();
-const MAX_KEYS = 10_000;
-let lastSweep = 0;
+const log = logger('ratelimit');
 
-export function rateLimit(key: string, limit: number, windowMs: number): { allowed: boolean; retryAfterS: number } {
-  const now = Date.now();
-  if (now - lastSweep > 60_000) {
-    lastSweep = now;
-    for (const [k, arr] of hits) {
-      if (!arr.length || now - arr[arr.length - 1] > 3_600_000) hits.delete(k);
-    }
-  }
-  if (!hits.has(key) && hits.size >= MAX_KEYS) {
-    // Memory cap: drop the oldest key rather than grow without bound.
-    const oldest = hits.keys().next().value;
-    if (oldest !== undefined) hits.delete(oldest);
-  }
-  const arr = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
-  if (arr.length >= limit) {
-    hits.set(key, arr);
-    return { allowed: false, retryAfterS: Math.max(1, Math.ceil((windowMs - (now - arr[0])) / 1000)) };
-  }
-  arr.push(now);
-  hits.set(key, arr);
-  return { allowed: true, retryAfterS: 0 };
+const CLEANUP_EVERY_MS = 60_000;
+const CLEANUP_HORIZON_MS = 3 * 60 * 60 * 1000;
+export const MAX_WINDOW_MS = 60 * 60 * 1000;
+let lastCleanup = 0;
+
+export interface RateLimitResult {
+  allowed: boolean;
+  retryAfterS: number;
+  /** True when the store was unreachable (the decision came from the failure policy). */
+  error?: boolean;
 }
 
-/** Returns a 429 Response when over the limit, otherwise null. */
-export function limitRequest(req: Request, route: string, limit: number, windowMs = 60_000): Response | null {
-  // Per-client key (only meaningful behind TRUSTED_PROXY) plus a global
-  // per-route cap, so spoofed/rotating client keys cannot brute-force a route.
-  const r = rateLimit(`${route}:${clientKey(req)}`, limit, windowMs);
-  const g = r.allowed ? rateLimit(`${route}:*global*`, limit * 5, windowMs) : r;
+export interface RateLimitOptions {
+  /** Deny (instead of allow) when the database is unreachable. Use for credential/sensitive routes. */
+  failClosed?: boolean;
+  /**
+   * Optional route-wide circuit breaker shared by ALL clients/tenants (max requests per window). Off by default:
+   * a shared bucket is a lockout switch for everyone, so only paid-provider routes should opt in, with a ceiling
+   * far above legitimate traffic. Never use it for credential checks (see login-throttle).
+   */
+  globalLimit?: number;
+}
+
+/** Opportunistic cleanup of long-expired buckets (at most once a minute per process). Never throws. */
+async function cleanupExpired(): Promise<void> {
+  const now = Date.now();
+  if (now - lastCleanup < CLEANUP_EVERY_MS) return;
+  lastCleanup = now;
+  try {
+    await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: new Date(now - CLEANUP_HORIZON_MS) } } });
+  } catch (err) {
+    log.warn('cleanup_failed', { err });
+  }
+}
+
+export async function rateLimit(
+  key: string,
+  limit: number,
+  windowMs: number,
+  opts: RateLimitOptions = {},
+): Promise<RateLimitResult> {
+  const w = Math.min(MAX_WINDOW_MS, Math.max(1000, Math.floor(windowMs)));
+  try {
+    const rows = await prisma.$queryRaw<{ cur: number; prev: number; elapsed_ms: number }[]>`
+      WITH t AS (
+        SELECT clock_timestamp() AS now,
+               to_timestamp(floor(extract(epoch FROM clock_timestamp()) * 1000 / ${w}::float8) * ${w}::float8 / 1000.0) AS ws
+      ), cur AS (
+        INSERT INTO "rate_limit_buckets" ("key", "window_start", "count")
+        SELECT ${key}, t.ws, 1 FROM t
+        ON CONFLICT ("key", "window_start") DO UPDATE SET "count" = "rate_limit_buckets"."count" + 1
+        RETURNING "count", "window_start"
+      )
+      SELECT cur."count"::int AS cur,
+             COALESCE((SELECT p."count" FROM "rate_limit_buckets" p
+                        WHERE p."key" = ${key}
+                          AND p."window_start" >= cur."window_start" - (${w}::float8 * 1.5 * interval '1 millisecond')
+                          AND p."window_start" <  cur."window_start" - (${w}::float8 * 0.5 * interval '1 millisecond')), 0)::int AS prev,
+             (extract(epoch FROM (t.now - cur."window_start")) * 1000)::float8 AS elapsed_ms
+        FROM cur, t`;
+    const { cur, prev, elapsed_ms } = rows[0];
+    const frac = Math.min(1, Math.max(0, elapsed_ms / w));
+    const estimate = cur + prev * (1 - frac);
+    void cleanupExpired();
+    if (estimate <= limit) return { allowed: true, retryAfterS: 0 };
+    // Conservative: wait for the next window boundary (the estimate only decays then).
+    return { allowed: false, retryAfterS: Math.max(1, Math.ceil((w - elapsed_ms) / 1000)) };
+  } catch (err) {
+    log.error('store_unavailable', { key, fail_closed: Boolean(opts.failClosed), err });
+    return opts.failClosed
+      ? { allowed: false, retryAfterS: 5, error: true }
+      : { allowed: true, retryAfterS: 0, error: true };
+  }
+}
+
+/** Returns a 429 (or 503 when a failClosed route cannot reach the store) Response, otherwise null. Always `await` it. */
+export async function limitRequest(
+  req: Request,
+  route: string,
+  limit: number,
+  windowMs = 60_000,
+  opts: RateLimitOptions = {},
+): Promise<Response | null> {
+  // Per-client key (only meaningful behind TRUSTED_PROXY). A route-wide bucket exists only on request.
+  const r = await rateLimit(`${route}:${clientKey(req)}`, limit, windowMs, opts);
+  const g = r.allowed && opts.globalLimit
+    ? await rateLimit(`${route}:*global*`, opts.globalLimit, windowMs, opts)
+    : r;
   if (r.allowed && g.allowed) return null;
+  const blocked = r.allowed ? g : r;
+  if (blocked.error) {
+    return Response.json(
+      { ok: false, error: 'service temporarily unavailable' },
+      { status: 503, headers: { 'retry-after': String(blocked.retryAfterS) } },
+    );
+  }
   return Response.json(
     { ok: false, error: 'rate limit exceeded' },
-    { status: 429, headers: { 'retry-after': String(r.allowed ? g.retryAfterS : r.retryAfterS) } },
+    { status: 429, headers: { 'retry-after': String(blocked.retryAfterS) } },
   );
 }

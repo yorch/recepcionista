@@ -19,7 +19,7 @@ export function classifyReply(rating: number | string): 'review' | 'owner' {
 
 export async function findGratitudeCandidates(businessId?: string): Promise<Booking[]> {
   const now = Date.now();
-  const gratitudeSms = (await listSms(businessId)).filter((s) => s.kind === 'gratitude');
+  const gratitudeSms = (await listSms(businessId)).filter((s) => s.kind === 'gratitude' && s.status !== 'blocked_quiet_hours');
   const alreadyTexted = new Set(
     gratitudeSms.map((s) => s.to_phone.replace(/\D/g, '').slice(-10)),
   );
@@ -47,7 +47,8 @@ export async function runGratitudeSweep(businessId?: string): Promise<SweepResul
 
   for (const booking of candidates) {
     try {
-      await sendGratitude(booking.id, 'en');
+      const { sms } = await sendGratitude(booking.id, 'en');
+      if (sms.status.startsWith('blocked')) { skipped++; continue; } // opt-out / quiet hours: retried next sweep only for quiet hours
       ids.push(booking.id);
     } catch (err) {
       log.warn('sweep.error', { booking: booking.id, err });

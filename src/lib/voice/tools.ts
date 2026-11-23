@@ -7,8 +7,8 @@
  * America/New_York, which is where the demo business lives.
  */
 import {
-  getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall,
-  updateCall, createBooking as dbCreateBooking, logSms, BookingRejectedError, listBookings,
+  getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall, upsertCallForConversation,
+  updateCall, createBooking as dbCreateBooking, BookingRejectedError,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
 import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
@@ -17,7 +17,12 @@ import {
 } from '@/lib/time';
 import { dollarsToCents, formatCents } from '@/lib/money';
 import { logger } from '@/lib/log';
-import { sendSms, normalizePhone } from '@/lib/providers/twilio';
+import { normalizePhone } from '@/lib/providers/twilio';
+import { E164 } from '@/lib/messaging/recipient';
+import { sendAndLog } from '@/lib/messaging';
+import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
+
+export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
 import type { Business, Call, SmsLog, TimeSlot } from '@/lib/types';
 
@@ -155,21 +160,67 @@ function missingBusiness(lang: ToolLanguage): ToolResult {
   };
 }
 
-/** The telephony SID or ElevenLabs conversation id that identifies this live call. */
-function callKey(args: { call_sid?: string; conversation_id?: string }): string {
-  return str(args.call_sid) || str(args.conversation_id);
-}
-
-/** Match by id, then SID / conversation id, then caller phone. Never guesses "the latest call". */
+/** Match by id, then SID / conversation id only. Never guesses by caller phone or "the latest call". */
 async function activeCall(
   businessId: string,
-  args: { call_id?: string; call_sid?: string; conversation_id?: string; caller_phone?: string },
+  args: { call_id?: string; call_sid?: string; conversation_id?: string },
 ): Promise<Call | null> {
   return findActiveCall(businessId, {
     callId: str(args.call_id) || undefined,
-    callSid: callKey(args) || undefined,
-    callerPhone: str(args.caller_phone) || undefined,
+    callSid: str(args.call_sid) || undefined,
+    conversationId: str(args.conversation_id) || undefined,
   });
+}
+
+/** Strict E.164 (after US-style normalisation) or null. Country policy is enforced later, when texting. */
+function cleanPhone(raw: unknown): string | null {
+  const v = str(raw);
+  if (!v) return null;
+  const n = normalizePhone(v);
+  return E164.test(n) ? n : null;
+}
+
+/**
+ * The platform's caller id (`system__caller_id`). It is trusted ONLY because the request reached us
+ * through the tool-secret-authenticated route and the schema binds the field to a platform dynamic
+ * variable the model cannot write. Anything else the model relays (customer_phone, `to`) is not.
+ */
+function platformCaller(args: { caller_phone?: string }): string | null {
+  return cleanPhone(args.caller_phone);
+}
+
+/** The number we may text for this call: the call row's caller, else the platform caller id. Never an LLM-relayed number. */
+function verifiedCaller(call: Call | null, args: { caller_phone?: string }): string | null {
+  return cleanPhone(call?.caller_phone) ?? platformCaller(args);
+}
+
+/**
+ * The live call row for this tool call. A phone call that reached the agent natively has no row yet, so
+ * the FIRST tool call creates one (keyed by call SID / conversation id, storing the platform caller id):
+ * from then on matching, the per-call cap and consent all hang off one row. Null only when the platform
+ * supplied no key at all.
+ */
+async function resolveCall(
+  business: Business,
+  args: { call_id?: string; call_sid?: string; conversation_id?: string; caller_phone?: string },
+): Promise<Call | null> {
+  const sid = str(args.call_sid);
+  const conv = str(args.conversation_id);
+  const found = await activeCall(business.id, args);
+  if (!found) {
+    return upsertCallForConversation(business.id, { callSid: sid, conversationId: conv, callerPhone: platformCaller(args) });
+  }
+  const patch: Partial<Call> = {};
+  if (sid && !found.call_sid && found.conversation_id !== sid) patch.call_sid = sid;
+  if (conv && !found.conversation_id && found.call_sid !== conv) patch.conversation_id = conv;
+  const callerId = platformCaller(args);
+  if (callerId && !found.caller_phone) patch.caller_phone = callerId;
+  return Object.keys(patch).length > 0 ? ((await updateCall(found.id, patch)) ?? found) : found;
+}
+
+/** Policy knob: text the model-relayed booking phone when NO verified caller number exists. Default: never. */
+function allowUnverifiedBookingSms(): boolean {
+  return process.env.ALLOW_UNVERIFIED_BOOKING_SMS === 'true';
 }
 
 export interface OwnerAlert {
@@ -185,15 +236,8 @@ async function alertOwner(business: Business, body: string): Promise<OwnerAlert>
     return { notified: false, reason: 'no_owner_phone', sms: null };
   }
   try {
-    const to = normalizePhone(business.owner_phone);
-    const sent = await sendSms(to, body);
-    const sms = await logSms({
-      business_id: business.id,
-      to_phone: to,
-      body,
-      kind: 'owner_alert',
-      provider_id: sent.id || null,
-      status: sent.status,
+    const { sms, result: sent } = await sendAndLog({
+      business_id: business.id, to: business.owner_phone, body, kind: 'owner_alert',
     });
     // 'mock' means no Twilio configured: only counts as delivered in explicit demo mode.
     const delivered = sent.status === 'sent' || (sent.status === 'mock' && process.env.DEMO_MODE === 'true');
@@ -208,9 +252,7 @@ async function alertOwner(business: Business, body: string): Promise<OwnerAlert>
 /** What to tell a caller when we could NOT reach the owner. */
 function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolean): { message: string; data: Record<string, unknown> } {
   const phone = business.owner_phone ? normalizePhone(business.owner_phone) : null;
-  const call911 = say(lang,
-    'If there is a gas smell, carbon monoxide, smoke or fire, hang up and call 911 right now.',
-    'Si huele a gas, hay monóxido de carbono, humo o fuego, cuelgue y llame al 911 ahora mismo.');
+  const call911 = say(lang, CALL_911_EN, CALL_911_ES);
   const owner = phone
     ? say(lang, `You can also call the owner directly at ${phone}.`, `También puede llamar al dueño directamente al ${phone}.`)
     : say(lang, 'I will keep trying to reach the owner and they will call you back.', 'Voy a seguir intentando comunicarme con el dueño y él le devolverá la llamada.');
@@ -332,8 +374,13 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     if (!business) return missingBusiness(lang);
     const tz = tzOf(business);
 
+    // The call row first: it carries the verified caller number and the per-call cap key.
+    const call = await resolveCall(business, args);
+    const verified = verifiedCaller(call, args);
+
     const name = str(args.customer_name);
-    const phone = str(args.customer_phone);
+    // The relayed callback number is only the booking CONTACT; it is stored, never texted (see below).
+    const phone = str(args.customer_phone) || verified || '';
     const service = str(args.service);
     const scheduledAt = str(args.scheduled_at);
 
@@ -363,24 +410,16 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     // Length of the job: same rule check_availability used for the offered slot.
     const duration = await resolveDuration(business.id, service, args.duration_minutes);
 
-    // Call matching and the confirmation number use the PLATFORM caller id, never
-    // a number the model relays. The model's number is only a fallback (when there is
-    // no trusted caller id), and sendSms still enforces E.164 + allowed countries.
-    const call = await activeCall(business.id, args);
-    const trustedPhone = call?.caller_phone || str(args.caller_phone);
-    const bookingPhone = trustedPhone || phone;
-
-    if (call) {
-      const made = (await listBookings(business.id)).filter((b) => b.call_id === call.id).length;
-      if (made >= MAX_BOOKINGS_PER_CALL) {
-        return {
-          ok: false,
-          message: say(lang,
-            'I have already booked two appointments on this call — let me have the owner help with anything else.',
-            'Ya agendé dos citas en esta llamada — voy a pedirle al dueño que le ayude con lo demás.'),
-          data: { reason: 'booking_cap' },
-        };
-      }
+    // No platform key (call SID / conversation id) and no call row: nothing to hang the per-call cap on, so refuse.
+    if (!call) {
+      log.warn('create_booking.no_call_key', { business: business.id });
+      return {
+        ok: false,
+        message: say(lang,
+          'I could not put that in the calendar from here — let me have the owner confirm it with you.',
+          'No pude agendarlo desde aquí — voy a pedirle al dueño que se lo confirme.'),
+        data: { reason: 'no_call_key' },
+      };
     }
 
     const priceDollars = args.price_estimate == null || str(args.price_estimate) === ''
@@ -396,35 +435,58 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     try {
       booking = await dbCreateBooking({
         business_id: business.id,
-        call_id: call?.id ?? null,
+        call_id: call.id,
         customer_name: name,
-        customer_phone: normalizePhone(bookingPhone),
+        customer_phone: normalizePhone(phone),
         service: catalogName,
         scheduled_at: iso,
         duration_minutes: duration,
         address: str(args.address) || null,
         price_estimate: priceEstimate,
-      });
+      }, { max_per_call: MAX_BOOKINGS_PER_CALL });
     } catch (err) {
+      if (err instanceof BookingRejectedError && err.reason === 'no_call') {
+        return { ok: false, message: say(lang,
+          'I could not put that in the calendar from here — let me have the owner confirm it with you.',
+          'No pude agendarlo desde aquí — voy a pedirle al dueño que se lo confirme.'), data: { reason: 'no_call_key' } };
+      }
+      if (err instanceof BookingRejectedError && err.reason === 'call_cap') {
+        return {
+          ok: false,
+          message: say(lang,
+            'I have already booked two appointments on this call — let me have the owner help with anything else.',
+            'Ya agendé dos citas en esta llamada — voy a pedirle al dueño que le ayude con lo demás.'),
+          data: { reason: 'booking_cap' },
+        };
+      }
       if (err instanceof BookingRejectedError) return await rejectionResult(err.reason, business, lang, duration, iso);
       throw err;
     }
 
-    if (call && !call.caller_name) await updateCall(call.id, { caller_name: name });
+    if (!call.caller_name) await updateCall(call.id, { caller_name: name });
 
-    // The confirmation has to come back in the language they called in.
+    // The confirmation goes to the VERIFIED caller number (call row / platform caller id), in the language
+    // they called in. The relayed contact number is texted only when it is that same number, or when
+    // operator policy explicitly allows texting an unverified one (ALLOW_UNVERIFIED_BOOKING_SMS).
+    const textTo = verified ?? (allowUnverifiedBookingSms() ? booking.customer_phone : null);
     let sms: unknown | null = null;
-    try {
-      sms = await sendConfirmation(booking.id, lang);
-    } catch (err) {
-      log.warn('confirmation.failed', { booking: booking.id, err });
+    if (textTo) {
+      try {
+        sms = await sendConfirmation(booking.id, lang, { to: textTo });
+      } catch (err) {
+        log.warn('confirmation.failed', { booking: booking.id, err });
+      }
     }
 
     return {
       ok: true,
-      message: say(lang,
-        `You're all set for ${whenPhrase(iso, lang, tz)}. I'm sending your confirmation text now.`,
-        `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}. Le mando el texto de confirmación ahora.`),
+      message: textTo
+        ? say(lang,
+          `You're all set for ${whenPhrase(iso, lang, tz)}. I'm sending your confirmation text now.`,
+          `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}. Le mando el texto de confirmación ahora.`)
+        : say(lang,
+          `You're all set for ${whenPhrase(iso, lang, tz)}.`,
+          `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}.`),
       data: { booking, sms_sent: sms != null },
     };
   } catch (err) {
@@ -484,8 +546,8 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
 
     // The recipient is NEVER taken from the model: only this call's caller or the owner.
     // (`to` merely selects between those two.)
-    const call = await activeCall(business.id, { call_id: args.call_id, call_sid: args.call_sid, conversation_id: args.conversation_id });
-    const callerPhone = call?.caller_phone || str(args.caller_phone);
+    const call = await resolveCall(business, args);
+    const callerPhone = verifiedCaller(call, args) ?? '';
     const key = (p: string) => p.replace(/\D/g, '').slice(-10);
     const wanted = str(args.to);
     const to = wanted && business.owner_phone
@@ -501,16 +563,20 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
       };
     }
 
-    const e164 = normalizePhone(to);
-    const sent = await sendSms(e164, body);
-    const log = await logSms({
-      business_id: business.id,
-      to_phone: e164,
-      body,
-      kind: 'other',
-      provider_id: sent.id || null,
-      status: sent.status,
+    const toOwner = Boolean(business.owner_phone) && key(to) === key(business.owner_phone as string);
+    const { sms: log, result: sent, blocked } = await sendAndLog({
+      business_id: business.id, to, body, kind: toOwner ? 'owner_alert' : 'other',
     });
+
+    if (blocked === 'blocked_opt_out') {
+      return {
+        ok: false,
+        message: say(lang,
+          'This number has opted out of texts, so I cannot send one — let me read you the details instead.',
+          'Este número pidió no recibir textos, así que no puedo mandarlo — mejor se los leo por teléfono.'),
+        data: { sms: log, blocked },
+      };
+    }
 
     if (sent.status === 'failed') {
       return {
@@ -574,10 +640,11 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const bookingId = str(args.booking_id);
     const found = bookingId ? await getBooking(bookingId) : null;
     const booking = found && found.business_id === business.id ? found : null;
-    const call = await activeCall(business.id, args);
-    // Recipient is never taken from the model: the booking's number or this call's caller id.
+    const call = await resolveCall(business, args);
+    // Recipient is never taken from the model: this call's verified caller number, or (only when there is none)
+    // the number on a booking that was made on THIS call.
     const to = normalizePhone(
-      booking?.customer_phone || call?.caller_phone || str(args.caller_phone) || '',
+      verifiedCaller(call, args) || (booking && call && booking.call_id === call.id ? booking.customer_phone : '') || '',
     );
     if (!to) {
       return {
@@ -642,13 +709,12 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     const callerPhone = str(args.customer_phone);
     const address = str(args.address);
 
-    let call = await activeCall(business.id, { ...args, caller_phone: callerPhone });
+    let call = await resolveCall(business, args);
     if (!call) {
-      // No live call to attach to (e.g. a tool call from the demo simulator).
+      // No platform key at all (e.g. a tool call from the demo simulator): still record the emergency.
       call = await createCall({
         business_id: business.id,
-        call_sid: callKey(args) || null,
-        caller_phone: callerPhone ? normalizePhone(callerPhone) : null,
+        caller_phone: platformCaller(args),
         caller_name: callerName || null,
         status: 'in_progress',
       });
@@ -658,7 +724,7 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       urgency: 'emergency',
       flagged_reason: reason,
       ...(callerName && !call.caller_name ? { caller_name: callerName } : {}),
-      ...(callerPhone && !call.caller_phone ? { caller_phone: normalizePhone(callerPhone) } : {}),
+      // call.caller_phone is only ever set from the platform caller id; the relayed number appears in the alert text only.
     });
 
     const alertBody = [
@@ -675,8 +741,8 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       return {
         ok: true,
         message: say(lang,
-          "I've flagged this as an emergency and the owner has been notified.",
-          'Lo marqué como emergencia y el dueño ya fue notificado.'),
+          `${CALL_911_EN} I've flagged this as an emergency and the owner has been notified.`,
+          `${CALL_911_ES} Lo marqué como emergencia y el dueño ya fue notificado.`),
         data: { call: updated, owner_sms: alert.sms, owner_notified: true },
       };
     }
@@ -813,6 +879,8 @@ export async function getPricing(args: GetPricingArgs): Promise<ToolResult> {
 
 export interface HandoffArgs extends BaseArgs {
   reason?: string;
+  /** True when the caller objected to the AI / recording: mark consent declined and take a message. */
+  consent_declined?: boolean | string;
 }
 
 export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
@@ -822,14 +890,15 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     if (!business) return missingBusiness(lang);
 
     const reason = str(args.reason) || 'Caller asked for a human';
-    let call = await activeCall(business.id, args);
-    if (!call) {
-      call = await createCall({ business_id: business.id, call_sid: callKey(args) || null, status: 'in_progress' });
-    }
+    let call = await resolveCall(business, args);
+    if (!call) call = await createCall({ business_id: business.id, caller_phone: platformCaller(args), status: 'in_progress' });
 
+    const declined = args.consent_declined === true || String(args.consent_declined).toLowerCase() === 'true';
     const updated = await updateCall(call.id, {
       status: 'handed_off',
       flagged_reason: reason,
+      // Post-call processing stores no transcript/summary for declined calls.
+      ...(declined ? { consent_status: 'declined' as const } : {}),
     });
 
     const alertBody = [
@@ -845,7 +914,10 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
       // This does NOT transfer the line: the owner was texted and will call back.
       return {
         ok: true,
-        message: say(lang,
+        message: declined ? say(lang,
+          "Understood — we won't keep a transcript of this call. I've sent the owner a message and they will call you back.",
+          'Entendido — no guardaremos una transcripción de esta llamada. Le envié un mensaje al dueño y le devolverá la llamada.')
+        : say(lang,
           "I've sent the owner an urgent message and they will call you back shortly. Is this the best number to reach you?",
           'Le envié un mensaje urgente al dueño y le devolverá la llamada pronto. ¿Es este el mejor número para localizarle?'),
         data: { call: updated, owner_sms: alert.sms, owner_notified: true, transferred: false },

@@ -7,6 +7,9 @@ import { createBusiness, getBusiness, getKnowledgeBase, upsertKnowledgeBase, upd
 import { extractFromUrl, templateResult, normalizeUrl } from '../src/lib/extraction';
 import { generateKnowledgeBase, buildSystemPrompt, buildCallScript, TOOL_NAMES } from '../src/lib/kb';
 import { provisionNumber } from '../src/lib/providers/twilio';
+import { assertSafeDatabase } from './_safe-db';
+
+assertSafeDatabase('ws1-test');
 
 let pass = 0;
 let failCount = 0;

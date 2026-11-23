@@ -38,6 +38,10 @@ export interface Business {
   agent_id?: string | null;
   /** IANA zone, e.g. America/New_York. Defaults to America/New_York when absent. */
   timezone?: string;
+  /** PII retention window in days (default 365). */
+  retention_days?: number;
+  /** Custom recording disclosure spoken at call start; null = default text. */
+  recording_disclosure_text?: string | null;
   created_at: string;
 }
 
@@ -57,6 +61,8 @@ export interface Call {
   business_id: ID;
   /** Telephony call SID (Twilio/ElevenLabs) — the reliable way to match a live call. */
   call_sid?: string | null;
+  /** ElevenLabs conversation id (system__conversation_id) — the key the post-call webhook correlates on. */
+  conversation_id?: string | null;
   caller_phone?: string | null;
   caller_name?: string | null;
   started_at: string;
@@ -69,7 +75,12 @@ export interface Call {
   status: CallStatus;
   recording_url?: string | null;
   flagged_reason?: string | null;
+  /** True once the recording disclosure was spoken to the caller. */
+  recording_disclosed?: boolean;
+  consent_status?: ConsentStatus;
 }
+
+export type ConsentStatus = 'unknown' | 'disclosed' | 'declined';
 
 export interface Booking {
   id: ID;
@@ -89,6 +100,11 @@ export interface Booking {
   deposit_paid: boolean;
   status: BookingStatus;
   created_at: string;
+  /** Set when customer PII was removed (retention/erasure); financial fields stay. */
+  anonymized_at?: string | null;
+  /** When the customer was told about follow-up (gratitude) texts; null = no recorded consent. */
+  followup_consent_at?: string | null;
+  followup_consent_source?: string | null;
 }
 
 export interface BriefingStats {
@@ -114,12 +130,42 @@ export interface SmsLog {
   business_id: ID;
   to_phone: string;
   body: string;
-  kind: 'confirmation' | 'payment_link' | 'gratitude' | 'review_request' | 'owner_alert' | 'other';
+  kind: 'confirmation' | 'payment_link' | 'gratitude' | 'review_request' | 'owner_alert' | 'manual' | 'other';
   /** Which booking this message belongs to — makes confirmation dedupe exact. */
   booking_id?: ID | null;
   provider_id?: string | null;
-  status: 'queued' | 'sent' | 'failed' | 'mock';
+  status: 'queued' | 'sent' | 'failed' | 'mock' | 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent';
+  /** Why this text was allowed, e.g. 'transactional_booking' | 'caller_initiated' | 'express_opt_in' | 'owner_alert'. */
+  consent_basis?: string | null;
   created_at: string;
+}
+
+export interface SmsOptOut {
+  id: ID;
+  business_id: ID;
+  /** Last 10 digits of the phone number. */
+  phone_key: string;
+  opted_out_at: string;
+  source: string;
+}
+
+export type UserRole = 'owner' | 'staff' | 'admin';
+
+export interface User {
+  id: ID;
+  email: string;
+  business_id: ID | null;
+  role: UserRole;
+  created_at: string;
+  disabled_at: string | null;
+}
+
+export interface UserSession {
+  id: ID;
+  user_id: ID;
+  expires_at: string;
+  created_at: string;
+  last_used_at: string;
 }
 
 export interface ExtractionResult {

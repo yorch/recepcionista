@@ -109,7 +109,9 @@ fi
 if [[ "$SEED" == "1" ]]; then
   echo "Seeding the demo dataset (this truncates every table)…"
   # --rm so the one-shot container does not linger in `compose ps`.
-  "${COMPOSE[@]}" --profile seed run --rm seed
+  # deploy.sh already required --i-know-this-wipes-data, so pass the seed script's own override: the production
+  # database name ("recepcionista") does not look disposable to its guard.
+  "${COMPOSE[@]}" --profile seed run --rm seed bun scripts/seed.ts --force-i-know
 fi
 
 # ---- report --------------------------------------------------------------

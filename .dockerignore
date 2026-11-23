@@ -15,6 +15,9 @@ next-env.d.ts
 # .env.local would be baked into an image layer.
 .env
 .env.*
+# Same rules at any depth, so a nested .env.local cannot leak either.
+**/.env
+**/.env.*
 !.env.example
 
 # ── VCS / editor / OS ───────────────────────────────────────────
@@ -24,9 +27,28 @@ next-env.d.ts
 .idea
 .DS_Store
 
-# ── Local infra state ───────────────────────────────────────────
+# ── Local infra state and backups ───────────────────────────────
 data/
 .postgres-data/
+# deploy.sh writes gzipped pg_dumps here: contain every customer row.
+backups/
+**/backups/
+# Root-level only: prisma/migrations/*.sql is needed by the tools target.
+/*.sql
+*.sql.gz
+*.dump
+
+# ── Keys and certificates ───────────────────────────────────────
+**/*.pem
+**/*.key
+**/*.p12
+
+# ── Runtime-generated media and agent tooling ───────────────────
+# Briefing audio is produced at runtime into the audio volume, never baked in.
+public/audio/
+.claude/
+.github/
+*.log
 
 # ── Docs and screenshots (not needed to build or run) ───────────
 *.md

@@ -15,11 +15,15 @@ import {
 import { phoneKey } from '@/lib/format';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
-  Service, FAQ, BriefingStats,
+  Service, FAQ, BriefingStats, ConsentStatus,
 } from '@/lib/types';
 
 export { prisma };
 export { newId, nowIso } from './ids';
+export * from './events';
+export * from './locks';
+export * from './compliance';
+export * from './users';
 
 /** Every write logs what changed; reads stay quiet (they are the hot path). */
 const log = logger('db');
@@ -53,6 +57,8 @@ function toBusiness(row: any): Business {
     status: row.status,
     agent_id: row.agentId ?? null,
     timezone: tzOf(row.timezone),
+    retention_days: row.retentionDays ?? 365,
+    recording_disclosure_text: row.recordingDisclosureText ?? null,
     created_at: isoReq(row.createdAt),
   };
 }
@@ -75,6 +81,7 @@ function toCall(row: any): Call {
     id: row.id,
     business_id: row.businessId,
     call_sid: row.callSid ?? null,
+    conversation_id: row.conversationId ?? null,
     caller_phone: row.callerPhone ?? null,
     caller_name: row.callerName ?? null,
     started_at: isoReq(row.startedAt),
@@ -87,6 +94,8 @@ function toCall(row: any): Call {
     status: row.status,
     recording_url: row.recordingUrl ?? null,
     flagged_reason: row.flaggedReason ?? null,
+    recording_disclosed: row.recordingDisclosed ?? false,
+    consent_status: (row.consentStatus ?? 'unknown') as ConsentStatus,
   };
 }
 
@@ -106,6 +115,9 @@ function toBooking(row: any): Booking {
     deposit_paid: row.depositPaid,
     status: row.status,
     created_at: isoReq(row.createdAt),
+    anonymized_at: iso(row.anonymizedAt),
+    followup_consent_at: iso(row.followupConsentAt),
+    followup_consent_source: row.followupConsentSource ?? null,
   };
 }
 
@@ -131,6 +143,7 @@ function toSms(row: any): SmsLog {
     booking_id: row.bookingId ?? null,
     provider_id: row.providerId ?? null,
     status: row.status,
+    consent_basis: row.consentBasis ?? null,
     created_at: isoReq(row.createdAt),
   };
 }
@@ -139,6 +152,7 @@ function toSms(row: any): SmsLog {
 function callPatch(patch: Partial<Call>) {
   const out: Record<string, unknown> = {};
   if (patch.call_sid !== undefined) out.callSid = patch.call_sid;
+  if (patch.conversation_id !== undefined) out.conversationId = patch.conversation_id;
   if (patch.caller_phone !== undefined) out.callerPhone = patch.caller_phone;
   if (patch.caller_name !== undefined) out.callerName = patch.caller_name;
   if (patch.started_at !== undefined) out.startedAt = new Date(patch.started_at);
@@ -151,6 +165,8 @@ function callPatch(patch: Partial<Call>) {
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.recording_url !== undefined) out.recordingUrl = patch.recording_url;
   if (patch.flagged_reason !== undefined) out.flaggedReason = patch.flagged_reason;
+  if (patch.recording_disclosed !== undefined) out.recordingDisclosed = patch.recording_disclosed;
+  if (patch.consent_status !== undefined) out.consentStatus = patch.consent_status;
   return out;
 }
 
@@ -167,6 +183,8 @@ function bookingPatch(patch: Partial<Booking>) {
   if (patch.deposit_amount !== undefined) out.depositAmount = patch.deposit_amount;
   if (patch.deposit_paid !== undefined) out.depositPaid = patch.deposit_paid;
   if (patch.status !== undefined) out.status = patch.status;
+  if (patch.followup_consent_at !== undefined) out.followupConsentAt = patch.followup_consent_at ? new Date(patch.followup_consent_at) : null;
+  if (patch.followup_consent_source !== undefined) out.followupConsentSource = patch.followup_consent_source;
   return out;
 }
 
@@ -182,6 +200,9 @@ function businessPatch(patch: Partial<Business>) {
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.agent_id !== undefined) out.agentId = patch.agent_id;
+  if (patch.retention_days !== undefined && Number.isInteger(patch.retention_days)
+      && patch.retention_days >= 1 && patch.retention_days <= 3650) out.retentionDays = patch.retention_days;
+  if (patch.recording_disclosure_text !== undefined) out.recordingDisclosureText = patch.recording_disclosure_text;
   return out;
 }
 
@@ -242,6 +263,8 @@ export async function createBusiness(
       hours: (input.hours ?? DEFAULT_HOURS) as object,
       serviceArea: input.service_area ?? [],
       status: input.status ?? 'onboarding',
+      ...(input.retention_days ? { retentionDays: input.retention_days } : {}),
+      recordingDisclosureText: input.recording_disclosure_text ?? null,
     },
   });
   log.info('business.created', { id: row.id, name: row.name, url: row.url });
@@ -302,6 +325,7 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
     data: {
       businessId: input.business_id,
       callSid: input.call_sid ?? null,
+      conversationId: input.conversation_id ?? null,
       callerPhone: input.caller_phone ?? null,
       callerName: input.caller_name ?? null,
       startedAt: input.started_at ? new Date(input.started_at) : new Date(),
@@ -314,6 +338,8 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
       status: input.status ?? 'in_progress',
       recordingUrl: input.recording_url ?? null,
       flaggedReason: input.flagged_reason ?? null,
+      recordingDisclosed: input.recording_disclosed ?? false,
+      consentStatus: input.consent_status ?? 'unknown',
     },
   });
   log.info('call.created', {
@@ -329,9 +355,19 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
 export async function updateCall(id: ID, patch: Partial<Call>): Promise<Call | null> {
   const data = callPatch(patch);
   if (Object.keys(data).length === 0) return getCall(id);
+  // A recorded objection to recording/AI is permanent: nothing may move consent OUT of 'declined'
+  // (not a late "disclosed" from post-call evidence, not a retry). Enforced here, in the write itself.
+  const consent: Record<string, unknown> = {};
+  if ('consentStatus' in data) { consent.consentStatus = data.consentStatus; delete data.consentStatus; }
+  if ('recordingDisclosed' in data) { consent.recordingDisclosed = data.recordingDisclosed; delete data.recordingDisclosed; }
   try {
+    if (Object.keys(consent).length > 0) {
+      const where = consent.consentStatus === 'declined' ? { id } : { id, consentStatus: { not: 'declined' } };
+      await prisma.call.updateMany({ where, data: consent });
+    }
+    if (Object.keys(data).length === 0) return getCall(id);
     const row = await prisma.call.update({ where: { id }, data });
-    log.debug('call.updated', { id, fields: Object.keys(data) });
+    log.debug('call.updated', { id, fields: [...Object.keys(data), ...Object.keys(consent)] });
     return toCall(row);
   } catch (err) {
     log.warn('call.update_failed', { id, fields: Object.keys(data), err });
@@ -350,40 +386,77 @@ export async function getCallBySid(callSid: string): Promise<Call | null> {
   return row ? toCall(row) : null;
 }
 
+export async function getCallByConversationId(conversationId: string): Promise<Call | null> {
+  if (!conversationId) return null;
+  const row = await prisma.call.findUnique({ where: { conversationId } });
+  return row ? toCall(row) : null;
+}
+
 /**
- * Resolve the live call a tool belongs to. Strict order: explicit id, then SID, then —
- * only when unambiguous — the single in-progress call (optionally for this caller phone)
- * in the last few hours. Two concurrent callers => null rather than the wrong call.
+ * Resolve the live call a tool belongs to. Strict: explicit id, then the telephony SID and/or
+ * ElevenLabs conversation id (matched against BOTH key columns: older rows stored the conversation
+ * id in `call_sid`). There is deliberately NO caller-phone or "only call in progress" fallback: a
+ * fuzzy match can attach one caller's data to another caller's call. No trusted identifier => null.
  */
 export async function findActiveCall(
   businessId: ID,
-  hint: { callId?: string; callSid?: string; callerPhone?: string } = {},
-  windowMs = 3 * 60 * 60 * 1000,
+  hint: { callId?: string; callSid?: string; conversationId?: string } = {},
 ): Promise<Call | null> {
   if (hint.callId) {
     const row = await prisma.call.findFirst({ where: { id: hint.callId, businessId } });
     if (row) return toCall(row);
   }
-  if (hint.callSid) {
-    const row = await prisma.call.findFirst({ where: { callSid: hint.callSid, businessId } });
+  const keys = [hint.callSid, hint.conversationId].filter((k): k is string => Boolean(k));
+  if (keys.length > 0) {
+    const row = await prisma.call.findFirst({
+      where: { businessId, OR: [{ callSid: { in: keys } }, { conversationId: { in: keys } }] },
+      orderBy: { startedAt: 'asc' },
+    });
     if (row) return toCall(row);
   }
-  const key = phoneKey(hint.callerPhone);
-  const rows = await prisma.call.findMany({
-    where: {
-      businessId,
-      status: 'in_progress',
-      startedAt: { gte: new Date(Date.now() - windowMs) },
-    },
-    orderBy: { startedAt: 'desc' },
-    take: 5,
-  });
-  if (key) {
-    const mine = rows.filter((r) => phoneKey(r.callerPhone) === key);
-    if (mine.length >= 1) return toCall(mine[0]);
-  }
-  // No "only call in progress" guess: without a trusted id/SID or a phone match, there is no call.
   return null;
+}
+
+/**
+ * The call row for a conversation, created on the FIRST tool call when none exists yet (a phone call
+ * that reached the agent natively has no /api/voice/incoming row). Keyed by call SID / conversation id,
+ * race-safe (unique indexes), and backfills keys / the platform caller id onto an existing row.
+ * Returns null when there is no key at all.
+ */
+export async function upsertCallForConversation(
+  businessId: ID,
+  keys: { callSid?: string; conversationId?: string; callerPhone?: string | null },
+): Promise<Call | null> {
+  const callSid = keys.callSid || undefined;
+  const conversationId = keys.conversationId || undefined;
+  if (!callSid && !conversationId) return null;
+  const find = () => findActiveCall(businessId, { callSid, conversationId });
+  let call = await find();
+  if (!call) {
+    try {
+      call = await createCall({
+        business_id: businessId,
+        call_sid: callSid ?? null,
+        conversation_id: conversationId ?? null,
+        caller_phone: keys.callerPhone ?? null,
+        status: 'in_progress',
+      });
+    } catch (err) {
+      call = await find(); // lost the race to a concurrent tool call: use the winner's row
+      if (!call) throw err;
+    }
+    return call;
+  }
+  const patch: Partial<Call> = {};
+  if (callSid && !call.call_sid) patch.call_sid = callSid;
+  if (conversationId && !call.conversation_id && call.call_sid !== conversationId) patch.conversation_id = conversationId;
+  if (keys.callerPhone && !call.caller_phone) patch.caller_phone = keys.callerPhone;
+  if (Object.keys(patch).length === 0) return call;
+  try {
+    return (await updateCall(call.id, patch)) ?? call;
+  } catch {
+    return call;
+  }
 }
 
 export async function listCalls(businessId?: ID, date?: string, tz?: string): Promise<Call[]> {
@@ -398,7 +471,7 @@ export async function listCalls(businessId?: ID, date?: string, tz?: string): Pr
 }
 
 // ---------- bookings ----------
-export type BookingRejection = SlotRejection | 'slot_taken' | 'invalid_time' | 'business_not_found';
+export type BookingRejection = SlotRejection | 'call_cap' | 'no_call' | 'slot_taken' | 'invalid_time' | 'business_not_found';
 
 /** Thrown by createBooking when the slot cannot be booked; `reason` is machine-readable. */
 export class BookingRejectedError extends Error {
@@ -423,14 +496,15 @@ function isOverlapViolation(err: unknown): boolean {
  * inside opening hours and finishing by close), duration-overlap check against
  * non-cancelled bookings, insert. A Postgres exclusion constraint is the backstop.
  * Throws BookingRejectedError for any business-rule rejection. Pass `{ enforce: false }`
- * to skip only the past/hours validation (overlap is always enforced).
+ * to skip only the past/hours validation (overlap is always enforced). `max_per_call` caps
+ * non-cancelled bookings per call_id inside the transaction ('call_cap').
  */
 export async function createBooking(
   input: Partial<Booking> & {
     business_id: ID; customer_name: string; customer_phone: string;
     service: string; scheduled_at: string;
   },
-  opts: { enforce?: boolean } = {},
+  opts: { enforce?: boolean; max_per_call?: number } = {},
 ): Promise<Booking> {
   const enforce = opts.enforce ?? true;
   const start = new Date(input.scheduled_at);
@@ -445,6 +519,14 @@ export async function createBooking(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.business_id}))`;
       const biz = await tx.business.findUnique({ where: { id: input.business_id } });
       if (!biz) throw new BookingRejectedError('business_not_found');
+
+      // Per-call cap: counted under the same advisory lock as the insert, so concurrent calls cannot overshoot.
+      if (opts.max_per_call != null) {
+        // A capped booking must belong to a call row (its key is what the cap counts on): no key, no booking.
+        if (!input.call_id) throw new BookingRejectedError('no_call');
+        const made = await tx.booking.count({ where: { callId: input.call_id, status: { not: 'cancelled' } } });
+        if (made >= opts.max_per_call) throw new BookingRejectedError('call_cap');
+      }
 
       if (enforce) {
         const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now());
@@ -483,6 +565,8 @@ export async function createBooking(
           depositAmount: input.deposit_amount ?? null,
           depositPaid: input.deposit_paid ?? false,
           status,
+          followupConsentAt: input.followup_consent_at ? new Date(input.followup_consent_at) : null,
+          followupConsentSource: input.followup_consent_source ?? null,
         },
       });
     });
@@ -646,6 +730,7 @@ export async function logSms(entry: Omit<SmsLog, 'id' | 'created_at'>): Promise<
       bookingId: entry.booking_id ?? null,
       providerId: entry.provider_id ?? null,
       status: entry.status,
+      consentBasis: entry.consent_basis ?? null,
     },
   });
   log.debug('sms.logged', {

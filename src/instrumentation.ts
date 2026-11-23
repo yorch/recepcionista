@@ -64,6 +64,12 @@ export async function register() {
     db: dbTarget(),
     ...providerSummary(),
   });
+
+  // Daily PII retention purge (not during `next build`, not in tests).
+  if (process.env.NEXT_PHASE !== 'phase-production-build' && process.env.DATABASE_URL) {
+    const { startRetentionJob } = await import('@/lib/retention-job');
+    startRetentionJob();
+  }
 }
 
 /**

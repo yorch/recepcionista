@@ -1,4 +1,5 @@
-import { listBusinesses, getKnowledgeBase, listCalls } from '@/lib/db';
+import { getKnowledgeBase, listCalls } from '@/lib/db';
+import { getDashboardContext, requireRolePage } from '@/lib/dashboard-context';
 import { Card, CardHead } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { DemoTools } from '@/components/dashboard/demo-tools';
@@ -6,8 +7,9 @@ import { DemoTools } from '@/components/dashboard/demo-tools';
 export const dynamic = 'force-dynamic';
 
 export default async function DemoPage() {
-  const biz = (await listBusinesses())[0];
-  if (!biz) return null;
+  const ctx = await getDashboardContext();
+  requireRolePage(ctx, 'admin'); // demo console wipes data and sends SMS: admin only
+  const biz = ctx.business;
   const kb = await getKnowledgeBase(biz.id);
   const calls = await listCalls(biz.id);
 
