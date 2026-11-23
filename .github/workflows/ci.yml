@@ -14,7 +14,21 @@ jobs:
   check:
     name: install, typecheck, lint, test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: recepcionista_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d recepcionista_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # Dummy value, the same approach the Dockerfile uses. Prisma generate
       # and the checks below never contact the database.
@@ -46,6 +60,13 @@ jobs:
           ADMIN_TOKEN: ci-build-token
           NEXT_TELEMETRY_DISABLED: "1"
 
-      - name: Test
-        # tests/ is being added. Until it exists, this step passes with no tests.
-        run: bun test --pass-with-no-tests
+      - name: Apply migrations to the test database
+        run: bunx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/recepcionista_test?schema=public
+
+      - name: Test (unit + integration)
+        # TEST_DATABASE_URL enables tests/integration and tests/db; the database name must contain "test".
+        run: bun test
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/recepcionista_test?schema=public

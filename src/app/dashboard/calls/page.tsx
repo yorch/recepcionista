@@ -1,4 +1,5 @@
-import { listBusinesses, listCalls } from '@/lib/db';
+import { listCalls } from '@/lib/db';
+import { getDashboardContext } from '@/lib/dashboard-context';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { relative, seconds } from '@/lib/format';
@@ -9,8 +10,8 @@ const LANG_LABEL: Record<string, string> = { en: 'English', es: 'Español', mixe
 const LANG_TONE: Record<string, string> = { en: 'neutral', es: 'brand', mixed: 'sky' };
 
 export default async function CallsPage() {
-  const biz = (await listBusinesses())[0];
-  if (!biz) return null;
+  const ctx = await getDashboardContext();
+  const biz = ctx.business;
   const calls = await listCalls(biz.id);
 
   return (

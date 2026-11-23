@@ -58,7 +58,8 @@ export async function POST(req: Request) {
         to: booking.customer_phone,
         body,
         kind: 'review_request',
-      booking_id: booking?.id ?? null,
+        booking_id: booking.id,
+        consent_basis: 'customer_reply',
       });
       return ok<GratitudeReplyResult>({ routed: 'review', sms, body });
     }

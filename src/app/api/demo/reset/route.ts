@@ -19,8 +19,8 @@ export const dynamic = 'force-dynamic';
 
 const log = logger('api/demo/reset');
 
-export async function POST() {
-  const denied = await guardAdmin();
+export async function POST(req: Request) {
+  const denied = await guardAdmin(req);
   if (denied) return denied;
   if (!demoModeEnabled()) return fail('not found', 404);
   const started = Date.now();

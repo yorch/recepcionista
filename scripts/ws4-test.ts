@@ -24,6 +24,9 @@ import { POST as createLinkRoute } from '../src/app/api/payments/create-link/rou
 import { POST as webhookRoute } from '../src/app/api/payments/webhook/route';
 import PayPage from '../src/app/pay/[id]/page';
 import { PaymentReceived } from '../src/app/pay/[id]/received';
+import { assertSafeDatabase, forwardedArgs } from './_safe-db';
+
+assertSafeDatabase('ws4-test');
 
 const BIZ = 'biz_miami_cool_air';
 const CONFIRM_BOOKING = 'bk_demo_3';
@@ -48,7 +51,7 @@ const bodyLen = (d?: { body?: string; sms?: { body?: string } }) =>
   (d?.body ?? d?.sms?.body)?.length ?? Infinity;
 
 function seed() {
-  execFileSync('bun', ['scripts/seed.ts'], { cwd: process.cwd(), stdio: 'ignore' });
+  execFileSync('bun', ['scripts/seed.ts', ...forwardedArgs()], { cwd: process.cwd(), stdio: 'ignore' });
 }
 
 function call(handler: (req: Request) => Promise<Response>, body: unknown) {

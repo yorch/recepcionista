@@ -15,11 +15,15 @@ import {
 import { phoneKey } from '@/lib/format';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
-  Service, FAQ, BriefingStats,
+  Service, FAQ, BriefingStats, ConsentStatus,
 } from '@/lib/types';
 
 export { prisma };
 export { newId, nowIso } from './ids';
+export * from './events';
+export * from './locks';
+export * from './compliance';
+export * from './users';
 
 /** Every write logs what changed; reads stay quiet (they are the hot path). */
 const log = logger('db');
@@ -53,6 +57,8 @@ function toBusiness(row: any): Business {
     status: row.status,
     agent_id: row.agentId ?? null,
     timezone: tzOf(row.timezone),
+    retention_days: row.retentionDays ?? 365,
+    recording_disclosure_text: row.recordingDisclosureText ?? null,
     created_at: isoReq(row.createdAt),
   };
 }
@@ -87,6 +93,8 @@ function toCall(row: any): Call {
     status: row.status,
     recording_url: row.recordingUrl ?? null,
     flagged_reason: row.flaggedReason ?? null,
+    recording_disclosed: row.recordingDisclosed ?? false,
+    consent_status: (row.consentStatus ?? 'unknown') as ConsentStatus,
   };
 }
 
@@ -106,6 +114,7 @@ function toBooking(row: any): Booking {
     deposit_paid: row.depositPaid,
     status: row.status,
     created_at: isoReq(row.createdAt),
+    anonymized_at: iso(row.anonymizedAt),
   };
 }
 
@@ -131,6 +140,7 @@ function toSms(row: any): SmsLog {
     booking_id: row.bookingId ?? null,
     provider_id: row.providerId ?? null,
     status: row.status,
+    consent_basis: row.consentBasis ?? null,
     created_at: isoReq(row.createdAt),
   };
 }
@@ -151,6 +161,8 @@ function callPatch(patch: Partial<Call>) {
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.recording_url !== undefined) out.recordingUrl = patch.recording_url;
   if (patch.flagged_reason !== undefined) out.flaggedReason = patch.flagged_reason;
+  if (patch.recording_disclosed !== undefined) out.recordingDisclosed = patch.recording_disclosed;
+  if (patch.consent_status !== undefined) out.consentStatus = patch.consent_status;
   return out;
 }
 
@@ -182,6 +194,9 @@ function businessPatch(patch: Partial<Business>) {
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.agent_id !== undefined) out.agentId = patch.agent_id;
+  if (patch.retention_days !== undefined && Number.isInteger(patch.retention_days)
+      && patch.retention_days >= 1 && patch.retention_days <= 3650) out.retentionDays = patch.retention_days;
+  if (patch.recording_disclosure_text !== undefined) out.recordingDisclosureText = patch.recording_disclosure_text;
   return out;
 }
 
@@ -242,6 +257,8 @@ export async function createBusiness(
       hours: (input.hours ?? DEFAULT_HOURS) as object,
       serviceArea: input.service_area ?? [],
       status: input.status ?? 'onboarding',
+      ...(input.retention_days ? { retentionDays: input.retention_days } : {}),
+      recordingDisclosureText: input.recording_disclosure_text ?? null,
     },
   });
   log.info('business.created', { id: row.id, name: row.name, url: row.url });
@@ -314,6 +331,8 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
       status: input.status ?? 'in_progress',
       recordingUrl: input.recording_url ?? null,
       flaggedReason: input.flagged_reason ?? null,
+      recordingDisclosed: input.recording_disclosed ?? false,
+      consentStatus: input.consent_status ?? 'unknown',
     },
   });
   log.info('call.created', {
@@ -351,14 +370,14 @@ export async function getCallBySid(callSid: string): Promise<Call | null> {
 }
 
 /**
- * Resolve the live call a tool belongs to. Strict order: explicit id, then SID, then —
- * only when unambiguous — the single in-progress call (optionally for this caller phone)
- * in the last few hours. Two concurrent callers => null rather than the wrong call.
+ * Resolve the live call a tool belongs to. Strict: explicit id, then telephony SID /
+ * conversation id (both stored in `call_sid`). There is deliberately NO caller-phone or
+ * "only call in progress" fallback: a fuzzy match can attach one caller's data to another
+ * caller's call. No trusted identifier => null.
  */
 export async function findActiveCall(
   businessId: ID,
-  hint: { callId?: string; callSid?: string; callerPhone?: string } = {},
-  windowMs = 3 * 60 * 60 * 1000,
+  hint: { callId?: string; callSid?: string } = {},
 ): Promise<Call | null> {
   if (hint.callId) {
     const row = await prisma.call.findFirst({ where: { id: hint.callId, businessId } });
@@ -368,21 +387,6 @@ export async function findActiveCall(
     const row = await prisma.call.findFirst({ where: { callSid: hint.callSid, businessId } });
     if (row) return toCall(row);
   }
-  const key = phoneKey(hint.callerPhone);
-  const rows = await prisma.call.findMany({
-    where: {
-      businessId,
-      status: 'in_progress',
-      startedAt: { gte: new Date(Date.now() - windowMs) },
-    },
-    orderBy: { startedAt: 'desc' },
-    take: 5,
-  });
-  if (key) {
-    const mine = rows.filter((r) => phoneKey(r.callerPhone) === key);
-    if (mine.length >= 1) return toCall(mine[0]);
-  }
-  // No "only call in progress" guess: without a trusted id/SID or a phone match, there is no call.
   return null;
 }
 
@@ -646,6 +650,7 @@ export async function logSms(entry: Omit<SmsLog, 'id' | 'created_at'>): Promise<
       bookingId: entry.booking_id ?? null,
       providerId: entry.provider_id ?? null,
       status: entry.status,
+      consentBasis: entry.consent_basis ?? null,
     },
   });
   log.debug('sms.logged', {

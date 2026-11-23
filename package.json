@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "bun test",
+    "test:integration": "bun test tests/integration",
     "typecheck": "tsc --noEmit",
     "db:up": "docker compose -f compose.dev.yaml up -d",
     "db:down": "docker compose -f compose.dev.yaml down",

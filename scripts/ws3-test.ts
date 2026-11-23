@@ -9,11 +9,14 @@ import {
   checkAvailability, createBooking, getPricing, flagEmergency, sendSmsTool,
   createPaymentLink, handoffToHuman, runTool,
 } from '../src/lib/voice/tools';
+import { assertSafeDatabase, forwardedArgs } from './_safe-db';
+
+assertSafeDatabase('ws3-test');
 
 const BIZ = 'biz_miami_cool_air';
 
 function seed() {
-  execFileSync('bun', ['scripts/seed.ts'], { cwd: process.cwd(), stdio: 'inherit' });
+  execFileSync('bun', ['scripts/seed.ts', ...forwardedArgs()], { cwd: process.cwd(), stdio: 'inherit' });
 }
 
 let pass = 0;

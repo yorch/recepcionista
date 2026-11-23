@@ -8,7 +8,7 @@
  */
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall,
-  updateCall, createBooking as dbCreateBooking, logSms, BookingRejectedError, listBookings,
+  updateCall, createBooking as dbCreateBooking, BookingRejectedError, listBookings,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
 import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
@@ -17,7 +17,11 @@ import {
 } from '@/lib/time';
 import { dollarsToCents, formatCents } from '@/lib/money';
 import { logger } from '@/lib/log';
-import { sendSms, normalizePhone } from '@/lib/providers/twilio';
+import { normalizePhone } from '@/lib/providers/twilio';
+import { sendAndLog } from '@/lib/messaging';
+import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
+
+export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
 import type { Business, Call, SmsLog, TimeSlot } from '@/lib/types';
 
@@ -160,7 +164,7 @@ function callKey(args: { call_sid?: string; conversation_id?: string }): string 
   return str(args.call_sid) || str(args.conversation_id);
 }
 
-/** Match by id, then SID / conversation id, then caller phone. Never guesses "the latest call". */
+/** Match by id, then SID / conversation id only. Never guesses by caller phone or "the latest call". */
 async function activeCall(
   businessId: string,
   args: { call_id?: string; call_sid?: string; conversation_id?: string; caller_phone?: string },
@@ -168,7 +172,6 @@ async function activeCall(
   return findActiveCall(businessId, {
     callId: str(args.call_id) || undefined,
     callSid: callKey(args) || undefined,
-    callerPhone: str(args.caller_phone) || undefined,
   });
 }
 
@@ -185,15 +188,8 @@ async function alertOwner(business: Business, body: string): Promise<OwnerAlert>
     return { notified: false, reason: 'no_owner_phone', sms: null };
   }
   try {
-    const to = normalizePhone(business.owner_phone);
-    const sent = await sendSms(to, body);
-    const sms = await logSms({
-      business_id: business.id,
-      to_phone: to,
-      body,
-      kind: 'owner_alert',
-      provider_id: sent.id || null,
-      status: sent.status,
+    const { sms, result: sent } = await sendAndLog({
+      business_id: business.id, to: business.owner_phone, body, kind: 'owner_alert',
     });
     // 'mock' means no Twilio configured: only counts as delivered in explicit demo mode.
     const delivered = sent.status === 'sent' || (sent.status === 'mock' && process.env.DEMO_MODE === 'true');
@@ -208,9 +204,7 @@ async function alertOwner(business: Business, body: string): Promise<OwnerAlert>
 /** What to tell a caller when we could NOT reach the owner. */
 function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolean): { message: string; data: Record<string, unknown> } {
   const phone = business.owner_phone ? normalizePhone(business.owner_phone) : null;
-  const call911 = say(lang,
-    'If there is a gas smell, carbon monoxide, smoke or fire, hang up and call 911 right now.',
-    'Si huele a gas, hay monóxido de carbono, humo o fuego, cuelgue y llame al 911 ahora mismo.');
+  const call911 = say(lang, CALL_911_EN, CALL_911_ES);
   const owner = phone
     ? say(lang, `You can also call the owner directly at ${phone}.`, `También puede llamar al dueño directamente al ${phone}.`)
     : say(lang, 'I will keep trying to reach the owner and they will call you back.', 'Voy a seguir intentando comunicarme con el dueño y él le devolverá la llamada.');
@@ -501,16 +495,20 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
       };
     }
 
-    const e164 = normalizePhone(to);
-    const sent = await sendSms(e164, body);
-    const log = await logSms({
-      business_id: business.id,
-      to_phone: e164,
-      body,
-      kind: 'other',
-      provider_id: sent.id || null,
-      status: sent.status,
+    const toOwner = Boolean(business.owner_phone) && key(to) === key(business.owner_phone as string);
+    const { sms: log, result: sent, blocked } = await sendAndLog({
+      business_id: business.id, to, body, kind: toOwner ? 'owner_alert' : 'other',
     });
+
+    if (blocked === 'blocked_opt_out') {
+      return {
+        ok: false,
+        message: say(lang,
+          'This number has opted out of texts, so I cannot send one — let me read you the details instead.',
+          'Este número pidió no recibir textos, así que no puedo mandarlo — mejor se los leo por teléfono.'),
+        data: { sms: log, blocked },
+      };
+    }
 
     if (sent.status === 'failed') {
       return {
@@ -675,8 +673,8 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       return {
         ok: true,
         message: say(lang,
-          "I've flagged this as an emergency and the owner has been notified.",
-          'Lo marqué como emergencia y el dueño ya fue notificado.'),
+          `${CALL_911_EN} I've flagged this as an emergency and the owner has been notified.`,
+          `${CALL_911_ES} Lo marqué como emergencia y el dueño ya fue notificado.`),
         data: { call: updated, owner_sms: alert.sms, owner_notified: true },
       };
     }
@@ -813,6 +811,8 @@ export async function getPricing(args: GetPricingArgs): Promise<ToolResult> {
 
 export interface HandoffArgs extends BaseArgs {
   reason?: string;
+  /** True when the caller objected to the AI / recording: mark consent declined and take a message. */
+  consent_declined?: boolean | string;
 }
 
 export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
@@ -827,9 +827,12 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
       call = await createCall({ business_id: business.id, call_sid: callKey(args) || null, status: 'in_progress' });
     }
 
+    const declined = args.consent_declined === true || String(args.consent_declined).toLowerCase() === 'true';
     const updated = await updateCall(call.id, {
       status: 'handed_off',
       flagged_reason: reason,
+      // Post-call processing stores no transcript/summary for declined calls.
+      ...(declined ? { consent_status: 'declined' as const } : {}),
     });
 
     const alertBody = [
@@ -845,7 +848,10 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
       // This does NOT transfer the line: the owner was texted and will call back.
       return {
         ok: true,
-        message: say(lang,
+        message: declined ? say(lang,
+          "Understood — we won't keep a transcript of this call. I've sent the owner a message and they will call you back. What's the best number to reach you?",
+          'Entendido — no guardaremos una transcripción de esta llamada. Le envié un mensaje al dueño y le devolverá la llamada. ¿Cuál es el mejor número para localizarle?')
+        : say(lang,
           "I've sent the owner an urgent message and they will call you back shortly. Is this the best number to reach you?",
           'Le envié un mensaje urgente al dueño y le devolverá la llamada pronto. ¿Es este el mejor número para localizarle?'),
         data: { call: updated, owner_sms: alert.sms, owner_notified: true, transferred: false },

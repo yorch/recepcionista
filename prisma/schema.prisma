@@ -12,28 +12,40 @@ datasource db {
 }
 
 model Business {
-  id          String   @id @default(uuid())
-  name        String
-  url         String?
-  phone       String?  @unique
-  /** Last 10 digits of `phone`, maintained by the db layer. Indexed lookup for inbound calls. */
-  phoneKey    String?  @map("phone_key")
-  /** IANA zone the business operates in. All hours/slot math happens in it. */
-  timezone    String   @default("America/New_York")
-  ownerPhone  String?  @map("owner_phone")
-  ownerName   String?  @map("owner_name")
-  hours       Json     @default("{}")
-  serviceArea String[] @map("service_area")
-  status      String   @default("onboarding")
-  /** ElevenLabs ConvAI agent id — persisted so a restart reuses the agent. */
-  agentId     String?  @map("agent_id")
-  createdAt   DateTime @default(now()) @map("created_at")
+  id                      String   @id @default(uuid())
+  name                    String
+  url                     String?
+  phone                   String?  @unique
+  /**
+   * Last 10 digits of `phone`, maintained by the db layer. Indexed lookup for inbound calls.
+   */
+  phoneKey                String?  @map("phone_key")
+  /**
+   * IANA zone the business operates in. All hours/slot math happens in it.
+   */
+  timezone                String   @default("America/New_York")
+  ownerPhone              String?  @map("owner_phone")
+  ownerName               String?  @map("owner_name")
+  hours                   Json     @default("{}")
+  serviceArea             String[] @map("service_area")
+  status                  String   @default("onboarding")
+  /**
+   * ElevenLabs ConvAI agent id — persisted so a restart reuses the agent.
+   */
+  agentId                 String?  @map("agent_id")
+  /// PII retention window in days (calls, transcripts, SMS bodies, briefings; booking PII is nulled).
+  retentionDays           Int      @default(365) @map("retention_days")
+  /// Spoken at call start when set; overrides the default recording disclosure.
+  recordingDisclosureText String?  @map("recording_disclosure_text")
+  createdAt               DateTime @default(now()) @map("created_at")
 
   knowledgeBase KnowledgeBase?
   calls         Call[]
   bookings      Booking[]
   briefings     Briefing[]
   smsLog        SmsLog[]
+  smsOptOuts    SmsOptOut[]
+  users         User[]
 
   @@index([phoneKey])
   @@index([agentId])
@@ -56,21 +68,25 @@ model KnowledgeBase {
 }
 
 model Call {
-  id            String    @id @default(uuid())
-  businessId    String    @map("business_id")
-  callSid       String?   @unique @map("call_sid")
-  callerPhone   String?   @map("caller_phone")
-  callerName    String?   @map("caller_name")
-  startedAt     DateTime  @default(now()) @map("started_at")
-  endedAt       DateTime? @map("ended_at")
-  durationSec   Int?      @map("duration_sec")
-  language      String?
-  transcript    String?
-  summary       String?
-  urgency       String    @default("unsure")
-  status        String    @default("in_progress")
-  recordingUrl  String?   @map("recording_url")
-  flaggedReason String?   @map("flagged_reason")
+  id                 String    @id @default(uuid())
+  businessId         String    @map("business_id")
+  callSid            String?   @unique @map("call_sid")
+  callerPhone        String?   @map("caller_phone")
+  callerName         String?   @map("caller_name")
+  startedAt          DateTime  @default(now()) @map("started_at")
+  endedAt            DateTime? @map("ended_at")
+  durationSec        Int?      @map("duration_sec")
+  language           String?
+  transcript         String?
+  summary            String?
+  urgency            String    @default("unsure")
+  status             String    @default("in_progress")
+  recordingUrl       String?   @map("recording_url")
+  flaggedReason      String?   @map("flagged_reason")
+  /// True once the recording/AI disclosure was spoken to the caller.
+  recordingDisclosed Boolean   @default(false) @map("recording_disclosed")
+  /// 'unknown' | 'disclosed' | 'declined' (CHECK constraint in the migration).
+  consentStatus      String    @default("unknown") @map("consent_status")
 
   business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
   bookings Booking[]
@@ -80,23 +96,25 @@ model Call {
 }
 
 model Booking {
-  id            String   @id @default(uuid())
-  callId        String?  @map("call_id")
-  businessId    String   @map("business_id")
-  customerName  String   @map("customer_name")
-  customerPhone String   @map("customer_phone")
-  service       String
-  scheduledAt   DateTime @map("scheduled_at")
+  id              String    @id @default(uuid())
+  callId          String?   @map("call_id")
+  businessId      String    @map("business_id")
+  customerName    String    @map("customer_name")
+  customerPhone   String    @map("customer_phone")
+  service         String
+  scheduledAt     DateTime  @map("scheduled_at")
   /// Length of the job. Together with scheduled_at it forms the blocked interval;
   /// a Postgres exclusion constraint (see migrations) forbids overlaps per business.
-  durationMinutes Int    @default(60) @map("duration_minutes")
-  address       String?
+  durationMinutes Int       @default(60) @map("duration_minutes")
+  address         String?
   /// MONEY IS INTEGER CENTS everywhere (price_estimate, deposit_amount).
-  priceEstimate Int?     @map("price_estimate")
-  depositAmount Int?     @map("deposit_amount")
-  depositPaid   Boolean  @default(false) @map("deposit_paid")
-  status        String   @default("confirmed")
-  createdAt     DateTime @default(now()) @map("created_at")
+  priceEstimate   Int?      @map("price_estimate")
+  depositAmount   Int?      @map("deposit_amount")
+  depositPaid     Boolean   @default(false) @map("deposit_paid")
+  status          String    @default("confirmed")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  /// Set when customer PII was nulled (retention purge or erasure request); financial fields are kept.
+  anonymizedAt    DateTime? @map("anonymized_at")
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   call     Call?    @relation(fields: [callId], references: [id], onDelete: SetNull)
@@ -121,18 +139,104 @@ model Briefing {
 }
 
 model SmsLog {
-  id         String   @id @default(uuid())
-  businessId String   @map("business_id")
-  toPhone    String   @map("to_phone")
-  body       String
-  kind       String
-  bookingId  String?  @map("booking_id")
-  providerId String?  @map("provider_id")
-  status     String   @default("queued")
-  createdAt  DateTime @default(now()) @map("created_at")
+  id           String   @id @default(uuid())
+  businessId   String   @map("business_id")
+  toPhone      String   @map("to_phone")
+  body         String
+  kind         String
+  bookingId    String?  @map("booking_id")
+  providerId   String?  @map("provider_id")
+  status       String   @default("queued")
+  /// Why we were allowed to send: 'transactional_booking' | 'caller_initiated' | 'express_opt_in' | 'owner_alert' | ...
+  consentBasis String?  @map("consent_basis")
+  createdAt    DateTime @default(now()) @map("created_at")
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@index([businessId, createdAt])
   @@map("sms_log")
+}
+
+/// SMS suppression list (STOP). Kept through erasure/retention on purpose: forgetting an opt-out would re-enable texting.
+model SmsOptOut {
+  id         String   @id @default(uuid())
+  businessId String   @map("business_id")
+  /// Last 10 digits (see phoneKey in src/lib/format.ts).
+  phoneKey   String   @map("phone_key")
+  optedOutAt DateTime @default(now()) @map("opted_out_at")
+  /// 'stop_keyword' | 'manual' | 'complaint' | ...
+  source     String
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, phoneKey])
+  @@map("sms_opt_outs")
+}
+
+/// Fixed-window counters for the Postgres rate limiter. Rows are disposable.
+model RateLimitBucket {
+  key         String
+  windowStart DateTime @map("window_start") @db.Timestamptz(6)
+  count       Int      @default(0)
+
+  @@id([key, windowStart])
+  @@index([windowStart])
+  @@map("rate_limit_buckets")
+}
+
+/// Webhook/event dedupe (claimEvent). Composite key: ids are only unique per source.
+model ProcessedEvent {
+  id        String
+  source    String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@id([source, id])
+  @@index([createdAt])
+  @@map("processed_events")
+}
+
+/// Expiring lease for long critical sections (provisioning does network IO).
+model ProvisionLock {
+  key        String   @id
+  holder     String
+  acquiredAt DateTime @default(now()) @map("acquired_at") @db.Timestamptz(6)
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(6)
+
+  @@index([expiresAt])
+  @@map("provision_locks")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  /// Always stored lowercased (CHECK constraint); lookups lowercase too.
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  /// Null only for role 'admin' (CHECK constraint).
+  businessId   String?   @map("business_id")
+  /// 'owner' | 'staff' | 'admin'
+  role         String
+  createdAt    DateTime  @default(now()) @map("created_at")
+  disabledAt   DateTime? @map("disabled_at")
+
+  business Business?     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  sessions UserSession[]
+
+  @@index([businessId])
+  @@map("users")
+}
+
+model UserSession {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  /// sha256 hex of the raw token; the raw token is never stored.
+  tokenHash  String   @unique @map("token_hash")
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  lastUsedAt DateTime @default(now()) @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("user_sessions")
 }

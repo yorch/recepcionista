@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic';
  */
 export async function POST(req: Request) {
   if (!demoModeEnabled()) return fail('not found', 404);
-  const limited = limitRequest(req, 'pay/mock-complete', 20);
+  const limited = await limitRequest(req, 'pay/mock-complete', 20);
   if (limited) return limited;
   try {
     const body = await readJson<{ booking_id?: string }>(req);

@@ -1,5 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
+import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings } from '@/lib/db';
 import type { Business, Hours, KnowledgeBase } from '@/lib/types';
 
@@ -40,13 +40,14 @@ export interface BusinessDetail {
 }
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<BusinessDetail>> | ReturnType<typeof fail>> {
-  const denied = await guardAdmin();
-  if (denied) return denied;
+  const auth = await authenticate(req);
+  if (!auth.ok) return auth.response;
   try {
     const { id } = await params;
+    requireBusinessAccess(auth.principal, id);
     const business = await getBusiness(id);
     if (!business) return fail('business not found', 404);
 
@@ -68,7 +69,7 @@ export async function GET(
 
     return ok<BusinessDetail>({ business: publicBusiness(business), knowledge_base: await getKnowledgeBase(id), stats });
   } catch (err) {
-    return fail(err, 500);
+    return authErrorResponse(err) ?? fail(err, 500);
   }
 }
 
@@ -76,10 +77,11 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<Business>> | ReturnType<typeof fail>> {
-  const denied = await guardAdmin();
-  if (denied) return denied;
+  const auth = await authenticate(req, { role: 'owner' }); // staff cannot change business settings
+  if (!auth.ok) return auth.response;
   try {
     const { id } = await params;
+    requireBusinessAccess(auth.principal, id);
     const body = await readJson<Record<string, unknown>>(req);
     if (!body || typeof body !== 'object' || Array.isArray(body)) return fail('invalid body', 422);
     const patch: Record<string, unknown> = {};
@@ -94,6 +96,6 @@ export async function PATCH(
     if (!updated) return fail('business not found', 404);
     return ok<Business>(publicBusiness(updated));
   } catch (err) {
-    return fail(err, 400);
+    return authErrorResponse(err) ?? fail(err, 400);
   }
 }

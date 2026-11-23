@@ -1,4 +1,5 @@
-import { listBookings, listBusinesses } from '@/lib/db';
+import { listBookings } from '@/lib/db';
+import { getDashboardContext } from '@/lib/dashboard-context';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { dayET, money, timeET } from '@/lib/format';
@@ -6,8 +7,8 @@ import { dayET, money, timeET } from '@/lib/format';
 export const dynamic = 'force-dynamic';
 
 export default async function BookingsPage() {
-  const biz = (await listBusinesses())[0];
-  if (!biz) return null;
+  const ctx = await getDashboardContext();
+  const biz = ctx.business;
   const bookings = await listBookings(biz.id);
 
   const groups = new Map<string, typeof bookings>();

@@ -5,7 +5,22 @@
  * server has ADMIN_TOKEN set, the same ADMIN_TOKEN here (sent as a Bearer token). Pay-page
  * checks use mock_ ids, which only exist outside production.
  */
+import { assertSafeDatabase, FORCE_FLAG } from './_safe-db';
+
 const BASE = process.env.APP_URL || 'http://127.0.0.1:3000';
+
+// This script POSTs /api/demo/reset, which wipes the database of whichever server answers on BASE.
+// Check the local DATABASE_URL when there is one (a local dev server normally shares it), and refuse
+// non-local servers unless explicitly forced.
+if (process.env.DATABASE_URL) {
+  assertSafeDatabase('smoke');
+} else {
+  console.log(`[smoke] DATABASE_URL not set here; the target database is whatever the server at ${BASE} uses`);
+}
+if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(BASE) && !process.argv.includes(FORCE_FLAG)) {
+  console.error(`[smoke] REFUSING to wipe a non-local server (${BASE}); pass ${FORCE_FLAG} if you really mean it.`);
+  process.exit(2);
+}
 const BIZ = 'biz_miami_cool_air';
 
 const AUTH: Record<string, string> = process.env.ADMIN_TOKEN ? { authorization: `Bearer ${process.env.ADMIN_TOKEN}` } : {};

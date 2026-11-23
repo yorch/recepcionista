@@ -1,4 +1,6 @@
-import { listBriefings, listBusinesses } from '@/lib/db';
+import { listBriefings } from '@/lib/db';
+import { hasRole } from '@/lib/session';
+import { getDashboardContext } from '@/lib/dashboard-context';
 import { Card } from '@/components/ui/card';
 import { VoicePlayer } from '@/components/ui/audio';
 import { BriefingActions } from '@/components/dashboard/briefing-actions';
@@ -7,8 +9,8 @@ import { money } from '@/lib/format';
 export const dynamic = 'force-dynamic';
 
 export default async function BriefingsPage() {
-  const biz = (await listBusinesses())[0];
-  if (!biz) return null;
+  const ctx = await getDashboardContext();
+  const biz = ctx.business;
   const briefings = await listBriefings(biz.id);
 
   return (
@@ -18,7 +20,7 @@ export default async function BriefingsPage() {
           <h1 className="text-[24px] font-semibold tracking-[-0.02em]">Briefings</h1>
           <p className="mt-1 text-[13px] text-[#8b98ab]">Forty-five seconds. Then you know your day.</p>
         </div>
-        <BriefingActions businessId={biz.id} />
+        {hasRole(ctx.principal, 'owner') ? <BriefingActions businessId={biz.id} /> : null}
       </header>
 
       <div className="mt-6 flex flex-col gap-4">

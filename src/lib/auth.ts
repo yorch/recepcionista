@@ -9,6 +9,10 @@
 
 export const SESSION_COOKIE = 'rc_session';
 export const SESSION_MAX_AGE_S = 60 * 60 * 24 * 7;
+/** Per-user session cookie: holds the raw opaque token; the DB stores only its sha256. */
+export const USER_SESSION_COOKIE = 'rc_user_session';
+/** Admin-only UI preference (selected business). Not a credential; always re-checked server-side. */
+export const BUSINESS_COOKIE = 'rc_business';
 
 const SESSION_CONTEXT = 'recepcionista-admin-session-v1';
 
@@ -16,6 +20,7 @@ const SESSION_CONTEXT = 'recepcionista-admin-session-v1';
 const PUBLIC_API_EXACT = new Set([
   '/api/health',
   '/api/auth/login',
+  '/api/auth/logout',
   '/api/voice/webhook',
   '/api/voice/post-call',
   '/api/voice/incoming',
@@ -23,6 +28,7 @@ const PUBLIC_API_EXACT = new Set([
   // Public checkout page's "Pay" button. The route itself 404s unless DEMO_MODE=true and reads the amount from the DB.
   '/api/pay/mock-complete',
   '/api/sms/gratitude-reply',
+  '/api/sms/inbound',
 ]);
 const PUBLIC_API_PREFIX = ['/api/voice/tools/'];
 const PUBLIC_PAGE_EXACT = new Set(['/', '/login']);
@@ -34,6 +40,9 @@ const PUBLIC_STATIC_EXACT = new Set(['/favicon.ico']);
 
 /** Decode and normalise a path so `%2e%2e`, `//`, `\\` and trailing slashes cannot dodge the allowlists. Returns null if it looks hostile. */
 export function normalizePath(pathname: string): string | null {
+  // Encoded separators are never legitimate here and Next keeps them inside one segment, so decoding
+  // them would let `/api/x/..%2fvoice%2ftools%2fy` look like a public path to the proxy.
+  if (/%2f|%5c/i.test(pathname)) return null;
   let p = pathname;
   try {
     p = decodeURIComponent(p);
@@ -115,13 +124,80 @@ export async function tokensMatch(candidate: string, token: string): Promise<boo
   return timingSafeEqual(a, b);
 }
 
-function readCookie(header: string | null, name: string): string | null {
+export function readCookie(header: string | null, name: string): string | null {
   if (!header) return null;
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
     if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
   }
   return null;
+}
+
+/** Cheap shape check for a user-session token (proxy gating only; the DB validates it in Node handlers). */
+export function looksLikeUserSessionToken(v: string | null | undefined): v is string {
+  return typeof v === 'string' && /^[A-Za-z0-9_-]{20,200}$/.test(v);
+}
+
+/** The user-session token from a request's Cookie header, if it has the right shape. */
+export function userSessionTokenFrom(headers: Headers): string | null {
+  const v = readCookie(headers.get('cookie'), USER_SESSION_COOKIE);
+  return looksLikeUserSessionToken(v) ? v : null;
+}
+
+/** True when the request carries the break-glass ADMIN_TOKEN (Bearer) or the admin session cookie. Edge safe. */
+export async function hasAdminCredentials(headers: Headers): Promise<boolean> {
+  const cfg = authConfig();
+  if (cfg.mode !== 'enforce') return false;
+  const authz = headers.get('authorization');
+  if (authz && /^bearer /i.test(authz) && (await tokensMatch(authz.slice(7).trim(), cfg.token))) return true;
+  const cookie = readCookie(headers.get('cookie'), SESSION_COOKIE);
+  return Boolean(cookie) && timingSafeEqual(cookie as string, await sessionValue(cfg.token));
+}
+
+/** True when the request carries one of our session cookies (so cookie CSRF rules apply). */
+export function hasSessionCookie(headers: Headers): boolean {
+  const c = headers.get('cookie');
+  return Boolean(c && (readCookie(c, SESSION_COOKIE) || readCookie(c, USER_SESSION_COOKIE)));
+}
+
+/** True when the request is authenticated by an Authorization header (not ambient cookies), so it is not CSRF-able. */
+export function hasBearer(headers: Headers): boolean {
+  const authz = headers.get('authorization');
+  return Boolean(authz && /^bearer /i.test(authz));
+}
+
+export const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Same-origin check for state-changing requests that rely on ambient cookies.
+ * Sec-Fetch-Site (sent by every current browser) must be `same-origin`; otherwise the Origin header
+ * must match this host. With neither header the request is refused when `requirePresent` is set
+ * (non-browser clients must use the Bearer token).
+ */
+export function checkSameOrigin(headers: Headers, opts: { requirePresent?: boolean } = {}): boolean {
+  const site = headers.get('sec-fetch-site');
+  if (site) return site === 'same-origin';
+  const origin = headers.get('origin');
+  if (!origin) return !opts.requirePresent;
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    return false;
+  }
+  const hosts = new Set<string>();
+  const host = headers.get('host');
+  if (host) hosts.add(host.toLowerCase());
+  if (process.env.TRUSTED_PROXY === 'true') {
+    const fwd = headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+    if (fwd) hosts.add(fwd.toLowerCase());
+  }
+  for (const v of [process.env.APP_URL, process.env.PUBLIC_BASE_URL]) {
+    try {
+      if (v) hosts.add(new URL(v).host.toLowerCase());
+    } catch { /* ignore malformed config */ }
+  }
+  return hosts.has(originHost.toLowerCase());
 }
 
 /** True when the request carries a valid session cookie or Bearer token. */

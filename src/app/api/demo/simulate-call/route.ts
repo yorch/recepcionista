@@ -105,7 +105,7 @@ async function tool<T>(name: string, args: Record<string, unknown>): Promise<{ d
 }
 
 export async function POST(req: Request) {
-  const denied = await guardAdmin();
+  const denied = await guardAdmin(req);
   if (denied) return denied;
   if (!demoModeEnabled()) return fail('not found', 404);
   try {
@@ -228,8 +228,8 @@ export async function POST(req: Request) {
   }
 }
 
-export async function GET() {
-  const denied = await guardAdmin();
+export async function GET(req: Request) {
+  const denied = await guardAdmin(req);
   if (denied) return denied;
   return NextResponse.json({ ok: true, data: { scripts: Object.keys(SCRIPTS) } });
 }

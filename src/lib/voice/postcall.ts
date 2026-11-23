@@ -363,6 +363,26 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
   }
 
   const alreadyHandedOff = call.status === 'handed_off';
+
+  // Caller declined recording/AI: keep minimal metadata only. No transcript, summary, recording
+  // URL or language is stored, and the provider-side conversation is deleted best-effort.
+  if (call.consent_status === 'declined') {
+    const updated = await updateCall(call.id, {
+      ended_at: call.ended_at ?? nowIso(),
+      duration_sec:
+        duration != null && Number.isFinite(Number(duration)) ? Math.round(Number(duration)) : call.duration_sec,
+      transcript: null,
+      summary: 'Caller declined recording; no transcript kept. Call back requested.',
+      recording_url: null,
+      status: alreadyHandedOff ? 'handed_off' : 'completed',
+    });
+    if (conversationId) {
+      remember(conversationId);
+      await deleteProviderConversation(conversationId);
+    }
+    log.info('stored.declined', { call: call.id, business: call.business_id });
+    return { status: 200, body: { call: updated } };
+  }
   const fallback = summaryFallback(transcript, urgency, language);
   const provided = body.analysis?.transcript_summary || body.analysis?.call_summary || '';
   let summary = provided.trim();
@@ -389,7 +409,12 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
     )).value.trim();
   }
 
+  // Record that the disclosure really was spoken: the agent's opening turn mentions recording/AI.
+  const disclosedInTranscript = call.consent_status === 'unknown'
+    && /\b(recorded|grabada)\b/i.test(transcript.slice(0, 600));
+
   const updated = await updateCall(call.id, {
+    ...(disclosedInTranscript ? { recording_disclosed: true, consent_status: 'disclosed' as const } : {}),
     ended_at: call.ended_at ?? nowIso(),
     duration_sec:
       duration != null && Number.isFinite(Number(duration))
@@ -405,6 +430,21 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
   if (conversationId) remember(conversationId);
   log.info('stored', { call: call.id, business: call.business_id, conversation: conversationId || null });
   return { status: 200, body: { call: updated } };
+}
+
+/** Best-effort removal of the provider-side conversation (audio + transcript) for a declined call. */
+async function deleteProviderConversation(conversationId: string): Promise<void> {
+  if (!hasKey()) return;
+  try {
+    const res = await fetch(`${API}/convai/conversations/${encodeURIComponent(conversationId)}`, {
+      method: 'DELETE',
+      headers: { 'xi-api-key': apiKey() },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) log.warn('provider_delete.failed', { conversation: conversationId, status: res.status });
+  } catch (err) {
+    log.warn('provider_delete.error', { conversation: conversationId, err });
+  }
 }
 
 /** Parse a webhook body (JSON, or form-encoded for legacy senders). */

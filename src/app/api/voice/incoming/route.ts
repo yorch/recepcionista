@@ -64,6 +64,9 @@ export async function POST(req: Request) {
       business_id: business.id,
       caller_phone: from || null,
       status: 'in_progress',
+      // The agent's first message opens with the AI/recording disclosure (firstMessageFor).
+      recording_disclosed: true,
+      consent_status: 'disclosed',
     });
 
     // Best-effort: a failed agent refresh must not drop the call.

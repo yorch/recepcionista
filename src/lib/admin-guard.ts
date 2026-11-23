@@ -1,20 +1,24 @@
 /**
- * Second layer of admin auth for route handlers. The proxy already gates
- * /api/**, but a proxy matcher mistake must never expose a handler, so every
- * non-public handler calls this first:
+ * Admin-only guard for route handlers (Node side; the proxy is only a cheap pre-filter):
  *
- *   const denied = await guardAdmin(); if (denied) return denied;
+ *   const denied = await guardAdmin(req); if (denied) return denied;
+ *
+ * Pass `req` so cookie-authenticated state-changing requests get the same-origin (CSRF) check.
+ * Routes that tenants may use call authenticate() from src/lib/session.ts instead.
  */
 import { headers } from 'next/headers';
 import { NextResponse } from 'next/server';
-import { authConfig, isAuthenticated } from '@/lib/auth';
+import { authenticate, resolvePrincipal } from '@/lib/session';
 
-export async function guardAdmin(): Promise<NextResponse<{ ok: false; error: string }> | null> {
-  const h = await headers();
-  if (await isAuthenticated(new Request('http://internal.invalid/', { headers: h }))) return null;
-  const misconfigured = authConfig().mode === 'misconfigured';
-  return NextResponse.json(
-    { ok: false as const, error: misconfigured ? 'server auth not configured' : 'unauthorized' },
-    { status: misconfigured ? 503 : 401 },
-  );
+export async function guardAdmin(req?: Request): Promise<NextResponse<{ ok: false; error: string }> | null> {
+  if (req) {
+    const auth = await authenticate(req, { role: 'admin' });
+    return auth.ok ? null : auth.response;
+  }
+  // No request object: no method to CSRF-check (the proxy still does), but the credential is fully validated.
+  const res = await resolvePrincipal(new Headers(await headers())).catch(() => null);
+  if (!res) return NextResponse.json({ ok: false as const, error: 'service temporarily unavailable' }, { status: 503 });
+  if (!res.ok) return NextResponse.json({ ok: false as const, error: res.error }, { status: res.status });
+  if (res.principal.kind !== 'admin') return NextResponse.json({ ok: false as const, error: 'forbidden' }, { status: 403 });
+  return null;
 }

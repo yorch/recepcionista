@@ -21,10 +21,24 @@ name: recepcionista
 # yamllint disable-line rule:line-length
 x-database-url: &database_url "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
 
+# Docker's json-file driver has no size limit by default, so a chatty service
+# fills the host disk. 10 MB x 5 files per container is enough history for
+# `docker compose logs` and bounded on disk.
+x-logging: &default_logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
-    image: postgres:17-alpine
+    # postgres:17-alpine (multi-arch index digest, resolved 2026-11-23)
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     restart: unless-stopped
+    # Caps memory so a runaway query or a shared host cannot take the whole box
+    # down. Postgres otherwise sizes itself against whatever the host offers.
+    mem_limit: 1g
+    logging: *default_logging
     environment:
       # `:?` fails the whole `compose up` when the value is missing, instead of
       # booting a database the image will reject later and less clearly.
@@ -63,6 +77,11 @@ services:
       db:
         condition: service_healthy
     restart: "no"
+    logging: *default_logging
+    # Migrations write nothing to the image; bun and prisma caches go to $HOME=/tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
@@ -89,6 +108,12 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: "no"
+    logging: *default_logging
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 
   app:
     build:
@@ -97,6 +122,7 @@ services:
     image: ${APP_IMAGE:-recepcionista-app:local}
     restart: unless-stopped
     init: true
+    logging: *default_logging
     env_file:
       - .env
     environment:

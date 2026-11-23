@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/components/ui/cn';
 
 const NAV = [
@@ -9,8 +9,25 @@ const NAV = [
   { href: '/dashboard/bookings', label: 'Calendar', icon: 'M4 6h16v14H4zM4 10h16M9 3v4M15 3v4' },
   { href: '/dashboard/knowledge', label: 'Brain', icon: 'M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8A3 3 0 0 0 8 18a3 3 0 0 0 4 2m0-16a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8A3 3 0 0 1 16 18a3 3 0 0 1-4 2m0-16v16' },
   { href: '/dashboard/briefings', label: 'Briefings', icon: 'M4 13a8 8 0 1 0 16 0 8 8 0 0 0-16 0Zm4-2v4m4-7v10m4-7v4' },
-  { href: '/dashboard/demo', label: 'Demo console', icon: 'M9 3h6l1 4h3v14H5V7h3l1-4Zm0 10h6m-3-3v6' },
+  { href: '/dashboard/demo', label: 'Demo console', icon: 'M9 3h6l1 4h3v14H5V7h3l1-4Zm0 10h6m-3-3v6', adminOnly: true },
+  { href: '/dashboard/settings', label: 'Settings', icon: 'M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6m-4 4v6', ownerOnly: true },
 ] as const;
+
+const BUSINESS_COOKIE = 'rc_business';
+
+export interface SidebarProps {
+  businessName: string;
+  phone?: string | null;
+  live: boolean;
+  /** Signed-in user's email (or "admin token"). */
+  who: string;
+  role: 'staff' | 'owner' | 'admin';
+  isAdmin: boolean;
+  canSettings: boolean;
+  currentBusinessId: string;
+  /** Admin only: every business for the switcher. */
+  businesses: { id: string; name: string }[];
+}
 
 async function logout() {
   try {
@@ -20,8 +37,16 @@ async function logout() {
   }
 }
 
-export function Sidebar({ businessName, phone, live }: { businessName: string; phone?: string | null; live: boolean }) {
+export function Sidebar({ businessName, phone, live, who, role, isAdmin, canSettings, currentBusinessId, businesses }: SidebarProps) {
   const path = usePathname();
+  const router = useRouter();
+
+  function switchBusiness(id: string) {
+    // UI preference only: the server re-validates it against the real business list on every render.
+    document.cookie = `${BUSINESS_COOKIE}=${encodeURIComponent(id)}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax`;
+    router.refresh();
+  }
+
   return (
     <aside className="hidden w-[248px] shrink-0 flex-col border-r border-[#171f2a] bg-[#080b10]/70 px-4 py-5 lg:flex">
       <Link href="/dashboard" className="flex items-center gap-2.5 px-2">
@@ -30,6 +55,18 @@ export function Sidebar({ businessName, phone, live }: { businessName: string; p
       </Link>
 
       <div className="mt-6 rounded-xl border border-[#1b2430] bg-[#0b1017] p-3">
+        {isAdmin && businesses.length > 1 ? (
+          <select
+            aria-label="Switch business"
+            value={currentBusinessId}
+            onChange={(e) => switchBusiness(e.target.value)}
+            className="mb-2 w-full rounded-lg border border-[#1b2430] bg-[#080b10] px-2 py-1 text-[12px] text-[#cbd7e6] outline-none focus:border-[#ff6b35]"
+          >
+            {businesses.map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
+        ) : null}
         <p className="truncate text-[13px] font-medium text-white">{businessName}</p>
         <div className="mt-1.5 flex items-center gap-1.5">
           <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-[#3ddc97] live-dot' : 'bg-[#5a6b80]')} />
@@ -45,7 +82,10 @@ export function Sidebar({ businessName, phone, live }: { businessName: string; p
       </div>
 
       <nav className="mt-6 flex flex-col gap-0.5">
-        {NAV.map((item) => {
+        {NAV.filter((item) => {
+          const gate = item as { adminOnly?: boolean; ownerOnly?: boolean };
+          return (!gate.adminOnly || isAdmin) && (!gate.ownerOnly || canSettings);
+        }).map((item) => {
           const active = path === item.href || (item.href !== '/dashboard' && path.startsWith(item.href));
           return (
             <Link
@@ -65,10 +105,14 @@ export function Sidebar({ businessName, phone, live }: { businessName: string; p
         })}
       </nav>
 
+      <div className="mt-auto px-3 pb-1 text-[11px] leading-tight">
+        <p className="truncate text-[#cbd7e6]" title={who}>{who}</p>
+        <p className="mt-0.5 uppercase tracking-wider text-[#6b7b91]">{role}</p>
+      </div>
       <button
         type="button"
         onClick={logout}
-        className="mt-auto flex items-center gap-3 rounded-lg px-3 py-2 text-left text-[13px] text-[#8b98ab] transition-colors hover:bg-[#111823] hover:text-[#cbd7e6]"
+        className="mt-1 flex items-center gap-3 rounded-lg px-3 py-2 text-left text-[13px] text-[#8b98ab] transition-colors hover:bg-[#111823] hover:text-[#cbd7e6]"
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
           <path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9" />

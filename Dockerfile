@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 #
 # Two runnable targets, one build:
 #   runner — what serves traffic (slim, standalone, non-root)
@@ -11,7 +11,10 @@
 # Prisma's native query engine from needing the musl workaround on alpine.
 
 ############### base ###############
-FROM oven/bun:1.4.1 AS base
+# Digests are the multi-arch index digests, resolved 2026-11-23. Tags stay in
+# the comments so Dependabot can bump both together.
+# oven/bun:1.4.1
+FROM oven/bun:1.4.1@sha256:9e123d5fc069e29d519fd4c981afb61b8542ac80274771961136db1e4538d53e AS base
 WORKDIR /app
 
 # Prisma's query engine links against openssl at runtime. ca-certificates is for
@@ -67,6 +70,8 @@ COPY src ./src
 # Run as an unprivileged uid, like the runner. The sources stay root-owned and
 # read-only to this user. HOME points at /tmp because bunx and the Prisma CLI
 # write caches under $HOME, and /tmp is writable by any user.
+# oven/bun already ships a `bun` user at uid 1000, so the useradd fallback is
+# normally skipped. It only matters if the base stops providing that uid.
 ENV HOME=/tmp
 RUN getent passwd 1000 >/dev/null || useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin app
 USER 1000:1000
@@ -75,7 +80,8 @@ USER 1000:1000
 CMD ["bunx", "prisma", "migrate", "deploy"]
 
 ############### runner ###############
-FROM node:24-bookworm-slim AS runner
+# node:24-bookworm-slim
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS runner
 
 WORKDIR /app
 

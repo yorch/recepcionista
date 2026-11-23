@@ -1,6 +1,6 @@
 import { ok, fail } from '@/lib/http';
 import { insecureDevAllowed } from '@/lib/auth';
-import { getBooking, getBusiness, markDepositPaid } from '@/lib/db';
+import { getBooking, getBusiness, markDepositPaid, claimEvent, releaseEvent } from '@/lib/db';
 import { ownerAlertSms } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
 import { logger } from '@/lib/log';
@@ -14,22 +14,6 @@ const RELEVANT = new Set([
   'payment_link.completed',
   'payment_intent.succeeded',
 ]);
-
-/**
- * Event ids and bookings already handled (process-local; Stripe retries land within hours).
- * TODO(multi-instance): this dedupe is per process, so with several instances a retry can reach a
- * different one and re-send the owner alert. markDepositPaid is idempotent, so no money state is
- * affected; persist processed event ids (e.g. a stripe_events table) if the alert must be exactly-once.
- */
-const SEEN_TTL_MS = 24 * 60 * 60 * 1000;
-const seenEvents = new Map<string, number>();
-const alertedBookings = new Map<string, number>();
-
-function seen(map: Map<string, number>, key: string): boolean {
-  const now = Date.now();
-  for (const [k, t] of map) if (now - t > SEEN_TTL_MS) map.delete(k);
-  return map.has(key);
-}
 
 /**
  * Stripe webhook. Signature verification is MANDATORY: with no
@@ -79,11 +63,26 @@ export async function POST(req: Request) {
     log.debug('event.ignored', { type, id: event.id ?? null });
     return ok({ received: true, ignored: type });
   }
-  if (event.id && seen(seenEvents, event.id)) {
+  // Shared (Postgres) dedupe across instances. A DB error propagates as a 500 so Stripe retries.
+  if (event.id && !(await claimEvent('stripe', event.id))) {
     log.info('event.duplicate', { type, id: event.id });
     return ok({ received: true, duplicate: true });
   }
   log.info('event.received', { type, id: event.id ?? null });
+  try {
+    return await handleEvent(event, type);
+  } catch (err) {
+    // Processing failed: give the claim back so Stripe's retry is processed, not dropped as a duplicate.
+    if (event.id) await releaseEvent('stripe', event.id);
+    log.error('event.failed', { type, id: event.id ?? null, err });
+    return fail(err, 500);
+  }
+}
+
+async function handleEvent(
+  event: { id?: string; type?: string; data?: { object?: Record<string, unknown> } },
+  type: string,
+) {
 
   const object = event.data?.object ?? {};
   const metadata = (object.metadata ?? {}) as Record<string, string>;
@@ -100,14 +99,12 @@ export async function POST(req: Request) {
   const bookingId = metadata.booking_id ?? metadata.bookingId;
   const businessId = metadata.business_id ?? metadata.businessId;
 
-  let response: Response;
   if (bookingId) {
     const booking = await getBooking(bookingId);
     // The metadata is ours, but never trust a booking that belongs to another business.
     if (booking && (!businessId || booking.business_id === businessId) && amountCents > 0) {
       const { updated } = await markDepositPaid(booking.id, amountCents);
-      if (updated && !seen(alertedBookings, booking.id)) {
-        alertedBookings.set(booking.id, Date.now());
+      if (updated) {
         const business = await getBusiness(booking.business_id);
         if (business?.owner_phone) {
           await sendAndLog({
@@ -122,9 +119,7 @@ export async function POST(req: Request) {
           });
         }
       }
-      response = ok({ received: true, booking_id: booking.id, deposit_paid: updated });
-      if (event.id) seenEvents.set(event.id, Date.now());
-      return response;
+      return ok({ received: true, booking_id: booking.id, deposit_paid: updated });
     }
     log.warn('booking.unmatched', { booking: bookingId, type, amount_cents: amountCents });
   }
@@ -145,7 +140,6 @@ export async function POST(req: Request) {
     log.warn('payment.unattributed', { amount: money(amountCents), type });
   }
 
-  if (event.id) seenEvents.set(event.id, Date.now());
   return ok({ received: true, unmatched: true });
 }
 

@@ -1,5 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
+import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { getBooking, getBusiness } from '@/lib/db';
 import type { Lang } from '@/lib/messaging/templates';
 import { createAndSendPaymentLink } from '@/lib/messaging/actions';
@@ -15,9 +15,9 @@ export interface PaymentLinkSmsResult {
 }
 
 export async function POST(req: Request) {
-  const denied = await guardAdmin();
-  if (denied) return denied;
-  const limited = limitRequest(req, 'sms/payment-link', 10);
+  const auth = await authenticate(req, { role: 'owner' }); // money + SMS: owner+
+  if (!auth.ok) return auth.response;
+  const limited = await limitRequest(req, 'sms/payment-link', 10);
   if (limited) return limited;
   try {
     const body = await readJson<{
@@ -29,7 +29,9 @@ export async function POST(req: Request) {
       language?: Lang;
     }>(req);
 
-    const business = body.business_id ? await getBusiness(body.business_id) : null;
+    const scoped = scopeBusinessId(auth.principal, body.business_id);
+    if (scoped) requireBusinessAccess(auth.principal, scoped);
+    const business = scoped ? await getBusiness(scoped) : null;
     if (!business) return fail('business not found', 404);
     if (!body.to) return fail('to is required', 422);
 
@@ -57,6 +59,6 @@ export async function POST(req: Request) {
       body: text,
     });
   } catch (err) {
-    return fail(err, 500);
+    return authErrorResponse(err) ?? fail(err, 500);
   }
 }

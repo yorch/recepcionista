@@ -40,7 +40,7 @@ export async function sendConfirmation(
   const { sms } = await sendAndLog({
     business_id: business.id, to: booking.customer_phone, body, kind: 'confirmation', booking_id: booking.id,
   });
-  return { sms, body, deduped: false };
+  return { sms, body: sms.body, deduped: false };
 }
 
 export async function sendGratitude(
@@ -50,8 +50,9 @@ export async function sendGratitude(
   const body = gratitudeSms({ business, booking, language });
   const { sms } = await sendAndLog({
     business_id: business.id, to: booking.customer_phone, body, kind: 'gratitude', booking_id: booking.id,
+    consent_basis: 'booking_followup',
   });
-  return { sms, body };
+  return { sms, body: sms.body };
 }
 
 export interface PaymentLinkInput {
@@ -84,5 +85,5 @@ export async function createAndSendPaymentLink(input: PaymentLinkInput) {
   const { sms } = await sendAndLog({
     business_id: business.id, to: input.to, body: text, kind: 'payment_link', booking_id: booking?.id ?? null,
   });
-  return { sms, body: text, link };
+  return { sms, body: sms.body, link };
 }

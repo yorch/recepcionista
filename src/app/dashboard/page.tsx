@@ -1,6 +1,7 @@
 import Link from 'next/link';
+import { getDashboardContext } from '@/lib/dashboard-context';
 import {
-  getLatestBriefing, listBookings, listBusinesses, listCalls, listSms,
+  getLatestBriefing, listBookings, listCalls, listSms,
 } from '@/lib/db';
 import { money, relative, seconds, timeET, whenET } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
@@ -10,8 +11,8 @@ import { VoicePlayer } from '@/components/ui/audio';
 export const dynamic = 'force-dynamic';
 
 export default async function TodayPage() {
-  const biz = (await listBusinesses())[0];
-  if (!biz) return null;
+  const ctx = await getDashboardContext();
+  const biz = ctx.business;
 
   const calls = await listCalls(biz.id);
   const bookings = await listBookings(biz.id);

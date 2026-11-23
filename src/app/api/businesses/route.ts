@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
-import { listBusinesses, createBusiness } from '@/lib/db';
+import { authenticate, authErrorResponse } from '@/lib/session';
+import { getBusiness, listBusinesses, createBusiness } from '@/lib/db';
 import type { Business } from '@/lib/types';
 
 /** Dashboard-safe projection: no owner contact details or voice-agent ids. */
@@ -10,10 +10,16 @@ function publicBusiness(b: Business): Business {
   return rest as Business;
 }
 
-export async function GET(): Promise<ReturnType<typeof ok<Business[]>> | ReturnType<typeof fail>> {
-  const denied = await guardAdmin();
-  if (denied) return denied;
+/** Admin: every business. Owner/staff: only their own (a list of one). */
+export async function GET(req: Request): Promise<ReturnType<typeof ok<Business[]>> | ReturnType<typeof fail>> {
+  const auth = await authenticate(req);
+  if (!auth.ok) return auth.response;
+  const { principal } = auth;
   try {
+    if (principal.kind === 'user') {
+      const own = await getBusiness(principal.business_id);
+      return ok<Business[]>(own ? [publicBusiness(own)] : []);
+    }
     return ok<Business[]>((await listBusinesses()).map(publicBusiness));
   } catch (err) {
     return fail(err, 500);
@@ -21,8 +27,8 @@ export async function GET(): Promise<ReturnType<typeof ok<Business[]>> | ReturnT
 }
 
 export async function POST(req: Request): Promise<ReturnType<typeof ok<Business>> | ReturnType<typeof fail>> {
-  const denied = await guardAdmin();
-  if (denied) return denied;
+  const auth = await authenticate(req, { role: 'admin' }); // creating tenants is admin-only
+  if (!auth.ok) return auth.response;
   try {
     const body = await readJson<{ name?: string; url?: string; owner_phone?: string; owner_name?: string }>(req);
     if (!body.name || typeof body.name !== 'string' || !body.name.trim()) {
@@ -36,6 +42,6 @@ export async function POST(req: Request): Promise<ReturnType<typeof ok<Business>
     });
     return ok<Business>(publicBusiness(business), 201);
   } catch (err) {
-    return fail(err, 400);
+    return authErrorResponse(err) ?? fail(err, 400);
   }
 }

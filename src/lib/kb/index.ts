@@ -22,6 +22,21 @@ export const REQUIRED_TOOLS = [
   'flag_emergency', 'get_pricing', 'handoff_to_human',
 ] as const;
 
+/** Marker heading of the compliance block; lets stale stored prompts be detected and healed. */
+export const COMPLIANCE_MARKER = '## DISCLOSURE, CONSENT AND LIFE SAFETY';
+
+/**
+ * Hard rules for recording disclosure, consent and life-safety emergencies. Appended to every
+ * prompt synced to the voice agent (also to older stored prompts, see voice/elevenlabs).
+ */
+export function complianceRules(business: Pick<Business, 'name'>): string {
+  const owner = 'the owner';
+  return `${COMPLIANCE_MARKER}
+- DISCLOSURE: every call opens with an AI and recording notice (the opening sentence of your first message: this call is handled by an AI assistant and may be recorded and transcribed). If for any reason it was not spoken, say it before anything else. Never skip or shorten it. If asked whether you are a person, answer honestly that you are the AI assistant for ${business.name}.
+- OBJECTION TO RECORDING OR AI: if the caller objects to being recorded or transcribed, says to stop, or does not want to talk to an AI, do not argue and do not continue taking details. Offer to take a message for a human callback, then call handoff_to_human with consent_declined=true and the reason "caller declined recording/AI". Say only that ${owner} will call them back; do not ask for or repeat further personal details.
+- LIFE SAFETY FIRST (911): if the caller mentions a gas smell or gas leak, carbon monoxide (CO alarm, headaches or dizziness with a fuel appliance), fire, smoke, electrical sparking or arcing, flooding together with an electrical hazard, or ANY other sign that someone's life or safety is at risk, your FIRST words must tell them to hang up and call 911 (for a gas leak also their gas utility's emergency line) and to leave the building if there is gas, smoke or fire. Say this BEFORE asking questions, booking, or using any tool. Only AFTER that, use flag_emergency. Never tell the caller to wait for ${owner} or for a technician in a life-safety situation, and never discourage calling 911.`;
+}
+
 /**
  * True when a stored prompt is missing something the voice agent needs to behave:
  * an emergency definition, the card-number rule, or any of the 7 tool names.
@@ -34,7 +49,8 @@ export function promptIsDeficient(prompt: string | null | undefined): boolean {
   const hasAllTools = REQUIRED_TOOLS.every((t) => prompt.includes(t));
   const hasEmergency = low.includes('water leaking') && low.includes('burning smell');
   const hasCardRule = low.includes('card number');
-  return !(hasAllTools && hasEmergency && hasCardRule);
+  const hasCompliance = prompt.includes(COMPLIANCE_MARKER) && prompt.includes('911');
+  return !(hasAllTools && hasEmergency && hasCardRule && hasCompliance);
 }
 
 /**
@@ -109,7 +125,7 @@ ${bilingual ? `You are bilingual in English and Spanish. Many callers are Spanis
 
 ## BUSINESS IDENTITY
 - Business: ${business.name}
-- Owner: ${owner}${business.owner_phone ? ` (${business.owner_phone})` : ''}
+- Owner: ${owner}
 - Website: ${business.url || 'n/a'}
 - Service area:
 ${fmtList(business.service_area)}
@@ -134,7 +150,7 @@ An emergency is any of:
 - No cooling AND a vulnerable occupant (baby, elderly, sick person) in the home
 - A burning smell or smoke from the unit
 - Complete system failure during extreme heat
-For an emergency: stay calm, tell the caller help is on the way, use flag_emergency immediately, and use handoff_to_human to reach ${owner} right away. Emergencies jump the schedule.
+For an emergency: stay calm, use flag_emergency immediately (life-safety situations first follow the 911 rule below), and use handoff_to_human to reach ${owner} right away. Emergencies jump the schedule.
 
 ## DEPOSITS AND PAYMENT
 - Deposits are capped at a maximum of $500.
@@ -164,6 +180,8 @@ Always use your tools rather than guessing answers. Prices come from get_pricing
 
 ## FAQ YOU CAN ANSWER
 ${faqsBlock}
+
+${complianceRules(business)}
 
 Keep answers short and conversational — this is a phone call, not an essay. Never read lists verbatim; summarize naturally.`;
 }

@@ -1,5 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { guardAdmin } from '@/lib/admin-guard';
+import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { getBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
 import { buildSystemPrompt } from '@/lib/kb';
 import type { FAQ, KnowledgeBase, Service } from '@/lib/types';
@@ -15,10 +15,11 @@ export async function PUT(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<KnowledgeBase>> | ReturnType<typeof fail>> {
-  const denied = await guardAdmin();
-  if (denied) return denied;
+  const auth = await authenticate(req, { role: 'owner' }); // the knowledge base is the agent's prompt: owner-only
+  if (!auth.ok) return auth.response;
   try {
     const { id } = await params;
+    requireBusinessAccess(auth.principal, id);
     const business = await getBusiness(id);
     if (!business) return fail('business not found', 404);
 
@@ -37,6 +38,6 @@ export async function PUT(
     const saved = await upsertKnowledgeBase(id, { services, faqs, pricing_notes, call_script, system_prompt });
     return ok<KnowledgeBase>(saved);
   } catch (err) {
-    return fail(err, 400);
+    return authErrorResponse(err) ?? fail(err, 400);
   }
 }
