@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { NextRequest } from 'next/server';
 import { proxy } from '../src/proxy';
-import { isPublicPath, sessionValue, SESSION_COOKIE } from '../src/lib/auth';
+import { isPublicPath, SESSION_COOKIE } from '../src/lib/auth';
 
 const TOKEN = 'proxy-matrix-admin-token';
 const ENV_KEYS = ['ADMIN_TOKEN', 'ALLOW_INSECURE_DEV', 'NODE_ENV'] as const;
@@ -49,7 +49,7 @@ async function decide(path: string, headers: Record<string, string> = {}): Promi
 describe('proxy with ADMIN_TOKEN set', () => {
   test('public paths pass without credentials', async () => {
     setEnv({ ADMIN_TOKEN: TOKEN });
-    for (const p of ['/', '/login', '/api/health', '/api/voice/post-call', '/api/voice/incoming', '/api/payments/webhook', '/api/voice/tools/create_booking', '/pay/abc', '/api/sms/gratitude-reply']) {
+    for (const p of ['/', '/login', '/api/health', '/api/voice/post-call', '/api/voice/incoming', '/api/payments/webhook', '/api/voice/tools/create_booking', '/pay/abc', '/api/sms/gratitude-reply', '/signup', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite', '/login/mfa', '/api/auth/signup', '/api/auth/mfa']) {
       expect([p, await decide(p)]).toEqual([p, 'next']);
     }
   });
@@ -65,7 +65,7 @@ describe('proxy with ADMIN_TOKEN set', () => {
 
   test('Bearer token and session cookie authenticate; near-misses do not', async () => {
     setEnv({ ADMIN_TOKEN: TOKEN });
-    const cookie = `${SESSION_COOKIE}=${await sessionValue(TOKEN)}`;
+    const cookie = `${SESSION_COOKIE}=${'c'.repeat(43)}`; // opaque session token: the proxy only checks its shape
     expect(await decide('/api/businesses', { authorization: `Bearer ${TOKEN}` })).toBe('next');
     expect(await decide('/api/businesses', { authorization: `bearer ${TOKEN}` })).toBe('next');
     expect(await decide('/api/businesses', { cookie })).toBe('next');
@@ -75,15 +75,9 @@ describe('proxy with ADMIN_TOKEN set', () => {
     expect(await decide('/api/businesses', { authorization: TOKEN })).toBe(401);
     expect(await decide('/api/businesses', { authorization: `Basic ${TOKEN}` })).toBe(401);
     expect(await decide('/api/businesses', { authorization: 'Bearer ' })).toBe(401);
-    expect(await decide('/api/businesses', { cookie: `${SESSION_COOKIE}=${TOKEN}` })).toBe(401); // the raw token is not a session
+    expect(await decide('/api/businesses', { cookie: `${SESSION_COOKIE}=short-token` })).toBe(401); // too short to be a session token
     expect(await decide('/api/businesses', { cookie: `${SESSION_COOKIE}=` })).toBe(401);
-    expect(await decide('/api/businesses', { cookie: `x${SESSION_COOKIE}=${await sessionValue(TOKEN)}` })).toBe(401);
-  });
-
-  test('a session derived from another token is rejected (rotation invalidates sessions)', async () => {
-    setEnv({ ADMIN_TOKEN: TOKEN });
-    const old = await sessionValue('old-token');
-    expect(await decide('/api/businesses', { cookie: `${SESSION_COOKIE}=${old}` })).toBe(401);
+    expect(await decide('/api/businesses', { cookie: `x${SESSION_COOKIE}=${'c'.repeat(43)}` })).toBe(401);
   });
 
   test('tricky paths stay protected', async () => {

@@ -13,7 +13,7 @@ import { PaymentReceived } from './received';
  * Booking resolution: `/pay/<bookingId>` or `/pay/mock_x?booking=<bookingId>`.
  */
 export const metadata: Metadata = {
-  title: 'Secure payment — Recepcionista',
+  title: 'Secure payment',
   robots: { index: false, follow: false },
 };
 
@@ -59,7 +59,7 @@ export default async function PayPage({
 
   if (booking) {
     const business = await getBusiness(booking.business_id);
-    businessName = business?.name ?? DEFAULT_BUSINESS;
+    businessName = business?.name ?? 'Your service provider';
     label = `${booking.service} deposit`;
     if (booking.deposit_amount && booking.deposit_amount > 0) {
       amountCents = booking.deposit_amount;

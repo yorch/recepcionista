@@ -64,10 +64,10 @@ export function verifyTwilioSignature(
   return { ok: false, error: 'invalid signature' };
 }
 
-export async function sendSms(to: string, body: string): Promise<SendSmsResult> {
+export async function sendSms(to: string, body: string, opts: { anyCountry?: boolean } = {}): Promise<SendSmsResult> {
   // Single enforcement point for E.164 + SMS_ALLOWED_COUNTRY_CODES: every text
   // (tools, confirmations, payment links, alerts, routes) ends up here.
-  const check = validateRecipient(to);
+  const check = validateRecipient(to, undefined, { anyCountry: opts.anyCountry });
   if (!check.ok) {
     log.warn('sms.recipient_rejected', { reason: check.error });
     return { id: '', status: 'failed', error: check.error };

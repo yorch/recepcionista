@@ -73,6 +73,7 @@ async function main() {
     password_hash: await hashPassword(password),
     role,
     business_id: role === 'admin' ? null : businessId,
+    email_verified: true, // created by an operator with shell access: the address is vouched for
   });
   console.log(`created ${user.role} ${user.email} (id ${user.id}${user.business_id ? `, business ${user.business_id}` : ''})`);
 }

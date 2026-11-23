@@ -8,6 +8,8 @@ import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
 import { limitRequest } from '@/lib/ratelimit';
+import { assertProvisioningAllowed, billingRequiredResponse } from '@/lib/billing/gate';
+import type { Principal } from '@/lib/session';
 import { withLease } from '@/lib/db';
 import type { Business, KnowledgeBase } from '@/lib/types';
 
@@ -64,7 +66,7 @@ export async function POST(
   if (limited) return limited as ReturnType<typeof fail>;
   const { id } = await params;
   try {
-    const run = await withLease(`provision:${id}`, PROVISION_LEASE_MS, (_lease, signal) => provision(req, id, signal));
+    const run = await withLease(`provision:${id}`, PROVISION_LEASE_MS, (_lease, signal) => provision(req, id, signal, auth.principal));
     if (!run.acquired) return fail('provisioning already in progress', 409);
     return run.value;
   } catch (err) {
@@ -82,6 +84,7 @@ async function provision(
   req: Request,
   id: string,
   signal: AbortSignal,
+  principal: Principal,
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
   const started = Date.now();
   try {
@@ -89,6 +92,19 @@ async function provision(
     if (!business) {
       log.warn('business_not_found', { business: id });
       return fail('business not found', 404);
+    }
+
+    // Paid resources (number, agent) only for a business with a plan; applies to `force` and re-provisioning too.
+    // Admins bypass (comped accounts). A no-op unless BILLING_ENFORCED=true.
+    try {
+      assertProvisioningAllowed(principal, business);
+    } catch (err) {
+      const required = billingRequiredResponse(err);
+      if (required) {
+        log.warn('billing_required', { business: id, billing_status: business.billing_status ?? 'none' });
+        return required as ReturnType<typeof fail>;
+      }
+      throw err;
     }
 
     let force = false;

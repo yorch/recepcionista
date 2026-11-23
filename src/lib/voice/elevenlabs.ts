@@ -12,6 +12,7 @@ import { TOOL_NAMES, type ToolName } from '@/lib/voice/tools';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { logger } from '@/lib/log';
 import { describeNow, nowVariables } from '@/lib/time';
+import { initiationAgentOverrides, initiationAutoConfig } from '@/lib/voice/initiation-config';
 
 const log = logger('elevenlabs');
 
@@ -392,6 +393,84 @@ async function agentBody(business: Business, kb: KnowledgeBase | null) {
   };
 }
 
+// ------------------------------------------------------- conversation-initiation webhook
+//
+// VERIFIED against the ElevenLabs docs ("Twilio personalization"): the platform POSTs
+// { caller_id, agent_id, called_number, call_sid, conversation_id } to a webhook URL and expects
+// { type: 'conversation_initiation_client_data', dynamic_variables, conversation_config_override }.
+// The docs describe configuring it ONLY in the UI (ElevenAgents settings: webhook URL + secrets sent as headers;
+// agent > Security tab: enable "fetch conversation initiation data" and the overridable fields, first message here).
+// UNVERIFIED (the API reference pages could not be read when this was written): the API equivalents used below,
+//   PATCH /v1/convai/settings                 { conversation_initiation_client_data_webhook: { url, request_headers } }
+//   PATCH /v1/convai/agents/{id}              { platform_settings: { overrides: {
+//        enable_conversation_initiation_client_data_from_webhook: true,
+//        conversation_config_override: { agent: { first_message: true } } } } }
+// Both are best-effort: a rejected call only logs a warning and leaves the manual UI steps in docs/runbook.md.
+
+export const initiationWebhookUrl = (): string => `${appUrl()}/api/voice/initiation`;
+
+/** Off switch: ELEVENLABS_INITIATION_WEBHOOK=off skips automatic configuration (manual UI setup instead). */
+
+let initiationWorkspaceDone = false;
+const initiationAgentsDone = new Set<string>();
+
+/** Headers ElevenLabs sends with the initiation webhook: only the shared secret (same value/reference as the tools). */
+export function initiationRequestHeaders(): Record<string, string | { secret_id: string }> {
+  const { ['content-type']: _ct, ...rest } = toolRequestHeaders();
+  void _ct;
+  return rest;
+}
+
+/** Best-effort: point the workspace's initiation webhook at this app and enable it on the agent. Never throws. */
+export async function ensureInitiationWebhook(agentId: string): Promise<{ ok: boolean; skipped?: string; error?: string }> {
+  if (!initiationAutoConfig()) return { ok: false, skipped: 'ELEVENLABS_INITIATION_WEBHOOK=off' };
+  if (!hasElevenLabs() || !agentId || agentId.startsWith('mock_')) return { ok: false, skipped: 'no API key or agent' };
+  if (!process.env.ELEVENLABS_TOOL_SECRET) {
+    log.warn('initiation.no_secret', { reason: 'ELEVENLABS_TOOL_SECRET unset: not configuring an unauthenticated initiation webhook' });
+    return { ok: false, skipped: 'no tool secret' };
+  }
+  try {
+    if (!initiationWorkspaceDone) {
+      const res = await fetch(`${API}/convai/settings`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({
+          conversation_initiation_client_data_webhook: { url: initiationWebhookUrl(), request_headers: initiationRequestHeaders() },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200);
+        log.warn('initiation.workspace_failed', { status: res.status, detail, action: 'configure the webhook manually (docs/runbook.md)' });
+        return { ok: false, error: `settings ${res.status}` };
+      }
+      initiationWorkspaceDone = true;
+    }
+    if (!initiationAgentsDone.has(agentId)) {
+      const res = await fetch(`${API}/convai/agents/${agentId}`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({
+          platform_settings: {
+            overrides: initiationAgentOverrides(),
+          },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200);
+        log.warn('initiation.agent_failed', { agent: agentId, status: res.status, detail });
+        return { ok: false, error: `agent ${res.status}` };
+      }
+      initiationAgentsDone.add(agentId);
+    }
+    return { ok: true };
+  } catch (err) {
+    log.warn('initiation.error', { agent: agentId, err });
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
 export interface AgentResult {
   agent_id: string;
   mock: boolean;
@@ -441,6 +520,7 @@ export async function createOrUpdateAgent(
           name: business.name,
           ms: Date.now() - started,
         });
+        await ensureInitiationWebhook(existing);
         return { agent_id: existing, mock: false, created: false };
       }
       log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
@@ -471,6 +551,7 @@ export async function createOrUpdateAgent(
       name: business.name,
       ms: Date.now() - started,
     });
+    await ensureInitiationWebhook(agentId);
     return { agent_id: agentId, mock: false, created: true };
   } catch (err) {
     return {

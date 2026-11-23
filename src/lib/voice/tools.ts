@@ -21,6 +21,9 @@ import { normalizePhone } from '@/lib/providers/twilio';
 import { E164 } from '@/lib/messaging/recipient';
 import { sendAndLog } from '@/lib/messaging';
 import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
+import { alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
+import { isOwnerNumber } from '@/lib/messaging/owner';
+import { countryForBusiness } from '@/lib/db';
 
 export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
@@ -223,31 +226,7 @@ function allowUnverifiedBookingSms(): boolean {
   return process.env.ALLOW_UNVERIFIED_BOOKING_SMS === 'true';
 }
 
-export interface OwnerAlert {
-  /** True ONLY if the SMS really went out (or demo mode mock). Never claim the owner was told otherwise. */
-  notified: boolean;
-  reason: 'sent' | 'no_owner_phone' | 'sms_failed' | 'sms_error';
-  sms: SmsLog | null;
-}
-
-async function alertOwner(business: Business, body: string): Promise<OwnerAlert> {
-  if (!business.owner_phone) {
-    log.error('owner_alert.no_owner_phone', { business: business.id });
-    return { notified: false, reason: 'no_owner_phone', sms: null };
-  }
-  try {
-    const { sms, result: sent } = await sendAndLog({
-      business_id: business.id, to: business.owner_phone, body, kind: 'owner_alert',
-    });
-    // 'mock' means no Twilio configured: only counts as delivered in explicit demo mode.
-    const delivered = sent.status === 'sent' || (sent.status === 'mock' && process.env.DEMO_MODE === 'true');
-    if (!delivered) log.error('owner_alert.not_delivered', { business: business.id, status: sent.status, error: sent.error ?? null });
-    return { notified: delivered, reason: delivered ? 'sent' : 'sms_failed', sms };
-  } catch (err) {
-    log.error('owner_alert.error', { business: business.id, err });
-    return { notified: false, reason: 'sms_error', sms: null };
-  }
-}
+export type { OwnerAlert };
 
 /** What to tell a caller when we could NOT reach the owner. */
 function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolean): { message: string; data: Record<string, unknown> } {
@@ -470,9 +449,12 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     // operator policy explicitly allows texting an unverified one (ALLOW_UNVERIFIED_BOOKING_SMS).
     const textTo = verified ?? (allowUnverifiedBookingSms() ? booking.customer_phone : null);
     let sms: unknown | null = null;
+    let smsDelivered = false;
     if (textTo) {
       try {
-        sms = await sendConfirmation(booking.id, lang, { to: textTo });
+        const confirmation = await sendConfirmation(booking.id, lang, { to: textTo });
+        sms = confirmation;
+        smsDelivered = confirmation.sms.status === 'sent' || confirmation.sms.status === 'mock';
       } catch (err) {
         log.warn('confirmation.failed', { booking: booking.id, err });
       }
@@ -480,14 +462,14 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
 
     return {
       ok: true,
-      message: textTo
+      message: smsDelivered
         ? say(lang,
           `You're all set for ${whenPhrase(iso, lang, tz)}. I'm sending your confirmation text now.`,
           `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}. Le mando el texto de confirmación ahora.`)
         : say(lang,
           `You're all set for ${whenPhrase(iso, lang, tz)}.`,
           `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}.`),
-      data: { booking, sms_sent: sms != null },
+      data: { booking, sms_sent: smsDelivered, sms_blocked: sms != null && !smsDelivered },
     };
   } catch (err) {
     return toolFailure('create_booking', err, lang, say(lang,
@@ -548,10 +530,10 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
     // (`to` merely selects between those two.)
     const call = await resolveCall(business, args);
     const callerPhone = verifiedCaller(call, args) ?? '';
-    const key = (p: string) => p.replace(/\D/g, '').slice(-10);
+    const country = countryForBusiness(business);
     const wanted = str(args.to);
     const to = wanted && business.owner_phone
-      && (wanted.toLowerCase() === 'owner' || key(wanted) === key(business.owner_phone))
+      && (wanted.toLowerCase() === 'owner' || isOwnerNumber(business, wanted, country))
       ? business.owner_phone
       : callerPhone;
     if (!to) {
@@ -563,7 +545,7 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
       };
     }
 
-    const toOwner = Boolean(business.owner_phone) && key(to) === key(business.owner_phone as string);
+    const toOwner = Boolean(business.owner_phone) && isOwnerNumber(business, to, country);
     const { sms: log, result: sent, blocked } = await sendAndLog({
       business_id: business.id, to, body, kind: toOwner ? 'owner_alert' : 'other',
     });
@@ -574,6 +556,16 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
         message: say(lang,
           'This number has opted out of texts, so I cannot send one — let me read you the details instead.',
           'Este número pidió no recibir textos, así que no puedo mandarlo — mejor se los leo por teléfono.'),
+        data: { sms: log, blocked },
+      };
+    }
+
+    if (blocked === 'blocked_cap' || blocked === 'blocked_owner_unverified') {
+      return {
+        ok: false,
+        message: say(lang,
+          'I cannot send a text from here right now — let me read you the details instead.',
+          'No puedo mandar un texto desde aquí en este momento — mejor se los leo por teléfono.'),
         data: { sms: log, blocked },
       };
     }
@@ -656,7 +648,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     }
 
     // One call, one link: the library creates the link, records the deposit (cents) and texts it.
-    let sms: unknown | null = null;
+    let sms: SmsLog | null = null;
     let link: { id: string; url: string; amount_cents: number; mock: boolean } | null = null;
     try {
       const sent = await createAndSendPaymentLink({
@@ -671,6 +663,16 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     }
 
     const spoken = formatCents(amountCents);
+    if (sms && sms.status !== 'sent' && sms.status !== 'mock') {
+      // The link exists but the text was blocked (opt-out, plan cap, ...): never claim it is on its way.
+      return {
+        ok: false,
+        message: say(lang,
+          'I could not text that link from here — let me have the owner call you to take the deposit.',
+          'No pude mandar ese enlace por texto — voy a pedirle al dueño que le llame para el depósito.'),
+        data: { amount_cents: amountCents, sms_sent: false, blocked: sms.status },
+      };
+    }
     return {
       ok: true,
       message: say(lang,

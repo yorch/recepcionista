@@ -3,9 +3,9 @@
  * callers (voice tools, gratitude sweep). Calling these directly avoids an
  * authenticated HTTP hop to ourselves and guarantees ONE side effect per call.
  */
-import { findRecentSms, getBooking, getBusiness, updateBooking } from '@/lib/db';
+import { countryForBusiness, findRecentSms, getBooking, getBusiness, updateBooking } from '@/lib/db';
 import { confirmationSms, FOLLOWUP_NOTICE_RE, gratitudeSms, paymentLinkSms, type Lang } from '@/lib/messaging/templates';
-import { phoneKey } from '@/lib/format';
+import { sameNumber } from '@/lib/phone';
 import { sendAndLog } from '@/lib/messaging';
 import { createPaymentLink } from '@/lib/providers/stripe';
 import type { Business, Booking, SmsLog } from '@/lib/types';
@@ -52,7 +52,7 @@ export async function sendConfirmation(
     business_id: business.id, to, body, kind: 'confirmation', booking_id: booking.id,
   });
   const delivered = sms.status === 'sent' || sms.status === 'mock';
-  if (delivered && FOLLOWUP_NOTICE_RE.test(body) && phoneKey(to) && phoneKey(to) === phoneKey(booking.customer_phone)
+  if (delivered && FOLLOWUP_NOTICE_RE.test(body) && sameNumber(to, booking.customer_phone, countryForBusiness(business))
     && !booking.followup_consent_at) {
     await updateBooking(booking.id, { followup_consent_at: new Date().toISOString(), followup_consent_source: FOLLOWUP_CONSENT_SOURCE });
   }

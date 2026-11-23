@@ -13,7 +13,7 @@ export const uniq = (prefix: string) => `${prefix}-${run}-${++seq}`;
 
 /** Unique, valid North-American mobile number (+1 305 555-01xx style, 7 random digits). */
 export function phone(): string {
-  const n = String(1_000_000 + Math.floor(Math.random() * 8_999_999));
+  const n = String(2_000_000 + Math.floor(Math.random() * 7_999_999)); // exchange 2xx-9xx: a valid NANP number
   return `+1305${n}`;
 }
 
@@ -38,6 +38,8 @@ export interface TestBusinessOptions {
   hours?: Hours;
   agent_id?: string | null;
   owner_phone?: string | null;
+  /** Default true: the owner phone is verified. */
+  owner_verified?: boolean;
   name?: string;
 }
 
@@ -52,6 +54,11 @@ export async function newBusiness(opts: TestBusinessOptions = {}) {
     phone: phone(),
   });
   createdBusinesses.push(b.id);
+  // Owner alerts only go to a VERIFIED owner phone: fixtures model a business whose owner already verified it
+  // (pass `owner_verified: false` to test the unverified path).
+  if (opts.owner_phone !== null && opts.owner_verified !== false) {
+    await prisma.business.update({ where: { id: b.id }, data: { ownerPhoneVerifiedAt: new Date() } });
+  }
   if (opts.agent_id !== null) {
     const agent = opts.agent_id ?? uniq('agent');
     await prisma.business.update({ where: { id: b.id }, data: { agentId: agent } });

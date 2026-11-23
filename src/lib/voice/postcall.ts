@@ -14,8 +14,9 @@ import { appUrl } from '@/lib/providers/stripe';
 import { logger } from '@/lib/log';
 import {
   claimEvent, completeEvent, createCall, getBusiness, getBusinessByAgentId, getCall, getCallByConversationId, getCallBySid,
-  nowIso, prisma, releaseEvent, updateCall,
+  nowIso, prisma, recordCallSeconds, releaseEvent, updateCall,
 } from '@/lib/db';
+import { initiationAgentOverrides } from '@/lib/voice/initiation-config';
 import { disclosureSpokenIn } from '@/lib/kb/disclosure';
 import { generateTextSafe } from '@/lib/providers/llm';
 import type { Business, Call, Urgency } from '@/lib/types';
@@ -153,6 +154,7 @@ export async function registerPostCallWebhookOnAgent(
               post_call_webhook_id: webhookId,
               events: ['transcript'],
             },
+            ...initiationAgentOverrides(),
           },
         },
       }),
@@ -315,6 +317,19 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
   }
   try {
     const outcome = await storePostCall(body, conversationId);
+    // Usage metering: ONCE per conversation, because only the delivery that won the claim above gets here (retries are
+    // ignored as duplicates; a failed attempt released the claim before this point). Metadata-only (declined) calls
+    // still used minutes, so they count too. A metering failure never fails the webhook.
+    if (conversationId && outcome.status === 200 && 'call' in outcome.body && outcome.body.call) {
+      const c = outcome.body.call;
+      if (c.duration_sec && c.duration_sec > 0) {
+        try {
+          await recordCallSeconds(c.business_id, c.duration_sec);
+        } catch (err) {
+          log.warn('usage.record_failed', { call: c.id, business: c.business_id, err });
+        }
+      }
+    }
     if (conversationId) {
       if (outcome.status !== 200) await releaseEvent(CLAIM_SOURCE, conversationId);
       else await completeEvent(CLAIM_SOURCE, conversationId);

@@ -1,4 +1,6 @@
-/** Shared by the server-rendered amount and the client form. No 'use client' here. */
+import { formatCents } from '@/lib/money';
+
+/** Shared by the server-rendered amount and the client form: "$189.00" (one money formatter for the app). */
 export function formatMoney(cents: number): string {
-  return `$${(Math.round(cents) / 100).toFixed(2)}`;
+  return formatCents(cents, { fractionalAlways: true });
 }

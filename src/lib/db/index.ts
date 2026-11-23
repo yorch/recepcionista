@@ -13,7 +13,8 @@ import {
   type Interval, type SlotRejection,
 } from '@/lib/availability';
 import { phoneKey } from '@/lib/format';
-import { toE164 } from '@/lib/phone';
+import { defaultPhoneCountry, toE164 } from '@/lib/phone';
+import { countryForBusiness, phoneIdent } from './compliance';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
   Service, FAQ, BriefingStats, ConsentStatus, BillingStatus,
@@ -205,13 +206,13 @@ function bookingPatch(patch: Partial<Booking>) {
   return out;
 }
 
-function businessPatch(patch: Partial<Business>) {
+function businessPatch(patch: Partial<Business>, country: string = defaultPhoneCountry()) {
   const out: Record<string, unknown> = {};
   if (patch.name !== undefined) out.name = patch.name;
   if (patch.url !== undefined) out.url = patch.url;
-  if (patch.phone !== undefined) { out.phone = patch.phone; out.phoneKey = phoneKey(patch.phone); out.phoneE164 = toE164(patch.phone); }
+  if (patch.phone !== undefined) { out.phone = patch.phone; out.phoneKey = phoneKey(patch.phone); out.phoneE164 = toE164(patch.phone, country); }
   if (patch.timezone !== undefined && isValidTimeZone(patch.timezone)) out.timezone = patch.timezone;
-  if (patch.owner_phone !== undefined) { out.ownerPhone = patch.owner_phone; out.ownerPhoneE164 = toE164(patch.owner_phone); }
+  if (patch.owner_phone !== undefined) { out.ownerPhone = patch.owner_phone; out.ownerPhoneE164 = toE164(patch.owner_phone, country); }
   if (patch.owner_name !== undefined) out.ownerName = patch.owner_name;
   if (patch.hours !== undefined) out.hours = patch.hours;
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
@@ -307,11 +308,23 @@ export async function getBusinessByStripeCustomer(stripeCustomerId: string): Pro
   return row ? toBusiness(row) : null;
 }
 
-/** Indexed lookup on the normalized (last-10-digit) phone key — no table scan. */
-export async function getBusinessByPhone(phone: string): Promise<Business | null> {
+/**
+ * Tenant lookup by phone number: exact on E.164 first. Only a business row WITHOUT a stored E.164 (legacy) may be
+ * matched on the last-10-digit key, and only for a US/Canada number, so a +44 number never routes to a +1 business
+ * that shares its last ten digits.
+ */
+export async function getBusinessByPhone(phone: string, country: string = defaultPhoneCountry()): Promise<Business | null> {
+  const id = phoneIdent(phone, country);
+  if (id.e164) {
+    const exact = await prisma.business.findFirst({ where: { phoneE164: id.e164 }, orderBy: { createdAt: 'asc' } });
+    if (exact) return toBusiness(exact);
+    if (!id.nanp) return null;
+    const legacy = await prisma.business.findFirst({ where: { phoneE164: null, phoneKey: id.e164.slice(-10) }, orderBy: { createdAt: 'asc' } });
+    return legacy ? toBusiness(legacy) : null;
+  }
   const key = phoneKey(phone);
   if (!key) return null;
-  const row = await prisma.business.findFirst({ where: { phoneKey: key }, orderBy: { createdAt: 'asc' } });
+  const row = await prisma.business.findFirst({ where: { phoneE164: null, phoneKey: key }, orderBy: { createdAt: 'asc' } });
   return row ? toBusiness(row) : null;
 }
 
@@ -341,7 +354,18 @@ export async function createBusiness(
 }
 
 export async function updateBusiness(id: ID, patch: Partial<Business>): Promise<Business | null> {
-  const data = businessPatch(patch);
+  let country: string = defaultPhoneCountry();
+  let current: { phoneE164: string | null; ownerPhoneE164: string | null } | null = null;
+  if (patch.phone !== undefined || patch.owner_phone !== undefined) {
+    current = await prisma.business.findUnique({ where: { id }, select: { phoneE164: true, ownerPhoneE164: true } });
+    country = countryForBusiness({ phone_e164: current?.phoneE164 });
+  }
+  const data = businessPatch(patch, country);
+  // The owner phone is an alert destination only once the owner PROVED they control it (owner-phone verification).
+  // Any change through this generic path therefore drops the verification, unless it is the very same number.
+  if ('ownerPhone' in data && !(data.ownerPhoneE164 && data.ownerPhoneE164 === current?.ownerPhoneE164)) {
+    data.ownerPhoneVerifiedAt = null;
+  }
   if (Object.keys(data).length === 0) return getBusiness(id);
   try {
     const row = await prisma.business.update({ where: { id }, data });
@@ -388,6 +412,18 @@ export async function upsertKnowledgeBase(
   return toKnowledgeBase(row);
 }
 
+// ---------- phone dual-write ----------
+/**
+ * E.164 of a raw number for a business: numbers with a '+' need no country, others use the business's own country
+ * (the country of its phone number), else DEFAULT_PHONE_COUNTRY. Null when the number is not valid.
+ */
+export async function e164ForBusiness(raw: string | null | undefined, businessId: ID): Promise<string | null> {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  if (raw.trim().startsWith('+')) return toE164(raw);
+  const b = await prisma.business.findUnique({ where: { id: businessId }, select: { phoneE164: true } });
+  return toE164(raw, countryForBusiness({ phone_e164: b?.phoneE164 }));
+}
+
 // ---------- calls ----------
 export async function createCall(input: Partial<Call> & { business_id: ID }): Promise<Call> {
   const row = await prisma.call.create({
@@ -396,6 +432,7 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
       callSid: input.call_sid ?? null,
       conversationId: input.conversation_id ?? null,
       callerPhone: input.caller_phone ?? null,
+      callerE164: await e164ForBusiness(input.caller_phone, input.business_id),
       callerName: input.caller_name ?? null,
       startedAt: input.started_at ? new Date(input.started_at) : new Date(),
       endedAt: input.ended_at ? new Date(input.ended_at) : null,
@@ -426,6 +463,10 @@ export async function updateCall(id: ID, patch: Partial<Call>): Promise<Call | n
   if (Object.keys(data).length === 0) return getCall(id);
   // A recorded objection to recording/AI is permanent: nothing may move consent OUT of 'declined'
   // (not a late "disclosed" from post-call evidence, not a retry). Enforced here, in the write itself.
+  if ('callerPhone' in data) {
+    const owner = await prisma.call.findUnique({ where: { id }, select: { businessId: true } });
+    data.callerE164 = owner ? await e164ForBusiness(data.callerPhone as string | null, owner.businessId) : null;
+  }
   const consent: Record<string, unknown> = {};
   if ('consentStatus' in data) { consent.consentStatus = data.consentStatus; delete data.consentStatus; }
   if ('recordingDisclosed' in data) { consent.recordingDisclosed = data.recordingDisclosed; delete data.recordingDisclosed; }
@@ -626,6 +667,7 @@ export async function createBooking(
           callId: input.call_id ?? null,
           customerName: input.customer_name,
           customerPhone: input.customer_phone,
+          phoneE164: toE164(input.customer_phone, countryForBusiness({ phone_e164: biz.phoneE164 })),
           service: input.service,
           scheduledAt: start,
           durationMinutes: duration,
@@ -688,6 +730,10 @@ export async function getBooking(id: ID): Promise<Booking | null> {
 export async function updateBooking(id: ID, patch: Partial<Booking>): Promise<Booking | null> {
   const data = bookingPatch(patch);
   if (Object.keys(data).length === 0) return getBooking(id);
+  if ('customerPhone' in data) {
+    const owner = await prisma.booking.findUnique({ where: { id }, select: { businessId: true } });
+    data.phoneE164 = owner ? await e164ForBusiness(data.customerPhone as string, owner.businessId) : null;
+  }
   try {
     const row = await prisma.booking.update({ where: { id }, data });
     log.debug('booking.updated', { id, fields: Object.keys(data) });
@@ -789,11 +835,12 @@ export async function getLatestBriefing(businessId: ID): Promise<Briefing | null
 }
 
 // ---------- sms log ----------
-export async function logSms(entry: Omit<SmsLog, 'id' | 'created_at'>): Promise<SmsLog> {
+export async function logSms(entry: Omit<SmsLog, 'id' | 'created_at'>, opts: { country?: string } = {}): Promise<SmsLog> {
   const row = await prisma.smsLog.create({
     data: {
       businessId: entry.business_id,
       toPhone: entry.to_phone,
+      toE164: opts.country ? toE164(entry.to_phone, opts.country) : await e164ForBusiness(entry.to_phone, entry.business_id),
       body: entry.body,
       kind: entry.kind,
       bookingId: entry.booking_id ?? null,
@@ -822,7 +869,7 @@ export async function listSms(businessId?: ID): Promise<SmsLog[]> {
 /** Sends inside a recent window — used for confirmation de-duplication. */
 export async function findRecentSms(
   businessId: ID,
-  opts: { kind: string; bookingId?: string | null; toLast10?: string; withinMs: number },
+  opts: { kind: string; bookingId?: string | null; toE164?: string; withinMs: number },
 ): Promise<SmsLog | null> {
   const since = new Date(Date.now() - opts.withinMs);
   const rows = await prisma.smsLog.findMany({
@@ -834,8 +881,8 @@ export async function findRecentSms(
     },
     orderBy: { createdAt: 'desc' },
   });
-  const match = opts.toLast10
-    ? rows.find((r) => r.toPhone.replace(/\D/g, '').endsWith(opts.toLast10 as string))
+  const match = opts.toE164
+    ? rows.find((r) => (r.toE164 ?? toE164(r.toPhone)) === opts.toE164)
     : rows[0];
   return match ? toSms(match) : null;
 }

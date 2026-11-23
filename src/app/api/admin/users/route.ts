@@ -1,7 +1,8 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
-import { createUser, EmailTakenError, getBusiness } from '@/lib/db';
+import { createUser, EmailTakenError, getBusiness, recordAudit } from '@/lib/db';
+import { auditIp } from '@/lib/account-flows';
 import { hashPassword } from '@/lib/password';
 import { validateEmail, validateNewPassword } from '@/lib/user-policy';
 import type { User } from '@/lib/types';
@@ -28,6 +29,12 @@ export async function POST(req: Request) {
       password_hash: await hashPassword(body.password as string),
       role: body.role,
       business_id: body.business_id,
+      email_verified: true, // the admin vouches for the address; the person can still change nothing without the password
+    });
+    await recordAudit({
+      actor_kind: auth.principal.kind === 'admin' && auth.principal.user ? 'user' : 'admin_token',
+      actor_user_id: auth.principal.kind === 'admin' ? auth.principal.user?.id ?? null : null,
+      business_id: body.business_id, action: 'user.create', target: `user:${user.id}`, ip: auditIp(req), meta: { role: body.role },
     });
     return ok<User>(user, 201); // User has no password_hash
   } catch (err) {

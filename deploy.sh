@@ -72,6 +72,15 @@ if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -z "${TWILIO_AUTH_TOKEN:-}" ]]; then
   die "TWILIO_AUTH_TOKEN is unset in .env but TWILIO_ACCOUNT_SID is set."
 fi
 
+# Subscription billing (docs/billing.md): with BILLING_ENFORCED=true every new account must have a plan, so a missing
+# key/price/webhook secret would lock customers out of checkout (or let subscription events be forged). compose passes
+# these through env_file, so the check lives here only.
+if [[ "${BILLING_ENFORCED:-}" == "true" ]]; then
+  for v in STRIPE_SECRET_KEY STRIPE_PRICE_ID STRIPE_BILLING_WEBHOOK_SECRET; do
+    [[ -n "${!v:-}" ]] || die "${v} is unset in .env but BILLING_ENFORCED=true. See docs/billing.md."
+  done
+fi
+
 # The proxy's network is host-level infrastructure, not something this stack
 # owns. Create it once rather than failing on a fresh host.
 if ! docker network inspect traefik >/dev/null 2>&1; then

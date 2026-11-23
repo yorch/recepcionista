@@ -22,7 +22,7 @@ Not legal advice.
 4. **Re-provision every business** (`POST /api/businesses/:id/provision`, admin token) so each ElevenLabs agent gets
    the current first message (disclosure), prompt and tool definitions (the tool secret header is refreshed on
    existing tools). The first provision of a workspace returns the post-call webhook signing secret ONCE: store it
-   as `ELEVENLABS_WEBHOOK_SECRET`, redeploy, re-run `verify:deploy`.
+   as `ELEVENLABS_WEBHOOK_SECRET`, redeploy, re-run `verify:deploy`. Then do section 6 (initiation webhook, owner phones).
 5. **Twilio inbound SMS URL.** Point the number's "A message comes in" webhook (HTTP POST) at
    `https://<APP_URL>/api/sms/inbound`. A number has one inbound URL; STOP/START/HELP and gratitude replies all go
    through it. The voice side is the ElevenLabs native Twilio integration (the number is imported into
@@ -103,3 +103,46 @@ on `/login` and `/pay/*`; fix the deployment (app or Traefik middleware) if they
       STOP auto-reply.
 - [ ] **LLM provider:** confirm no-training / zero-retention API settings.
 - [ ] Legal-hold, tax and insurance record requirements reconciled with `retention_days`.
+
+## 6. Initiation webhook, owner phones and usage caps
+
+**ElevenLabs conversation-initiation webhook** (`POST /api/voice/initiation`). It is what records the disclosure evidence
+on the native Twilio path and enforces the call cap. Request/response shape is VERIFIED against the ElevenLabs
+"Twilio personalization" docs; those docs configure it only in the UI. Provisioning (`createOrUpdateAgent`, and the
+post-call registration, which writes the same `platform_settings.overrides` so neither undoes the other) tries these
+API calls, which are UNVERIFIED because the API reference could not be read when this was written:
+
+- `PATCH /v1/convai/settings` with `conversation_initiation_client_data_webhook: { url, request_headers }`;
+- `PATCH /v1/convai/agents/{id}` with `platform_settings.overrides.enable_conversation_initiation_client_data_from_webhook: true`
+  and `platform_settings.overrides.conversation_config_override.agent.first_message: true`.
+
+A rejected call only logs `initiation.workspace_failed` / `initiation.agent_failed`. **Check it by hand** after
+provisioning, and do these in the UI if the API route did not take effect (or set `ELEVENLABS_INITIATION_WEBHOOK=off`):
+
+1. ElevenAgents settings: set the conversation-initiation webhook URL to `https://<APP_URL>/api/voice/initiation`, add a
+   workspace secret holding `ELEVENLABS_TOOL_SECRET`, and send it in the header `x-recepcionista-tool-secret`.
+2. Each agent > Security: enable fetching conversation-initiation data for inbound Twilio calls and allow overriding the
+   first message.
+3. Verify: place a call; before it ends the `calls` row exists with `consent_status='disclosed'`, `caller_e164` set, and
+   exactly one row for the call (the initiation, tools and post-call all share it). A request without the header must be 401:
+   `curl -s -o /dev/null -w '%{http_code}' -X POST https://<APP_URL>/api/voice/initiation -d '{}'`.
+   If the platform ignores the webhook the agent still opens with the provisioned first message (disclosure included), but
+   the row stays `unknown` until the post-call evidence arrives.
+
+**Owner phone verification rollout.** Alerts are only sent to a verified owner phone. After deploying:
+1. Set `OWNER_PHONE_GRANDFATHER=true` for the transition (existing numbers keep receiving alerts).
+2. Ask each owner to verify their number (the UI calls `POST /api/businesses/:id/owner-phone/verify/start {phone}` then
+   `.../confirm {phone, code, challenge}`).
+3. Find the stragglers: `SELECT id, name FROM businesses WHERE owner_phone IS NOT NULL AND owner_phone_verified_at IS NULL;`
+4. Unset `OWNER_PHONE_GRANDFATHER` and redeploy. From then on unverified numbers get no alerts (log
+   `owner_alert.owner_unverified`, sms_log status `blocked_owner_unverified`, and the voice tool tells the caller the owner was not notified).
+Demo installs: keep `OWNER_PHONE_GRANDFATHER=true`.
+
+**Usage caps.** `BILLING_ENFORCED=true` turns plan caps on. Over the SMS cap customer texts are logged `blocked_cap` (owner alerts,
+STOP/HELP replies and verification codes still go out and are counted). Over the call-minutes cap `/api/voice/initiation` and
+`/api/voice/incoming` give the caller the out-of-service line and mark the call `handed_off` with `flagged_reason='out_of_service:<reason>'`;
+search the logs for `call.refused`. Call time is added once per conversation by the post-call webhook (a conversation whose
+post-call never arrives is not metered).
+
+**Legacy bookings** (made before follow-up consent was recorded) are never texted for gratitude; a customer's own `YES`/`SI`/`START`
+to the business number opts them in. `POST /api/gratitude/run` reports `skipped_no_consent` and the other skip reasons.

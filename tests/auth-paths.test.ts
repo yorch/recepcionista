@@ -3,12 +3,17 @@ import { isPublicPath, normalizePath, clientKey } from '../src/lib/auth';
 
 describe('isPublicPath', () => {
   test('known public paths', () => {
-    for (const p of ['/', '/login', '/api/health', '/api/auth/login', '/api/voice/tools/create_booking', '/pay/bk_1', '/favicon.ico', '/_next/static/chunk.js', '/api/pay/mock-complete']) {
+    for (const p of ['/', '/login', '/api/health', '/api/auth/login', '/api/voice/tools/create_booking', '/pay/bk_1', '/favicon.ico', '/_next/static/chunk.js', '/api/pay/mock-complete',
+      '/signup', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite', '/login/mfa',
+      '/api/auth/signup', '/api/auth/verify-email', '/api/auth/resend-verification', '/api/auth/forgot-password', '/api/auth/reset-password',
+      '/api/auth/accept-invite', '/api/auth/mfa', '/api/auth/logout']) {
       expect(isPublicPath(p)).toBe(true);
     }
   });
   test('agent-prompt and admin APIs are not public', () => {
-    for (const p of ['/api/voice/agent-prompt', '/api/businesses', '/api/sms/send', '/dashboard', '/onboarding', '/audio/briefing-x-2026-01-01.mp3', '/api/admin/retention']) {
+    for (const p of ['/api/voice/agent-prompt', '/api/businesses', '/api/sms/send', '/dashboard', '/onboarding', '/audio/briefing-x-2026-01-01.mp3', '/api/admin/retention',
+      '/api/auth/2fa/enroll', '/api/auth/2fa/confirm', '/api/auth/2fa/disable', '/api/auth/sessions', '/api/auth/revoke-admin-sessions', '/api/auth/me',
+      '/api/team', '/api/team/invite', '/api/team/users/x', '/api/team/audit', '/dashboard/team', '/dashboard/security', '/signup/x', '/verify-email/x']) {
       expect(isPublicPath(p)).toBe(false);
     }
   });

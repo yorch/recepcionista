@@ -152,7 +152,7 @@ export interface SmsLog {
   /** Which booking this message belongs to — makes confirmation dedupe exact. */
   booking_id?: ID | null;
   provider_id?: string | null;
-  status: 'queued' | 'sent' | 'failed' | 'mock' | 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent';
+  status: 'queued' | 'sent' | 'failed' | 'mock' | 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent' | 'blocked_cap' | 'blocked_owner_unverified';
   /** Why this text was allowed, e.g. 'transactional_booking' | 'caller_initiated' | 'express_opt_in' | 'owner_alert'. */
   consent_basis?: string | null;
   created_at: string;

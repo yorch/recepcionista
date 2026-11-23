@@ -1,0 +1,81 @@
+import { NextResponse } from 'next/server';
+import { checkSameOrigin } from '@/lib/auth';
+import {
+  afterResponse, allowPerEmail, auditIp, limitIp, sendSignupExistsNotice, sendVerificationEmail,
+} from '@/lib/account-flows';
+import { recordAudit } from '@/lib/db';
+import { emailConfigured } from '@/lib/email';
+import { accountId } from '@/lib/login-throttle';
+import { hashPassword } from '@/lib/password';
+import { rateLimit } from '@/lib/ratelimit';
+import { createSignupAccount, parseSignupBody, takeGlobalSignupSlot, turnstileEnabled, verifyTurnstile } from '@/lib/signup';
+import { logger } from '@/lib/log';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
+const log = logger('auth/signup');
+
+/** The one success answer: identical for a new address, an existing one and a bot that filled the honeypot. */
+const accepted = () => NextResponse.json({ ok: true, data: { status: 'verification_sent' } });
+const fail = (status: number, error: string) => NextResponse.json({ ok: false, error }, { status });
+
+/**
+ * Open self-signup: `{ email, password, business_name }` -> business (billing_status 'none', nothing paid provisioned)
+ * + owner (email unverified) + verification email. Never reveals whether the address already has an account
+ * (an existing one gets a "someone tried to sign up" notice, at most once an hour). No session is issued: the
+ * new owner signs in after verifying (a cookie here would tell new from existing addresses apart).
+ *
+ * Abuse controls: per-IP and per-address Postgres limits, a honeypot field, Cloudflare Turnstile when
+ * TURNSTILE_SECRET_KEY is set (fails closed), and a platform-wide hourly cap (SIGNUP_MAX_PER_HOUR, default 30).
+ */
+export async function POST(req: Request) {
+  if (!checkSameOrigin(req.headers)) return fail(403, 'cross-site request refused');
+  const limited = await limitIp(req, 'auth/signup', 5);
+  if (limited) return limited;
+
+  const body = await req.json().catch(() => null);
+  const input = parseSignupBody(body);
+  if (!input.ok) return fail(422, input.error);
+  if (input.honeypot) {
+    log.warn('honeypot', {});
+    return accepted(); // pretend; a bot learns nothing and nothing is created
+  }
+
+  if (turnstileEnabled() && !(await verifyTurnstile(input.turnstileToken, auditIp(req)))) {
+    return fail(400, 'captcha_failed');
+  }
+  if (!(await allowPerEmail('auth/signup', input.email, 3))) return fail(429, 'too many attempts, try again later');
+  if (!(await takeGlobalSignupSlot())) {
+    log.warn('global_cap_reached', {});
+    return NextResponse.json({ ok: false, error: 'signups are temporarily unavailable, try again later' }, { status: 429, headers: { 'retry-after': '600' } });
+  }
+  // Same answer for every address, so a missing mail provider is not an existence oracle: refuse BEFORE creating anything.
+  if (!emailConfigured()) {
+    log.error('email_not_configured', {});
+    return fail(503, 'signup is temporarily unavailable');
+  }
+
+  try {
+    const passwordHash = await hashPassword(input.password); // always: same CPU cost for new and existing addresses
+    const created = await createSignupAccount({ email: input.email, passwordHash, businessName: input.businessName });
+    if (!created) {
+      // Existing address: no account is touched. One notice per hour at most.
+      const may = await rateLimit(`auth/signup:notice:${accountId(input.email)}`, 1, 60 * 60_000);
+      await afterResponse('signup.exists_notice', async () => {
+        if (may.allowed) await sendSignupExistsNotice(input.email);
+      });
+      return accepted();
+    }
+    await recordAudit({
+      actor_kind: 'user', actor_user_id: created.user.id, business_id: created.businessId, action: 'auth.signup',
+      target: `user:${created.user.id}`, ip: auditIp(req),
+    });
+    await afterResponse('signup.verification', () => sendVerificationEmail(created.user));
+    return accepted();
+  } catch (err) {
+    log.error('error', { err });
+    return fail(503, 'signup is temporarily unavailable');
+  }
+}
+

@@ -1,6 +1,9 @@
 'use client';
 
 import { useState } from 'react';
+import { LogoMark } from '@/components/ui/logo';
+import { TextField } from '@/components/ui/field';
+import { Button } from '@/components/ui/button';
 import { formatMoney } from './money';
 import { PaymentReceived } from './received';
 
@@ -18,18 +21,35 @@ export interface CheckoutProps {
   bookingId?: string;
 }
 
+type Errors = Partial<Record<'card' | 'exp' | 'cvc' | 'zip', string>>;
+
+function validate(card: string, exp: string, cvc: string, zip: string): Errors {
+  const e: Errors = {};
+  if (card.replace(/\D/g, '').length < 13) e.card = 'Enter the full card number.';
+  const m = /^(\d{2})\s*\/?\s*(\d{2})$/.exec(exp.trim());
+  if (!m || Number(m[1]) < 1 || Number(m[1]) > 12) e.exp = 'Use MM / YY.';
+  if (!/^\d{3,4}$/.test(cvc.trim())) e.cvc = '3 or 4 digits.';
+  if (zip.trim().length < 3) e.zip = 'Enter your ZIP code.';
+  return e;
+}
+
 export function Checkout({ reference, amountCents, label, businessName, bookingId }: CheckoutProps) {
-  const [card, setCard] = useState('4242 4242 4242 4242');
-  const [exp, setExp] = useState('12 / 29');
-  const [cvc, setCvc] = useState('123');
-  const [zip, setZip] = useState('33131');
+  const [card, setCard] = useState('');
+  const [exp, setExp] = useState('');
+  const [cvc, setCvc] = useState('');
+  const [zip, setZip] = useState('');
   const [state, setState] = useState<'idle' | 'paying' | 'paid'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Errors>({});
+  const [paidAt, setPaidAt] = useState<string | undefined>();
 
   const amount = formatMoney(amountCents);
 
   async function pay(e: React.FormEvent) {
     e.preventDefault();
+    const found = validate(card, exp, cvc, zip);
+    setErrors(found);
+    if (Object.keys(found).length) return;
     setState('paying');
     setError(null);
     // Short beat so the button press reads as a real network call.
@@ -47,12 +67,13 @@ export function Checkout({ reference, amountCents, label, businessName, bookingI
           return;
         }
       } catch {
-        setError('Network error. Please try again.');
+        setError('Network error. Please check your connection and try again.');
         setState('idle');
         return;
       }
     }
     await beat;
+    setPaidAt(new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date()));
     setState('paid');
   }
 
@@ -63,114 +84,62 @@ export function Checkout({ reference, amountCents, label, businessName, bookingI
         amountCents={amountCents}
         label={label}
         businessName={businessName}
-        last4={card.replace(/\s/g, '').slice(-4)}
+        last4={card.replace(/\D/g, '').slice(-4)}
+        paidAt={paidAt}
       />
     );
   }
 
   return (
-    <main className="mx-auto w-full max-w-md px-5 pb-12 pt-8">
-      <header className="flex items-center justify-between">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#ff6b35] text-sm font-bold text-[#150800]">
-            {businessName.slice(0, 1)}
-          </span>
+    <main id="main-content" className="mx-auto w-full max-w-md px-4 pb-12 pt-6 sm:px-5 sm:pt-8">
+      <header className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <LogoMark letter={businessName.slice(0, 1).toUpperCase()} />
           <div className="min-w-0">
-            <p className="truncate text-[13px] font-semibold leading-tight text-white">{businessName}</p>
-            <p className="text-[10.5px] leading-tight text-[#6b7b91]">Secure payment</p>
+            <p className="truncate text-[14px] font-semibold leading-tight text-white">{businessName}</p>
+            <p className="text-xs leading-tight text-dim">Secure payment</p>
           </div>
         </div>
-        <span className="shrink-0 rounded-full border border-[#2a3546] px-2 py-0.5 text-[9.5px] font-medium uppercase tracking-wider text-[#7b8b9f]">
-          Test mode
+        <span className="shrink-0 rounded-full border border-line-3 px-2.5 py-1 text-xs font-medium uppercase tracking-wider text-mute">
+          Demo checkout
         </span>
       </header>
 
-      <section className="mt-7 rounded-2xl border border-[#1f2937] bg-[#0d1117] p-5">
-        <p className="text-[10.5px] uppercase tracking-[0.12em] text-[#6b7b91]">{label}</p>
-        <p className="mt-1.5 font-mono text-[34px] leading-none tracking-tight text-white">{amount}</p>
-        <p className="mt-3 flex items-center gap-1.5 text-[11.5px] text-[#7b8b9f]">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#3ddc97]" />
-          Payable today to confirm your appointment
+      <section aria-labelledby="amount-label" className="mt-7 rounded-2xl border border-line bg-panel p-5">
+        <h1 id="amount-label" className="text-xs uppercase tracking-[0.12em] text-dim">{label}</h1>
+        <p className="mt-1.5 font-mono text-[34px] leading-none tracking-tight text-white" aria-label={`Amount due ${amount}`}>{amount}</p>
+        <p className="mt-3 flex items-center gap-1.5 text-xs text-mute">
+          <span aria-hidden="true" className="inline-block h-1.5 w-1.5 rounded-full bg-mint" />
+          Payable today to confirm your appointment with {businessName}
         </p>
       </section>
 
-      <form onSubmit={pay} className="mt-5 space-y-3">
-        <Field
-          label="Card number"
-          value={card}
-          onChange={setCard}
-          mono
-          inputMode="numeric"
-          autoComplete="cc-number"
-          placeholder="4242 4242 4242 4242"
-        />
+      <form onSubmit={pay} className="mt-5 space-y-3.5" noValidate aria-describedby="demo-note">
+        <TextField label="Card number" value={card} onChange={(e) => setCard(e.target.value)} mono inputMode="numeric"
+          autoComplete="cc-number" placeholder="1234 1234 1234 1234" error={errors.card} />
         <div className="grid grid-cols-2 gap-3">
-          <Field
-            label="Expiry"
-            value={exp}
-            onChange={setExp}
-            mono
-            inputMode="numeric"
-            autoComplete="cc-exp"
-            placeholder="MM / YY"
-          />
-          <Field
-            label="CVC"
-            value={cvc}
-            onChange={setCvc}
-            mono
-            inputMode="numeric"
-            autoComplete="cc-csc"
-            placeholder="123"
-          />
+          <TextField label="Expiry" value={exp} onChange={(e) => setExp(e.target.value)} mono inputMode="numeric"
+            autoComplete="cc-exp" placeholder="MM / YY" error={errors.exp} />
+          <TextField label="CVC" value={cvc} onChange={(e) => setCvc(e.target.value)} mono inputMode="numeric"
+            autoComplete="cc-csc" placeholder="123" error={errors.cvc} />
         </div>
-        <Field
-          label="ZIP code"
-          value={zip}
-          onChange={setZip}
-          mono
-          inputMode="numeric"
-          autoComplete="postal-code"
-          placeholder="33131"
-        />
+        <TextField label="ZIP code" value={zip} onChange={(e) => setZip(e.target.value)} mono inputMode="numeric"
+          autoComplete="postal-code" placeholder="33131" error={errors.zip} />
 
-        <button
-          type="submit"
-          disabled={state === 'paying'}
-          className="mt-2 w-full rounded-xl bg-[#ff6b35] py-3.5 text-[15px] font-semibold text-[#150800] shadow-[0_10px_30px_-12px_rgba(255,107,53,.9)] transition-colors hover:bg-[#ff8558] disabled:opacity-60"
-        >
+        <Button type="submit" disabled={state === 'paying'} className="mt-2 w-full py-3.5 text-[15px] font-semibold">
           {state === 'paying' ? 'Processing…' : `Pay ${amount}`}
-        </button>
-        {error ? <p role="alert" className="text-center text-[12px] text-[#f2c86b]">{error}</p> : null}
+        </Button>
+        <div aria-live="polite">
+          {error ? <p role="alert" className="rounded-xl border border-warn-line bg-warn-bg px-3.5 py-2.5 text-center text-[13px] text-warn">{error}</p> : null}
+        </div>
       </form>
 
-      <div className="mt-5 flex items-center justify-center gap-1.5 text-[10.5px] text-[#5a6b80]">
-        <span>🔒</span>
-        <span>Encrypted · This is a demonstration checkout, no card is charged</span>
-      </div>
+      <p id="demo-note" className="mt-5 flex items-center justify-center gap-1.5 text-center text-xs text-dim">
+        <span aria-hidden="true">🔒</span>
+        <span>This is a demonstration checkout. No card is charged.</span>
+      </p>
 
-      <p className="mt-3 text-center font-mono text-[10px] text-[#3f4c5e]">Ref {reference}</p>
+      <p className="mt-3 text-center font-mono text-xs text-dim">Ref {reference}</p>
     </main>
-  );
-}
-
-function Field({
-  label, value, onChange, mono, ...rest
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  mono?: boolean;
-} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'>) {
-  return (
-    <label className="block">
-      <span className="text-[10px] uppercase tracking-[0.12em] text-[#6b7b91]">{label}</span>
-      <input
-        {...rest}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={`mt-1 w-full rounded-xl border border-[#26313f] bg-[#080b10] px-3.5 py-3 text-[15px] text-white outline-none transition-colors focus:border-[#ff6b35]/70 ${mono ? 'font-mono tracking-wide' : ''}`}
-      />
-    </label>
   );
 }

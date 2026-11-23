@@ -62,6 +62,11 @@ export function pairKey(account: string, req: Request): string {
   return `auth/login:pair:${account}:${clientKey(req)}`;
 }
 
+/** Same backoff, separate counters, for the second login step (6-digit codes / recovery codes). */
+export function mfaPairKey(userId: string, req: Request): string {
+  return `auth/mfa:pair:${accountId(userId)}:${clientKey(req)}`;
+}
+
 /** Layer 1. Counts every attempt from this client; call before touching credentials. */
 export async function checkClientAttempts(req: Request): Promise<Verdict> {
   const ip = clientKey(req);

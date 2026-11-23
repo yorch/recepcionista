@@ -1,32 +1,20 @@
 'use client';
-import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import type { ApiResult, Briefing } from '@/lib/types';
+import { useApi } from '@/hooks/use-api';
+import type { Briefing } from '@/lib/types';
 
 export function BriefingActions({ businessId }: { businessId: string }) {
   const router = useRouter();
-  const [busy, setBusy] = useState(false);
+  const { busy, call } = useApi();
 
   async function generate() {
-    setBusy(true);
-    const t = toast.loading('Writing your evening note…');
-    try {
-      const res = await fetch('/api/briefings/generate', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ business_id: businessId }),
-      });
-      const json = (await res.json()) as ApiResult<Briefing>;
-      if (!json.ok) throw new Error(json.error);
-      toast.success('Briefing ready', { id: t });
-      router.refresh();
-    } catch (err) {
-      toast.error((err as Error).message, { id: t });
-    } finally {
-      setBusy(false);
-    }
+    const data = await call<Briefing>(
+      '/api/briefings/generate',
+      { body: { business_id: businessId } },
+      { loading: 'Writing your evening note…', success: 'Briefing ready' },
+    );
+    if (data) router.refresh();
   }
 
   return (

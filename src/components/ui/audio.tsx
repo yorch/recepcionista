@@ -17,21 +17,23 @@ export function VoicePlayer({
     const el = ref.current;
     if (!el) return;
     if (playing) el.pause();
-    else void el.play();
+    else el.play().catch(() => setFailedSrc(src ?? null)); // autoplay policy / decode error: show "audio unavailable"
   };
 
   return (
-    <div className={cn('rounded-2xl border border-[#1f2937] bg-[#101720] p-4', className)}>
+    <div className={cn('rounded-2xl border border-line bg-[#101720] p-4', className)}>
       <div className="flex items-center gap-4">
         <button
+          type="button"
           onClick={toggle}
           disabled={missing}
-          aria-label={playing ? 'Pause' : 'Play'}
+          aria-label={`${playing ? 'Pause' : 'Play'}: ${label}`}
+          aria-pressed={playing}
           className={cn(
             'grid h-11 w-11 shrink-0 place-items-center rounded-full transition',
             missing
-              ? 'bg-[#1b232e] text-[#5a6b80]'
-              : 'bg-[#ff6b35] text-[#150800] hover:bg-[#ff8558]',
+              ? 'bg-[#1b232e] text-dim'
+              : 'bg-brand text-on-brand hover:bg-brand-hover',
           )}
         >
           {playing ? (
@@ -48,23 +50,31 @@ export function VoicePlayer({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-3">
-            <p className="truncate text-xs font-medium text-[#cbd7e6]">{label}</p>
-            <span className="shrink-0 text-[11px] tabular-nums text-[#6b7b91]">
-              {missing ? 'audio pending' : playing ? 'playing' : 'voice note'}
+            <p className="truncate text-xs font-medium text-soft">{label}</p>
+            <span className="shrink-0 text-xs tabular-nums text-dim">
+              {!src ? 'audio pending' : missing ? 'audio unavailable' : playing ? 'playing' : 'voice note'}
             </span>
           </div>
-          <div className="mt-2 flex h-8 items-center gap-[3px]">
+          <div
+            role="progressbar"
+            aria-label={`Playback progress, ${label}`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(progress * 100)}
+            className="mt-2 flex h-8 items-center gap-[3px]"
+          >
             {Array.from({ length: bars }).map((_, i) => {
               const seed = Math.abs(Math.sin(i * 12.9898) * 43758.5453) % 1;
-              const h = 20 + seed * 80;
+              const h = Math.round(20 + seed * 80);
               const active = progress * bars > i;
               return (
                 <span
                   key={i}
+                  aria-hidden="true"
                   className={cn(
                     'w-full rounded-full transition-colors',
                     playing && active ? 'bar' : '',
-                    active ? 'bg-[#ff6b35]' : 'bg-[#24303f]',
+                    active ? 'bg-brand' : 'bg-[#24303f]',
                   )}
                   style={{
                     height: `${h}%`,

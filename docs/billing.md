@@ -1,0 +1,148 @@
+# Billing (Stripe subscriptions)
+
+Open self-signup, paid access: a new account must start a **Stripe subscription with a free trial and a card on file**
+before any paid resource (Twilio number, ElevenLabs agent) is provisioned. One monthly price, with monthly usage caps for
+texts and call minutes.
+
+Deposit payments (`/api/payments/webhook`, `STRIPE_WEBHOOK_SECRET`) are a separate feature and are untouched.
+
+## How it works
+
+| Piece | Where |
+| --- | --- |
+| Checkout / portal / status | `POST /api/billing/checkout`, `POST /api/billing/portal`, `GET /api/billing/status` |
+| Stripe webhook (public, signed) | `POST /api/billing/webhook`, secret `STRIPE_BILLING_WEBHOOK_SECRET` |
+| Admin comp / grandfather | `POST /api/admin/billing` |
+| Provisioning gate | `src/lib/billing/gate.ts` (`assertProvisioningAllowed`), used by `/api/businesses/[id]/provision` |
+| Dashboard | `/dashboard/billing`, banner `src/components/dashboard/billing-banner.tsx` |
+| State on `businesses` | `billing_status`, `plan`, `stripe_customer_id`, `stripe_subscription_id`, `trial_ends_at`, `current_period_end`, `cancel_at_period_end`, `past_due_since`, cap overrides |
+
+Status mapping (Stripe subscription status to `billing_status`): `trialing`, `active`, `past_due`, `unpaid`, `canceled` map one to
+one; `incomplete` / `incomplete_expired` become `none`; `paused` becomes `unpaid`; anything unknown becomes `none` (fail closed).
+
+Service rules (Phase 1, `src/lib/db/usage.ts`): `trialing` and `active` are allowed; `past_due` is allowed for
+`BILLING_PAST_DUE_GRACE_DAYS` (default 5) after it first became past due; everything else is refused.
+
+**Nothing is refused unless `BILLING_ENFORCED=true`.** Demo and legacy tenants, and local development, keep working exactly as before.
+
+Checkout rules: owner or admin only, the account email must be verified (admins exempt), a business that already used a trial
+gets no second one, an already-subscribed business gets 409 (use the portal). Cookie requests are same-origin checked and rate limited.
+
+### Webhook behaviour
+
+- Signature: `Stripe-Signature` (`t=`, one or more `v1=`), HMAC-SHA256 of `t.body`, 5 minute tolerance. Unset secret answers 503, except
+  `ALLOW_INSECURE_DEV=true` outside production.
+- Idempotent: `claimEvent('stripe-billing', event.id)`, `completeEvent` on success, `releaseEvent` on failure (Stripe retries then work).
+- Events handled: `checkout.session.completed` (subscription mode only), `customer.subscription.created|updated|deleted|trial_will_end`,
+  `invoice.paid`, `invoice.payment_failed`. Everything else answers 200 and is ignored.
+- The business is found by `stripe_customer_id`, or by `client_reference_id` / subscription `metadata.business_id` for the first event.
+  A business that already has a different customer id, or a customer id owned by another business, refuses the event (200, audited as
+  `billing.webhook_refused`). A late event about an older, replaced subscription is ignored.
+- Owners are emailed (best effort) on payment failure, trial ending and cancellation.
+
+## Rollout
+
+### 1. Stripe product and price (test mode first)
+
+1. Dashboard > Product catalogue > Add product (for example "Recepcionista"), recurring price, monthly, your currency.
+2. Copy the **price id** (`price_...`) into `STRIPE_PRICE_ID`. The trial is set per Checkout Session from `BILLING_TRIAL_DAYS`, so do not
+   configure a trial on the price.
+
+### 2. Webhook endpoint
+
+Developers > Webhooks > Add endpoint: `https://<DOMAIN>/api/billing/webhook`. Events to send:
+
+```
+checkout.session.completed
+customer.subscription.created
+customer.subscription.updated
+customer.subscription.deleted
+customer.subscription.trial_will_end
+invoice.paid
+invoice.payment_failed
+```
+
+Copy the signing secret (`whsec_...`) into `STRIPE_BILLING_WEBHOOK_SECRET`. It is a different secret from `STRIPE_WEBHOOK_SECRET`
+(deposits); do not reuse it.
+
+### 3. Customer Portal
+
+Settings > Billing > Customer portal: enable it, then allow customers to update payment methods, view invoices and **cancel subscriptions**
+(cancel at end of period is recommended). Leave plan switching off unless you add more prices. Set the default return link to
+`https://<DOMAIN>/dashboard/billing`. Without a saved portal configuration Stripe refuses to create portal sessions (the route answers 502).
+
+### 4. Environment
+
+| Variable | Notes |
+| --- | --- |
+| `STRIPE_SECRET_KEY` | `sk_test_...` until you have gone live. Shared with deposit links. |
+| `STRIPE_PRICE_ID` | recurring monthly price |
+| `STRIPE_BILLING_WEBHOOK_SECRET` | billing endpoint signing secret |
+| `BILLING_TRIAL_DAYS` | 0-90, default 7 |
+| `BILLING_ENFORCED` | exactly `true` to start refusing; leave unset until step 6 |
+| `BILLING_PAST_DUE_GRACE_DAYS` | default 5 |
+| `PLAN_SMS_CAP`, `PLAN_CALL_MINUTES_CAP` | default monthly caps (500 texts, 300 minutes); per-business overrides win |
+| `BILLING_PLAN_NAME` | label stored on subscribed businesses, default `standard` |
+| `BILLING_ALLOW_PROMO_CODES` | `true` shows the promotion code box in Checkout |
+| `APP_URL` / `PUBLIC_BASE_URL` | return URLs; required in production |
+
+`deploy.sh` refuses to deploy with `BILLING_ENFORCED=true` unless `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
+`STRIPE_BILLING_WEBHOOK_SECRET` are set. In production a missing key or price makes checkout answer 503; the local mock never runs there.
+
+### 5. Grandfather existing businesses (before enforcing)
+
+Every existing tenant has `billing_status='none'` and would be locked out the moment `BILLING_ENFORCED=true`. Comp them first, as an admin
+(Bearer `ADMIN_TOKEN` or an admin session):
+
+```sh
+curl -sS -X POST https://<DOMAIN>/api/admin/billing \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"business_id":"<id>","billing_status":"active","plan":"grandfathered","note":"existing customer"}'
+```
+
+Optional fields: `trial_ends_at`, `current_period_end` (ISO date or `null`), `sms_cap_override`, `call_minutes_cap_override` (integer or `null`
+for the plan default). Every call is audited (`billing.admin_override`). Comp accounts must not be linked to a Stripe customer: a later Stripe
+event for a linked customer overwrites the status. Admins also bypass the provisioning gate, so you can provision on a customer's behalf.
+
+### 6. Turn it on
+
+1. Verify in test mode (checklist below).
+2. Comp the existing tenants (step 5) and confirm with `GET /api/billing/status?business_id=<id>` (`provisioning_allowed: true`).
+3. Switch to live keys (live price id, live webhook endpoint and secret), set `BILLING_ENFORCED=true`, redeploy.
+4. Roll back by unsetting `BILLING_ENFORCED`: nothing is refused again (billing data is kept).
+
+## Test-mode checklist (Stripe CLI)
+
+```sh
+stripe login
+stripe listen --forward-to localhost:3000/api/billing/webhook \
+  --events checkout.session.completed,customer.subscription.created,customer.subscription.updated,customer.subscription.deleted,customer.subscription.trial_will_end,invoice.paid,invoice.payment_failed
+# copy the printed whsec_... into STRIPE_BILLING_WEBHOOK_SECRET and restart the app
+```
+
+- [ ] Sign up, verify the email, open `/dashboard/billing`, click **Start free trial**; pay with `4242 4242 4242 4242`. After the redirect
+      the page shows "Free trial" with the countdown (status `trialing`, `trial_ends_at` and `current_period_end` set).
+- [ ] Replay the same event from the Stripe dashboard (Resend): the webhook answers `duplicate: true`, nothing changes.
+- [ ] `stripe trigger customer.subscription.updated` and `stripe trigger invoice.payment_failed`: triggered events use fixture customers that
+      are not linked to a business, so they answer `ignored: unknown customer` (expected). To test for real, use the test clock below.
+- [ ] Failed payment: subscribe with `4000 0000 0000 0341` (attaches, then fails on charge), advance a Billing test clock past the trial end.
+      Status becomes `past_due`, the owner gets the email, the banner shows the grace period; after `BILLING_PAST_DUE_GRACE_DAYS` provisioning
+      and sends are refused. Pay the invoice from the portal: `invoice.paid` returns the account to `active`.
+- [ ] `customer.subscription.trial_will_end` (3 days before the trial ends, or with a test clock) sends the "trial ends soon" email.
+- [ ] Cancel from the portal (at period end): `cancel_at_period_end` shows on the page; cancel immediately: status `canceled`, email sent.
+- [ ] Resubscribe after cancellation: checkout works and does **not** grant a second trial.
+- [ ] With `BILLING_ENFORCED=true`, a business with `billing_status='none'` gets `402 {"error":"billing_required","checkout":"/api/billing/checkout"}` from a
+      non-admin provisioning call, an admin does not.
+- [ ] Wrong secret / old timestamp: `curl` the endpoint with a forged `Stripe-Signature`: 400. With the secret unset: 503.
+
+Local development without Stripe: leave `STRIPE_SECRET_KEY` unset and set `DEMO_MODE=true`; checkout then goes to
+`/api/billing/mock-activate`, which starts a local trial for the signed-in owner. It does nothing in production or when a Stripe key is set.
+
+## Operations
+
+- Audit trail: `billing.checkout_started`, `billing.subscription_updated`, `billing.payment_failed`, `billing.invoice_paid`,
+  `billing.webhook_refused`, `billing.admin_override`.
+- Lost webhook delivery: Stripe retries for 3 days; use "Resend" in the dashboard for older ones. State can always be set by hand with
+  `/api/admin/billing`.
+- Out-of-order events are tolerated for status transitions on one subscription (the last delivered wins); the first `checkout.session.completed`
+  re-reads the subscription from Stripe when `STRIPE_SECRET_KEY` is set.

@@ -1,11 +1,12 @@
-/** Data-subject access: everything stored about one customer (phone's last 10 digits) of one business. */
+/** Data-subject access: everything stored about one customer (matched on their E.164 number) of one business. */
 import { prisma } from '@/lib/db';
-import { locateCustomerRecords } from '@/lib/db/compliance';
-import { phoneKey } from '@/lib/format';
+import { isOptedOut, locateCustomerRecords, phoneIdent } from '@/lib/db/compliance';
+import { defaultPhoneCountry } from '@/lib/phone';
 
 export interface CustomerExport {
   business_id: string;
-  phone_key: string;
+  /** The customer's number in E.164 (what the records were matched on). */
+  phone_e164: string;
   exported_at: string;
   calls: unknown[];
   bookings: unknown[];
@@ -16,12 +17,12 @@ export interface CustomerExport {
   sms_opted_out: boolean;
 }
 
-export async function exportCustomerData(businessId: string, phone: string): Promise<CustomerExport> {
-  const key = phoneKey(phone);
-  if (!key || key.length < 7) throw new Error('phone must have at least 7 digits');
-  const [rec, optOut] = await Promise.all([
-    locateCustomerRecords(prisma, businessId, key),
-    prisma.smsOptOut.findUnique({ where: { businessId_phoneKey: { businessId, phoneKey: key } }, select: { id: true } }),
+export async function exportCustomerData(businessId: string, phone: string, country: string = defaultPhoneCountry()): Promise<CustomerExport> {
+  const id = phoneIdent(phone, country);
+  if (!id.e164) throw new Error('phone must be a valid number (use +country code for non-US numbers)');
+  const [rec, optedOut] = await Promise.all([
+    locateCustomerRecords(prisma, businessId, id, country),
+    isOptedOut(businessId, id.e164),
   ]);
   const [calls, bookings, sms, briefings] = await Promise.all([
     prisma.call.findMany({ where: { id: { in: rec.callIds } }, orderBy: { startedAt: 'asc' } }),
@@ -31,9 +32,9 @@ export async function exportCustomerData(businessId: string, phone: string): Pro
   ]);
   return {
     business_id: businessId,
-    phone_key: key,
+    phone_e164: id.e164,
     exported_at: new Date().toISOString(),
     calls, bookings, sms, briefings,
-    sms_opted_out: optOut !== null,
+    sms_opted_out: optedOut,
   };
 }

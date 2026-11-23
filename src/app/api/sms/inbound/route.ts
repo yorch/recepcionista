@@ -1,5 +1,5 @@
-import { getBusinessByPhone, prisma } from '@/lib/db';
-import { phoneKey } from '@/lib/format';
+import { countryForBusiness, getBusinessByPhone, prisma } from '@/lib/db';
+import { sameNumber, toE164 } from '@/lib/phone';
 import { routeGratitudeReply } from '@/lib/gratitude/reply';
 import { applyInboundKeyword } from '@/lib/messaging/inbound';
 import { normalizeInbound, twiml } from '@/lib/messaging/keywords';
@@ -46,13 +46,13 @@ export async function POST(req: Request) {
     // A bare 1-5 answers the most recent gratitude text we sent to this number.
     const rating = /^[1-5]$/.test(normalizeInbound(fields.Body)) ? Number(normalizeInbound(fields.Body)) : null;
     if (rating) {
-      const key = phoneKey(from);
+      const country = countryForBusiness(business);
       const recent = await prisma.smsLog.findMany({
         where: { businessId: business.id, kind: 'gratitude', bookingId: { not: null }, status: { in: ['sent', 'mock'] } },
         orderBy: { createdAt: 'desc' },
         take: 20,
       });
-      const hit = recent.find((r) => phoneKey(r.toPhone) === key);
+      const hit = recent.find((r) => (r.toE164 ? r.toE164 === toE164(from, country) : sameNumber(r.toPhone, from, country)));
       if (hit?.bookingId) {
         await routeGratitudeReply(hit.bookingId, rating);
         return xml(twiml());

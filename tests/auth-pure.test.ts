@@ -22,7 +22,7 @@ afterAll(() => {
 });
 
 const user = (role: 'owner' | 'staff', biz = 'biz_a') =>
-  ({ kind: 'user', role, business_id: biz, user: { id: 'u1', email: 'a@b.co', role, business_id: biz, created_at: '', disabled_at: null } }) as import('../src/lib/session').Principal;
+  ({ kind: 'user', role, business_id: biz, user: { id: 'u1', email: 'a@b.co', role, business_id: biz, created_at: '', disabled_at: null, email_verified_at: '2026-01-01T00:00:00Z', phone: null, totp_enabled: false }, email_verified: true }) as import('../src/lib/session').Principal;
 const admin = { kind: 'admin', via: 'token' } as import('../src/lib/session').Principal;
 
 describe('checkSameOrigin', () => {
@@ -86,21 +86,15 @@ describe('admin credentials in the Node guard', () => {
     const r = await s.authenticate(post({ authorization: 'Bearer test-admin-token-123' }), { role: 'admin' });
     expect(r.ok).toBe(true);
   });
-  test('bad Bearer is 401 even with a valid admin cookie', async () => {
-    const cookie = `${auth.SESSION_COOKIE}=${await auth.sessionValue('test-admin-token-123')}`;
+  test('bad Bearer is 401 even with an admin-session-shaped cookie (no cookie fallback, no database touched)', async () => {
+    const cookie = `${auth.SESSION_COOKIE}=${'a'.repeat(43)}`;
     const r = await s.authenticate(post({ authorization: 'Bearer nope', cookie, 'sec-fetch-site': 'same-origin' }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.response.status).toBe(401);
   });
-  test('admin cookie: same-origin POST ok, cross-site / header-less POST 403, GET ok', async () => {
-    const cookie = `${auth.SESSION_COOKIE}=${await auth.sessionValue('test-admin-token-123')}`;
-    expect((await s.authenticate(post({ cookie, 'sec-fetch-site': 'same-origin' }), { role: 'admin' })).ok).toBe(true);
-    for (const extra of [{ 'sec-fetch-site': 'cross-site' }, { origin: 'https://evil.test', host: 'app.test' }, {}] as Record<string, string>[]) {
-      const r = await s.authenticate(post({ cookie, ...extra }));
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.response.status).toBe(403);
-    }
-    expect((await s.authenticate(new Request('http://app.test/api/x', { headers: { cookie } }))).ok).toBe(true);
+  test('the old derived HMAC cookie no longer exists', () => {
+    expect((auth as Record<string, unknown>).sessionValue).toBeUndefined();
+    expect((auth as Record<string, unknown>).isAuthenticated).toBeUndefined();
   });
   test('no credentials is 401; unset ADMIN_TOKEN fails closed with 503', async () => {
     const r = await s.authenticate(new Request('http://app.test/api/x'));
@@ -129,6 +123,15 @@ describe('proxy (cheap gate only)', () => {
     expect(status(await call('/api/businesses', { headers: { cookie: good } }))).toBe(200);
     expect(status(await call('/api/businesses', { headers: { cookie: `${auth.USER_SESSION_COOKIE}=short` } }))).toBe(401);
     expect(status(await call('/api/businesses', { headers: { cookie: `${auth.USER_SESSION_COOKIE}=${'a b;'.repeat(10)}` } }))).toBe(401);
+  });
+  test('admin-session cookie passes the proxy by SHAPE only; malformed does not', async () => {
+    const good = `${auth.SESSION_COOKIE}=${'b'.repeat(43)}`;
+    expect(status(await call('/api/businesses', { headers: { cookie: good } }))).toBe(200);
+    expect(status(await call('/api/businesses', { headers: { cookie: `${auth.SESSION_COOKIE}=short` } }))).toBe(401);
+  });
+  test('the proxy forwards the path and never trusts a client-supplied x-rc-pathname', async () => {
+    const r = await call('/dashboard/team', { headers: { cookie: `${auth.USER_SESSION_COOKIE}=${'a'.repeat(43)}`, 'x-rc-pathname': '/dashboard/security' } });
+    expect(r.headers.get('x-middleware-request-x-rc-pathname')).toBe('/dashboard/team');
   });
   test('cookie-authenticated POST must be same-origin; Bearer is exempt', async () => {
     const cookie = `${auth.USER_SESSION_COOKIE}=${'a'.repeat(43)}`;

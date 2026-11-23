@@ -1,91 +1,117 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
-/** Public landing page: static marketing copy only. Never renders any tenant's data. */
+import { Logo } from '@/components/ui/logo';
+import { buttonClass } from '@/components/ui/button';
+import { planPriceDisplay } from '@/app/site-config';
+
+/** Public marketing page: static copy only. It never reads or renders any tenant's data. */
+export const dynamic = 'force-dynamic'; // plan price comes from runtime env
+
+export const metadata: Metadata = {
+  title: { absolute: 'Recepcionista — Your bilingual AI front desk' },
+  description:
+    'An AI receptionist that answers your business phone in English and Spanish, books jobs, collects deposits and briefs you every evening. Set up in minutes from your website.',
+  alternates: { canonical: '/' },
+};
+
+const STEPS = [
+  { n: '1', t: 'Paste your website', d: 'She reads your services, prices, hours and service area. You review and fix anything.' },
+  { n: '2', t: 'Get her phone number', d: 'Forward your business line to it. Your phone still rings first; she catches what you miss.' },
+  { n: '3', t: 'Run your day', d: 'Jobs land on your calendar, deposits get collected, and you get a short voice briefing each evening.' },
+];
+
+const FEATURES = [
+  { t: 'Spanglish native', d: 'Switches mid-sentence and replies in the language the caller actually uses.' },
+  { t: 'Books the job', d: 'Checks your hours and calendar, then texts the customer a confirmation.' },
+  { t: 'Triages emergencies', d: 'Asks about leaks, heat and vulnerable people first, and alerts you by text.' },
+  { t: 'Collects deposits', d: 'Sends a secure payment link by text. She never takes card numbers over the phone.' },
+  { t: 'Reports back', d: 'A short evening briefing on calls, bookings, money and anything that needs you.' },
+  { t: 'You stay in control', d: 'Edit every price and answer she knows. Review transcripts of every call.' },
+];
+
 export default function Home() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-8">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <span className="grid h-8 w-8 place-items-center rounded-lg bg-[#ff6b35] text-[15px] font-bold text-[#150800]">R</span>
-          <span className="text-[15px] font-semibold tracking-tight">Recepcionista</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Link
-            href="/dashboard"
-            className="rounded-xl px-3.5 py-2 text-[13px] text-[#a8b6c8] transition-colors hover:bg-[#131a24] hover:text-white"
-          >
-            See a live business
-          </Link>
-          <Link
-            href="/onboarding"
-            className="rounded-xl bg-[#ff6b35] px-4 py-2 text-[13px] font-medium text-[#150800] transition-colors hover:bg-[#ff8558]"
-          >
-            Hire yours →
-          </Link>
-        </div>
+    <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-6 sm:px-6 sm:py-8">
+      <header className="flex items-center justify-between gap-3">
+        <Logo />
+        <nav aria-label="Account" className="flex items-center gap-2">
+          <Link href="/login" className={buttonClass('ghost', 'px-3.5 text-[13px]')}>Sign in</Link>
+          <Link href="/signup" className={buttonClass('primary', 'px-4 text-[13px]')}>Start free trial</Link>
+        </nav>
       </header>
 
-      <section className="rise mt-20 max-w-3xl">
-        <div className="inline-flex items-center gap-2 rounded-full border border-[#26313f] bg-[#0d131b] px-3 py-1 text-[11px] text-[#9fb0c5]">
-          <span className="h-1.5 w-1.5 rounded-full bg-[#3ddc97] live-dot" />
-          Answers in English, Spanish, y todo entre medio
-        </div>
-
-        <h1 className="mt-6 text-[44px] font-semibold leading-[1.06] tracking-[-0.03em] sm:text-[60px]">
-          Paste your website.
-          <br />
-          <span className="bg-gradient-to-r from-[#ff6b35] via-[#ff8f5e] to-[#ffc9a8] bg-clip-text text-transparent">
-            Get a bilingual employee
-          </span>
-          <br />
-          in two minutes.
-        </h1>
-
-        <p className="mt-6 max-w-xl text-[15px] leading-relaxed text-[#8b98ab]">
-          She answers the phone, triages emergencies, books the job, texts the customer,
-          takes the deposit, and calls you at the end of the day to tell you how it went.
-          No dispatcher. No hold music. No lost calls.
-        </p>
-
-        <div className="mt-9 flex flex-wrap items-center gap-3">
-          <Link
-            href="/onboarding"
-            className="rounded-xl bg-[#ff6b35] px-6 py-3 text-sm font-semibold text-[#150800] shadow-[0_16px_40px_-16px_rgba(255,107,53,.9)] transition hover:bg-[#ff8558]"
-          >
-            Set up my front desk
-          </Link>
-          <Link
-            href="/dashboard"
-            className="rounded-xl border border-[#2a3546] px-6 py-3 text-sm font-medium text-[#cbd7e6] transition hover:bg-[#131a24] hover:text-white"
-          >
-            Watch it work
-          </Link>
-          <a
-            href={`tel:${process.env.ELEVENLABS_PHONE_NUMBER || ''}`}
-            className="inline-flex items-center gap-2 rounded-xl border border-[#1c4635] bg-[#10291f] px-5 py-3 text-sm font-mono text-[#6ee7b7] transition hover:border-[#3ddc97] hover:bg-[#162e22]"
-          >
-            <span className="h-2 w-2 rounded-full bg-[#3ddc97] animate-pulse" />
-            {process.env.ELEVENLABS_PHONE_NUMBER || 'Call her'}
-          </a>
-        </div>
-      </section>
-
-      <section className="mt-20 grid gap-px overflow-hidden rounded-2xl border border-[#1f2937] bg-[#1f2937] sm:grid-cols-2 lg:grid-cols-4">
-        {[
-          { t: 'Spanglish native', d: 'Switches mid-sentence. Replies in the language the caller actually uses.' },
-          { t: 'Books the job', d: 'Real availability, real confirmation text, real deposit link.' },
-          { t: 'Triages', d: 'Asks about leaks, heat, and vulnerable people before she quotes anything.' },
-          { t: 'Reports back', d: 'A 45-second voice note at 6 PM. You can answer it while driving home.' },
-        ].map((f) => (
-          <div key={f.t} className="bg-[#0b0f15] p-5">
-            <p className="text-[13px] font-semibold text-white">{f.t}</p>
-            <p className="mt-1.5 text-[12px] leading-relaxed text-[#7b8b9f]">{f.d}</p>
+      <main id="main-content">
+        <section className="rise mt-14 max-w-3xl sm:mt-20" aria-labelledby="hero-title">
+          <p className="inline-flex items-center gap-2 rounded-full border border-line-2 bg-[#0d131b] px-3 py-1 text-xs text-body">
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-mint live-dot" />
+            Answers in English, Spanish, y todo entre medio
+          </p>
+          <h1 id="hero-title" className="mt-6 text-[40px] font-semibold leading-[1.06] tracking-[-0.03em] text-white sm:text-[60px]">
+            Paste your website.
+            <br />
+            <span className="bg-gradient-to-r from-brand via-brand-soft to-[#ffc9a8] bg-clip-text text-transparent">
+              Get a bilingual employee
+            </span>
+            <br />
+            in minutes.
+          </h1>
+          <p className="mt-6 max-w-xl text-[16px] leading-relaxed text-mute">
+            She answers the phone, triages emergencies, books the job, texts the customer, takes the deposit,
+            and tells you how the day went. No dispatcher. No hold music. No lost calls.
+          </p>
+          <div className="mt-9 flex flex-wrap items-center gap-3">
+            <Link href="/signup" className={buttonClass('primary', 'px-6 py-3 text-sm font-semibold shadow-[0_16px_40px_-16px_rgba(255,107,53,.9)]')}>
+              Set up my front desk
+            </Link>
+            <Link href="/login" className={buttonClass('outline', 'px-6 py-3')}>Sign in</Link>
           </div>
-        ))}
-      </section>
+          <p className="mt-3 text-xs text-dim">{planPriceDisplay()}</p>
+        </section>
 
-      <footer className="mt-auto pt-16 text-[11px] text-[#5a6b80]">
-        Built at Buildersgiving · Miami AI Hackathon · ElevenLabs voice · Mel multi-agent
+        <section className="mt-20" aria-labelledby="how-title">
+          <h2 id="how-title" className="text-[24px] font-semibold tracking-[-0.02em] text-white">How it works</h2>
+          <ol className="mt-5 grid gap-4 md:grid-cols-3">
+            {STEPS.map((s) => (
+              <li key={s.n} className="rounded-2xl border border-line bg-panel/80 p-5">
+                <span aria-hidden="true" className="grid h-8 w-8 place-items-center rounded-full bg-brand text-sm font-bold text-on-brand">{s.n}</span>
+                <h3 className="mt-3 text-[15px] font-semibold text-white">{s.t}</h3>
+                <p className="mt-1.5 text-[13px] leading-relaxed text-mute">{s.d}</p>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        <section className="mt-16" aria-labelledby="features-title">
+          <h2 id="features-title" className="sr-only">What she does</h2>
+          <ul className="grid gap-px overflow-hidden rounded-2xl border border-line bg-line sm:grid-cols-2 lg:grid-cols-3">
+            {FEATURES.map((f) => (
+              <li key={f.t} className="bg-[#0b0f15] p-5">
+                <h3 className="text-[14px] font-semibold text-white">{f.t}</h3>
+                <p className="mt-1.5 text-[13px] leading-relaxed text-mute">{f.d}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="mt-16" aria-labelledby="pricing-title">
+          <div className="rounded-2xl border border-line-3 bg-panel p-6 text-center sm:p-10">
+            <h2 id="pricing-title" className="text-[24px] font-semibold tracking-[-0.02em] text-white">Pricing</h2>
+            <p className="mx-auto mt-3 max-w-xl text-[18px] text-soft">{planPriceDisplay()}</p>
+            <p className="mx-auto mt-2 max-w-xl text-[13px] text-dim">
+              One plan with your own phone number, calls, texts and briefings. Cancel any time.
+            </p>
+            <Link href="/signup" className={buttonClass('primary', 'mt-6 px-8 py-3 font-semibold')}>Start free trial</Link>
+          </div>
+        </section>
+      </main>
+
+      <footer className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-16 text-xs text-dim">
+        <span>© {new Date().getFullYear()} Recepcionista</span>
+        <nav aria-label="Footer" className="flex gap-4">
+          <Link href="/login" className="inline-flex min-h-11 items-center hover:text-soft">Sign in</Link>
+          <Link href="/signup" className="inline-flex min-h-11 items-center hover:text-soft">Sign up</Link>
+        </nav>
       </footer>
-    </main>
+    </div>
   );
 }
