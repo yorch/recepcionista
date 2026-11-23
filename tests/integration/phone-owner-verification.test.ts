@@ -38,7 +38,7 @@ integration('owner phone verification (postgres)', () => {
     let res: Response;
     try { res = await start(req(`/api/businesses/${id}/owner-phone/verify/start`, { phone: number }), ctx(id)); } finally { console.log = orig; }
     const json = (await res.json()) as { ok: boolean; challenge?: string; expires_at?: string; error?: string };
-    const code = lines.join('\n').match(/code is (\d{6})/)?.[1];
+    const code = lines.join('\n').match(/code: (\d{6})/)?.[1];
     return { res, json, code };
   }
 
@@ -102,11 +102,11 @@ integration('owner phone verification (postgres)', () => {
     expect(verifyOwnerPhoneChallenge(challenge, 'biz-1', '+13055550123', ' 123456 ', t0).ok).toBe(code === '123456');
   });
 
-  test('start: 5 per hour per business+phone, country allow-list applies, opted-out numbers are refused', async () => {
+  test('start: 3 per hour per destination number (all businesses), country allow-list applies, opted-out numbers are refused', async () => {
     await clear();
     const biz = await newBusiness({ owner_phone: null });
     const number = phone();
-    for (let i = 0; i < 5; i++) expect((await startFor(biz.id, number)).res.status).toBe(200);
+    for (let i = 0; i < 3; i++) expect((await startFor(biz.id, number)).res.status).toBe(200);
     expect((await startFor(biz.id, number)).res.status).toBe(429);
 
     await clear();

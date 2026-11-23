@@ -47,7 +47,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `SMTP_URL` | cond (`smtp`, or the parts below) | none | SMTP as one URL | yes |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_SECURE` | cond (`smtp` without `SMTP_URL`) | port `587`, secure `false` | SMTP parts | no |
 | `SMTP_PASS` | cond (`smtp` without `SMTP_URL`) | none | SMTP password | yes |
-| `SIGNUP_MAX_PER_HOUR` | no | `30` | platform-wide signup cap per hour | no |
+| `SIGNUP_MAX_PER_HOUR` | no | `60` | platform-wide cap on accounts CREATED per hour (existing-address/honeypot requests do not count). One client may use 20% (50% for the shared `untrusted` key); at 70% signup degrades (one account per client, Turnstile mandatory when configured, warning logged); only at 100% signup stops for everyone (`signup.global_cap_reached` error log) | no |
 | `TURNSTILE_SECRET_KEY` | no | off | Cloudflare Turnstile on signup; server verification fails closed. Needs the site key too (deploy.sh checks the pair) | yes |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | with the secret | none | Turnstile widget (build time) | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | price text on the plan step (build time) | no |
@@ -57,7 +57,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 
 | Name | Required | Default | Feature | Secret |
 | --- | --- | --- | --- | --- |
-| `BILLING_ENFORCED` | no | unset (nothing refused) | exactly `true` refuses provisioning, texts and calls for businesses without an active plan. Comp existing tenants first (`scripts/grandfather-existing.ts`) | no |
+| `BILLING_ENFORCED` | prod: yes (`true` or `false`) | production: enforced unless exactly `false` (FAIL CLOSED); dev/test: off unless `true` | refuses provisioning, texts and calls for businesses without an active plan. deploy.sh and compose.production.yaml refuse an unset/invalid value and banner `false`; non-admin provisioning always needs a plan in production. Comp existing tenants first (`scripts/grandfather-existing.ts --before <iso>`) | no |
 | `STRIPE_SECRET_KEY` | cond (`BILLING_ENFORCED=true`, deposits) | unset: mock checkout and mock deposit links (not in production) | Stripe API: subscriptions and deposit payment links | yes |
 | `STRIPE_PRICE_ID` | cond (`BILLING_ENFORCED=true`) | none | recurring monthly price | no |
 | `STRIPE_BILLING_WEBHOOK_SECRET` | cond (`BILLING_ENFORCED=true`) | none | signs `/api/billing/webhook` (a different secret from the deposit webhook) | yes |
@@ -77,9 +77,12 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `TWILIO_ACCOUNT_SID` | cond (real SMS and numbers) | unset: SMS is logged, numbers are mock | Twilio | no |
 | `TWILIO_AUTH_TOKEN` | cond (with the SID; also verifies Twilio webhooks) | none | Twilio | yes |
 | `TWILIO_PHONE_NUMBER` | cond | none | SMS sender number | no |
-| `SMS_ALLOWED_COUNTRY_CODES` | no | `1` | destination countries for outbound texts (verified owner phones are exempt) | no |
+| `SMS_ALLOWED_COUNTRY_CODES` | no | `1` | destination countries for outbound texts. Also applied to `owner_phone` (PATCH) and to verification texts, so an owner alert destination is always in an enabled country | no |
 | `DEFAULT_PHONE_COUNTRY` | no | `US` | ISO country assumed for numbers typed without `+` | no |
-| `OWNER_PHONE_GRANDFATHER` | no | `false` | `true` treats every existing owner phone as verified until the owner re-verifies (rollout switch; docs/runbook.md section 6). The seeded demo business is already verified | no |
+| `OWNER_PHONE_GRANDFATHER` | no | `false` | `true` treats existing unverified owner phones as verified until the owner re-verifies (rollout switch; docs/runbook.md section 6). DANGEROUS: bypasses opt-outs and the country allow-list. In production it is ignored without `OWNER_PHONE_GRANDFATHER_ACK`; startup logs a warning | no |
+| `OWNER_PHONE_GRANDFATHER_ACK` | with the switch, prod | none | must be exactly `i-understand` for the switch to work in production (deploy.sh refuses `true` without it) | no |
+| `OWNER_PHONE_GRANDFATHER_BEFORE`, `OWNER_PHONE_GRANDFATHER_UNTIL` | no | none | ISO instants: only businesses created before `_BEFORE` benefit; the switch expires at `_UNTIL` (unparseable = off) | no |
+| `OWNER_VERIFY_GLOBAL_PER_HOUR`, `OWNER_VERIFY_GLOBAL_PER_DAY` | no | `300`, `2000` | platform-wide caps on owner-phone verification texts (on top of per-user, per-IP, per-number and per-business limits) | no |
 | `ALLOW_UNVERIFIED_BOOKING_SMS` | no | off | text a model-relayed booking phone when the call has no verified caller id | no |
 | `ELEVENLABS_API_KEY` | cond (live voice agent) | unset: scripted calls | ElevenLabs agent and briefing TTS | yes |
 | `ELEVENLABS_TOOL_SECRET` | prod when `ELEVENLABS_API_KEY` is set | none | shared secret on the agent tools and `/api/voice/initiation` (`x-recepcionista-tool-secret`) | yes |

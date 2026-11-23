@@ -1,6 +1,6 @@
 import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
-import { billingEnforced, billingStateAllows, getBusiness, getKnowledgeBase, listAuditEvents, prisma } from '@/lib/db';
+import { billingEnforced, isProvisioningAllowed, getBusiness, getKnowledgeBase, listAuditEvents, prisma } from '@/lib/db';
 import type { BillingStatus } from '@/lib/types';
 import { nextStep, type OnboardingStatus } from './status';
 
@@ -32,7 +32,7 @@ export async function GET(
 
     const billingStatus = (business.billing_status ?? 'none') as BillingStatus;
     const enforced = billingEnforced();
-    const provisioning_allowed = auth.principal.kind === 'admin' || !enforced || billingStateAllows(business);
+    const provisioning_allowed = auth.principal.kind === 'admin' || isProvisioningAllowed(business);
     const provisioned = Boolean(business.phone) && business.status === 'live';
     const facts = {
       has_knowledge: Boolean(kb && kb.services.length > 0),

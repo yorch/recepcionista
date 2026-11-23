@@ -20,10 +20,10 @@ const bad = (error: string, status: number, headers?: Record<string, string>) =>
  * POST /api/businesses/:id/owner-phone/verify/confirm   { phone, code, challenge }
  * Verifies the challenge from /start and the 6-digit code (constant time), then stores the number as the owner phone
  * (owner_phone + owner_phone_e164) and sets owner_phone_verified_at. Returns { ok: true, verified_at }.
- * At most 5 attempts per challenge (Postgres limiter, fails closed). Audited as `business.owner_phone_verified`.
+ * At most 5 attempts per (server-verified) challenge, 10 per business+phone per 10 min, 20 per business per hour (Postgres limiter, fails closed). Audited as `business.owner_phone_verified`.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = await authenticate(req, { role: 'owner' });
+  const auth = await authenticate(req, { role: 'owner', verifiedEmail: true });
   if (!auth.ok) return auth.response;
   try {
     const { id } = await params;
@@ -38,11 +38,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const e164 = toE164(body.phone, country);
     if (!e164) return bad('phone must be a valid number', 422);
 
-    const attempts = await rateLimit(`owner-phone/confirm:${challengeId(body.challenge)}`, 5, 10 * 60_000, { failClosed: true });
-    if (!attempts.allowed) {
-      return attempts.error
-        ? bad('service temporarily unavailable', 503, { 'retry-after': String(attempts.retryAfterS) })
-        : bad('too many attempts; request a new code', 429, { 'retry-after': String(attempts.retryAfterS) });
+    // Attempt limits that a re-spelled challenge cannot dodge: per (business, phone), per business, and per challenge
+    // keyed on the nonce the SERVER signed (an inauthentic challenge only ever burns the business/phone buckets).
+    const cid = challengeId(body.challenge);
+    const limits: [string, number, number][] = [
+      [`owner-phone/confirm:bp:${id}:${e164}`, 10, 10 * 60_000],
+      [`owner-phone/confirm:b:${id}`, 20, 60 * 60_000],
+      ...(cid ? [[`owner-phone/confirm:c:${cid}`, 5, 10 * 60_000] as [string, number, number]] : []),
+    ];
+    for (const [key, limit, windowMs] of limits) {
+      const attempts = await rateLimit(key, limit, windowMs, { failClosed: true });
+      if (!attempts.allowed) {
+        return attempts.error
+          ? bad('service temporarily unavailable', 503, { 'retry-after': String(attempts.retryAfterS) })
+          : bad('too many attempts; request a new code', 429, { 'retry-after': String(attempts.retryAfterS) });
+      }
     }
 
     const verdict = verifyOwnerPhoneChallenge(body.challenge, id, e164, body.code);

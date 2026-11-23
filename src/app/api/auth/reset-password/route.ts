@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { checkSameOrigin } from '@/lib/auth';
-import { afterResponse, auditIp, limitIp, sendPasswordChangedNotice } from '@/lib/account-flows';
+import { afterResponse, auditIp, limitIp, sendPasswordChangedNotice, sendTwoFactorNotice } from '@/lib/account-flows';
 import {
-  changePassword, consumeEmailToken, getUserById, invalidateUserEmailTokens, markEmailVerified, peekEmailToken, recordAudit,
+  changePassword, consumeEmailToken, disableTotp, getTotpState, getUserById, invalidateUserEmailTokens, markEmailVerified, peekEmailToken, recordAudit,
 } from '@/lib/db';
 import { hashPassword } from '@/lib/password';
 import { validateStrongPassword } from '@/lib/user-policy';
@@ -37,9 +37,23 @@ export async function POST(req: Request) {
     const user = await getUserById(rec.user_id);
     if (!user || user.email !== rec.email || user.disabled_at) return fail(400, BAD_LINK);
 
+    // M4: 2FA planted before the mailbox was ever proven (pre-account squatting) must not outlive the real owner's reset.
+    // 2FA enrolled while the address was unverified, or enrolled BEFORE it was verified, is not trusted: the reset (which
+    // proves the mailbox) clears it. 2FA enrolled after verification is kept: the reset link alone must not remove it.
+    const totp = await getTotpState(user.id);
+    const untrustedTotp = Boolean(totp?.enabled_at) && (!user.email_verified_at || Date.parse(user.email_verified_at) > Date.parse(totp!.enabled_at as string));
+
     await changePassword(user.id, await hashPassword(body.password as string));
     await invalidateUserEmailTokens(user.id, 'reset');
     await markEmailVerified(user.id); // proving the mailbox is what verification means
+    if (untrustedTotp) {
+      await disableTotp(user.id);
+      await recordAudit({
+        actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.2fa_cleared_on_reset', target: `user:${user.id}`, ip: auditIp(req),
+        meta: { reason: 'enrolled_before_email_verified' },
+      });
+      await afterResponse('reset.2fa_notice', () => sendTwoFactorNotice(user.email, false));
+    }
     await recordAudit({
       actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.password_reset', target: `user:${user.id}`, ip: auditIp(req),
     });

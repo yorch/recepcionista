@@ -70,6 +70,7 @@ model Business {
 
   @@index([phoneKey])
   @@index([phoneE164])
+  @@index([ownerPhoneE164])
   @@index([agentId])
   @@index([stripeCustomerId])
   @@map("businesses")
@@ -194,6 +195,7 @@ model SmsLog {
 
   @@index([businessId, createdAt])
   @@index([businessId, toE164])
+  @@index([consentBasis, createdAt])
   @@map("sms_log")
 }
 
@@ -213,6 +215,7 @@ model SmsOptOut {
 
   @@unique([businessId, phoneKey])
   @@index([businessId, phoneE164])
+  @@index([phoneE164])
   @@map("sms_opt_outs")
 }
 
@@ -382,4 +385,18 @@ model UsageCounter {
 
   @@unique([businessId, periodStart])
   @@map("usage_counters")
+}
+
+/// Free-trial abuse guard: one trial per payment card / normalised email. `fingerprint` is a hash (card: Stripe's
+/// card fingerprint, email: HMAC of the normalised address), never the raw value.
+model TrialFingerprint {
+  id          String   @id @default(uuid())
+  /// 'card' | 'email'
+  kind        String
+  fingerprint String
+  businessId  String?  @map("business_id")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([kind, fingerprint])
+  @@map("trial_fingerprints")
 }

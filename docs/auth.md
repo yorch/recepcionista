@@ -119,12 +119,20 @@ All tokens (`email_tokens`) are random 256-bit values, stored only as sha256, **
 
 ### Abuse controls on signup
 
-Per-IP limit (5 attempts / hour, ×20 without `TRUSTED_PROXY` where all clients share one key), per-address limit (3 / hour), a **honeypot** field (`company_website`: filled = fake success, nothing created), optional **Cloudflare Turnstile** (`TURNSTILE_SECRET_KEY` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY`; server-side siteverify with a 5 s timeout, **fails closed**), and a platform-wide cap `SIGNUP_MAX_PER_HOUR` (default 30, counted per attempt that passed the cheaper gates) so a botnet cannot mass-create businesses. All counters live in `rate_limit_buckets` (shared by all instances; the store failing closes the route).
+Per-IP limit (5 attempts / hour, ×20 without `TRUSTED_PROXY` where all clients share one key), per-address limit (3 / hour), a **honeypot** field (`company_website`: filled = fake success, nothing created), optional **Cloudflare Turnstile** (`TURNSTILE_SECRET_KEY` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY`; server-side siteverify with a 5 s timeout, **fails closed**; the CSP opens exactly `https://challenges.cloudflare.com` for script, frame and connect when it is configured, docs/security-headers.md), and a graceful platform-wide capacity `SIGNUP_MAX_PER_HOUR` (default 60) designed so one client cannot switch signup off for everybody:
+
+1. only accounts actually **created** consume capacity (existing-address, honeypot and failed-captcha requests do not);
+2. each client (IP; the shared `untrusted` key without a trusted proxy) may create at most 20% of the cap per hour (50% for the shared key), so an attacker hits its own limit first (`429 too many attempts`);
+3. past **70%** of the cap signup is *degraded*: a client that already created an account this hour gets no second one, Turnstile (when configured) is required on every signup, and `signup.degraded` is logged;
+4. only at **100%** is signup refused for everyone (`429 signups are temporarily unavailable`, `signup.global_cap_reached` logged at error level once per 10 minutes: alert on it and raise the cap if the demand is real).
+
+All counters live in `rate_limit_buckets` (shared by all instances; the store failing closes the route). **Pre-account squatting:** nobody can plant a second factor on an unverified account (`2fa/enroll` and `/confirm` answer `403 email_not_verified`); a password reset (which proves control of the mailbox) disables and wipes 2FA that was enrolled while the address was unverified or before it was verified, audits it (`auth.2fa_cleared_on_reset`) and emails the owner; and a stale (>24 h) UNVERIFIED self-signup no longer holds its address: a new signup for it replaces the squatter's pristine business and user (never a verified account, one with a number/agent/plan, or one with a second member).
 
 ### Two-factor authentication (TOTP)
 
 - Enrol on `/dashboard/security`: the user re-enters their password (`POST /api/auth/2fa/enroll`), the server generates a secret, stores it **encrypted** (AES-256-GCM, `APP_SECRET_KEY`, bound to the user id) and returns the otpauth URI and a **server-rendered SVG QR code** (`qrcode`). A code from the app (`/confirm`) turns it on and returns **10 recovery codes shown once** (only hashes are stored). Turning it on signs out all other sessions.
 - Disable (`/disable`) needs the password **and** a valid code or recovery code; regenerating recovery codes (`/recovery-codes`) needs an app code and voids the old set. Each change is audited and mailed to the user.
+- **Per-account lockout (independent of the client IP):** wrong second-factor codes on one account (login step, disable, regenerate) are counted per account with exponential backoff (3 free failures, then 429 with `retry-after`, doubling); while locked even a correct code is not checked. From the 4th failure the user gets an email (`Someone is guessing your two-factor codes`, at most once an hour) and the lock is audited (`auth.mfa_account_locked`). The per-(account, IP) and per-session limits still apply.
 - Recovery codes are `xxxxx-xxxxx`, case/format tolerant, single use; using one is audited with the remaining count.
 - Losing `APP_SECRET_KEY` makes every authenticator unusable (recovery codes still work through the second step, which only needs the hashes).
 

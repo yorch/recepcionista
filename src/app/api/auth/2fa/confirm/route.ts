@@ -22,6 +22,7 @@ export async function POST(req: Request) {
   if (!auth.ok) return auth.response;
   const user = 'user' in auth.principal ? auth.principal.user : undefined;
   if (!user || !auth.sessionId) return NextResponse.json({ ok: false, error: 'two-factor needs a personal account' }, { status: 400 });
+  if (!user.email_verified_at) return NextResponse.json({ ok: false, error: 'email_not_verified' }, { status: 403 });
   try {
     const limited = await rateLimit(`auth/2fa-confirm:${user.id}`, 10, 15 * 60_000, { failClosed: true });
     if (!limited.allowed) return NextResponse.json({ ok: false, error: 'too many attempts, try again later' }, { status: 429, headers: { 'retry-after': String(limited.retryAfterS) } });

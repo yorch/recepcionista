@@ -91,10 +91,10 @@ describe('Turnstile and caps', () => {
     expect(new URLSearchParams(seen!.body).get('remoteip')).toBe('203.0.113.9');
   });
   test('SIGNUP_MAX_PER_HOUR default and bounds', () => {
-    expect(signup.signupMaxPerHour(env({}))).toBe(30);
+    expect(signup.signupMaxPerHour(env({}))).toBe(60);
     expect(signup.signupMaxPerHour(env({ SIGNUP_MAX_PER_HOUR: '5' }))).toBe(5);
-    expect(signup.signupMaxPerHour(env({ SIGNUP_MAX_PER_HOUR: '0' }))).toBe(30);
-    expect(signup.signupMaxPerHour(env({ SIGNUP_MAX_PER_HOUR: 'abc' }))).toBe(30);
+    expect(signup.signupMaxPerHour(env({ SIGNUP_MAX_PER_HOUR: '0' }))).toBe(60);
+    expect(signup.signupMaxPerHour(env({ SIGNUP_MAX_PER_HOUR: 'abc' }))).toBe(60);
   });
 });
 

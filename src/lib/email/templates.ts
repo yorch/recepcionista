@@ -63,14 +63,30 @@ export function resetPasswordTemplate(opts: { link: string; ttlMinutes?: number 
   };
 }
 
+/**
+ * A tenant-chosen name rendered inside a platform email must not carry a phishing payload: URLs, e-mail addresses and
+ * phone-number-like digit runs are removed, control characters flattened, the length capped. Callers still QUOTE it.
+ */
+export function safeDisplayName(name: string, max = 60): string {
+  const cleaned = name
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2066-\u2069]+/g, ' ')
+    .replace(/\b(?:https?:\/\/|www\.)\S+/gi, ' ')
+    .replace(/\S+@\S+\.\S+/g, ' ')
+    .replace(/\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|co|us|app|dev|xyz|info|biz|ly|me|to|gl|link|click|top)(?:\/\S*)?\b/gi, ' ')
+    .replace(/\+?\d[\d\s().-]{5,}\d/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.slice(0, max).trim() || 'a Recepcionista account';
+}
+
 export function inviteTemplate(opts: { link: string; businessName: string; inviterEmail?: string | null; role: 'owner' | 'staff'; ttlDays?: number }): RenderedEmail {
   const days = opts.ttlDays ?? 7;
   const who = opts.inviterEmail ? `${opts.inviterEmail} invited you` : 'You were invited';
-  const lines = [`${who} to join ${opts.businessName} on Recepcionista as ${opts.role}.`, `This invitation works once and expires in ${days} days.`];
+  // The business name is tenant-controlled text: sanitised, quoted as "an account named", and never put in the subject.
+  const lines = [`${who} to join an account named \u201c${safeDisplayName(opts.businessName)}\u201d on Recepcionista as ${opts.role}.`, `This invitation works once and expires in ${days} days.`];
   const footer = 'If you were not expecting this invitation, ignore this message.';
   return {
-    // Header-safe: strip control characters from the interpolated name.
-    subject: `You are invited to ${opts.businessName.replace(/[\r\n\u0000-\u001f]+/g, ' ').slice(0, 80)}`,
+    subject: 'You are invited to join a Recepcionista account',
     text: `${lines.join('\n\n')}\n\n${opts.link}\n\n${footer}\n`,
     html: wrap('You are invited', lines, opts.link, 'Accept invitation', footer),
   };

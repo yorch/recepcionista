@@ -16,8 +16,9 @@ const log = logger('db.compliance');
 
 // ---------------------------------------------------------------------------------------------
 // Phone identity. E.164 is THE identity; the legacy last-10-digit `phone_key` only bridges rows written before the
-// E.164 columns existed (e164 IS NULL) and only between numbers that are both US/Canada-shaped, so a +44 number
-// can never be mistaken for a +1 number that shares its last ten digits.
+// E.164 columns existed (e164 IS NULL). Their country is unknown (only the last 10 digits survive), so they FAIL SAFE:
+// they suppress every number that shares those digits, whatever its country (see optOutWhere). Rows with an E.164
+// match exactly, so +44 and +1 never share an identity.
 // ---------------------------------------------------------------------------------------------
 
 /** The country assumed for numbers typed without '+' for this business: its own phone's country, else DEFAULT_PHONE_COUNTRY. */
@@ -85,16 +86,26 @@ function toOptOut(row: { id: string; businessId: string; phoneKey: string; opted
   };
 }
 
+/** Legacy `phone_key` of an E.164 number: its last 10 digits (what the pre-E.164 code stored, whatever the country). */
+const legacyKeyOf = (e164: string): string => e164.replace(/\D/g, '').slice(-10);
+
+/**
+ * Legacy rows (`phone_e164 IS NULL`) hold only the last 10 digits of whatever number sent STOP: their country is
+ * UNKNOWN (+52 55 1234 5678 and a +1 551 number share `5512345678`). FAIL SAFE: they suppress every country whose
+ * last 10 digits match, exactly like the pre-E.164 code did, until a corrective pass (or a fresh STOP) proves the country.
+ * Over-suppression of a stranger's number beats texting someone who opted out.
+ */
 function optOutWhere(businessId: string, id: PhoneIdent): Prisma.SmsOptOutWhereInput | null {
   if (id.e164) {
-    const or: Prisma.SmsOptOutWhereInput[] = [{ phoneE164: id.e164 }];
-    // Legacy rows (no E.164 recorded) hold only the last 10 digits: usable for US/Canada numbers alone.
-    if (id.nanp) or.push({ phoneE164: null, phoneKey: id.key as string });
-    return { businessId, OR: or };
+    return { businessId, OR: [{ phoneE164: id.e164 }, { phoneE164: null, phoneKey: legacyKeyOf(id.e164) }] };
   }
   // Unparseable number: it cannot be proven different from a legacy row with the same digits, so (fail safe) match those.
   return id.key ? { businessId, phoneE164: null, phoneKey: id.key } : null;
 }
+
+/** Rows that are provably THIS number (exact E.164): the only rows a non-US START may remove or a non-US STOP may reuse. */
+const exactOptOutWhere = (businessId: string, id: PhoneIdent): Prisma.SmsOptOutWhereInput | null =>
+  id.e164 ? { businessId, phoneE164: id.e164 } : null;
 
 /** True when this number has opted out of texts from this business. Unparseable numbers match only legacy rows with the same digits. */
 export async function isOptedOut(businessId: string, phone: string | null | undefined, country?: string): Promise<boolean> {
@@ -103,14 +114,15 @@ export async function isOptedOut(businessId: string, phone: string | null | unde
   return (await prisma.smsOptOut.findFirst({ where, select: { id: true } })) !== null;
 }
 
-/** Record a STOP. Idempotent: the first opt-out time and source are kept; a legacy row gains its E.164. */
+/** Record a STOP. Idempotent: the first opt-out time and source are kept; a legacy US/CA row gains its E.164. */
 export async function recordOptOut(businessId: string, phone: string, source = 'stop_keyword', country?: string): Promise<SmsOptOut> {
   const id = phoneIdent(phone, country);
-  const where = optOutWhere(businessId, id);
+  const where = id.nanp ? optOutWhere(businessId, id) : exactOptOutWhere(businessId, id) ?? optOutWhere(businessId, id);
   if (!where || !id.key) throw new Error('recordOptOut: invalid phone');
   let row = await prisma.smsOptOut.findFirst({ where, orderBy: { optedOutAt: 'asc' } });
   if (row) {
-    if (!row.phoneE164 && id.e164) row = await prisma.smsOptOut.update({ where: { id: row.id }, data: { phoneE164: id.e164 } });
+    // Never rewrite a legacy row on behalf of a non-US number: the row may be someone else's (the same last 10 digits).
+    if (!row.phoneE164 && id.e164 && id.nanp) row = await prisma.smsOptOut.update({ where: { id: row.id }, data: { phoneE164: id.e164 } });
   } else {
     try {
       row = await prisma.smsOptOut.create({ data: { businessId, phoneKey: id.key, phoneE164: id.e164, source } });
@@ -127,7 +139,8 @@ export async function recordOptOut(businessId: string, phone: string, source = '
 /** Record a START / explicit re-opt-in by removing the suppression. Returns true if a row was removed. */
 export async function recordOptIn(businessId: string, phone: string, country?: string): Promise<boolean> {
   const id = phoneIdent(phone, country);
-  const where = optOutWhere(businessId, id);
+  // START removes only rows that are provably this number: a +52 START must never delete a legacy row that may be a US customer's STOP.
+  const where = id.nanp ? optOutWhere(businessId, id) : exactOptOutWhere(businessId, id) ?? optOutWhere(businessId, id);
   if (!where) throw new Error('recordOptIn: invalid phone');
   const res = await prisma.smsOptOut.deleteMany({ where });
   if (res.count > 0) log.info('sms.opt_in', { business: businessId });

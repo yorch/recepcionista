@@ -49,7 +49,7 @@ integration('caps, initiation webhook and follow-up consent (postgres)', () => {
 
       const alert = await msg.sendAndLog({ business_id: biz.id, to: biz.owner_phone!, body: 'EMERGENCY', kind: 'owner_alert' });
       expect(alert.blocked).toBeUndefined();
-      const code = await msg.sendOwnerVerificationCode(biz.id, phone(), 'code 123456');
+      const code = await msg.sendOwnerVerificationCode(biz.id, phone(), '123456');
       expect(code.blocked).toBeUndefined();
       expect((await db.getUsage(biz.id))?.sms_count).toBe(4);
       // gratitude (marketing class) is capped too
@@ -131,6 +131,13 @@ integration('caps, initiation webhook and follow-up consent (postgres)', () => {
       expect(call.status).toBe('handed_off');
       expect(call.flaggedReason).toBe('out_of_service:cap_reached');
       expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'owner_alert' } })).toBe(1); // owner told (mock)
+      // M6: the call is cut short instead of running the agent's full 15 minutes ...
+      expect((json as unknown as { conversation_config_override: { conversation?: { max_duration_seconds?: number } } }).conversation_config_override.conversation?.max_duration_seconds).toBe(60);
+      // ... and a redial storm does not pump the owner's phone: a second out-of-service call within 10 minutes sends no text
+      const again = { caller_id: phone(), agent_id: biz.agent_id, call_sid: uniq('CA'), conversation_id: uniq('conv') };
+      await initiation.POST(initReq(again));
+      expect((await prisma.call.findFirst({ where: { businessId: biz.id, callSid: again.call_sid } }))?.status).toBe('handed_off');
+      expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'owner_alert' } })).toBe(1);
 
       const run = async (name: string, args: Record<string, unknown>) =>
         (await (await tools(toolRequest(name, { agent_id: biz.agent_id, conversation_id: body.conversation_id, ...args }), { params: Promise.resolve({ tool: name }) })).json()) as { ok: boolean; message: string };

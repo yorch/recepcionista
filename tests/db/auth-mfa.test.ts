@@ -193,12 +193,20 @@ suite('2FA, sessions and admin sessions (postgres)', () => {
       expect(codes).toContain(429);
       expect((await s.resolvePrincipal(new Headers({ cookie: pending }))).ok).toBe(false);
       await clearLimiter(db, ['auth/mfa']);
-      // from different addresses the per-session cap kills the session on the 5th wrong code
-      const p2 = await pendingCookie('brute');
-      const out: number[] = [];
-      for (let i = 0; i < 5; i++) out.push((await post(mfa, '/api/auth/mfa', { code: '222222' }, p2)).status);
-      expect(out.filter((c) => c === 401).length).toBe(5);
-      expect(await s.resolvePendingMfa(new Headers({ cookie: p2 }))).toBeNull();
+      // M5: from DIFFERENT addresses the per-ACCOUNT lock still stops the guessing (3 free failures, then a backoff
+      // that does not depend on the client address); the notice mail and the audit row follow.
+      {
+        const p2 = await pendingCookie('brute');
+        const out: number[] = [];
+        for (let i = 0; i < 6; i++) out.push((await post(mfa, '/api/auth/mfa', { code: '222222' }, p2)).status);
+        expect(out).toEqual([401, 401, 401, 401, 429, 429]);
+        // a correct code is refused too while the account is locked
+        const { user } = await db.getUserByEmail(email('brute')).then((u: any) => ({ user: u }));
+        expect((await post(mfa, '/api/auth/mfa', { code: 'not-checked' }, p2)).status).toBe(429);
+        expect(await db.prisma.auditEvent.count({ where: { actorUserId: user.id, action: 'auth.mfa_account_locked' } })).toBeGreaterThan(0);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(mail.to(email('brute')).some((m: any) => /guessing your two-factor/i.test(m.subject))).toBe(true);
+      }
     });
 
     test('an expired pending session is useless', async () => {

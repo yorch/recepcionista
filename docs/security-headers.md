@@ -61,6 +61,14 @@ Verified in Chromium against a production build (`next build && next start`): `/
 
 Rollback in an incident is `CSP_REPORT_ONLY=true` plus a restart: pages keep working with the pre-nonce policy.
 
+## Cloudflare Turnstile
+
+When `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (build time) or `TURNSTILE_SECRET_KEY` is set, the policy additionally allows exactly
+`https://challenges.cloudflare.com` in `script-src` (the widget's `api.js`; under `'strict-dynamic'` it is loaded by the nonced app script and the
+host entry only serves browsers without strict-dynamic support), in `connect-src`, and as the only `frame-src` (the challenge is an iframe). The same
+holds for the moderate policy used by `CSP_REPORT_ONLY=true`. With Turnstile off none of this is added. A test covers both modes (`tests/csp.test.ts`) and the
+widget was exercised in Chromium against a production build with Cloudflare's always-pass test site key `1x00000000000000000000AA`: zero CSP violations.
+
 ## Adding third-party scripts
 
 Load them from a nonced script (`<Script nonce=...>` gets the nonce automatically) or a script that a nonced script injects

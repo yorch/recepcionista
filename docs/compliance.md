@@ -62,23 +62,25 @@ other states differ. Have counsel review the wording and the flows below before 
   with the business's country (the country of its own phone, else `DEFAULT_PHONE_COUNTRY`) for numbers typed without `+`.
   Opt-out, erasure, export, consent, tenant routing and "is this the owner" never match on trailing digits across
   countries: a STOP/erasure for a +44 number never touches a +1 number with the same last ten digits, and vice versa.
-  A row that has NO E.164 (written before the columns existed and not backfillable) may still be matched on the legacy
-  last-10-digit key, but only when both numbers are US/Canada-shaped. Consequences: new non-+1 opt-outs store the E.164
-  in `phone_key` (the unique key), free text (SMS bodies, briefings) is searched with a phone-number parser, and a legacy
-  foreign-number row with no E.164 is not matched by an erase/opt-out (it cannot be proven to be the same person).
+  Opt-outs are the exception, and they FAIL SAFE: a legacy opt-out row that has NO E.164 (recorded before the columns existed; only the last 10 digits
+  survive, so its country is unknowable: +52 55 1234 5678 and +1 551 234 5678 are both `5512345678`) suppresses EVERY country whose number ends in those
+  digits, exactly like the pre-E.164 code. A non-US START never deletes such a row and a non-US STOP never rewrites it. New non-+1 opt-outs store the E.164
+  in `phone_key` (the unique key), and free text (SMS bodies, briefings) is searched with a phone-number parser.
 - **Owner alerts need a VERIFIED owner phone.** Emergency, handoff, payment and low-rating alerts go only to
   `businesses.owner_phone` when `owner_phone_verified_at` is set (stateless HMAC challenge, 6-digit SMS code, 10 minute TTL,
-  5 attempts per challenge, 5 texts/hour per business+phone+client; audited). A verified number is exempt from
-  `SMS_ALLOWED_COUNTRY_CODES` (possession proven); the verification text itself is not. An unverified phone gets NO alert, the
+  5 attempts per server-verified challenge, requires a verified email, fixed text with no tenant-controlled characters, limits per business+phone+client,
+  business, user, IP, destination number across all businesses and platform-wide; numbers that opted out anywhere or were verified by another business in the
+  last 30 days are refused; audited). Owner phones (PATCH and verification) must be in `SMS_ALLOWED_COUNTRY_CODES`; the verification text is subject to it too. An unverified phone gets NO alert, the
   attempt is logged `blocked_owner_unverified`, and the voice tools answer honestly that the owner was not notified (with
   911/fallback advice). Changing `owner_phone` any other way clears the verification (same number keeps it).
-  Rollout: `OWNER_PHONE_GRANDFATHER=true` treats existing numbers as verified until owners re-verify (default off).
+  Rollout: `OWNER_PHONE_GRANDFATHER=true` treats existing numbers as verified until owners re-verify (default off; ignored in production without
+  `OWNER_PHONE_GRANDFATHER_ACK=i-understand`; time-box it with `_BEFORE`/`_UNTIL`; such numbers bypass opt-outs, so use it briefly).
 - **Plan caps.** Customer-facing texts (confirmation, payment link, replies, manual, gratitude/review) stop at the plan cap
   with status `blocked_cap` (logged, retried by the next gratitude sweep, not billed); owner alerts, STOP/START/HELP
-  confirmations and verification codes are never blocked but are counted. Calls: over the minutes cap (or no plan while
-  `BILLING_ENFORCED=true`) the agent opens with the disclosure plus an honest out-of-service line, tools other than
+  confirmations are never blocked but are counted; verification codes are counted and, after 3 a day per business while billing is enforced, plan-gated. Calls: over the minutes cap (or no plan while
+  billing is enforced, the production default) the agent opens with the disclosure plus an honest out-of-service line, tools other than
   `flag_emergency`/`handoff_to_human` refuse with the same line, the call row is marked `handed_off`
-  (`out_of_service:<reason>`) and the owner gets a "missed call" text when their phone is verified. Duration is recorded
+  (`out_of_service:<reason>`), the call is cut to 60 seconds, and the owner gets a "missed call" text when their phone is verified (at most 1 per 10 minutes and 6 per hour per business). Duration is recorded
   once per conversation by the post-call webhook.
 - All sends go through `sendAndLog` (`src/lib/messaging`), which enforces:
   - owner alerts to the business's own owner phone: exempt from opt-out lists, no footer. `owner_alert` is
@@ -118,9 +120,12 @@ other states differ. Have counsel review the wording and the flows below before 
 - Known limitation: with Twilio Advanced Opt-Out / default long-code STOP handling Twilio itself blocks the number
   (error 21610) and may not forward the STOP to this webhook; the app's suppression list then only reflects STOPs it
   saw. Matching is on E.164 (see above); only legacy US/Canada rows without an E.164 fall back to the last ten digits.
-  The country allow-list `SMS_ALLOWED_COUNTRY_CODES` defaults to `1`. The Phase 1 backfill derived `sms_opt_outs.phone_e164`
-  from the old 10-digit key as a +1 number, so a legacy opt-out of a foreign number whose national part is a valid NANP
-  number is now treated as a +1 opt-out (it over-suppresses, never under-suppresses).
+  The country allow-list `SMS_ALLOWED_COUNTRY_CODES` defaults to `1`. The migration NEVER maps a legacy opt-out onto +1 from the 10-digit key alone
+  (review round 3, H3): `20261125120000` leaves `phone_e164` NULL, and the corrective migration `20261126120000_review3_optout_repair_trials_indexes`
+  sets it only where the same business has exactly one distinct E.164 ending in those digits (`sms_log.to_e164`, `calls.caller_e164`,
+  `bookings.phone_e164`), and also repairs databases where the earlier blind backfill already ran (a +52/+44 opt-out wrongly stored as +1 is un-mapped).
+  Anything ambiguous or unproven stays NULL, which suppresses (an unrelated number sharing the digits may be over-suppressed; an opted-out customer is
+  never texted).
 
 ### Emergencies (911)
 The prompt requires that for gas, carbon monoxide, fire, smoke, electrical sparking, flooding with an
@@ -153,7 +158,7 @@ failure and exception results, and still reports honestly whether the owner was 
 
 ## What the operator must still do
 - **Owner phone verification.** Each owner verifies their alert number once (Settings). Until they do, alerts are not sent.
-  To avoid a silent period on deploy, set `OWNER_PHONE_GRANDFATHER=true`, ask owners to verify, then turn it off.
+  To avoid a silent period on deploy, set `OWNER_PHONE_GRANDFATHER=true` (production also needs `OWNER_PHONE_GRANDFATHER_ACK=i-understand`; add `_BEFORE`/`_UNTIL`), ask owners to verify, then turn it off.
 - **ElevenLabs initiation webhook.** Provisioning tries to configure it through the API; verify it in the ElevenLabs UI
   (docs/runbook.md section 6) and place a test call: the call row must show `consent_status='disclosed'` BEFORE the post-call.
 - **After upgrading, re-provision every business** (`POST /api/businesses/:id/provision`, admin) so each existing

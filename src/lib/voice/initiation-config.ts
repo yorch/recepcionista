@@ -10,7 +10,8 @@ export function initiationAgentOverrides(): Record<string, unknown> {
   return initiationAutoConfig()
     ? {
       enable_conversation_initiation_client_data_from_webhook: true,
-      conversation_config_override: { agent: { first_message: true } },
+      // `conversation.max_duration_seconds` lets an out-of-service call be cut short (voice/capacity.ts) instead of running the full 15 minutes.
+      conversation_config_override: { agent: { first_message: true }, conversation: { max_duration_seconds: true } },
     }
     : {};
 }

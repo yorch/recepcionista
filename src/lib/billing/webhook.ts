@@ -7,7 +7,8 @@
  * belongs to one business cannot be claimed by another through metadata.
  */
 import { getBusiness, getBusinessByStripeCustomer, recordAudit, setBillingState } from '@/lib/db';
-import { retrieveSubscription, planName, type RetrievedSubscription } from '@/lib/providers/stripe-billing';
+import { endTrialNow, planName, retrieveCardFingerprint, retrieveSubscription, type RetrievedSubscription } from '@/lib/providers/stripe-billing';
+import { cardFingerprint, claimTrial } from './trial';
 import { notifyOwners } from './emails';
 import { acceptsSubscription, fromUnix, idOf, subscriptionPatch, type StripeSubscriptionLike } from './status';
 import { logger } from '@/lib/log';
@@ -137,10 +138,33 @@ async function onCheckoutCompleted(event: StripeEvent, session: Record<string, u
       log.warn('subscription.retrieve_failed', { sub: subId, error: (err as Error).name }); // subscription.* events will follow
     }
   }
-  if (sub && idOf(sub.customer) === customerId) return applySubscription(event, business, res.link, customerId, sub as StripeSubscriptionLike);
+  if (sub && idOf(sub.customer) === customerId) {
+    const outcome = await applySubscription(event, business, res.link, customerId, sub as StripeSubscriptionLike);
+    if (outcome.handled && sub.trial_end && sub.status === 'trialing') await enforceOneTrialPerCard(event, business, subId);
+    return outcome;
+  }
   await setBillingState(business.id, { stripe_customer_id: customerId, stripe_subscription_id: subId, plan: planName() });
   await audit(event, business, 'billing.checkout_completed', { subscription: subId });
   return { handled: true, business_id: business.id, detail: 'linked' };
+}
+
+/**
+ * One free trial per physical card (L1): a card whose fingerprint was already used for a trial by ANOTHER business ends this
+ * trial now (the first invoice is charged). Best-effort: a Stripe failure here never fails the webhook (Stripe would retry
+ * and re-apply the state); the denial is audited either way.
+ */
+async function enforceOneTrialPerCard(event: StripeEvent, business: Business, subId: string): Promise<void> {
+  try {
+    const raw = await retrieveCardFingerprint(subId);
+    if (!raw) return;
+    const verdict = await claimTrial('card', cardFingerprint(raw), business.id);
+    if (verdict !== 'taken') return;
+    await endTrialNow(subId);
+    await audit(event, business, 'billing.trial_denied', { reason: 'card_used_for_another_trial', subscription: subId });
+    log.warn('trial.denied_card_seen', { business: business.id, sub: subId });
+  } catch (err) {
+    log.warn('trial.card_check_failed', { business: business.id, error: (err as Error).name });
+  }
 }
 
 async function onSubscription(event: StripeEvent, type: string, sub: Record<string, unknown>): Promise<Outcome> {

@@ -25,7 +25,9 @@ export interface ProvisionResult {
   agent_id?: string;
   agent_mock?: boolean;
   regenerated?: boolean;
-  /** Shown ONCE, only when this call created the ElevenLabs post-call webhook. Store as ELEVENLABS_WEBHOOK_SECRET; it is not persisted or logged. */
+  /** True when the agent exists but the post-call webhook could not be attached (operator action needed: docs/runbook.md). Never carries a secret. */
+  post_call_webhook_pending?: boolean;
+  /** Shown ONCE, ONLY to an admin principal, when this call created the ElevenLabs post-call webhook. Store as ELEVENLABS_WEBHOOK_SECRET; it is not persisted or logged. */
   webhook_secret?: string;
   webhook_secret_notice?: string;
 }
@@ -214,6 +216,7 @@ async function provision(
     let agentId: string | undefined;
     let agentMock: boolean | undefined;
     let webhookSecret: string | undefined;
+    let postCallPending = false;
     lostLeaseCheck(signal);
     try {
       const agent = await createOrUpdateAgent({ business: updated, kb });
@@ -225,10 +228,15 @@ async function provision(
       }
       if (!agent.mock && agentId) {
         try { await bindPhoneNumber(agentId); } catch { /* best-effort */ }
-        const hook = await ensurePostCallWebhook();
-        webhookSecret = hook.webhook_secret;
+        // Only an ADMIN call may create the platform-wide webhook (and so see its one-time signing secret).
+        // A tenant call just attaches the existing one; if it is missing or cannot be looked up the step fails safely.
+        const hook = await ensurePostCallWebhook({ allowCreate: principal.kind === 'admin' });
+        if (principal.kind === 'admin') webhookSecret = hook.webhook_secret;
         if (hook.webhook_id) {
           await registerPostCallWebhookOnAgent(agentId, hook.webhook_id);
+        } else {
+          postCallPending = true;
+          log.warn('post_call_webhook.unavailable', { business: id, error: hook.error ?? null });
         }
       }
     } catch (err) {
@@ -254,7 +262,8 @@ async function provision(
       agent_id: agentId,
       agent_mock: agentMock,
       regenerated,
-      ...(webhookSecret ? {
+      ...(postCallPending ? { post_call_webhook_pending: true } : {}),
+      ...(webhookSecret && principal.kind === 'admin' ? {
         webhook_secret: webhookSecret,
         webhook_secret_notice: 'Store this as ELEVENLABS_WEBHOOK_SECRET in .env and redeploy. It is shown only once and is not saved by the app.',
       } : {}),

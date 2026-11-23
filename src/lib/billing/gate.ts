@@ -8,7 +8,7 @@ import type { Business } from '@/lib/types';
 
 export const CHECKOUT_PATH = '/api/billing/checkout';
 
-/** The business has no paid plan (and BILLING_ENFORCED=true). Surface as 402. */
+/** The business has no paid plan (billing enforced, or any production non-admin provisioning). Surface as 402. */
 export class BillingRequiredError extends Error {
   readonly code = 'billing_required';
   constructor() {
@@ -19,8 +19,8 @@ export class BillingRequiredError extends Error {
 
 /**
  * Throws BillingRequiredError when `business` may not buy a number / create an agent.
- * Admin principals bypass (they comp accounts and provision on their behalf). With BILLING_ENFORCED unset
- * nothing is refused (demo / legacy tenants, local development).
+ * Admin principals bypass (they comp accounts and provision on their behalf). In production a non-admin
+ * always needs a plan (even with BILLING_ENFORCED=false); in development nothing is refused unless BILLING_ENFORCED=true.
  */
 export function assertProvisioningAllowed(
   principal: Principal,

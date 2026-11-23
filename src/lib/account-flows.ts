@@ -141,3 +141,16 @@ export async function sendTwoFactorNotice(email: string, enabled: boolean): Prom
   );
   await deliver({ to: email, ...m });
 }
+
+/** Sent when the second-factor step of an account keeps getting wrong codes (the password is probably known to someone else). */
+export async function sendMfaFailuresNotice(email: string): Promise<void> {
+  const m = plainMail(
+    'Someone is guessing your two-factor codes',
+    [
+      'Several wrong two-factor codes were just entered for your Recepcionista account, so sign-in is paused for a while.',
+      'Whoever is trying already knows your password. Change it now.',
+    ],
+    `Reset your password at ${appBaseUrl()}/forgot-password. If this was you, wait a few minutes and try again.`,
+  );
+  await deliver({ to: email, ...m });
+}

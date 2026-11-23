@@ -23,10 +23,17 @@ one; `incomplete` / `incomplete_expired` become `none`; `paused` becomes `unpaid
 Service rules (Phase 1, `src/lib/db/usage.ts`): `trialing` and `active` are allowed; `past_due` is allowed for
 `BILLING_PAST_DUE_GRACE_DAYS` (default 5) after it first became past due; everything else is refused.
 
-**Nothing is refused unless `BILLING_ENFORCED=true`.** Demo and legacy tenants, and local development, keep working exactly as before.
+**Production fails closed.** With `NODE_ENV=production` billing is ENFORCED unless `BILLING_ENFORCED=false` is set explicitly (any other value, a
+typo or an unset variable enforces). `deploy.sh` and `compose.production.yaml` refuse to run with the variable unset or invalid, and `deploy.sh`
+prints a loud banner (plus a startup warning in the app log, `billing.not_enforced`) for `false`. Reason: signup is public, so a fail-open default would give
+every stranger a free number, agent and texts. Two further rules do not depend on the flag: in production a **non-admin** can never provision a number/agent
+without an active plan (`isProvisioningAllowed`), even with `BILLING_ENFORCED=false`; and `BILLING_ENFORCED=false` only relaxes texts/calls for tenants that
+already exist. In development and tests nothing is refused unless `BILLING_ENFORCED=true`.
 
 Checkout rules: owner or admin only, the account email must be verified (admins exempt), a business that already used a trial
-gets no second one, an already-subscribed business gets 409 (use the portal). Cookie requests are same-origin checked and rate limited.
+gets no second one, an already-subscribed business gets 409 (use the portal). **One trial per person, not per business**: the normalised owner
+address (case, `+tag`, Gmail dots) and the card's Stripe fingerprint are remembered as HMAC hashes in `trial_fingerprints`; a seen address starts
+paid (no trial) and a card seen on another business ends the trial immediately when `checkout.session.completed` arrives (audited as `billing.trial_denied`). Cookie requests are same-origin checked and rate limited.
 
 ### Webhook behaviour
 
@@ -79,14 +86,14 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 | `STRIPE_PRICE_ID` | recurring monthly price |
 | `STRIPE_BILLING_WEBHOOK_SECRET` | billing endpoint signing secret |
 | `BILLING_TRIAL_DAYS` | 0-90, default 7 |
-| `BILLING_ENFORCED` | exactly `true` to start refusing; leave unset until step 6 |
+| `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh and compose. Outside production only `true` enforces |
 | `BILLING_PAST_DUE_GRACE_DAYS` | default 5 |
 | `PLAN_SMS_CAP`, `PLAN_CALL_MINUTES_CAP` | default monthly caps (500 texts, 300 minutes); per-business overrides win |
 | `BILLING_PLAN_NAME` | label stored on subscribed businesses, default `standard` |
 | `BILLING_ALLOW_PROMO_CODES` | `true` shows the promotion code box in Checkout |
 | `APP_URL` / `PUBLIC_BASE_URL` | return URLs; required in production |
 
-`deploy.sh` refuses to deploy with `BILLING_ENFORCED=true` unless `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
+`deploy.sh` refuses to deploy when `BILLING_ENFORCED` is unset/invalid, and with `BILLING_ENFORCED=true` unless `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
 `STRIPE_BILLING_WEBHOOK_SECRET` are set. In production a missing key or price makes checkout answer 503; the local mock never runs there.
 
 ### 5. Grandfather existing businesses (before enforcing)
@@ -106,29 +113,40 @@ event for a linked customer overwrites the status. Admins also bypass the provis
 
 #### Bulk: `scripts/grandfather-existing.ts` (recommended for more than a handful of tenants)
 
+Comping gives away paid service, so the script is deliberately narrow and needs an explicit cutoff:
+
 ```sh
-bun scripts/grandfather-existing.ts --force-i-know            # DRY RUN (default): lists what would change, writes nothing
-bun scripts/grandfather-existing.ts --force-i-know --apply    # comps them
+# DRY RUN (default): prints the ELIGIBLE and SKIPPED lists with reasons, writes nothing
+bun scripts/grandfather-existing.ts --force-i-know --before 2026-11-25T00:00:00Z
+# comps exactly the eligible list you just read
+bun scripts/grandfather-existing.ts --force-i-know --before 2026-11-25T00:00:00Z --apply
 ```
 
-Run it where `DATABASE_URL` points at the production database (on the production host, through the one-shot tools container: `docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/grandfather-existing.ts --force-i-know [--apply]`; this only runs the script, nothing is seeded).
-It uses the same safe-database guard as `seed`/`db-reset`: databases without a whole `dev`/`test`/`scratch`/`local` word in the name need `--force-i-know`;
-read the dry-run output first. For every business with `billing_status='none'` and no Stripe subscription it sets `billing_status='active'`, `plan='legacy'`;
-where an `owner_phone` is stored but unverified it sets `owner_phone_verified_at` (alerts keep flowing; owners can re-verify in Settings). Businesses with any
-other billing state are untouched, so it is idempotent and safe to re-run; each change is audited (`billing.grandfathered`).
+- `--before <ISO instant>` is **required** with `--apply`: use the moment signup went live / the deploy time. Only businesses created before it are touched.
+- Skipped (with the reason printed): a business whose owners have no verified email; a self-signup business (an `auth.signup` audit row; override
+  `--include-self-signup`, only after reading the list); a business whose owner phone is set but **not verified** (override `--include-unverified-phone`);
+  anything that already has billing state (trialing, active, past_due, canceled, a Stripe subscription).
+- It **never marks an owner phone verified**. Owners verify in Settings; for a legacy tenant who cannot, use the explicit `OWNER_PHONE_GRANDFATHER` switch below.
+- For each eligible business: `billing_status='active'`, `plan='legacy'`. Idempotent; each change is audited (`billing.grandfathered`).
+
+Run it where `DATABASE_URL` points at the production database (on the production host, through the one-shot tools container: `docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/grandfather-existing.ts --force-i-know --before <iso> [--apply]`; this only runs the script, nothing is seeded).
+It uses the same safe-database guard as `seed`/`db-reset`: databases without a whole `dev`/`test`/`scratch`/`local` word in the name need `--force-i-know`.
 
 #### Owner phones without the script: `OWNER_PHONE_GRANDFATHER`
 
-Owner alerts only go to a *verified* owner phone. `OWNER_PHONE_GRANDFATHER=true` is the runtime alternative to the script's phone step: every existing
-`owner_phone` is treated as verified until its owner re-verifies, so a deploy does not silence alerts. It does not touch billing (use the script or
-`/api/admin/billing` for that). Turn it off once owners have verified. The seeded demo business is created already verified and `active`, so a demo install needs neither.
+Owner alerts only go to a *verified* owner phone. `OWNER_PHONE_GRANDFATHER=true` treats existing unverified `owner_phone` values as verified until their owners
+re-verify. It is dangerous (those numbers bypass opt-outs and the country allow-list and were never proven to belong to the owner), so in **production it is ignored
+unless `OWNER_PHONE_GRANDFATHER_ACK=i-understand` is also set**, deploy.sh refuses the combination without the ack, and the app logs a startup warning either way.
+Always time-box it: `OWNER_PHONE_GRANDFATHER_BEFORE=<ISO>` (only businesses created before that instant, e.g. the deploy time) and
+`OWNER_PHONE_GRANDFATHER_UNTIL=<ISO>` (expires; an unparseable value disables it). It does not touch billing. Turn it off once owners have verified. The seeded demo
+business is created already verified and `active`, so a demo install needs neither.
 
 ### 6. Turn it on
 
 1. Verify in test mode (checklist below).
-2. Comp the existing tenants (step 5: `scripts/grandfather-existing.ts`) and confirm with `GET /api/billing/status?business_id=<id>` (`provisioning_allowed: true`).
+2. Comp the existing tenants (step 5: `scripts/grandfather-existing.ts --before <deploy time>`) and confirm with `GET /api/billing/status?business_id=<id>` (`provisioning_allowed: true`).
 3. Switch to live keys (live price id, live webhook endpoint and secret), set `BILLING_ENFORCED=true`, redeploy.
-4. Roll back by unsetting `BILLING_ENFORCED`: nothing is refused again (billing data is kept).
+4. Roll back by setting `BILLING_ENFORCED=false` (the explicit opt-out; unsetting it enforces in production). Texts/calls are not refused again for existing tenants and billing data is kept, but non-admin provisioning still needs a plan. Do not do this with open signup.
 
 ## Test-mode checklist (Stripe CLI)
 

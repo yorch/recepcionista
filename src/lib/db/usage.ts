@@ -5,8 +5,8 @@
  *   = first day of that month). All period math happens in SQL (one source of truth) and every increment is a
  *   single atomic upsert, so concurrent sends cannot lose counts.
  * - Caps: per-business override columns, else env PLAN_SMS_CAP (default 500) / PLAN_CALL_MINUTES_CAP (default 300).
- * - Plan gate: BILLING_ENFORCED must be exactly 'true' for anything to be refused (demo/legacy tenants and
- *   local development stay unrestricted). When enforced, billing_status 'trialing'/'active' is allowed,
+ * - Plan gate: in production billing is enforced unless BILLING_ENFORCED=false is set explicitly (fail closed); in
+ *   development/test it is enforced only with BILLING_ENFORCED=true. When enforced, billing_status 'trialing'/'active' is allowed,
  *   'past_due' is allowed for BILLING_PAST_DUE_GRACE_DAYS (default 5) after it became past due, everything else is not.
  */
 import crypto from 'node:crypto';
@@ -23,7 +23,17 @@ const nonNegInt = (raw: string | undefined, fallback: number): number => {
   return Number.isInteger(n) && n >= 0 ? n : fallback;
 };
 
-export const billingEnforced = (env: NodeJS.ProcessEnv = process.env): boolean => env.BILLING_ENFORCED === 'true';
+const isProduction = (env: NodeJS.ProcessEnv): boolean => env.NODE_ENV === 'production';
+
+/**
+ * FAIL CLOSED in production: billing is enforced unless BILLING_ENFORCED is exactly 'false' (an explicit, loud opt-out;
+ * any other value, including a typo, enforces). Outside production (dev/test) it is enforced only when exactly 'true'.
+ */
+export const billingEnforced = (env: NodeJS.ProcessEnv = process.env): boolean => {
+  const v = (env.BILLING_ENFORCED ?? '').trim();
+  if (isProduction(env)) return v !== 'false';
+  return v === 'true';
+};
 export const pastDueGraceDays = (env: NodeJS.ProcessEnv = process.env): number =>
   nonNegInt(env.BILLING_PAST_DUE_GRACE_DAYS, DEFAULT_PAST_DUE_GRACE_DAYS);
 
@@ -53,13 +63,17 @@ export function billingStateAllows(
   return false;
 }
 
-/** May this business buy a number / create an agent (provisioning)? Always true unless BILLING_ENFORCED=true. */
+/**
+ * May this business buy a number / create an agent (provisioning)? In production a business ALWAYS needs a plan,
+ * whatever BILLING_ENFORCED says (BILLING_ENFORCED=false only relaxes texts/calls for comped tenants; strangers who
+ * signed up never get free paid resources). Outside production: only when enforcement is on.
+ */
 export function isProvisioningAllowed(
   b: Pick<Business, 'billing_status' | 'past_due_since'>,
   now: Date = new Date(),
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return !billingEnforced(env) || billingStateAllows(b, now, env);
+  return !(isProduction(env) || billingEnforced(env)) || billingStateAllows(b, now, env);
 }
 
 export interface UsageSummary {

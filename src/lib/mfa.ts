@@ -1,13 +1,26 @@
 /** Second-factor checks shared by the MFA login step and the security endpoints. Node runtime only. */
 import { claimTotpStep, consumeRecoveryCode, getTotpState, getUserByEmail } from '@/lib/db';
-import { accountId, checkPair, clearFailures, pairKey, recordFailure, verdictResponse } from '@/lib/login-throttle';
+import { accountId, checkPair, clearFailures, pairKey, peekPair, recordFailure, verdictResponse, type Verdict } from '@/lib/login-throttle';
+import { afterResponse, sendMfaFailuresNotice } from '@/lib/account-flows';
+import { recordAudit } from '@/lib/db';
+import { rateLimit } from '@/lib/ratelimit';
+import { logger } from '@/lib/log';
 import { verifyPasswordOrDummy } from '@/lib/password';
 import { decryptSecret, hashRecoveryCode, looksLikeRecoveryCode, verifyTotp } from '@/lib/totp';
 
 /** A session that only passed the password step must finish the second factor within this long. */
 export const MFA_PENDING_TTL_MS = 10 * 60_000;
 
-export type SecondFactor = { ok: true; method: 'totp' | 'recovery' } | { ok: false };
+export type SecondFactor =
+  | { ok: true; method: 'totp' | 'recovery' }
+  | { ok: false; locked?: Extract<Verdict, { ok: false }> };
+
+/** Wrong second-factor attempts on ONE account (all addresses together) before the account's MFA step is emailed about. */
+export const MFA_ACCOUNT_NOTICE_AFTER = 4;
+/** Per-ACCOUNT throttle key for the second factor: independent of the client IP, so a botnet cannot fan out. */
+export const mfaAccountKey = (userId: string): string => `auth/mfa:acct:${accountId(userId)}`;
+
+export interface MfaAccountContext { email: string; businessId: string | null; ip: string | null }
 
 /**
  * Verify a TOTP code (replay-guarded: the matched 30 s step is claimed atomically, so a code works once)
@@ -17,7 +30,41 @@ export type SecondFactor = { ok: true; method: 'totp' | 'recovery' } | { ok: fal
 export async function verifySecondFactor(
   userId: string,
   input: { code?: unknown; recovery_code?: unknown },
-  opts: { allowRecovery?: boolean; nowMs?: number } = {},
+  opts: { allowRecovery?: boolean; nowMs?: number; account?: MfaAccountContext } = {},
+): Promise<SecondFactor> {
+  // M5: per-ACCOUNT lock with exponential backoff, independent of the client address (the per-(user, IP) pair and
+  // per-session limits cannot stop a distributed guesser). While locked nothing is checked, even a right code.
+  const lock = await checkPair(mfaAccountKey(userId));
+  if (!lock.ok) return { ok: false, locked: lock };
+  const r = await verifyFactor(userId, input, opts);
+  if (!r.ok) await onAccountFailure(userId, opts.account);
+  return r;
+}
+
+const mfaLog = logger('mfa');
+
+/** Count a wrong attempt against the account; from MFA_ACCOUNT_NOTICE_AFTER failures email the user (once an hour) and audit the lock. */
+async function onAccountFailure(userId: string, account?: MfaAccountContext): Promise<void> {
+  const key = mfaAccountKey(userId);
+  await recordFailure(key, accountId(userId));
+  const st = await peekPair(key);
+  if (st.failures < MFA_ACCOUNT_NOTICE_AFTER) return;
+  mfaLog.warn('account_mfa_guessing', { acct: accountId(userId).slice(0, 8), failures: st.failures, retry_after_s: st.retryAfterS });
+  if (st.retryAfterS > 0) {
+    await recordAudit({
+      actor_kind: 'system', actor_user_id: userId, business_id: account?.businessId ?? null, action: 'auth.mfa_account_locked', target: `user:${userId}`, ip: account?.ip ?? null,
+      meta: { failures: st.failures, retry_after_s: st.retryAfterS },
+    });
+  }
+  if (account?.email && (await rateLimit(`auth/mfa:notice:${accountId(userId)}`, 1, 60 * 60_000)).allowed) {
+    await afterResponse('mfa.failures_notice', () => sendMfaFailuresNotice(account.email));
+  }
+}
+
+async function verifyFactor(
+  userId: string,
+  input: { code?: unknown; recovery_code?: unknown },
+  opts: { allowRecovery?: boolean; nowMs?: number },
 ): Promise<SecondFactor> {
   const state = await getTotpState(userId);
   if (!state || !state.enabled_at || !state.secret_enc) return { ok: false };

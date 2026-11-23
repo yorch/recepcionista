@@ -2,7 +2,7 @@ import { ok, fail } from '@/lib/http';
 import { getBusinessByPhone, listBusinesses, createCall, getCallBySid, updateCall } from '@/lib/db';
 import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
-import { callGate, outOfServiceFirstMessage } from '@/lib/voice/capacity';
+import { allowMissedCallAlert, callGate, outOfServiceFirstMessage } from '@/lib/voice/capacity';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
@@ -91,8 +91,10 @@ export async function POST(req: Request) {
     if (!gate.ok) {
       if (call.status !== 'handed_off') {
         await updateCall(call.id, { status: 'handed_off', flagged_reason: `out_of_service:${gate.reason ?? 'capacity'}` });
-        const alert = await alertOwner(business, `MISSED CALL — ${business.name}\nA call${from ? ` from ${from}` : ''} was not taken by the assistant (${gate.reason === 'no_plan' ? 'plan inactive' : 'monthly call minutes used up'}). Please call back.`);
-        log.warn('handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert.notified });
+        const alert = (await allowMissedCallAlert(business.id))
+          ? await alertOwner(business, `MISSED CALL — ${business.name}\nA call${from ? ` from ${from}` : ''} was not taken by the assistant (${gate.reason === 'no_plan' ? 'plan inactive' : 'monthly call minutes used up'}). Please call back.`)
+          : null;
+        log.warn('handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert?.notified ?? false, alert_suppressed: alert === null });
       }
       return ok({
         agent_id: '',

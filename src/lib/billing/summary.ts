@@ -1,7 +1,7 @@
 /**
  * Billing summary for a business (status route + dashboard page). Node runtime only.
  */
-import { billingEnforced, billingStateAllows, callMinutesCapFor, getUsage, pastDueGraceDays, smsCapFor } from '@/lib/db';
+import { billingEnforced, isProvisioningAllowed, callMinutesCapFor, getUsage, pastDueGraceDays, smsCapFor } from '@/lib/db';
 import type { BillingStatus, Business } from '@/lib/types';
 
 export interface BillingSummary {
@@ -41,7 +41,7 @@ export async function billingSummary(b: Business, now: Date = new Date()): Promi
     cancel_at_period_end: b.cancel_at_period_end ?? false,
     grace_ends_at: graceEndsAt(b),
     enforced: billingEnforced(),
-    provisioning_allowed: !billingEnforced() || billingStateAllows(b, now),
+    provisioning_allowed: isProvisioningAllowed(b, now),
     has_customer: Boolean(b.stripe_customer_id),
     usage: {
       period_start: usage?.period_start ?? null,

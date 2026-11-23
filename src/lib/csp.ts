@@ -19,20 +19,36 @@ export interface CspOptions {
   isDev?: boolean;
   /** Optional collector (CSP_REPORT_URI): adds `report-uri`. */
   reportUri?: string;
+  /**
+   * Cloudflare Turnstile is configured: allow its script (api.js), its challenge iframe and its network calls from
+   * challenges.cloudflare.com (as Cloudflare documents). Nothing else is opened up.
+   */
+  turnstile?: boolean;
+}
+
+export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
+
+/** Is the Turnstile widget enabled for this deployment? (site key = public, build time; secret = server.) */
+export function turnstileConfigured(env: Record<string, string | undefined> = process.env): boolean {
+  // The literal process.env.NEXT_PUBLIC_* read lets Next inline the build-time value into the proxy bundle.
+  return Boolean((env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY || '').trim());
 }
 
 export function buildCsp(o: CspOptions): string {
   const dev = o.isDev ?? process.env.NODE_ENV !== 'production';
+  const ts = o.turnstile ? ` ${TURNSTILE_ORIGIN}` : '';
+  // strict-dynamic makes browsers ignore the host source (the nonced loader may add api.js); it stays for browsers that do not.
   const scripts = o.mode === 'strict' && o.nonce
-    ? `script-src 'self' 'nonce-${o.nonce}' 'strict-dynamic'${dev ? " 'unsafe-eval'" : ''}`
-    : `script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ''}`;
+    ? `script-src 'self' 'nonce-${o.nonce}' 'strict-dynamic'${ts}${dev ? " 'unsafe-eval'" : ''}`
+    : `script-src 'self' 'unsafe-inline'${ts}${dev ? " 'unsafe-eval'" : ''}`;
   const directives = [
     "default-src 'self'",
     scripts,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    `connect-src 'self'${dev ? ' ws: wss:' : ''}`,
+    `connect-src 'self'${ts}${dev ? ' ws: wss:' : ''}`,
+    ...(o.turnstile ? [`frame-src ${TURNSTILE_ORIGIN}`] : []),
     "media-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",
@@ -58,11 +74,12 @@ export interface CspHeaders {
 export function cspHeadersFor(nonce: string, env: NodeJS.ProcessEnv = process.env): CspHeaders {
   const reportUri = env.CSP_REPORT_URI?.trim() || undefined;
   const isDev = env.NODE_ENV !== 'production';
-  const strict = buildCsp({ nonce, mode: 'strict', isDev, reportUri });
+  const turnstile = turnstileConfigured(env);
+  const strict = buildCsp({ nonce, mode: 'strict', isDev, reportUri, turnstile });
   if (env.CSP_REPORT_ONLY === 'true') {
     // The strict policy stays on the REQUEST (see `enforced`) so Next stamps the nonce on its scripts; the enforced
     // response header is the nonce-less moderate one ('unsafe-inline' would be ignored if a nonce were present).
-    const moderate = buildCsp({ mode: 'moderate', isDev, reportUri });
+    const moderate = buildCsp({ mode: 'moderate', isDev, reportUri, turnstile });
     return { response: [['Content-Security-Policy', moderate], ['Content-Security-Policy-Report-Only', strict]], enforced: strict };
   }
   return { response: [['Content-Security-Policy', strict]], enforced: strict };

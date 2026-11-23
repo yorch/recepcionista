@@ -130,19 +130,27 @@ provisioning, and do these in the UI if the API route did not take effect (or se
    the row stays `unknown` until the post-call evidence arrives.
 
 **Owner phone verification rollout.** Alerts are only sent to a verified owner phone. After deploying:
-1. Set `OWNER_PHONE_GRANDFATHER=true` for the transition (existing numbers keep receiving alerts).
+1. Set `OWNER_PHONE_GRANDFATHER=true` for the transition (existing numbers keep receiving alerts). In production this is ignored unless
+   `OWNER_PHONE_GRANDFATHER_ACK=i-understand` is set too (deploy.sh refuses the switch without it, startup logs `owner_phone_grandfather`), and it should always
+   carry `OWNER_PHONE_GRANDFATHER_BEFORE=<deploy time>` and `OWNER_PHONE_GRANDFATHER_UNTIL=<a short expiry>`: such numbers bypass opt-outs and the country allow-list.
 2. Ask each owner to verify their number (the UI calls `POST /api/businesses/:id/owner-phone/verify/start {phone}` then
    `.../confirm {phone, code, challenge}`).
 3. Find the stragglers: `SELECT id, name FROM businesses WHERE owner_phone IS NOT NULL AND owner_phone_verified_at IS NULL;`
 4. Unset `OWNER_PHONE_GRANDFATHER` and redeploy. From then on unverified numbers get no alerts (log
    `owner_alert.owner_unverified`, sms_log status `blocked_owner_unverified`, and the voice tool tells the caller the owner was not notified).
-Alternatively verify and comp every existing business in one step with `bun scripts/grandfather-existing.ts` (dry run by default, `--apply` to write; docs/billing.md).
+Separately, comp existing paying tenants with `bun scripts/grandfather-existing.ts --before <deploy time>` (dry run by default, `--apply` to write; docs/billing.md). It never verifies a phone and skips self-signup, unverified-email and unverified-phone businesses.
+
+**Verification-text abuse limits.** `POST .../owner-phone/verify/start` needs a verified email, sends a fixed text (`Recepcionista verification code: 123456...`, no tenant-chosen characters), and is limited per business+phone+client (5/h), per business (10/h, 15/day), per user (10/h), per client IP (20/h), per destination number across ALL businesses (3/h, 5/day) and platform-wide (`OWNER_VERIFY_GLOBAL_PER_HOUR` 300, `OWNER_VERIFY_GLOBAL_PER_DAY` 2000). Numbers that opted out of any business, or were verified by another business in the last 30 days, are refused (an admin may override the latter). After 3 texts a day per business they count against the plan cap when billing is enforced. Confirm attempts are limited per server-verified challenge (5), per business+phone (10 / 10 min) and per business (20 / h); re-spelled (padded) challenges are rejected.
+
+**ElevenLabs post-call webhook secret.** The platform-wide webhook is created by an ADMIN provision call only (`POST /api/businesses/:id/provision` with the admin token); its one-time `webhook_secret` appears only in that response: store it as `ELEVENLABS_WEBHOOK_SECRET`. Tenant provisioning only attaches the existing webhook (idempotent lookup by URL, retried; a failed lookup never creates one). If the webhook does not exist yet the tenant gets `post_call_webhook_pending: true` and the log `webhook.missing`: run one admin provision first.
 Demo installs need none of this: `scripts/seed.ts` creates the demo business with a verified owner phone and `billing_status='active'`.
 
-**Usage caps.** `BILLING_ENFORCED=true` turns plan caps on. Over the SMS cap customer texts are logged `blocked_cap` (owner alerts,
+**Usage caps.** Plan caps are on whenever billing is enforced (production default; `BILLING_ENFORCED=false` is the explicit opt-out, docs/billing.md). Over the SMS cap customer texts are logged `blocked_cap` (owner alerts,
 STOP/HELP replies and verification codes still go out and are counted). Over the call-minutes cap `/api/voice/initiation` and
 `/api/voice/incoming` give the caller the out-of-service line and mark the call `handed_off` with `flagged_reason='out_of_service:<reason>'`;
-search the logs for `call.refused`. Call time is added once per conversation by the post-call webhook (a conversation whose
+search the logs for `call.refused`. The gate reads the live state on every call (no cache), the initiation override cuts such a call to 60 seconds
+(`conversation.max_duration_seconds`, needs the initiation webhook override enabled on the agent, which provisioning does), and the owner's "MISSED CALL" text is limited to
+1 per 10 minutes and 6 per hour per business. A business that stays canceled keeps its number and agent until an operator releases them. Call time is added once per conversation by the post-call webhook (a conversation whose
 post-call never arrives is not metered).
 
 **Legacy bookings** (made before follow-up consent was recorded) are never texted for gratitude; a customer's own `YES`/`SI`/`START`

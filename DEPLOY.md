@@ -112,13 +112,15 @@ Every one of these must use the public origin from `APP_URL`:
 **Required `.env` values.** Besides the database, `DOMAIN`/`APP_URL` and the provider secrets above, `deploy.sh` refuses to run without
 `APP_SECRET_KEY` (32 random bytes, base64), `EMAIL_PROVIDER` = `resend`|`smtp` with `EMAIL_FROM` and its key (signup verification,
 password reset and invitations send mail; `log` is refused in production), the Turnstile site/secret pair when either is set, and
-with `BILLING_ENFORCED=true` also `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and `STRIPE_BILLING_WEBHOOK_SECRET`. It also refuses
+`BILLING_ENFORCED` set explicitly (`true`, or deliberately `false`, which prints a loud banner: production **fails closed**, so unset/invalid is refused here and in
+`compose.production.yaml`), with `BILLING_ENFORCED=true` also `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and `STRIPE_BILLING_WEBHOOK_SECRET`, and
+`OWNER_PHONE_GRANDFATHER=true` only together with `OWNER_PHONE_GRANDFATHER_ACK=i-understand`. It also refuses
 `DEMO_MODE`, `ALLOW_INSECURE_DEV` or `STRIPE_ALLOW_UNSIGNED` set to `true`. The full table is `docs/env-vars.md`.
 `NEXT_PUBLIC_*` values are build arguments (compose passes them), so changing them needs a re-run of `./deploy.sh`.
 
-**Existing customers and `BILLING_ENFORCED`.** Before turning plans on, comp every existing tenant:
-`docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/grandfather-existing.ts --force-i-know`
-(a dry run that lists what would change; add `--apply` to write; the `seed` service is only a one-shot tools container, nothing is seeded). Details and the `OWNER_PHONE_GRANDFATHER` alternative: `docs/billing.md`.
+**Existing customers and `BILLING_ENFORCED`.** Signup is public, so billing is enforced from the first deploy; comp the tenants that already exist (vetted, created before the cutoff you pass):
+`docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/grandfather-existing.ts --force-i-know --before <deploy time ISO>`
+(a dry run that prints the eligible and skipped lists; read them, then add `--apply`; it never verifies an owner phone and skips self-signup and unverified-email/phone businesses; the `seed` service is only a one-shot tools container, nothing is seeded). Details and the `OWNER_PHONE_GRANDFATHER` alternative: `docs/billing.md`.
 
 **Retention is off until you turn it on.** `RETENTION_JOB` defaults to off: nothing is auto-deleted after an
 upgrade (existing businesses have a 365-day window, which would otherwise purge older data on first boot). Boot

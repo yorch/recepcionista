@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { checkSameOrigin } from '@/lib/auth';
+import { checkSameOrigin, clientKey } from '@/lib/auth';
 import {
   afterResponse, allowPerEmail, auditIp, limitIp, sendSignupExistsNotice, sendVerificationEmail,
 } from '@/lib/account-flows';
@@ -8,7 +8,7 @@ import { emailConfigured } from '@/lib/email';
 import { accountId } from '@/lib/login-throttle';
 import { hashPassword } from '@/lib/password';
 import { rateLimit } from '@/lib/ratelimit';
-import { createSignupAccount, parseSignupBody, takeGlobalSignupSlot, turnstileEnabled, verifyTurnstile } from '@/lib/signup';
+import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, turnstileEnabled, verifyTurnstile } from '@/lib/signup';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -27,7 +27,10 @@ const fail = (status: number, error: string) => NextResponse.json({ ok: false, e
  * new owner signs in after verifying (a cookie here would tell new from existing addresses apart).
  *
  * Abuse controls: per-IP and per-address Postgres limits, a honeypot field, Cloudflare Turnstile when
- * TURNSTILE_SECRET_KEY is set (fails closed), and a platform-wide hourly cap (SIGNUP_MAX_PER_HOUR, default 30).
+ * TURNSTILE_SECRET_KEY is set (fails closed), and graceful platform-wide capacity (SIGNUP_MAX_PER_HOUR, default 60): only
+ * CREATED accounts count, each client has its own smaller share, signup degrades at 70% and stops only at 100%
+ * (lib/signup checkSignupCapacity). A stale (>24h) UNVERIFIED account holding the address is replaced, so squatting a
+ * victim's address never locks them out; a verified account is never replaced.
  */
 export async function POST(req: Request) {
   if (!checkSameOrigin(req.headers)) return fail(403, 'cross-site request refused');
@@ -46,9 +49,14 @@ export async function POST(req: Request) {
     return fail(400, 'captcha_failed');
   }
   if (!(await allowPerEmail('auth/signup', input.email, 3))) return fail(429, 'too many attempts, try again later');
-  if (!(await takeGlobalSignupSlot())) {
-    log.warn('global_cap_reached', {});
-    return NextResponse.json({ ok: false, error: 'signups are temporarily unavailable, try again later' }, { status: 429, headers: { 'retry-after': '600' } });
+  const client = clientKey(req);
+  const gate = await checkSignupCapacity(client);
+  if (!gate.ok) {
+    // A client over ITS OWN share is told so; only a genuinely exhausted platform answers "unavailable" (and that is logged loudly).
+    return NextResponse.json(
+      { ok: false, error: gate.reason === 'client_limit' ? 'too many attempts, try again later' : 'signups are temporarily unavailable, try again later' },
+      { status: 429, headers: { 'retry-after': String(gate.retryAfterS) } },
+    );
   }
   // Same answer for every address, so a missing mail provider is not an existence oracle: refuse BEFORE creating anything.
   if (!emailConfigured()) {
@@ -67,9 +75,10 @@ export async function POST(req: Request) {
       });
       return accepted();
     }
+    await recordSignupCreated(client); // only accounts that were really created consume capacity
     await recordAudit({
       actor_kind: 'user', actor_user_id: created.user.id, business_id: created.businessId, action: 'auth.signup',
-      target: `user:${created.user.id}`, ip: auditIp(req),
+      target: `user:${created.user.id}`, ip: auditIp(req), ...(created.replacedStale ? { meta: { replaced_stale_unverified: true } } : {}),
     });
     await afterResponse('signup.verification', () => sendVerificationEmail(created.user));
     return accepted();

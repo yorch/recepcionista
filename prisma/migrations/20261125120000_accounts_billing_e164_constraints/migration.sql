@@ -202,8 +202,10 @@ UPDATE "public"."bookings"     SET "phone_e164"       = "public"."_rc_to_e164"("
 UPDATE "public"."sms_log"      SET "to_e164"          = "public"."_rc_to_e164"("to_phone")       WHERE "to_e164" IS NULL;
 UPDATE "public"."businesses"   SET "phone_e164"       = "public"."_rc_to_e164"("phone")          WHERE "phone_e164" IS NULL AND "phone" IS NOT NULL;
 UPDATE "public"."businesses"   SET "owner_phone_e164" = "public"."_rc_to_e164"("owner_phone")    WHERE "owner_phone_e164" IS NULL AND "owner_phone" IS NOT NULL;
--- Opt-outs only keep the last 10 digits; a clean 10-digit NANP key is unambiguous enough for US/Canada.
-UPDATE "public"."sms_opt_outs" SET "phone_e164"       = "public"."_rc_to_e164"("phone_key")      WHERE "phone_e164" IS NULL;
+-- Legacy opt-outs keep ONLY the last 10 digits of the number that sent STOP, so their country is unknowable from the key
+-- alone (+52 55 1234 5678 and +1 551 234 5678 are both '5512345678'). They are deliberately NOT mapped to +1 here:
+-- phone_e164 stays NULL and the app matches NULL rows by phone_key for every country (fail safe). The corrective
+-- migration 20261126120000_review3_optout_repair_trials_indexes fills phone_e164 only where the same business has unambiguous evidence.
 
 DROP FUNCTION "public"."_rc_to_e164"(TEXT);
 

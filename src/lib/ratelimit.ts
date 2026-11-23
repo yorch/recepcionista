@@ -95,6 +95,34 @@ export async function rateLimit(
   }
 }
 
+/**
+ * Read-only version of `rateLimit`: the current sliding-window estimate for `key` WITHOUT counting this call.
+ * For "reserve capacity / check first, count only on success" flows. Returns 0 when the store is unreachable
+ * (callers that must fail closed should also use `rateLimit`).
+ */
+export async function peekRateLimit(key: string, windowMs: number): Promise<number> {
+  const w = Math.min(MAX_WINDOW_MS, Math.max(1000, Math.floor(windowMs)));
+  try {
+    const rows = await prisma.$queryRaw<{ cur: number; prev: number; elapsed_ms: number }[]>`
+      WITH t AS (
+        SELECT clock_timestamp() AS now,
+               to_timestamp(floor(extract(epoch FROM clock_timestamp()) * 1000 / ${w}::float8) * ${w}::float8 / 1000.0) AS ws
+      )
+      SELECT COALESCE((SELECT c."count" FROM "rate_limit_buckets" c WHERE c."key" = ${key} AND c."window_start" = t.ws), 0)::int AS cur,
+             COALESCE((SELECT p."count" FROM "rate_limit_buckets" p
+                        WHERE p."key" = ${key}
+                          AND p."window_start" >= t.ws - (${w}::float8 * 1.5 * interval '1 millisecond')
+                          AND p."window_start" <  t.ws - (${w}::float8 * 0.5 * interval '1 millisecond')), 0)::int AS prev,
+             (extract(epoch FROM (t.now - t.ws)) * 1000)::float8 AS elapsed_ms
+        FROM t`;
+    const { cur, prev, elapsed_ms } = rows[0];
+    return cur + prev * (1 - Math.min(1, Math.max(0, elapsed_ms / w)));
+  } catch (err) {
+    log.error('peek_failed', { key, err });
+    return 0;
+  }
+}
+
 /** Returns a 429 (or 503 when a failClosed route cannot reach the store) Response, otherwise null. Always `await` it. */
 export async function limitRequest(
   req: Request,

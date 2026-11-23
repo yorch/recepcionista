@@ -180,3 +180,28 @@ export async function retrieveSubscription(id: string): Promise<RetrievedSubscri
   if (!/^sub_[A-Za-z0-9_]+$/.test(id)) throw new BillingProviderError('invalid subscription id');
   return stripe<RetrievedSubscription>('GET', `/subscriptions/${id}`);
 }
+
+/**
+ * The card fingerprint Stripe computed for the subscription's payment method (the same physical card gives the same
+ * value across customers), or null when it cannot be read. Used for the one-trial-per-card rule (billing/trial.ts).
+ */
+export async function retrieveCardFingerprint(subscriptionId: string): Promise<string | null> {
+  if (!/^sub_[A-Za-z0-9_]+$/.test(subscriptionId)) return null;
+  type Pm = { card?: { fingerprint?: string | null } } | string | null | undefined;
+  const sub = await stripe<{ default_payment_method?: Pm; customer?: { invoice_settings?: { default_payment_method?: Pm } } | string }>(
+    'GET', `/subscriptions/${subscriptionId}?expand%5B%5D=default_payment_method&expand%5B%5D=customer.invoice_settings.default_payment_method`,
+  );
+  const direct = typeof sub.default_payment_method === 'object' ? sub.default_payment_method?.card?.fingerprint : null;
+  const cust = typeof sub.customer === 'object' ? sub.customer?.invoice_settings?.default_payment_method : null;
+  const viaCustomer = cust && typeof cust === 'object' ? cust.card?.fingerprint : null;
+  return direct || viaCustomer || null;
+}
+
+/** End a subscription's free trial now (the first invoice is charged immediately, no proration). */
+export async function endTrialNow(subscriptionId: string): Promise<void> {
+  if (!/^sub_[A-Za-z0-9_]+$/.test(subscriptionId)) throw new BillingProviderError('invalid subscription id');
+  const form = new URLSearchParams();
+  form.set('trial_end', 'now');
+  form.set('proration_behavior', 'none');
+  await stripe('POST', `/subscriptions/${subscriptionId}`, form);
+}

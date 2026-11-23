@@ -15,7 +15,7 @@
  */
 import { getBusinessByAgentId, getBusinessByPhone, updateCall, upsertCallForConversation } from '@/lib/db';
 import { firstMessageFor, verifyToolSecret } from '@/lib/voice/elevenlabs';
-import { callGate, outOfServiceFirstMessage } from '@/lib/voice/capacity';
+import { allowMissedCallAlert, callGate, outOfServiceOverride } from '@/lib/voice/capacity';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { nowVariables } from '@/lib/time';
 import { logger } from '@/lib/log';
@@ -84,7 +84,7 @@ export async function POST(req: Request): Promise<Response> {
 
     const gate = await callGate(business.id);
     const outOfService = !gate.ok;
-    const firstMessage = outOfService ? outOfServiceFirstMessage(business) : firstMessageFor(business);
+    const override = outOfService ? outOfServiceOverride(business) : { agent: { first_message: firstMessageFor(business) } };
 
     if (call) {
       // Both messages open with disclosureFor(business): the override below is the server-side evidence.
@@ -93,8 +93,11 @@ export async function POST(req: Request): Promise<Response> {
       if (outOfService && call.status !== 'handed_off') {
         await updateCall(call.id, { status: 'handed_off', flagged_reason: `out_of_service:${gate.reason ?? 'capacity'}` });
         const who = callerId ? ` from ${callerId}` : '';
-        const alert = await alertOwner(business, `MISSED CALL — ${business.name}\nA call${who} was not taken by the assistant (${gate.reason === 'no_plan' ? 'plan inactive' : 'monthly call minutes used up'}). Please call back.`);
-        log.warn('call.handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert.notified });
+        // Rate limited per business (1 / 10 min, 6 / hour): a lapsed tenant must not be a free SMS pump.
+        const alert = (await allowMissedCallAlert(business.id))
+          ? await alertOwner(business, `MISSED CALL — ${business.name}\nA call${who} was not taken by the assistant (${gate.reason === 'no_plan' ? 'plan inactive' : 'monthly call minutes used up'}). Please call back.`)
+          : null;
+        log.warn('call.handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert?.notified ?? false, alert_suppressed: alert === null });
       }
     } else {
       log.warn('no_call_key', { business: business.id });
@@ -103,7 +106,7 @@ export async function POST(req: Request): Promise<Response> {
     return json({
       type: 'conversation_initiation_client_data',
       dynamic_variables: variables(business, { caller: callerId, callSid }),
-      conversation_config_override: { agent: { first_message: firstMessage } },
+      conversation_config_override: override,
     });
   } catch (err) {
     log.error('failed', { err });

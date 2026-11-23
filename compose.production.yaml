@@ -148,6 +148,10 @@ services:
       # Fail closed: without these, the owner dashboard/API is unauthenticated
       # and Stripe webhooks can be forged. deploy.sh also checks both.
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env (openssl rand -hex 32)}
+      # Fail closed on billing (docs/billing.md): the app enforces plans in production unless this is the literal
+      # `false`, and compose refuses to start without an explicit decision, so a forgotten variable can never open
+      # free provisioning, texts and calls to every self-signup. deploy.sh checks it too (and prints a banner for false).
+      BILLING_ENFORCED: "${BILLING_ENFORCED:?Set BILLING_ENFORCED in .env - true (recommended) or, deliberately, false (docs/billing.md)}"
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?Set STRIPE_WEBHOOK_SECRET in .env}
       # Required in production (the app fails closed without them). Empty
       # defaults keep a no-voice deployment possible; deploy.sh enforces them

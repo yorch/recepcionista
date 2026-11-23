@@ -27,7 +27,8 @@ export async function POST(req: Request) {
     const key = mfaPairKey(user.id, req);
     const gate = await checkPair(key);
     if (!gate.ok) return verdictResponse(gate);
-    const result = await verifySecondFactor(user.id, body, { allowRecovery: true });
+    const result = await verifySecondFactor(user.id, body, { allowRecovery: true, account: { email: user.email, businessId: user.business_id, ip: auditIp(req) } });
+    if (!result.ok && result.locked) return verdictResponse(result.locked);
     if (!result.ok) {
       await recordFailure(key, accountId(user.id));
       return NextResponse.json({ ok: false, error: 'invalid code' }, { status: 400 });

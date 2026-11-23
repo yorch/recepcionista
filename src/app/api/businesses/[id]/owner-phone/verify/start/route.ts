@@ -1,11 +1,10 @@
 import { NextResponse } from 'next/server';
 import { readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
-import { clientKey } from '@/lib/auth';
 import { countryForBusiness, getBusiness, isOptedOut } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
-import { rateLimit } from '@/lib/ratelimit';
-import { createOwnerPhoneChallenge, OWNER_PHONE_CODE_TTL_MS } from '@/lib/messaging/owner-verify';
+import { checkVerificationStart } from '@/lib/messaging/verify-limits';
+import { createOwnerPhoneChallenge } from '@/lib/messaging/owner-verify';
 import { sendOwnerVerificationCode } from '@/lib/messaging';
 import { logger } from '@/lib/log';
 
@@ -21,11 +20,13 @@ const bad = (error: string, status: number, headers?: Record<string, string>) =>
  * POST /api/businesses/:id/owner-phone/verify/start   { phone }
  * Texts a 6-digit code to `phone` and returns { ok: true, challenge, expires_at }. Echo the challenge to /confirm with
  * the code. Owner of the business (or admin) only; cookie sessions are same-origin checked by `authenticate`.
- * Limits: 5 texts per hour per business+phone+client, 10 per hour per business. The destination country allow-list
- * (SMS_ALLOWED_COUNTRY_CODES) applies to this text (the number is not yet proven).
+ * Needs a VERIFIED email. The text is a fixed template (no tenant-controlled characters). Limits (messaging/verify-limits):
+ * per business+phone+client, business, user, client IP, destination number across businesses, and platform-wide per
+ * hour/day; numbers that opted out anywhere or were verified by another business recently are refused. The destination
+ * country allow-list (SMS_ALLOWED_COUNTRY_CODES) applies to this text (the number is not yet proven).
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = await authenticate(req, { role: 'owner' });
+  const auth = await authenticate(req, { role: 'owner', verifiedEmail: true });
   if (!auth.ok) return auth.response;
   try {
     const { id } = await params;
@@ -41,19 +42,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // Same rule as PATCH: an alert destination must not be a number that opted out of this business's texts.
     if (await isOptedOut(id, e164, country)) return bad('that number opted out of texts from this business', 422);
 
-    const perPhone = await rateLimit(`owner-phone/start:${id}:${e164}:${clientKey(req)}`, 5, 60 * 60_000, { failClosed: true });
-    const perBusiness = perPhone.allowed ? await rateLimit(`owner-phone/start:${id}:*`, 10, 60 * 60_000, { failClosed: true }) : perPhone;
-    if (!perPhone.allowed || !perBusiness.allowed) {
-      const blocked = perPhone.allowed ? perBusiness : perPhone;
-      return blocked.error
-        ? bad('service temporarily unavailable', 503, { 'retry-after': String(blocked.retryAfterS) })
-        : bad('too many verification texts; try again later', 429, { 'retry-after': String(blocked.retryAfterS) });
+    const denied = await checkVerificationStart({
+      req, businessId: id, e164, userId: auth.principal.user?.id ?? null, isAdmin: auth.principal.kind === 'admin',
+    });
+    if (denied) {
+      return bad(denied.error, denied.status, denied.retryAfterS ? { 'retry-after': String(denied.retryAfterS) } : undefined);
     }
 
     const { code, challenge, expires_at } = createOwnerPhoneChallenge(id, e164);
-    const sent = await sendOwnerVerificationCode(
-      id, e164, `${business.name}: your verification code is ${code}. It expires in ${OWNER_PHONE_CODE_TTL_MS / 60_000} minutes.`,
-    );
+    const sent = await sendOwnerVerificationCode(id, e164, code);
     if (sent.blocked || sent.result.status === 'failed') {
       log.warn('verify.start_failed', { business: id, blocked: sent.blocked ?? null, error: sent.result.error ?? null });
       const msg = sent.result.error === 'destination country is not allowed'

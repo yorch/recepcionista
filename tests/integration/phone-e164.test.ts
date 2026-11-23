@@ -1,6 +1,6 @@
 /**
  * E.164 identity everywhere: dual-write of the e164 columns, exact E.164 matching, and the legacy last-10-digit
- * fallback that is only allowed between two US/Canada-shaped numbers (never across countries).
+ * fallback, which now FAILS SAFE: a legacy (E.164-less) opt-out suppresses every country with the same last 10 digits.
  */
 import { integration } from '../helpers/env';
 import { afterAll, beforeAll, expect, test } from 'bun:test';
@@ -80,17 +80,45 @@ integration('phone E.164 identity (postgres)', () => {
     expect(await db.isOptedOut(b.id, UK)).toBe(false);
   });
 
-  test('legacy opt-out rows (no E.164) still suppress the matching US/CA number only', async () => {
+  test('legacy opt-out rows (no E.164) suppress EVERY country that shares the last 10 digits (fail safe, H3)', async () => {
     const biz = await newBusiness();
     await prisma.smsOptOut.create({ data: { businessId: biz.id, phoneKey: US.slice(-10), phoneE164: null, source: 'stop_keyword' } });
     expect(await db.isOptedOut(biz.id, US)).toBe(true);
     expect(await db.isOptedOut(biz.id, '2079460958')).toBe(true);
-    expect(await db.isOptedOut(biz.id, UK)).toBe(false);
+    // the country of a legacy row is unknown: the +44 number with the same last 10 digits stays suppressed too
+    expect(await db.isOptedOut(biz.id, UK)).toBe(true);
+    // a non-US START can never delete a legacy row that may be somebody else's STOP
+    expect(await db.recordOptIn(biz.id, UK)).toBe(false);
+    expect(await db.isOptedOut(biz.id, US)).toBe(true);
+    // a non-US STOP does not rewrite the legacy row either: it gets its own E.164 row
+    await db.recordOptOut(biz.id, UK);
+    expect((await prisma.smsOptOut.findMany({ where: { businessId: biz.id } })).map((r) => r.phoneE164).sort()).toEqual([null, UK].sort());
+    await prisma.smsOptOut.deleteMany({ where: { businessId: biz.id, phoneE164: UK } });
     // a new STOP for the same number upgrades the legacy row instead of duplicating it
     await db.recordOptOut(biz.id, US);
     const rows = await prisma.smsOptOut.findMany({ where: { businessId: biz.id } });
     expect(rows.length).toBe(1);
     expect(rows[0].phoneE164).toBe(US);
+  });
+
+  test('H3: a Mexican (+52) and a UK (+44) customer whose legacy STOP only kept 10 digits stay suppressed, and nobody else is re-mapped', async () => {
+    const biz = await newBusiness();
+    const MX = '+525512345678';
+    await prisma.smsOptOut.createMany({ data: [
+      { businessId: biz.id, phoneKey: '5512345678', phoneE164: null, source: 'stop_keyword' },
+      { businessId: biz.id, phoneKey: UK.slice(-10), phoneE164: null, source: 'stop_keyword' },
+    ] });
+    expect(await db.isOptedOut(biz.id, MX)).toBe(true);
+    expect(await db.isOptedOut(biz.id, UK)).toBe(true);
+    // a different +52 number is not affected
+    expect(await db.isOptedOut(biz.id, '+525512345679')).toBe(false);
+    // non-US opt-outs recorded now are exact and keep their own country
+    const fresh = await newBusiness();
+    await db.recordOptOut(fresh.id, MX);
+    expect(await db.isOptedOut(fresh.id, MX)).toBe(true);
+    expect(await db.isOptedOut(fresh.id, '+15512345678')).toBe(false);
+    expect(await db.recordOptIn(fresh.id, MX)).toBe(true);
+    expect(await db.isOptedOut(fresh.id, MX)).toBe(false);
   });
 
   async function seedCustomer(businessId: string, phoneNumber: string, e164: string | null, tag: string) {

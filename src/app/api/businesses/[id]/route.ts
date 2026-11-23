@@ -1,6 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, hasRole, requireBusinessAccess } from '@/lib/session';
 import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings, isOptedOut } from '@/lib/db';
+import { countryAllowed } from '@/lib/messaging/recipient';
 import type { Business, Hours, KnowledgeBase } from '@/lib/types';
 
 function publicBusiness(b: Business): Business {
@@ -99,6 +100,10 @@ export async function PATCH(
     // that opted out of this business's texts (otherwise re-pointing it would defeat a customer's STOP).
     if (typeof patch.owner_phone === 'string' && (await isOptedOut(id, patch.owner_phone))) {
       return fail('owner_phone is a number that opted out of texts from this business', 422);
+    }
+    // The alert destination must be in a country this deployment texts (SMS_ALLOWED_COUNTRY_CODES): no premium/international pumping.
+    if (typeof patch.owner_phone === 'string' && !countryAllowed(patch.owner_phone)) {
+      return fail('owner_phone is in a country that is not enabled for this account', 422);
     }
     const updated = await updateBusiness(id, patch as Partial<Business>);
     if (!updated) return fail('business not found', 404);

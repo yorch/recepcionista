@@ -35,7 +35,7 @@ suite('account lifecycle (postgres)', () => {
     delete process.env.SIGNUP_MAX_PER_HOUR;
     delete process.env.TURNSTILE_SECRET_KEY;
     mail.mails.length = 0;
-    await clearLimiter(db, ['auth/signup:global']);
+    await clearLimiter(db, ['auth/signup:']);
   });
   afterAll(async () => {
     mail.restore();
@@ -145,7 +145,7 @@ suite('account lifecycle (postgres)', () => {
 
     test('global hourly cap (SIGNUP_MAX_PER_HOUR) stops mass creation', async () => {
       process.env.SIGNUP_MAX_PER_HOUR = '2';
-      await clearLimiter(db, ['auth/signup:global']);
+      await clearLimiter(db, ['auth/signup:']);
       const statuses: number[] = [];
       for (const n of ['cap1', 'cap2', 'cap3']) {
         const e = email(n);

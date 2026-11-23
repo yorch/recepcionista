@@ -24,6 +24,27 @@ describe('buildCsp', () => {
     expect(mod).toContain("script-src 'self' 'unsafe-inline'");
     expect(mod).not.toContain('nonce-');
   });
+  test('M3: Turnstile configured opens exactly challenges.cloudflare.com for script, frame and connect (both modes); off = untouched', () => {
+    const strict = buildCsp({ mode: 'strict', nonce: 'abc', isDev: false, turnstile: true });
+    const mod = buildCsp({ mode: 'moderate', isDev: false, turnstile: true });
+    for (const csp of [strict, mod]) {
+      expect(csp).toContain('frame-src https://challenges.cloudflare.com');
+      expect(csp).toMatch(/script-src [^;]*https:\/\/challenges\.cloudflare\.com/);
+      expect(csp).toMatch(/connect-src [^;]*https:\/\/challenges\.cloudflare\.com/);
+      expect(csp).not.toMatch(/script-src[^;]*unsafe-inline.*;.*\*/);
+    }
+    expect(strict).not.toMatch(/script-src[^;]*unsafe-inline/);
+    const off = buildCsp({ mode: 'strict', nonce: 'abc', isDev: false });
+    expect(off).not.toContain('cloudflare');
+    expect(off).not.toContain('frame-src');
+    // wired through the real header builder, in report-only mode too (the enforced moderate policy must not block api.js)
+    const envOn = { NODE_ENV: 'production', NEXT_PUBLIC_TURNSTILE_SITE_KEY: '1x00000000000000000000AA' } as unknown as NodeJS.ProcessEnv;
+    expect(Object.fromEntries(cspHeadersFor('n', envOn).response)['Content-Security-Policy']).toContain('frame-src https://challenges.cloudflare.com');
+    const ro = Object.fromEntries(cspHeadersFor('n', { ...envOn, CSP_REPORT_ONLY: 'true' } as unknown as NodeJS.ProcessEnv).response);
+    expect(ro['Content-Security-Policy']).toMatch(/script-src 'self' 'unsafe-inline' https:\/\/challenges\.cloudflare\.com/);
+    expect(ro['Content-Security-Policy-Report-Only']).toContain('frame-src https://challenges.cloudflare.com');
+    expect(Object.fromEntries(cspHeadersFor('n', { NODE_ENV: 'production' } as unknown as NodeJS.ProcessEnv).response)['Content-Security-Policy']).not.toContain('cloudflare');
+  });
   test('nonces are unique, 128 bit base64', () => {
     const a = newNonce(); const b = newNonce();
     expect(a).not.toBe(b);

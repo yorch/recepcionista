@@ -100,14 +100,35 @@ for v in DEMO_MODE ALLOW_INSECURE_DEV STRIPE_ALLOW_UNSIGNED; do
   [[ "${!v:-}" != "true" ]] || die "${v}=true in .env: never enable it on a production host (docs/runbook.md)."
 done
 
-# Subscription billing (docs/billing.md): with BILLING_ENFORCED=true every new account must have a plan, so a missing
-# key/price/webhook secret would lock customers out of checkout (or let subscription events be forged). compose passes
-# these through env_file, so the check lives here only.
-if [[ "${BILLING_ENFORCED:-}" == "true" ]]; then
-  for v in STRIPE_SECRET_KEY STRIPE_PRICE_ID STRIPE_BILLING_WEBHOOK_SECRET; do
-    [[ -n "${!v:-}" ]] || die "${v} is unset in .env but BILLING_ENFORCED=true. See docs/billing.md."
-  done
-  echo "NOTE: BILLING_ENFORCED=true. Existing tenants must be comped first (bun scripts/grandfather-existing.ts, docs/billing.md step 5)."
+# Subscription billing (docs/billing.md). FAIL CLOSED: in production billing is enforced unless BILLING_ENFORCED=false is
+# set explicitly, because signup is public and anything else would hand every stranger a free number, agent and texts.
+# So the operator must DECIDE: the variable must be present (true or false); an unset/typo value is refused here.
+case "${BILLING_ENFORCED:-}" in
+  true)
+    for v in STRIPE_SECRET_KEY STRIPE_PRICE_ID STRIPE_BILLING_WEBHOOK_SECRET; do
+      [[ -n "${!v:-}" ]] || die "${v} is unset in .env but BILLING_ENFORCED=true. See docs/billing.md."
+    done
+    echo "NOTE: BILLING_ENFORCED=true. Existing tenants must be comped first (bun scripts/grandfather-existing.ts --before <deploy time>, docs/billing.md step 5)."
+    ;;
+  false)
+    echo "################################################################################" >&2
+    echo "# WARNING: BILLING_ENFORCED=false. Texts and calls are NOT capped and tenants    #" >&2
+    echo "# need no plan for them. Non-admin provisioning (number + agent) still requires  #" >&2
+    echo "# an active plan. Do not run like this with open signup (docs/billing.md).       #" >&2
+    echo "################################################################################" >&2
+    ;;
+  *)
+    die "BILLING_ENFORCED is '${BILLING_ENFORCED:-}' (unset or invalid) in .env. Production fails closed: set BILLING_ENFORCED=true (with the Stripe keys; docs/billing.md) or, deliberately, BILLING_ENFORCED=false." ;;
+esac
+# Owner-phone grandfathering bypasses opt-outs and the country allow-list for unverified numbers: it needs an explicit acknowledgement.
+if [[ "${OWNER_PHONE_GRANDFATHER:-}" == "true" ]]; then
+  [[ "${OWNER_PHONE_GRANDFATHER_ACK:-}" == "i-understand" ]] \
+    || die "OWNER_PHONE_GRANDFATHER=true needs OWNER_PHONE_GRANDFATHER_ACK=i-understand (and, strongly, OWNER_PHONE_GRANDFATHER_UNTIL / _BEFORE). Without the ack the app ignores it. See docs/runbook.md section 6."
+  echo "WARNING: OWNER_PHONE_GRANDFATHER=true: unverified owner phones receive alerts that bypass opt-outs and the country allow-list. Turn it off once owners verified." >&2
+fi
+# Signup abuse control: open signup without a captcha invites bot farms and degrades at the cap.
+if [[ -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
+  echo "WARNING: Turnstile is not configured (TURNSTILE_SECRET_KEY / NEXT_PUBLIC_TURNSTILE_SITE_KEY). Signup has only rate limits and the platform cap (docs/auth.md)." >&2
 fi
 
 # The proxy's network is host-level infrastructure, not something this stack

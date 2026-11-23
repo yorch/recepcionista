@@ -47,17 +47,33 @@ interface WebhookItem {
   settings?: { webhook_url?: string };
 }
 
+export interface EnsureWebhookOptions {
+  /**
+   * May this call CREATE the workspace webhook (and so receive its one-time signing secret)? Only an operator/admin
+   * provisioning call may: a tenant's request must never create the platform-wide webhook or see its secret.
+   */
+  allowCreate?: boolean;
+  /** Attempts for the idempotent lookup (default 3). */
+  listAttempts?: number;
+  /** Base delay between lookup attempts, ms (default 400; tests pass 0). */
+  retryDelayMs?: number;
+  fetchImpl?: typeof fetch;
+}
+
 /**
  * Ensure a workspace-level post-call webhook exists for this app.
- * Returns mock=true when the key lacks `webhooks_write`.
+ * - The lookup by URL is retried; if it STILL fails the step fails safely (no webhook is created, because a failed
+ *   list proves nothing about whether one exists: creating another would orphan the secret in ELEVENLABS_WEBHOOK_SECRET).
+ * - Without `allowCreate` a missing webhook is an error, never a creation.
+ * Returns mock=true when the key lacks `webhooks_write` or the step failed.
  */
-export async function ensurePostCallWebhook(): Promise<{
+export async function ensurePostCallWebhook(opts: EnsureWebhookOptions = {}): Promise<{
   webhook_id: string | null;
   mock: boolean;
   error?: string;
   /**
-   * HMAC signing secret. ElevenLabs returns it ONLY when the webhook is
-   * created. Copy it into ELEVENLABS_WEBHOOK_SECRET; it is never logged.
+   * HMAC signing secret. ElevenLabs returns it ONLY when the webhook is created, and we only create it for an admin
+   * call. Copy it into ELEVENLABS_WEBHOOK_SECRET; it is never logged and never sent to a tenant.
    */
   webhook_secret?: string;
 }> {
@@ -65,28 +81,52 @@ export async function ensurePostCallWebhook(): Promise<{
     return { webhook_id: null, mock: true, error: 'no API key' };
   }
 
+  const doFetch = opts.fetchImpl ?? fetch;
   const expectedUrl = postCallWebhookUrl();
+  const attempts = Math.max(1, opts.listAttempts ?? 3);
+  const delay = opts.retryDelayMs ?? 400;
 
   try {
-    // 1. List existing webhooks
-    const listRes = await fetch(`${API}/workspace/webhooks`, {
-      headers: { 'xi-api-key': apiKey() },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (listRes.ok) {
-      const json = (await listRes.json()) as { webhooks?: WebhookItem[] };
-      const hit = (json.webhooks ?? []).find(
-        (w) =>
-          (w.webhook_url && w.webhook_url === expectedUrl) ||
-          (w.settings?.webhook_url && w.settings.webhook_url === expectedUrl),
-      );
-      if (hit?.webhook_id) {
-        return { webhook_id: hit.webhook_id, mock: false };
+    // 1. Idempotent lookup by URL, with retries.
+    let listed: WebhookItem[] | null = null;
+    let lastStatus: string = 'unknown';
+    for (let i = 0; i < attempts && listed === null; i++) {
+      if (i > 0 && delay > 0) await new Promise((r) => setTimeout(r, delay * i));
+      try {
+        const listRes = await doFetch(`${API}/workspace/webhooks`, {
+          headers: { 'xi-api-key': apiKey() },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (listRes.ok) {
+          const json = (await listRes.json()) as { webhooks?: WebhookItem[] };
+          listed = json.webhooks ?? [];
+        } else {
+          lastStatus = String(listRes.status);
+        }
+      } catch (err) {
+        lastStatus = (err as Error).name || 'network';
       }
     }
+    if (listed === null) {
+      log.warn('webhook.list_failed', { attempts, last: lastStatus });
+      return { webhook_id: null, mock: true, error: `could not list workspace webhooks (${lastStatus}); not creating one` };
+    }
+    const hit = listed.find(
+      (w) =>
+        (w.webhook_url && w.webhook_url === expectedUrl) ||
+        (w.settings?.webhook_url && w.settings.webhook_url === expectedUrl),
+    );
+    if (hit?.webhook_id) {
+      return { webhook_id: hit.webhook_id, mock: false };
+    }
 
-    // 2. Create a new one
-    const createRes = await fetch(`${API}/workspace/webhooks`, {
+    if (!opts.allowCreate) {
+      log.warn('webhook.missing', { action: 'the post-call webhook does not exist yet; an admin must provision once (docs/runbook.md) to create it' });
+      return { webhook_id: null, mock: true, error: 'post-call webhook does not exist; an operator must create it' };
+    }
+
+    // 2. Create a new one (admin only). Never retried: a lost answer is resolved by the next idempotent lookup.
+    const createRes = await doFetch(`${API}/workspace/webhooks`, {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({
@@ -114,7 +154,7 @@ export async function ensurePostCallWebhook(): Promise<{
     if (!process.env.ELEVENLABS_WEBHOOK_SECRET) {
       log.warn('webhook.secret_unsaved', {
         webhook: json.webhook_id ?? null,
-        action: 'the signing secret is returned ONCE in the admin-only provision response (webhook_secret): store it as ELEVENLABS_WEBHOOK_SECRET and redeploy. It is never logged.',
+        action: 'the signing secret is returned ONCE in the ADMIN provision response (webhook_secret): store it as ELEVENLABS_WEBHOOK_SECRET and redeploy. It is never logged.',
         secret_returned: Boolean(json.webhook_secret),
       });
     }

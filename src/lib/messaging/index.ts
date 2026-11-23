@@ -8,6 +8,7 @@ import { toE164 } from '@/lib/phone';
 import { tzOf } from '@/lib/time';
 import { decide, withStopFooter } from '@/lib/messaging/policy';
 import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
+import { ownerVerificationText } from '@/lib/messaging/owner-verify';
 import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
@@ -142,7 +143,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
  * verifying) but counted; the destination country allow-list DOES apply (the number is not yet proven).
  * The recipient must be a number that has not opted out of this business's texts.
  */
-export async function sendOwnerVerificationCode(businessId: string, phoneE164: string, body: string): Promise<SendAndLogOutput> {
+export async function sendOwnerVerificationCode(businessId: string, phoneE164: string, code: string): Promise<SendAndLogOutput> {
   const business = await getBusiness(businessId);
   const country = countryForBusiness(business);
   if (await isOptedOut(businessId, phoneE164, country)) {
@@ -152,7 +153,7 @@ export async function sendOwnerVerificationCode(businessId: string, phoneE164: s
     }, { country });
     return { sms, result: { id: '', status: 'failed', error: 'blocked_opt_out' }, blocked: 'blocked_opt_out' };
   }
-  const result = await sendSms(phoneE164, body);
+  const result = await sendSms(phoneE164, ownerVerificationText(code)); // fixed template: nothing tenant-controlled
   if (result.status !== 'failed') await meterSms(businessId);
   const sms = await logSms({
     business_id: businessId, to_phone: phoneE164,

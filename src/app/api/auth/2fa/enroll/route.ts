@@ -22,6 +22,8 @@ export async function POST(req: Request) {
   const user = 'user' in auth.principal ? auth.principal.user : undefined;
   if (!user) return NextResponse.json({ ok: false, error: 'two-factor needs a personal account (the break-glass token has none)' }, { status: 400 });
   try {
+    // M4: an unverified account (possibly a squatter on someone else's address) can never plant a second factor.
+    if (!user.email_verified_at) return NextResponse.json({ ok: false, error: 'email_not_verified' }, { status: 403 });
     const body = (await req.json().catch(() => ({}))) as { password?: unknown };
     const denied = await reauthWithPassword(req, user.email, body.password);
     if (denied) return denied;
