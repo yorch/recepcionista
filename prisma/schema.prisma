@@ -70,7 +70,11 @@ model KnowledgeBase {
 model Call {
   id                 String    @id @default(uuid())
   businessId         String    @map("business_id")
+  /// Telephony call SID (Twilio `system__call_sid`) when the call came in over the phone.
   callSid            String?   @unique @map("call_sid")
+  /// ElevenLabs conversation id (`system__conversation_id`). The post-call webhook is correlated by this
+  /// (or by the SID), so a call is one row whichever path created it.
+  conversationId     String?   @unique @map("conversation_id")
   callerPhone        String?   @map("caller_phone")
   callerName         String?   @map("caller_name")
   startedAt          DateTime  @default(now()) @map("started_at")
@@ -115,6 +119,10 @@ model Booking {
   createdAt       DateTime  @default(now()) @map("created_at")
   /// Set when customer PII was nulled (retention purge or erasure request); financial fields are kept.
   anonymizedAt    DateTime? @map("anonymized_at")
+  /// When (and how) the customer was told they may get follow-up texts. Recorded by the server when a
+  /// confirmation that carries the notice is delivered to this booking's own number; gates gratitude texts.
+  followupConsentAt     DateTime? @map("followup_consent_at")
+  followupConsentSource String?   @map("followup_consent_source")
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   call     Call?    @relation(fields: [callId], references: [id], onDelete: SetNull)
@@ -185,9 +193,12 @@ model RateLimitBucket {
 }
 
 /// Webhook/event dedupe (claimEvent). Composite key: ids are only unique per source.
+/// `status` 'processing' is a lease (a crashed worker's claim can be taken over after `claimed_at` + lease); 'done' is final.
 model ProcessedEvent {
   id        String
   source    String
+  status    String   @default("done")
+  claimedAt DateTime @default(now()) @map("claimed_at") @db.Timestamptz(6)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@id([source, id])

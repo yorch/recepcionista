@@ -1,6 +1,9 @@
-import { getBusinessByPhone, recordOptIn, recordOptOut } from '@/lib/db';
+import { getBusinessByPhone, prisma } from '@/lib/db';
+import { phoneKey } from '@/lib/format';
+import { routeGratitudeReply } from '@/lib/gratitude/reply';
+import { applyInboundKeyword } from '@/lib/messaging/inbound';
+import { normalizeInbound, twiml } from '@/lib/messaging/keywords';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
-import { helpReply, parseKeyword, startReply, stopReply, twiml } from '@/lib/messaging/keywords';
 import { logger } from '@/lib/log';
 
 export const runtime = 'nodejs';
@@ -12,9 +15,10 @@ const xml = (body: string, status = 200) =>
   new Response(body, { status, headers: { 'content-type': 'text/xml; charset=utf-8' } });
 
 /**
- * Twilio inbound-SMS webhook: STOP-class keywords opt the sender out of this business's texts,
- * START-class keywords opt back in, HELP returns contact info. Signature verified, fails closed.
- * The business is resolved from the Twilio number the text was sent TO.
+ * THE inbound-SMS webhook: point the Twilio number's "A message comes in" URL here (and only here; a number has
+ * one inbound URL). STOP-class keywords opt the sender out of this business's texts, START-class keywords opt
+ * back in, HELP returns contact info, and a 1-5 reply to a gratitude text is routed to the review/owner logic.
+ * Signature verified, fails closed. The business is resolved from the Twilio number the text was sent TO.
  */
 export async function POST(req: Request) {
   try {
@@ -30,22 +34,30 @@ export async function POST(req: Request) {
 
     const from = fields.From ?? '';
     const to = fields.To ?? '';
-    const keyword = parseKeyword(fields.Body);
     const business = to ? await getBusinessByPhone(to) : null;
     if (!business || !from) {
       log.warn('unrouted', { to: to || null, matched: Boolean(business) });
       return xml(twiml());
     }
 
-    if (keyword === 'stop') {
-      await recordOptOut(business.id, from, 'stop_keyword');
-      return xml(twiml(stopReply(business.name)));
+    const reply = await applyInboundKeyword(business, from, fields.Body);
+    if (reply) return xml(reply);
+
+    // A bare 1-5 answers the most recent gratitude text we sent to this number.
+    const rating = /^[1-5]$/.test(normalizeInbound(fields.Body)) ? Number(normalizeInbound(fields.Body)) : null;
+    if (rating) {
+      const key = phoneKey(from);
+      const recent = await prisma.smsLog.findMany({
+        where: { businessId: business.id, kind: 'gratitude', bookingId: { not: null }, status: { in: ['sent', 'mock'] } },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      });
+      const hit = recent.find((r) => phoneKey(r.toPhone) === key);
+      if (hit?.bookingId) {
+        await routeGratitudeReply(hit.bookingId, rating);
+        return xml(twiml());
+      }
     }
-    if (keyword === 'start') {
-      await recordOptIn(business.id, from);
-      return xml(twiml(startReply(business.name)));
-    }
-    if (keyword === 'help') return xml(twiml(helpReply(business.name, business.phone)));
 
     return xml(twiml()); // not a keyword: no auto-reply
   } catch (err) {

@@ -1,6 +1,6 @@
 import { ok, fail } from '@/lib/http';
-import { getBusinessByPhone, listBusinesses, createCall } from '@/lib/db';
-import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber } from '@/lib/voice/elevenlabs';
+import { getBusinessByPhone, listBusinesses, createCall, getCallBySid, updateCall } from '@/lib/db';
+import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
@@ -13,6 +13,7 @@ interface IncomingPayload {
   To?: string;
   From?: string;
   CallSid?: string;
+  callSid?: string;
   to?: string;
   from?: string;
 }
@@ -35,6 +36,11 @@ async function readPayload(req: Request): Promise<{ payload: IncomingPayload; fo
   }
 }
 
+async function getCallSid(callSid: string, businessId: string) {
+  const row = await getCallBySid(callSid);
+  return row && row.business_id === businessId ? row : null;
+}
+
 export async function POST(req: Request) {
   try {
     const { payload, form } = await readPayload(req);
@@ -46,9 +52,11 @@ export async function POST(req: Request) {
     const to = payload.To || payload.to || '';
     const from = payload.From || payload.from || '';
 
-    // Never dead-end the demo: fall back to the primary business.
+    // A number that is not ours routes to the only business of a single-tenant/demo install, never to
+    // "the first of several" (that would hand one tenant another tenant's caller).
     const matched = to ? await getBusinessByPhone(to) : null;
-    const business: Business | null = matched ?? (await listBusinesses())[0] ?? null;
+    const all = matched ? [] : await listBusinesses();
+    const business: Business | null = matched ?? (all.length === 1 ? all[0] : null);
     if (!business) {
       log.error('no_business', { to: to || null, from: from || null });
       return fail('no business configured — run scripts/seed.ts', 404);
@@ -60,13 +68,19 @@ export async function POST(req: Request) {
       matched: matched ? 'phone' : 'fallback-first-business',
     });
 
-    const call = await createCall({
+    // The row is keyed by the Twilio CallSid, which the platform also hands the agent as system__call_sid and
+    // the post-call webhook as metadata.phone_call.call_sid: tools and the transcript find THIS row, never a copy.
+    // Twilio retries a webhook with the same CallSid: reuse the row.
+    const callSid = (payload.CallSid || payload.callSid || '').trim();
+    const existing = callSid ? await getCallSid(callSid, business.id) : null;
+    const call = existing ?? await createCall({
       business_id: business.id,
+      call_sid: callSid || null,
       caller_phone: from || null,
       status: 'in_progress',
-      // The agent's first message opens with the AI/recording disclosure (firstMessageFor).
-      recording_disclosed: true,
-      consent_status: 'disclosed',
+      // NOT 'disclosed' yet: that is set below, only once the server knows the disclosure is what the agent will say.
+      recording_disclosed: false,
+      consent_status: 'unknown',
     });
 
     // Best-effort: a failed agent refresh must not drop the call.
@@ -81,6 +95,13 @@ export async function POST(req: Request) {
       }
     } catch (err) {
       log.error('agent_setup_failed', { business: business.id, err });
+    }
+
+    // Server-side evidence that the agent opens with the disclosure: its first message (firstMessageFor, which
+    // always contains the notice) was just pushed to a real agent, or this is the scripted demo that speaks the
+    // same text. If the agent refresh failed the old first message stands, so the state stays 'unknown'.
+    if ((!hasElevenLabs() || !agentMock) && call.consent_status !== 'declined') {
+      await updateCall(call.id, { recording_disclosed: true, consent_status: 'disclosed' });
     }
 
     let wsUrl: string | null = null;
@@ -111,7 +132,7 @@ export async function POST(req: Request) {
   }
 }
 
-/** Twilio health-check / browser probe. */
+/** Twilio health-check / browser probe. Reveals nothing about tenants. */
 export async function GET() {
-  return ok({ ready: true, businesses: (await listBusinesses()).length });
+  return ok({ ready: true });
 }

@@ -1,9 +1,10 @@
-import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import {
   authConfig, checkSameOrigin, sessionValue, tokensMatch, SESSION_COOKIE, SESSION_MAX_AGE_S, USER_SESSION_COOKIE,
 } from '@/lib/auth';
-import { limitRequest, rateLimit } from '@/lib/ratelimit';
+import {
+  ADMIN_TOKEN_ACCOUNT, accountId, checkClientAttempts, checkPair, clearFailures, pairKey, recordFailure, verdictResponse,
+} from '@/lib/login-throttle';
 import { createSession, getUserByEmail, normalizeEmail, SESSION_TTL_MS } from '@/lib/db/users';
 import { verifyPasswordOrDummy } from '@/lib/password';
 import { logger } from '@/lib/log';
@@ -31,8 +32,10 @@ const fail = (status: number, error: string, headers?: Record<string, string>) =
  * Failure responses are identical for unknown email, wrong password and disabled account.
  */
 export async function POST(req: Request) {
-  const limited = await limitRequest(req, 'auth/login', 10, 5 * 60_000, { failClosed: true });
-  if (limited) return limited;
+  // Layer 1: per-client attempt cap, before any credential work. Never shared across clients, so junk
+  // traffic from one address cannot starve anyone else (see src/lib/login-throttle.ts).
+  const attempts = await checkClientAttempts(req);
+  if (!attempts.ok) return verdictResponse(attempts);
 
   const cfg = authConfig();
   if (cfg.mode === 'misconfigured') return fail(503, 'server auth not configured');
@@ -42,7 +45,14 @@ export async function POST(req: Request) {
 
   // --- break-glass admin token -------------------------------------------------------------
   if (typeof body.token === 'string' && typeof body.email !== 'string') {
-    if (cfg.mode === 'enforce' && !(await tokensMatch(body.token, cfg.token))) return fail(401, INVALID);
+    const tokenKey = pairKey(ADMIN_TOKEN_ACCOUNT, req); // the break-glass token has its own backoff, per client
+    const gate = await checkPair(tokenKey);
+    if (!gate.ok) return verdictResponse(gate);
+    if (cfg.mode === 'enforce' && !(await tokensMatch(body.token, cfg.token))) {
+      await recordFailure(tokenKey, ADMIN_TOKEN_ACCOUNT);
+      return fail(401, INVALID);
+    }
+    await clearFailures(tokenKey);
     const res = NextResponse.json({ ok: true, data: { authenticated: true, kind: 'admin' } });
     if (cfg.mode === 'enforce') {
       res.cookies.set(SESSION_COOKIE, await sessionValue(cfg.token), { ...cookieBase(), maxAge: SESSION_MAX_AGE_S });
@@ -58,22 +68,22 @@ export async function POST(req: Request) {
   }
   const email = normalizeEmail(body.email);
 
-  // Per-account cap on top of the per-client one (client keys are weak without a trusted proxy).
-  const emailKey = crypto.createHash('sha256').update(email).digest('hex').slice(0, 32);
-  const perAccount = await rateLimit(`auth/login:acct:${emailKey}`, 10, 15 * 60_000, { failClosed: true });
-  if (!perAccount.allowed) {
-    return perAccount.error
-      ? fail(503, 'service temporarily unavailable', { 'retry-after': String(perAccount.retryAfterS) })
-      : fail(429, 'rate limit exceeded', { 'retry-after': String(perAccount.retryAfterS) });
-  }
+  // Layer 2: per (account, client IP) failure backoff. The same for known and unknown emails (no enumeration),
+  // and a different client's pair is untouched, so nobody can lock the real user out of their own address.
+  const account = accountId(email);
+  const key = pairKey(account, req);
+  const gate = await checkPair(key);
+  if (!gate.ok) return verdictResponse(gate);
 
   try {
     const user = await getUserByEmail(email);
     const valid = await verifyPasswordOrDummy(body.password, user?.password_hash);
     if (!user || !valid || user.disabled_at) {
-      log.warn('failed', { acct: emailKey.slice(0, 8) });
+      log.warn('failed', { acct: account.slice(0, 8) });
+      await recordFailure(key, account);
       return fail(401, INVALID);
     }
+    await clearFailures(key);
     const { token } = await createSession(user.id);
     const res = NextResponse.json({
       ok: true,

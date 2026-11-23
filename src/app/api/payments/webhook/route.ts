@@ -1,6 +1,6 @@
 import { ok, fail } from '@/lib/http';
 import { insecureDevAllowed } from '@/lib/auth';
-import { getBooking, getBusiness, markDepositPaid, claimEvent, releaseEvent } from '@/lib/db';
+import { getBooking, getBusiness, markDepositPaid, claimEvent, completeEvent, releaseEvent } from '@/lib/db';
 import { ownerAlertSms } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
 import { logger } from '@/lib/log';
@@ -70,7 +70,12 @@ export async function POST(req: Request) {
   }
   log.info('event.received', { type, id: event.id ?? null });
   try {
-    return await handleEvent(event, type);
+    const res = await handleEvent(event, type);
+    if (event.id) {
+      if (res.status >= 500) await releaseEvent('stripe', event.id);
+      else await completeEvent('stripe', event.id);
+    }
+    return res;
   } catch (err) {
     // Processing failed: give the claim back so Stripe's retry is processed, not dropped as a duplicate.
     if (event.id) await releaseEvent('stripe', event.id);

@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import type { ApiResult } from '@/lib/types';
+import { disclosureFor } from '@/lib/kb/disclosure';
 
 const field =
   'w-full rounded-xl border border-[#26313f] bg-[#080b10] p-3 text-[13px] text-[#cbd7e6] outline-none focus:border-[#ff6b35]/60';
@@ -25,7 +26,7 @@ export function SettingsForm({
 
   const n = Number(days);
   const daysOk = Number.isInteger(n) && n >= 1 && n <= 3650;
-  const spoken = disclosure.trim() || defaultDisclosure;
+  const spoken = disclosure.trim() ? disclosureFor({ recording_disclosure_text: disclosure }) : defaultDisclosure;
 
   async function save() {
     if (!daysOk) return;
@@ -71,7 +72,7 @@ export function SettingsForm({
           placeholder={defaultDisclosure} className={`${field} mt-1 resize-y`}
         />
         <p className="mt-1 text-[11px] text-[#6b7b91]">
-          {disclosure.length}/{maxDisclosureLength}. Leave empty to use the default. Spoken first on every call.
+          {disclosure.length}/{maxDisclosureLength}. Leave empty to use the default. Spoken first on every call; the standard AI and recording notice is always included (added if your text lacks it).
         </p>
         <div className="mt-2 rounded-xl border border-[#26313f] bg-[#0c1118] p-3">
           <p className="text-[10px] uppercase tracking-wide text-[#5a6b80]">She will open with</p>

@@ -61,6 +61,8 @@ export interface Call {
   business_id: ID;
   /** Telephony call SID (Twilio/ElevenLabs) — the reliable way to match a live call. */
   call_sid?: string | null;
+  /** ElevenLabs conversation id (system__conversation_id) — the key the post-call webhook correlates on. */
+  conversation_id?: string | null;
   caller_phone?: string | null;
   caller_name?: string | null;
   started_at: string;
@@ -100,6 +102,9 @@ export interface Booking {
   created_at: string;
   /** Set when customer PII was removed (retention/erasure); financial fields stay. */
   anonymized_at?: string | null;
+  /** When the customer was told about follow-up (gratitude) texts; null = no recorded consent. */
+  followup_consent_at?: string | null;
+  followup_consent_source?: string | null;
 }
 
 export interface BriefingStats {
@@ -125,7 +130,7 @@ export interface SmsLog {
   business_id: ID;
   to_phone: string;
   body: string;
-  kind: 'confirmation' | 'payment_link' | 'gratitude' | 'review_request' | 'owner_alert' | 'other';
+  kind: 'confirmation' | 'payment_link' | 'gratitude' | 'review_request' | 'owner_alert' | 'manual' | 'other';
   /** Which booking this message belongs to — makes confirmation dedupe exact. */
   booking_id?: ID | null;
   provider_id?: string | null;

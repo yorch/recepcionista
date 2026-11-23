@@ -4,7 +4,7 @@ import { eraseCustomerData, getBusiness } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-/** Right-to-erasure for one customer of one business. Admin only. */
+/** Right-to-erasure for one customer of one business. Owner of that business, or admin. */
 export async function POST(req: Request) {
   const auth = await authenticate(req, { role: 'owner' }); // owners erase their own customers' data; admins any business
   if (!auth.ok) return auth.response;

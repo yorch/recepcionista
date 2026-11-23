@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
-import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings } from '@/lib/db';
+import { authenticate, authErrorResponse, hasRole, requireBusinessAccess } from '@/lib/session';
+import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings, isOptedOut } from '@/lib/db';
 import type { Business, Hours, KnowledgeBase } from '@/lib/types';
 
 function publicBusiness(b: Business): Business {
@@ -67,7 +67,10 @@ export async function GET(
     };
     void calls;
 
-    return ok<BusinessDetail>({ business: publicBusiness(business), knowledge_base: await getKnowledgeBase(id), stats });
+    // The stored system prompt is the owner's configuration (it can name the owner and internal rules): staff get the knowledge, not the prompt.
+    const kb = await getKnowledgeBase(id);
+    const knowledge_base = kb && !hasRole(auth.principal, 'owner') ? { ...kb, system_prompt: '', call_script: '' } : kb;
+    return ok<BusinessDetail>({ business: publicBusiness(business), knowledge_base, stats });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 500);
   }
@@ -91,6 +94,11 @@ export async function PATCH(
       const clean = validate(value);
       if (clean === undefined) return fail(`invalid value for "${key}"`, 422);
       patch[key] = clean;
+    }
+    // owner_alert texts to the owner phone are exempt from customer opt-outs: that number must never be one
+    // that opted out of this business's texts (otherwise re-pointing it would defeat a customer's STOP).
+    if (typeof patch.owner_phone === 'string' && (await isOptedOut(id, patch.owner_phone))) {
+      return fail('owner_phone is a number that opted out of texts from this business', 422);
     }
     const updated = await updateBusiness(id, patch as Partial<Business>);
     if (!updated) return fail('business not found', 404);

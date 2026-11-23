@@ -26,8 +26,9 @@ integration('voice tools route (postgres)', () => {
     return { status: res.status, body: (await res.json()) as ToolBody };
   }
   const TUE = () => futureDateKey(2);
+  // Every real tool call carries the platform's conversation id; a booking without any call key is refused.
   const bookingArgs = (extra: Record<string, unknown> = {}) => ({
-    customer_name: 'Lucía Gómez', customer_phone: '+13055550999', service: 'AC repair', ...extra,
+    customer_name: 'Lucía Gómez', customer_phone: '+13055550999', service: 'AC repair', conversation_id: uniq('conv'), ...extra,
   });
   const GENERIC = /get the owner/i;
 
@@ -113,11 +114,11 @@ integration('voice tools route (postgres)', () => {
     }));
     expect(r.body.ok).toBe(true);
     const row = (await prisma.booking.findMany({ where: { businessId: a.id } }))[0];
-    expect(row.callId).toBeNull();
-    expect(row.customerPhone).toBe('+13055550888'); // not the foreign call's number
+    expect(row.callId).not.toBe(foreign.id); // the foreign call is never attached...
+    expect(row.customerPhone).toBe('+13055550888'); // ...nor its number used
   });
 
-  test('create_booking uses the verified caller number from the live call, not the phone the model relays', async () => {
+  test('create_booking TEXTS the verified caller number from the live call, never the phone the model relays (which is only stored as the contact)', async () => {
     const biz = await newBusiness();
     const caller = '+13055550101';
     const live = await db.createCall({ business_id: biz.id, caller_phone: caller, call_sid: uniq('conv') });
@@ -126,8 +127,9 @@ integration('voice tools route (postgres)', () => {
     }));
     expect(r.body.ok).toBe(true);
     const row = (await prisma.booking.findMany({ where: { businessId: biz.id } }))[0];
-    expect(row.customerPhone).toBe(caller);
+    expect(row.customerPhone).toBe('+13055550666'); // the relayed callback number is stored as the booking contact
     expect(row.callId).toBe(live.id);
+    expect(row.followupConsentAt).toBeNull(); // the follow-up notice did not reach the contact number: no consent recorded
     // the confirmation went to the verified number
     const sms = await prisma.smsLog.findMany({ where: { businessId: biz.id, kind: 'confirmation' } });
     expect(sms.map((s) => s.toPhone)).toEqual([caller]);
@@ -139,7 +141,9 @@ integration('voice tools route (postgres)', () => {
       agent_id: biz.agent_id, conversation_id: conv, customer_phone: '+13055550666', scheduled_at: wall(TUE(), '11:00'),
     }));
     expect(r2.body.ok).toBe(true);
-    expect((await prisma.booking.findFirst({ where: { callId: live2.id } }))?.customerPhone).toBe('+13055550202');
+    expect((await prisma.booking.findFirst({ where: { callId: live2.id } }))?.customerPhone).toBe('+13055550666');
+    expect((await prisma.smsLog.findMany({ where: { businessId: biz.id, kind: 'confirmation' } })).map((x) => x.toPhone).sort())
+      .toEqual([caller, '+13055550202'].sort());
   });
 
   test('call cap: a third booking on the same call is refused', async () => {

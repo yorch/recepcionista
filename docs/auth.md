@@ -51,8 +51,9 @@ Public (no session; each verifies its own secret/signature): `/api/health`, `/ap
 | `POST /api/extract` | admin | n/a |
 | `POST /api/gratitude/run` | owner | owner pinned to own business; only admin may omit `business_id` (= all) |
 | `POST /api/payments/create-link` | owner | `business_id` forced to own; booking must belong to it |
-| `POST /api/sms/send` | owner | own business; recipient must be a known contact |
-| `POST /api/sms/payment-link` | owner | own business; booking must belong to it |
+| `POST /api/sms/send` | owner | own business; recipient must be a known contact; `kind`/`consent_basis` are rejected (kind is `manual`) |
+| `POST /api/sms/payment-link` | owner | own business; `booking_id` required, texts only that booking's number (no `to`/`description`) |
+| `POST /api/admin/retention` | admin | retention purge now (`dry_run` defaults to true) |
 | `POST /api/sms/confirmation`, `/api/sms/gratitude` | staff | booking's business checked |
 | `GET /api/voice/agent-prompt` | owner | own business (admin: `?business_id=` or first) |
 | `GET/POST /api/privacy/export`, `/erase` | owner | `business_id` forced to own |
@@ -99,8 +100,8 @@ Passwords must be 12-256 characters. In a deployed container run the script the 
 
 - **Cross-tenant access**: every business-scoped handler resolves the business from the principal, not from the request. Cross-tenant ids return 404. `tests/auth-db.test.ts` covers owner/staff/admin isolation against Postgres.
 - **User enumeration**: login responses and timing are uniform; the admin-only create-user route does reveal `409 email already registered`.
-- **Lockout**: the per-account limiter can be used to temporarily lock one account out of password login (the admin token path and the other accounts are unaffected). Per-IP limiting only works behind a trusted proxy (`TRUSTED_PROXY=true`); otherwise all clients share one bucket.
+- **Login throttling** (`src/lib/login-throttle.ts`), with no bucket shared by all tenants: (1) a per-client-IP attempt cap (60 / 5 min, checked before any password hashing); (2) a per-(account, client-IP) failure backoff (3 free failures, then 15s, 30s, 1m ... capped at 15 min; failures only, a success clears it; the break-glass `ADMIN_TOKEN` has its own pair key); (3) a per-account failure counter across all addresses that only **logs** (`distributed_guessing`) and never blocks, because blocking on it would let anyone lock a real user out from a different IP. Consequences: junk traffic or guessing from one address only affects that address; a distributed guesser is slowed per address, not stopped (use strong passwords; there is no 2FA). Per-IP keys need `TRUSTED_PROXY=true` (and `TRUSTED_PROXY_HOPS` behind a CDN); otherwise all clients share the `untrusted` key and the pair backoff uses a 20-failure allowance and a 60 s cap so it cannot become a long lockout. Failures stay timing-uniform (unknown email, wrong password, disabled account).
 - **No self-signup, no password reset, no 2FA** yet: an admin sets and rotates passwords (change the hash with `setUserPasswordHash`, which revokes sessions). Weaker scrypt hashes are not auto-upgraded at login.
 - **XSS**: the session cookie is `HttpOnly`, so script cannot read it, but script running in the page can still make same-origin requests.
-- The public home page `/` still renders the first business's aggregate numbers; it is not part of this auth model.
+- The public home page `/` renders no tenant data.
 - Voice-tool and webhook routes are not user-authenticated (they use tool/webhook secrets); the agent-to-tenant binding is covered in `docs/review/05-adversarial-review.md` (H2).

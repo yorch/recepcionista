@@ -5,7 +5,7 @@ declare module 'bun:test' {
   export namespace describe { function skip(name: string, fn: () => void): void; }
   export function beforeAll(fn: Fn): void;
   export function afterAll(fn: Fn): void;
-  export function test(name: string, fn: Fn): void;
+  export function test(name: string, fn: Fn, timeoutMs?: number): void;
   export function it(name: string, fn: Fn): void;
   export function beforeEach(fn: Fn): void;
   export function afterEach(fn: Fn): void;

@@ -1,9 +1,13 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
-import { getBusiness, updateBusiness } from '@/lib/db';
+import { getBusiness, getKnowledgeBase, updateBusiness } from '@/lib/db';
+import { createOrUpdateAgent, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { logger } from '@/lib/log';
 import { cleanDisclosure, MAX_DISCLOSURE_LENGTH } from '@/lib/kb/disclosure';
 
 export const dynamic = 'force-dynamic';
+
+const log = logger('settings');
 
 export interface BusinessSettings {
   retention_days: number;
@@ -62,6 +66,14 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (Object.keys(patch).length === 0) return fail('nothing to update', 422);
     const updated = await updateBusiness(id, patch);
     if (!updated) return fail('business not found', 404);
+    // The spoken opening lives in the provider's agent: push it now instead of "from the next provisioning".
+    if ('recording_disclosure_text' in patch && hasElevenLabs() && updated.agent_id) {
+      try {
+        await createOrUpdateAgent({ business: updated, kb: await getKnowledgeBase(id) });
+      } catch (err) {
+        log.warn('agent_resync_failed', { business: id, err });
+      }
+    }
     return ok(view(updated));
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 500);

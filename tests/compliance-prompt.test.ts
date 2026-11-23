@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { buildSystemPrompt, complianceRules, promptIsDeficient, COMPLIANCE_MARKER } from '../src/lib/kb';
-import { cleanDisclosure, disclosureFor, DEFAULT_DISCLOSURE, MAX_DISCLOSURE_LENGTH } from '../src/lib/kb/disclosure';
+import { cleanDisclosure, disclosureFor, hasMandatoryNotice, DEFAULT_DISCLOSURE, MAX_DISCLOSURE_LENGTH } from '../src/lib/kb/disclosure';
 import { firstMessageFor } from '../src/lib/voice/elevenlabs';
 import { CALL_911_EN, CALL_911_ES } from '../src/lib/voice/emergency';
 import type { Business } from '../src/lib/types';
@@ -43,10 +43,19 @@ describe('recording disclosure', () => {
   test('first message opens with the default disclosure', () => {
     expect(firstMessageFor(biz).startsWith(DEFAULT_DISCLOSURE)).toBe(true);
   });
-  test('custom text overrides and is length capped', () => {
-    const custom = { ...biz, recording_disclosure_text: 'Calls are recorded by our AI helper.' };
-    expect(firstMessageFor(custom).startsWith('Calls are recorded by our AI helper.')).toBe(true);
-    expect(disclosureFor({ recording_disclosure_text: 'x'.repeat(5000) }).length).toBe(MAX_DISCLOSURE_LENGTH);
+  test('custom text extends the mandatory notice and never replaces it', () => {
+    const custom = { ...biz, recording_disclosure_text: 'Hi!' };
+    const spoken = firstMessageFor(custom);
+    expect(spoken.startsWith('Hi! ')).toBe(true);
+    expect(spoken).toContain(DEFAULT_DISCLOSURE); // appended: the AI + recording notice is always spoken
+    // a text that already carries the notice in both languages is used as written
+    const full = 'We use an AI assistant and calls may be recorded. Usamos una inteligencia artificial y la llamada puede ser grabada.';
+    expect(disclosureFor({ recording_disclosure_text: full })).toBe(full);
+    expect(hasMandatoryNotice(full)).toBe(true);
+    expect(hasMandatoryNotice('Hi!')).toBe(false);
+    expect(hasMandatoryNotice('Calls are recorded by our AI helper.')).toBe(false); // English only
+    expect(disclosureFor({ recording_disclosure_text: 'x'.repeat(5000) }).startsWith('x'.repeat(MAX_DISCLOSURE_LENGTH))).toBe(true);
+    expect(disclosureFor({ recording_disclosure_text: 'x'.repeat(5000) })).toContain(DEFAULT_DISCLOSURE);
     expect(disclosureFor({ recording_disclosure_text: '   ' })).toBe(DEFAULT_DISCLOSURE);
     expect(cleanDisclosure('a\n\nb\t c')).toBe('a b c');
   });

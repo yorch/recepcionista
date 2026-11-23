@@ -19,6 +19,11 @@ const nextConfig: NextConfig = {
     browserToTerminal: 'warn',
     fetches: { fullUrl: false },
   },
+  // Briefing audio is written at runtime, which Next does not serve from public/. Serve it through an
+  // authenticated route (src/app/api/briefings/audio) while keeping the stored /audio/<file> URLs.
+  async rewrites() {
+    return { beforeFiles: [{ source: '/audio/:name', destination: '/api/briefings/audio/:name' }], afterFiles: [], fallback: [] };
+  },
   turbopack: {
     rules: {
       '*.css': {

@@ -5,7 +5,7 @@ import { exportCustomerData } from '@/lib/privacy';
 
 export const dynamic = 'force-dynamic';
 
-/** Access request: GET /api/privacy/export?business_id=...&phone=... Admin only. */
+/** Access request: GET /api/privacy/export?business_id=...&phone=... Owner of that business, or admin. */
 export async function GET(req: Request) {
   const auth = await authenticate(req, { role: 'owner' }); // customer PII export: owner+, own business only
   if (!auth.ok) return auth.response;

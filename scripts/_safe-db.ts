@@ -1,12 +1,13 @@
 /**
  * Guard for scripts that wipe or rewrite data (seed, smoke, ws*-test).
  *
- * Refuses to continue unless DATABASE_URL names a database that looks disposable
- * (its name contains "dev", "test", "scratch" or "local"), or `--force-i-know` is passed.
+ * Refuses to continue unless DATABASE_URL names a database that looks disposable (its name has a whole
+ * `dev`, `test`, `scratch` or `local` word, split on `_` `-` `.`: `recepcionista_dev` yes, `contest_production` and
+ * `recepcionista_prod_latest` no), or `--force-i-know` is passed.
  * Always prints the target first so a wrong .env is obvious BEFORE anything is deleted.
  */
 export const FORCE_FLAG = '--force-i-know';
-const SAFE_NAME = /(dev|test|scratch|local)/i;
+const SAFE_NAME = /(?:^|[_.-])(?:dev|test|scratch|local)(?:$|[_.-])/i;
 
 export function dbTarget(url: string | undefined): { name: string; host: string } | null {
   if (!url) return null;
@@ -38,7 +39,7 @@ export function assertSafeDatabase(script: string): void {
     return;
   }
   console.error(
-    `[${script}] REFUSING to run: database "${target.name}" does not contain "dev", "test", "scratch" or "local".\n`
+    `[${script}] REFUSING to run: database "${target.name}" is not clearly disposable (no whole "dev", "test", "scratch" or "local" word in its name).\n`
     + `  Point DATABASE_URL at a disposable database (e.g. recepcionista_dev), or pass ${FORCE_FLAG} if you really mean it.`,
   );
   process.exit(2);

@@ -7,7 +7,7 @@
 import { integration } from '../helpers/env';
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import {
-  ALL_WEEK, cleanup, futureDateKey, loadDb, loadPrisma, newBusiness, nextUsDstDay, phone, wall,
+  ALL_WEEK, cleanup, futureDateKey, loadDb, loadPrisma, newBusiness, nextUsDstDay, phone, uniq, wall,
 } from '../helpers/fixtures';
 import { addDaysToDateKey, localDateKey } from '../../src/lib/time';
 import type { Booking } from '../../src/lib/types';
@@ -190,9 +190,9 @@ integration('booking (postgres)', () => {
     const dayNy = TUE();
     const dayLa = futureDateKey(2, 'America/Los_Angeles');
 
-    const a = await tools.createBooking({ business_id: ny.id, customer_name: 'N', customer_phone: phone(), service: 'AC repair', scheduled_at: wall(dayNy, '10:00') });
+    const a = await tools.createBooking({ business_id: ny.id, conversation_id: uniq('conv'), customer_name: 'N', customer_phone: phone(), service: 'AC repair', scheduled_at: wall(dayNy, '10:00') });
     expect(a.ok).toBe(true);
-    const c = await tools.createBooking({ business_id: la.id, customer_name: 'L', customer_phone: phone(), service: 'AC repair', scheduled_at: wall(dayLa, '10:00') });
+    const c = await tools.createBooking({ business_id: la.id, conversation_id: uniq('conv'), customer_name: 'L', customer_phone: phone(), service: 'AC repair', scheduled_at: wall(dayLa, '10:00') });
     expect(c.ok).toBe(true);
     const nyRow = (await db.listBookings(ny.id))[0];
     const laRow = (await db.listBookings(la.id))[0];
@@ -200,11 +200,11 @@ integration('booking (postgres)', () => {
     expect(new Date(nyRow.scheduled_at).getUTCHours()).toBeOneOf([14, 15]);
     expect(new Date(laRow.scheduled_at).getUTCHours()).toBeOneOf([17, 18]);
     // an explicit offset wins over the zone
-    const e = await tools.createBooking({ business_id: ny.id, customer_name: 'N', customer_phone: phone(), service: 'AC repair', scheduled_at: `${dayNy}T13:00:00Z` });
+    const e = await tools.createBooking({ business_id: ny.id, conversation_id: uniq('conv'), customer_name: 'N', customer_phone: phone(), service: 'AC repair', scheduled_at: `${dayNy}T13:00:00Z` });
     expect(e.ok).toBe(true);
     expect((await db.listBookings(ny.id)).map((x) => x.scheduled_at)).toContain(`${dayNy}T13:00:00.000Z`);
     // garbage is refused with a re-ask, not booked
-    const bad = await tools.createBooking({ business_id: ny.id, customer_name: 'N', customer_phone: phone(), service: 'AC repair', scheduled_at: 'tomorrow at ten' });
+    const bad = await tools.createBooking({ business_id: ny.id, conversation_id: uniq('conv'), customer_name: 'N', customer_phone: phone(), service: 'AC repair', scheduled_at: 'tomorrow at ten' });
     expect(bad.ok).toBe(false);
   });
 });

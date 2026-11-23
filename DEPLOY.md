@@ -105,7 +105,12 @@ Every one of these must use the public origin from `APP_URL`:
 | ElevenLabs (post-call webhook) | `POST /api/voice/webhook` |
 | ElevenLabs (agent tools) | `POST /api/voice/tools/<tool>` |
 | Stripe (webhook) | `POST /api/payments/webhook` |
-| Twilio (inbound SMS, gratitude replies) | `POST /api/sms/gratitude-reply` |
+| Twilio (inbound SMS: STOP/START/HELP and 1-5 gratitude replies) | `POST /api/sms/inbound` (the number has ONE inbound URL; `/api/sms/gratitude-reply` still honours STOP but is legacy) |
+
+**Retention is off until you turn it on.** `RETENTION_JOB` defaults to off: nothing is auto-deleted after an
+upgrade (existing businesses have a 365-day window, which would otherwise purge older data on first boot). Boot
+logs the counts that *would* be purged. Review each business's window (Dashboard > Settings), check with
+`POST /api/admin/retention {"dry_run":true}` (admin token), then set `RETENTION_JOB=on` in `.env`. See `docs/compliance.md`.
 
 **Set `STRIPE_WEBHOOK_SECRET` in production.** Without it,
 `/api/payments/webhook` would accept *unsigned* payloads, and anyone who finds
@@ -160,6 +165,11 @@ git checkout <previous-sha> && ./deploy.sh
 Migrations are the caveat: `prisma migrate deploy` is forward-only, so rolling
 back the code
 across a migration that dropped a column needs the matching database restore.
+The compliance migrations (`20261123210000_*`, `20261124120000_*`) only ADD columns, tables and CHECK constraints,
+so the previous code keeps working against the migrated schema; to undo them for real restore the pre-deploy
+`pg_dump` (the only supported path back). The `ADD CONSTRAINT` statements in `20261123210000` are validated
+immediately (a full scan under an exclusive lock): fine now, but on a very large `calls` table apply such
+constraints as `NOT VALID` + `VALIDATE CONSTRAINT` in a later migration.
 
 ## Volumes
 
@@ -170,7 +180,9 @@ across a migration that dropped a column needs the matching database restore.
 
 The audio volume matters because `src/lib/briefing/tts.ts` writes `.mp3`/`.m4a`
 files into
-`public/audio` at runtime and the app serves them as `/audio/<file>`. The image
+`public/audio` at runtime. Next does not serve `public/` files created after the build, so `/audio/<file>` is
+rewritten (next.config.ts) to the authenticated route `/api/briefings/audio/<file>`, which streams them to staff of the
+business that owns the briefing. The image
 pre-creates
 that directory owned by `node` so a fresh named volume inherits writable
 ownership; the

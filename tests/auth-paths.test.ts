@@ -3,12 +3,12 @@ import { isPublicPath, normalizePath, clientKey } from '../src/lib/auth';
 
 describe('isPublicPath', () => {
   test('known public paths', () => {
-    for (const p of ['/', '/login', '/api/health', '/api/auth/login', '/api/voice/tools/create_booking', '/pay/bk_1', '/favicon.ico', '/_next/static/chunk.js', '/audio/a.mp3', '/api/pay/mock-complete']) {
+    for (const p of ['/', '/login', '/api/health', '/api/auth/login', '/api/voice/tools/create_booking', '/pay/bk_1', '/favicon.ico', '/_next/static/chunk.js', '/api/pay/mock-complete']) {
       expect(isPublicPath(p)).toBe(true);
     }
   });
   test('agent-prompt and admin APIs are not public', () => {
-    for (const p of ['/api/voice/agent-prompt', '/api/businesses', '/api/sms/send', '/dashboard', '/onboarding']) {
+    for (const p of ['/api/voice/agent-prompt', '/api/businesses', '/api/sms/send', '/dashboard', '/onboarding', '/audio/briefing-x-2026-01-01.mp3', '/api/admin/retention']) {
       expect(isPublicPath(p)).toBe(false);
     }
   });
@@ -38,6 +38,14 @@ describe('clientKey', () => {
     process.env.TRUSTED_PROXY = 'true';
     const req2 = new Request('http://x/', { headers: { 'x-forwarded-for': '9.9.9.9, 1.2.3.4' } });
     expect(clientKey(req2)).toBe('1.2.3.4');
+    // behind a CDN AND a proxy the client is the 2nd hop from the right, not the CDN's address
+    const cdn = new Request('http://x/', { headers: { 'x-forwarded-for': 'spoofed, 203.0.113.7, 172.16.0.9' } });
+    expect(clientKey(cdn)).toBe('172.16.0.9');
+    process.env.TRUSTED_PROXY_HOPS = '2';
+    expect(clientKey(cdn)).toBe('203.0.113.7');
+    process.env.TRUSTED_PROXY_HOPS = '99';
+    expect(clientKey(cdn)).toBe('spoofed'.slice(0, 7)); // clamped to 5 hops, then to the left-most entry
+    delete process.env.TRUSTED_PROXY_HOPS;
     delete process.env.TRUSTED_PROXY;
   });
 });

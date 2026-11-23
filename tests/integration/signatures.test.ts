@@ -4,6 +4,7 @@
  */
 import { integration, outboundCalls, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { DEFAULT_DISCLOSURE } from '../../src/lib/kb/disclosure';
 import {
   cleanup, elevenLabsSignature, loadDb, loadPrisma, newBusiness, phone, twilioSignature, uniq,
 } from '../helpers/fixtures';
@@ -110,7 +111,7 @@ integration('provider webhook signatures (postgres)', () => {
       conversation_id: uniq('conv'),
       status: 'done',
       transcript: [
-        { role: 'agent', message: 'Thanks for calling, how can I help?', time_in_call_secs: 0 },
+        { role: 'agent', message: `${DEFAULT_DISCLOSURE} — Thanks for calling, how can I help?`, time_in_call_secs: 0 },
         { role: 'user', message: 'My AC is leaking water into the hallway.', time_in_call_secs: 4 },
       ],
       metadata: { start_time_unix_secs: Math.floor(Date.now() / 1000) - 120, call_duration_secs: 95, main_language: 'en' },
@@ -130,7 +131,7 @@ integration('provider webhook signatures (postgres)', () => {
       business_id: biz.id, status: 'completed', duration_sec: 95, language: 'en', urgency: 'emergency',
       summary: 'Caller reports an AC leak; booking requested.',
     });
-    expect(String(call.transcript)).toContain('agent: Thanks for calling');
+    expect(String(call.transcript)).toContain('Thanks for calling');
     expect(String(call.transcript)).toContain('user: My AC is leaking');
     expect(await prisma.call.count({ where: { businessId: biz.id } })).toBe(1);
     expect(outboundCalls).toEqual([]);
@@ -174,7 +175,7 @@ integration('provider webhook signatures (postgres)', () => {
 
   test('post-call shapes: legacy flat body with call_id, string transcript, duration_sec', async () => {
     const biz = await newBusiness();
-    const live = await db.createCall({ business_id: biz.id, caller_phone: phone() });
+    const live = await db.createCall({ business_id: biz.id, caller_phone: phone(), consent_status: 'disclosed', recording_disclosed: true });
     const raw = JSON.stringify({
       call_id: live.id, agent_id: biz.agent_id, transcript: 'Caller: hola, mi aire no enfría. Agent: Le mando un técnico mañana.',
       duration_sec: 61, language: 'es-MX', recording_url: 'https://audio.example.test/r.mp3',
@@ -190,7 +191,7 @@ integration('provider webhook signatures (postgres)', () => {
   test('post-call shapes: a tool-created call keyed by conversation id is completed, not duplicated', async () => {
     const biz = await newBusiness();
     const conv = uniq('conv');
-    const live = await db.createCall({ business_id: biz.id, call_sid: conv, status: 'handed_off' });
+    const live = await db.createCall({ business_id: biz.id, conversation_id: conv, status: 'handed_off' });
     const res = await elPost(envelope(biz.agent_id!, {}, { conversation_id: conv }), undefined);
     expect(res.status).toBe(200);
     expect(await prisma.call.count({ where: { businessId: biz.id } })).toBe(1);

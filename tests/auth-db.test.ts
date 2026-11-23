@@ -65,11 +65,75 @@ suite('per-tenant auth (postgres)', () => {
     return c as string;
   }
 
-  test('login is rate limited per account', async () => {
+  test('login backs off per (account, client IP) after repeated failures', async () => {
     await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
-    let last = 0;
-    for (let i = 0; i < 12; i++) last = (await login.POST(loginReq({ email: email('ratelimited'), password: 'bad-password-xx' }))).status;
-    expect(last).toBe(429);
+    process.env.TRUSTED_PROXY = 'true';
+    try {
+      const from = (ip: string, password: string) => login.POST(req('/api/auth/login', {
+        method: 'POST', headers: { 'x-forwarded-for': ip }, body: JSON.stringify({ email: email('ownerB'), password }),
+      }));
+      let last = 0;
+      for (let i = 0; i < 6; i++) last = (await from('198.51.100.7', 'bad-password-xx')).status;
+      expect(last).toBe(429);
+      // the real user, from another address, is not affected by that streak
+      expect((await from('203.0.113.9', PASSWORD)).status).toBe(200);
+    } finally {
+      delete process.env.TRUSTED_PROXY;
+      await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
+    }
+  });
+
+  test('H3: junk logins (random emails, many IPs) never lock out another tenant\'s user; one IP only exhausts itself', async () => {
+    await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
+    process.env.TRUSTED_PROXY = 'true';
+    try {
+      const post = (ip: string, body: unknown) => login.POST(req('/api/auth/login', { method: 'POST', headers: { 'x-forwarded-for': ip }, body: JSON.stringify(body) }));
+      // 60 junk attempts from six addresses, plus a burst of wrong-password guesses at the victim from two of them
+      for (let i = 0; i < 60; i++) await post(`192.0.2.${10 + (i % 6)}`, { email: `junk-${i}@nowhere.test`, password: 'x'.repeat(12) });
+      for (let i = 0; i < 10; i++) await post(`192.0.2.${10 + (i % 2)}`, { email: email('ownerA'), password: 'wrong-password-1' });
+      const victim = await post('203.0.113.50', { email: email('ownerA'), password: PASSWORD });
+      expect(victim.status).toBe(200);
+      const admin = await post('203.0.113.51', { token: 'test-admin-token-123' });
+      expect(admin.status).toBe(200);
+
+      // a single address that hammers is capped, after which ONLY it is refused
+      await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
+      let status = 0;
+      for (let i = 0; i < 62; i++) status = (await post('198.51.100.99', { email: `flood-${i}@nowhere.test`, password: 'x'.repeat(12) })).status;
+      expect(status).toBe(429);
+      expect((await post('203.0.113.52', { email: email('ownerA'), password: PASSWORD })).status).toBe(200);
+    } finally {
+      delete process.env.TRUSTED_PROXY;
+      await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
+    }
+  }, 120_000); // ~130 real scrypt verifications
+
+  test('H3: a successful login clears the pair\'s failure streak; wrong-token guesses back off per client, separately from user logins', async () => {
+    await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
+    process.env.TRUSTED_PROXY = 'true';
+    try {
+      const post = (ip: string, body: unknown) => login.POST(req('/api/auth/login', { method: 'POST', headers: { 'x-forwarded-for': ip }, body: JSON.stringify(body) }));
+      for (let i = 0; i < 3; i++) expect((await post('198.51.100.20', { email: email('ownerA'), password: 'wrong-password-1' })).status).toBe(401);
+      expect((await post('198.51.100.20', { email: email('ownerA'), password: PASSWORD })).status).toBe(200); // still within the free failures
+      for (let i = 0; i < 3; i++) expect((await post('198.51.100.20', { email: email('ownerA'), password: 'wrong-password-1' })).status).toBe(401); // streak restarted at 0
+      // admin token guesses from one address back off...
+      let last = 0;
+      for (let i = 0; i < 6; i++) last = (await post('198.51.100.21', { token: `wrong-${i}` })).status;
+      expect(last).toBe(429);
+      // ...without affecting that address's user logins for a different account (own pair keys)
+      expect((await post('198.51.100.21', { email: email('ownerB'), password: PASSWORD })).status).toBe(200);
+    } finally {
+      delete process.env.TRUSTED_PROXY;
+      await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
+    }
+  });
+
+  test('H3: with no trusted proxy (shared "untrusted" key) 10 junk logins no longer lock everyone out', async () => {
+    await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
+    delete process.env.TRUSTED_PROXY;
+    for (let i = 0; i < 12; i++) await login.POST(loginReq({ email: `junk-${i}@nowhere.test`, password: 'x'.repeat(12) }));
+    expect((await login.POST(loginReq({ email: email('ownerA'), password: PASSWORD }))).status).toBe(200);
+    await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/login' } } });
   });
 
   test('login sets an httpOnly lax cookie; DB stores only the hash', async () => {

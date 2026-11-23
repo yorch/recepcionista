@@ -3,9 +3,8 @@
  * in-process against Postgres (no subprocess), so a reset is one transaction
  * batch rather than a child Bun process racing the dev server's connection.
  */
-import fs from 'node:fs';
 import { guardAdmin } from '@/lib/admin-guard';
-import path from 'node:path';
+import { removeAllBriefingAudio } from '@/lib/briefing/audio-files';
 import { ok, fail } from '@/lib/http';
 import { demoModeEnabled } from '@/lib/auth';
 import { clearAll, prisma } from '@/lib/db';
@@ -44,12 +43,7 @@ export async function POST(req: Request) {
     await prisma.briefing.create({ data: demoBriefing() });
     await prisma.smsLog.createMany({ data: demoMessages() });
 
-    const audioDir = path.join(process.cwd(), 'public/audio');
-    if (fs.existsSync(audioDir)) {
-      for (const f of fs.readdirSync(audioDir)) {
-        if (/^briefing-/.test(f)) fs.unlinkSync(path.join(audioDir, f));
-      }
-    }
+    removeAllBriefingAudio();
     log.info('done', { ms: Date.now() - started });
     return ok({ reset: true });
   } catch (err) {

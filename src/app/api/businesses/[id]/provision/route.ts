@@ -60,11 +60,11 @@ export async function POST(
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
   const auth = await authenticate(req, { role: 'admin' }); // buys numbers / creates agents: admin-only
   if (!auth.ok) return auth.response as ReturnType<typeof fail>;
-  const limited = await limitRequest(req, 'businesses/provision', 5);
+  const limited = await limitRequest(req, 'businesses/provision', 5, 60_000, { globalLimit: 100 });
   if (limited) return limited as ReturnType<typeof fail>;
   const { id } = await params;
   try {
-    const run = await withLease(`provision:${id}`, PROVISION_LEASE_MS, () => provision(req, id));
+    const run = await withLease(`provision:${id}`, PROVISION_LEASE_MS, (_lease, signal) => provision(req, id, signal));
     if (!run.acquired) return fail('provisioning already in progress', 409);
     return run.value;
   } catch (err) {
@@ -73,9 +73,15 @@ export async function POST(
   }
 }
 
+/** Throws (-> 500, nothing more is bought) once the provisioning lease is lost. */
+function lostLeaseCheck(signal: AbortSignal): void {
+  if (signal.aborted) throw new Error('provisioning lease lost; aborting before the next paid step');
+}
+
 async function provision(
   req: Request,
   id: string,
+  signal: AbortSignal,
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
   const started = Date.now();
   try {
@@ -149,6 +155,7 @@ async function provision(
     let phone = business.phone;
     let mock = true;
     if (!phone) {
+      lostLeaseCheck(signal); // never buy a number after the lease was lost: a successor may already hold it
       const provisioned = await provisionNumber('305');
       phone = provisioned.phone;
       mock = provisioned.mock;
@@ -184,6 +191,7 @@ async function provision(
     let agentId: string | undefined;
     let agentMock: boolean | undefined;
     let webhookSecret: string | undefined;
+    lostLeaseCheck(signal);
     try {
       const agent = await createOrUpdateAgent({ business: updated, kb });
       agentId = agent.agent_id;

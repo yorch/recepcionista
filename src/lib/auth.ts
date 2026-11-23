@@ -35,7 +35,7 @@ const PUBLIC_PAGE_EXACT = new Set(['/', '/login']);
 const PUBLIC_PAGE_PREFIX = ['/pay/'];
 
 /** Static assets that are really served from public/ or Next internals. */
-const PUBLIC_STATIC_PREFIX = ['/_next/static/', '/_next/image', '/audio/'];
+const PUBLIC_STATIC_PREFIX = ['/_next/static/', '/_next/image']; // /audio/* is NOT public: it is served by an authenticated route
 const PUBLIC_STATIC_EXACT = new Set(['/favicon.ico']);
 
 /** Decode and normalise a path so `%2e%2e`, `//`, `\\` and trailing slashes cannot dodge the allowlists. Returns null if it looks hostile. */
@@ -252,7 +252,10 @@ export function clientKey(req: Request): string {
   if (process.env.TRUSTED_PROXY === 'true') {
     const real = req.headers.get('x-real-ip')?.trim();
     const hops = (req.headers.get('x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
-    const ip = hops.length ? hops[hops.length - 1] : real;
+    // TRUSTED_PROXY_HOPS = how many proxies append to X-Forwarded-For in front of the app (default 1, e.g. Traefik).
+    // Behind a CDN + Traefik set 2, so the client address (not the CDN's) is the key.
+    const n = Math.max(1, Math.min(5, Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '1', 10) || 1));
+    const ip = hops.length ? hops[Math.max(0, hops.length - n)] : real;
     if (ip) return ip.slice(0, 64);
   }
   return 'untrusted';

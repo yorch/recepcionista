@@ -40,5 +40,5 @@ export const config = {
   // Only Next internals and the favicon bypass the proxy. Public API/page
   // paths are decided by isPublicPath() (never by file extension: a dynamic
   // /api/**/x.js must still be authenticated). Handlers re-validate (session.ts).
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|audio/).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
 };

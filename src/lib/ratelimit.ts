@@ -35,6 +35,12 @@ export interface RateLimitResult {
 export interface RateLimitOptions {
   /** Deny (instead of allow) when the database is unreachable. Use for credential/sensitive routes. */
   failClosed?: boolean;
+  /**
+   * Optional route-wide circuit breaker shared by ALL clients/tenants (max requests per window). Off by default:
+   * a shared bucket is a lockout switch for everyone, so only paid-provider routes should opt in, with a ceiling
+   * far above legitimate traffic. Never use it for credential checks (see login-throttle).
+   */
+  globalLimit?: number;
 }
 
 /** Opportunistic cleanup of long-expired buckets (at most once a minute per process). Never throws. */
@@ -97,10 +103,11 @@ export async function limitRequest(
   windowMs = 60_000,
   opts: RateLimitOptions = {},
 ): Promise<Response | null> {
-  // Per-client key (only meaningful behind TRUSTED_PROXY) plus a global
-  // per-route cap, so spoofed/rotating client keys cannot brute-force a route.
+  // Per-client key (only meaningful behind TRUSTED_PROXY). A route-wide bucket exists only on request.
   const r = await rateLimit(`${route}:${clientKey(req)}`, limit, windowMs, opts);
-  const g = r.allowed ? await rateLimit(`${route}:*global*`, limit * 5, windowMs, opts) : r;
+  const g = r.allowed && opts.globalLimit
+    ? await rateLimit(`${route}:*global*`, opts.globalLimit, windowMs, opts)
+    : r;
   if (r.allowed && g.allowed) return null;
   const blocked = r.allowed ? g : r;
   if (blocked.error) {

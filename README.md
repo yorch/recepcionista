@@ -137,9 +137,17 @@ response (`webhook_secret`). The app does not store or log it: copy it to
 `ELEVENLABS_WEBHOOK_SECRET` in `.env` and redeploy. If you lose it, delete the
 webhook in the ElevenLabs workspace and re-provision.
 
-**Login rate limit.** `X-Forwarded-For` is trusted only with `TRUSTED_PROXY=true`
-(set it only behind Traefik). Otherwise all clients share one bucket, plus a global
-per-route cap.
+**Login throttling.** `X-Forwarded-For` is trusted only with `TRUSTED_PROXY=true`
+(set it only behind Traefik; behind a CDN *and* Traefik also set `TRUSTED_PROXY_HOPS=2` so the key is
+the client, not the CDN). Login is limited per client IP (attempts) and per (account, client IP)
+with an exponential backoff on failures only: one address guessing at an account never locks that
+account out for anyone else, and anonymous junk traffic only exhausts its own address. Without a trusted
+proxy all clients share one key, so the thresholds are far looser.
+
+**Data retention is opt-in.** Set `RETENTION_JOB=on` only after reviewing each business's retention window;
+until then nothing is auto-deleted and boot logs what a purge would remove. Inspect with
+`POST /api/admin/retention {"dry_run":true}`. Twilio's inbound-SMS webhook must be `POST /api/sms/inbound`
+(see DEPLOY.md and `docs/compliance.md`).
 
 ## Security checklist before going live
 

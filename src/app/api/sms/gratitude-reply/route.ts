@@ -1,24 +1,21 @@
 import { fail, ok } from '@/lib/http';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
-import { getBooking, getBusiness } from '@/lib/db';
-import { ownerEscalationSms, reviewRequestSms, reviewUrl } from '@/lib/messaging/templates';
-import { sendAndLog } from '@/lib/messaging';
-import type { SmsLog } from '@/lib/types';
+import { getBooking, getBusiness, getBusinessByPhone } from '@/lib/db';
+import { applyInboundKeyword } from '@/lib/messaging/inbound';
+import { routeGratitudeReply, GratitudeReplyError } from '@/lib/gratitude/reply';
+import type { GratitudeReplyResult, GratitudeRoute } from '@/lib/gratitude/reply';
 
 export const dynamic = 'force-dynamic';
 
-export type GratitudeRoute = 'review' | 'owner';
+export type { GratitudeReplyResult, GratitudeRoute };
 
-export interface GratitudeReplyResult {
-  routed: GratitudeRoute;
-  sms: SmsLog | null;
-  body: string;
-}
+const xml = (body: string, status = 200) =>
+  new Response(body, { status, headers: { 'content-type': 'text/xml; charset=utf-8' } });
 
 /**
- * The decision point of the gratitude loop. A 4–5 gets a public review ask; a
- * 1–3 never does — it goes straight to the owner's phone, because a bad review
- * is permanent and a callback is not.
+ * Rating replies (1-5) to the gratitude text. Kept for deployments whose Twilio number still points here:
+ * STOP-class keywords are honoured FIRST (same handling as /api/sms/inbound, which is the URL to configure),
+ * only then is the body read as a rating.
  */
 export async function POST(req: Request) {
   try {
@@ -38,6 +35,17 @@ export async function POST(req: Request) {
 
     const query = new URL(req.url).searchParams;
     const booking_id = isJson ? jsonBody.booking_id : (fields.booking_id ?? query.get('booking_id') ?? undefined);
+
+    if (!isJson && fields.From) {
+      // Opt-out keywords first: a STOP must never be answered with "rating must be a number".
+      const booking = booking_id ? await getBooking(booking_id) : null;
+      const business = booking ? await getBusiness(booking.business_id) : fields.To ? await getBusinessByPhone(fields.To) : null;
+      if (business) {
+        const reply = await applyInboundKeyword(business, fields.From, fields.Body);
+        if (reply) return xml(reply);
+      }
+    }
+
     const rating = isJson ? jsonBody.rating : (fields.rating ?? fields.Body ?? query.get('rating') ?? undefined);
     if (!booking_id) return fail('booking_id is required', 422);
 
@@ -45,45 +53,9 @@ export async function POST(req: Request) {
     if (!Number.isFinite(score) || score < 1 || score > 5) {
       return fail('rating must be a number from 1 to 5', 422);
     }
-
-    const booking = await getBooking(booking_id);
-    if (!booking) return fail('booking not found', 404);
-    const business = await getBusiness(booking.business_id);
-    if (!business) return fail('business not found', 404);
-
-    if (score >= 4) {
-      const body = reviewRequestSms({ business, booking, reviewUrl: reviewUrl() });
-      const { sms } = await sendAndLog({
-        business_id: business.id,
-        to: booking.customer_phone,
-        body,
-        kind: 'review_request',
-        booking_id: booking.id,
-        consent_basis: 'customer_reply',
-      });
-      return ok<GratitudeReplyResult>({ routed: 'review', sms, body });
-    }
-
-    const body = ownerEscalationSms({
-      business,
-      customer: `${booking.customer_name} (${booking.customer_phone})`,
-      reason: `rated the ${booking.service} ${score}/5`,
-    });
-
-    // No owner number on file: still report the routing so the dashboard can act.
-    if (!business.owner_phone) {
-      return ok<GratitudeReplyResult>({ routed: 'owner', sms: null, body });
-    }
-
-    const { sms } = await sendAndLog({
-      business_id: business.id,
-      to: business.owner_phone,
-      body,
-      kind: 'owner_alert',
-      booking_id: booking?.id ?? null,
-    });
-    return ok<GratitudeReplyResult>({ routed: 'owner', sms, body });
+    return ok<GratitudeReplyResult>(await routeGratitudeReply(booking_id, score));
   } catch (err) {
+    if (err instanceof GratitudeReplyError) return fail(err.message, err.status);
     return fail(err, 500);
   }
 }

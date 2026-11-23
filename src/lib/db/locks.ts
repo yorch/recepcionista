@@ -57,20 +57,33 @@ export async function releaseLease(lease: Lease): Promise<void> {
  * always released, even when `fn` throws. The lease is auto-renewed every ttlMs/3 while `fn`
  * runs, so ttlMs only needs to exceed a missed-heartbeat window, not the whole duration: if the
  * instance dies, the lease frees itself within ttlMs.
+ *
+ * `fn` receives an AbortSignal that fires as soon as the lease is known to be LOST (a renewal found another
+ * holder, or renewals kept failing for a full ttl, so the lease has expired underneath us). Long critical
+ * sections must check `signal.aborted` before each paid or irreversible step (buying a number, creating an
+ * agent) so a stalled holder cannot act after a successor took over.
  */
 export async function withLease<T>(
   key: string,
   ttlMs: number,
-  fn: (lease: Lease) => Promise<T>,
+  fn: (lease: Lease, signal: AbortSignal) => Promise<T>,
 ): Promise<{ acquired: true; value: T } | { acquired: false }> {
   const lease = await acquireLease(key, ttlMs);
   if (!lease) return { acquired: false };
+  const controller = new AbortController();
+  let lastRenewed = Date.now();
   const timer = setInterval(() => {
-    renewLease(lease, ttlMs).catch(() => { /* next beat retries; expiry is the backstop */ });
+    renewLease(lease, ttlMs).then((renewed) => {
+      if (renewed) lastRenewed = Date.now();
+      else controller.abort(new Error(`lease ${key} lost`));
+    }).catch(() => {
+      // The store is unreachable: the next beat retries, but once a full ttl passed without a renewal the lease has expired.
+      if (Date.now() - lastRenewed >= ttlMs) controller.abort(new Error(`lease ${key} expired (renewal failing)`));
+    });
   }, Math.max(500, Math.floor(ttlMs / 3)));
   timer.unref?.();
   try {
-    return { acquired: true, value: await fn(lease) };
+    return { acquired: true, value: await fn(lease, controller.signal) };
   } finally {
     clearInterval(timer);
     await releaseLease(lease);
