@@ -3,7 +3,7 @@ import { useCallback, useState } from 'react';
 import { AuthLink, AuthShell, Field, FormError, SubmitButton, friendly, go, sendJson } from './auth-ui';
 import { Turnstile } from './turnstile';
 
-export function SignupForm({ turnstileSiteKey }: { turnstileSiteKey: string | null }) {
+export function SignupForm({ turnstileSiteKey, disabled = false }: { turnstileSiteKey: string | null; disabled?: boolean }) {
   const [businessName, setBusinessName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -27,6 +27,21 @@ export function SignupForm({ turnstileSiteKey }: { turnstileSiteKey: string | nu
     }
     try { sessionStorage.setItem('rc_signup_email', email); } catch { /* private mode */ }
     go('/verify-email-sent');
+  }
+
+  if (disabled) {
+    return (
+      <AuthShell
+        title="Sign-up is invite-only"
+        subtitle="New accounts are currently by invitation only."
+        footer={<>Already have an account? <AuthLink href="/login">Sign in</AuthLink></>}
+      >
+        <p role="status" data-testid="signup-disabled" className="rounded-lg border border-[#2a3546] bg-[#080b10] p-3 text-[13px] text-[#c8d2e0]">
+          Public sign-up is currently disabled. If your team already uses Recepcionista, ask an owner to send you an invitation; the
+          link in that email lets you create your account.
+        </p>
+      </AuthShell>
+    );
   }
 
   return (

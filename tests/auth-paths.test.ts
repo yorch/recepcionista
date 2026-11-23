@@ -11,7 +11,7 @@ describe('isPublicPath', () => {
     }
   });
   test('agent-prompt and admin APIs are not public', () => {
-    for (const p of ['/api/voice/agent-prompt', '/api/businesses', '/api/sms/send', '/dashboard', '/onboarding', '/audio/briefing-x-2026-01-01.mp3', '/api/admin/retention',
+    for (const p of ['/api/voice/agent-prompt', '/api/businesses', '/api/sms/send', '/dashboard', '/onboarding', '/audio/briefing-x-2026-01-01.mp3', '/api/admin/retention', '/api/admin/release-tenant',
       '/api/auth/2fa/enroll', '/api/auth/2fa/confirm', '/api/auth/2fa/disable', '/api/auth/sessions', '/api/auth/revoke-admin-sessions', '/api/auth/me',
       '/api/team', '/api/team/invite', '/api/team/users/x', '/api/team/audit', '/dashboard/team', '/dashboard/security', '/signup/x', '/verify-email/x']) {
       expect(isPublicPath(p)).toBe(false);

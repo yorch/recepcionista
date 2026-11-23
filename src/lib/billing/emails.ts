@@ -9,12 +9,12 @@ import { logger } from '@/lib/log';
 
 const log = logger('billing.email');
 
-export type BillingEmailKind = 'payment_failed' | 'trial_will_end' | 'canceled';
+export type BillingEmailKind = 'payment_failed' | 'trial_will_end' | 'canceled' | 'release_notice';
 
 export interface BillingEmail { subject: string; text: string; html: string }
 
 /** Pure: the message for `kind`. `link` is the billing page URL. */
-export function renderBillingEmail(kind: BillingEmailKind, opts: { businessName: string; link: string; trialEnd?: Date | null }): BillingEmail {
+export function renderBillingEmail(kind: BillingEmailKind, opts: { businessName: string; link: string; trialEnd?: Date | null; releaseOn?: Date | null }): BillingEmail {
   let subject: string;
   let lines: string[];
   let cta: string;
@@ -33,6 +33,14 @@ export function renderBillingEmail(kind: BillingEmailKind, opts: { businessName:
       'Your card will be charged when it ends. You can cancel any time before that from the billing page.',
     ];
     cta = 'Manage billing';
+  } else if (kind === 'release_notice') {
+    const when = opts.releaseOn ? ` on or after ${opts.releaseOn.toISOString().slice(0, 10)}` : ' soon';
+    subject = 'Your Recepcionista phone number and agent will be released';
+    lines = [
+      `The subscription for ${opts.businessName} is no longer active, so calls and texts are paused.`,
+      `Unless you resubscribe first, we will release the phone number and voice agent set up for ${opts.businessName}${when}. Released numbers cannot be recovered and a new subscription would get a new number.`,
+    ];
+    cta = 'Resubscribe';
   } else {
     subject = 'Your Recepcionista subscription was canceled';
     lines = [
@@ -52,12 +60,12 @@ export function renderBillingEmail(kind: BillingEmailKind, opts: { businessName:
 export async function notifyOwners(
   business: { id: string; name: string },
   kind: BillingEmailKind,
-  opts: { trialEnd?: Date | null } = {},
+  opts: { trialEnd?: Date | null; releaseOn?: Date | null } = {},
 ): Promise<number> {
   try {
     const owners = (await listBusinessUsers(business.id)).filter((u) => u.role === 'owner' && !u.disabled_at);
     if (owners.length === 0) return 0;
-    const msg = renderBillingEmail(kind, { businessName: business.name, link: `${returnBaseUrl()}/dashboard/billing`, trialEnd: opts.trialEnd });
+    const msg = renderBillingEmail(kind, { businessName: business.name, link: `${returnBaseUrl()}/dashboard/billing`, trialEnd: opts.trialEnd, releaseOn: opts.releaseOn });
     let sent = 0;
     for (const o of owners) {
       try {

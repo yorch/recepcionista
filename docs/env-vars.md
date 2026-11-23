@@ -31,6 +31,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `ALLOWED_DEV_ORIGINS` | no | none | `next dev` behind a tunnel (dev only) | no |
 | `DEMO_MODE` | never in prod | unset | `/api/demo/*`, `/api/pay/mock-complete`, mock Stripe checkout (`/api/billing/mock-activate`). compose forces `false`; deploy.sh refuses `true` | no |
 | `CSP_REPORT_ONLY` | no | unset | `true`: enforce the moderate CSP and only report violations of the strict nonce policy (docs/security-headers.md) | no |
+| `CSP_UPGRADE_INSECURE` | no | unset = automatic: on only in production with an `https://` `APP_URL`/`PUBLIC_BASE_URL` | `true`/`false` forces `upgrade-insecure-requests` (turn it off for a plain-HTTP staging deployment; docs/security-headers.md) | no |
 | `CSP_REPORT_URI` | no | none | adds `report-uri` to the CSP (a collector URL you operate) | no |
 | `LOG_LEVEL` | no | `debug` (dev), `info` (prod) | log verbosity | no |
 | `PRISMA_LOG` | no | unset | `1` logs every query | no |
@@ -48,8 +49,9 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_SECURE` | cond (`smtp` without `SMTP_URL`) | port `587`, secure `false` | SMTP parts | no |
 | `SMTP_PASS` | cond (`smtp` without `SMTP_URL`) | none | SMTP password | yes |
 | `SIGNUP_MAX_PER_HOUR` | no | `60` | platform-wide cap on accounts CREATED per hour (existing-address/honeypot requests do not count). One client may use 20% (50% for the shared `untrusted` key); at 70% signup degrades (one account per client, Turnstile mandatory when configured, warning logged); only at 100% signup stops for everyone (`signup.global_cap_reached` error log) | no |
-| `TURNSTILE_SECRET_KEY` | no | off | Cloudflare Turnstile on signup; server verification fails closed. Needs the site key too (deploy.sh checks the pair) | yes |
-| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | with the secret | none | Turnstile widget (build time) | no |
+| `TURNSTILE_SECRET_KEY` | prod (with the site key) unless `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` | off | Cloudflare Turnstile on signup; server verification fails closed. Needs the site key too (deploy.sh checks the pair). In production, open signup is REFUSED (503 `signup_disabled`, `/signup` invite-only) without the pair or the opt-out below | yes |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | prod (with the secret) | none | Turnstile widget (build time) | no |
+| `SIGNUP_ALLOW_WITHOUT_CAPTCHA` | no | unset | exactly `true` lets production run open signup with no captcha (startup logs a loud warning, deploy.sh prints a banner). NOT recommended; without it and without the Turnstile pair deploy.sh fails | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | price text on the plan step (build time) | no |
 | `CREATE_USER_PASSWORD` | no | none | `scripts/create-user.ts` non-interactive password (the script refuses `--password`) | yes |
 

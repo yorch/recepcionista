@@ -98,10 +98,15 @@ async function lockedOwnerChange<T>(
 const LAST_OWNER = { ok: false, reason: 'last_owner' } as const;
 
 /** Change owner<->staff. Refuses to demote the last enabled owner. */
-export async function changeTeamRole(businessId: string, userId: string, role: 'owner' | 'staff'): Promise<TeamChange<TeamUser | null>> {
+export async function changeTeamRole(
+  businessId: string, userId: string, role: 'owner' | 'staff', opts: { keepSessionId?: string } = {},
+): Promise<TeamChange<TeamUser | null>> {
   const r = await lockedOwnerChange(businessId, userId, async (tx, target, others) => {
     if (target.role === 'owner' && role !== 'owner' && !target.disabledAt && others === 0) return 'last_owner' as const;
     const row = await tx.user.update({ where: { id: userId }, data: { role } });
+    // A role change re-authorises the user: every session (MFA-pending ones included) must sign in again, except the
+    // caller's own when they changed their own role.
+    if (role !== target.role) await tx.userSession.deleteMany({ where: { userId, ...(opts.keepSessionId ? { id: { not: opts.keepSessionId } } : {}) } });
     return toTeamUser(row);
   });
   if (r.ok && r.value === 'last_owner') return LAST_OWNER;

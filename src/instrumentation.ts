@@ -10,6 +10,7 @@
 import type { Instrumentation } from 'next';
 import { logger, serializeError } from '@/lib/log';
 import { ownerPhoneGrandfatherProblem } from '@/lib/messaging/owner';
+import { signupAvailability, signupConfigWarning } from '@/lib/signup-config';
 
 const boot = logger('boot');
 let booted = false;
@@ -61,6 +62,8 @@ function startupWarnings(): void {
       boot.info('billing.enforced_by_default', { note: 'BILLING_ENFORCED is not set to true: production enforces billing by default (set BILLING_ENFORCED=false only to opt out explicitly)' });
     }
   }
+  const sw = signupConfigWarning();
+  if (sw) boot.warn(signupAvailability().open ? 'signup.without_captcha' : 'signup.disabled', { banner: sw });
   const og = ownerPhoneGrandfatherProblem();
   if (og) boot.warn('owner_phone_grandfather', { warning: og });
 }

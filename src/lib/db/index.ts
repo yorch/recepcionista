@@ -381,6 +381,24 @@ export async function updateBusiness(id: ID, patch: Partial<Business>): Promise<
   }
 }
 
+/**
+ * After provider resources were released (scripts/release-canceled-tenants.ts): forget the number and agent so nothing keeps
+ * pointing at a number/agent that no longer exists. Only the fields asked for are cleared; when the number is cleared the
+ * business is 'paused' (it can no longer take calls; re-provisioning after a new subscription buys a fresh line).
+ */
+export async function clearBusinessProviderResources(id: ID, what: { phone?: boolean; agent?: boolean }): Promise<Business | null> {
+  const data: Record<string, unknown> = {};
+  if (what.phone) { data.phone = null; data.phoneKey = null; data.phoneE164 = null; data.status = 'paused'; }
+  if (what.agent) data.agentId = null;
+  if (Object.keys(data).length === 0) return getBusiness(id);
+  try {
+    return toBusiness(await prisma.business.update({ where: { id }, data }));
+  } catch (err) {
+    log.warn('business.clear_provider_failed', { id, err });
+    return null;
+  }
+}
+
 // ---------- knowledge bases ----------
 export async function getKnowledgeBase(businessId: ID): Promise<KnowledgeBase | null> {
   const row = await prisma.knowledgeBase.findUnique({ where: { businessId } });

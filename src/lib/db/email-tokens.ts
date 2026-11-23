@@ -5,7 +5,7 @@
  * concurrent attempts with the same token let exactly one through.
  */
 import crypto from 'node:crypto';
-import { prisma } from './client';
+import { prisma, type DbClient } from './client';
 import { normalizeEmail } from './users';
 import type { EmailToken, EmailTokenPurpose } from '@/lib/types';
 
@@ -105,11 +105,12 @@ const plausible = (t: unknown): t is string => typeof t === 'string' && t.length
 /**
  * Atomically consume a token: returns its record when it exists, has this purpose, is unused and
  * unexpired (marking it used in the same statement); null otherwise. Two concurrent calls with the
- * same token cannot both succeed.
+ * same token cannot both succeed. Pass a transaction client as `db` to make the consumption roll back with the caller's
+ * other writes (invite acceptance: token + user are one unit).
  */
-export async function consumeEmailToken(purpose: EmailTokenPurpose, token: string, now: Date = new Date()): Promise<EmailToken | null> {
+export async function consumeEmailToken(purpose: EmailTokenPurpose, token: string, now: Date = new Date(), db: DbClient = prisma): Promise<EmailToken | null> {
   if (!plausible(token)) return null;
-  const rows = await prisma.$queryRaw<Row[]>`
+  const rows = await db.$queryRaw<Row[]>`
     UPDATE "email_tokens" SET "used_at" = ${now}
      WHERE "token_hash" = ${hashEmailToken(token)} AND "purpose" = ${purpose}
        AND "used_at" IS NULL AND "expires_at" > ${now}

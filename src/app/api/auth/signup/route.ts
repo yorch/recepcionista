@@ -8,7 +8,7 @@ import { emailConfigured } from '@/lib/email';
 import { accountId } from '@/lib/login-throttle';
 import { hashPassword } from '@/lib/password';
 import { rateLimit } from '@/lib/ratelimit';
-import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, turnstileEnabled, verifyTurnstile } from '@/lib/signup';
+import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, signupAvailability, turnstileEnabled, verifyTurnstile } from '@/lib/signup';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -36,6 +36,11 @@ export async function POST(req: Request) {
   if (!checkSameOrigin(req.headers)) return fail(403, 'cross-site request refused');
   const limited = await limitIp(req, 'auth/signup', 5);
   if (limited) return limited;
+
+  if (!signupAvailability().open) {
+    // Production without a captcha (and without the explicit opt-out): public signup is off. Invites still work.
+    return NextResponse.json({ ok: false, error: 'signup_disabled' }, { status: 503, headers: { 'retry-after': '3600' } });
+  }
 
   const body = await req.json().catch(() => null);
   const input = parseSignupBody(body);

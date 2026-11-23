@@ -18,6 +18,17 @@ describe('buildCsp', () => {
     expect(csp).not.toContain('unsafe-eval');
     for (const d of ["object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'", 'upgrade-insecure-requests']) expect(csp).toContain(d);
   });
+  test('upgrade-insecure-requests: production + https only; CSP_UPGRADE_INSECURE overrides; never in dev', () => {
+    const e = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
+    const has = (o: Record<string, string>) => cspHeadersFor('n', e({ NODE_ENV: 'production', ...o })).enforced.includes('upgrade-insecure-requests');
+    expect(has({ APP_URL: 'https://app.example.com' })).toBe(true);
+    expect(has({ APP_URL: 'http://staging.example.com:3000' })).toBe(false); // plain-HTTP staging
+    expect(has({})).toBe(false); // no public origin known
+    expect(has({ APP_URL: 'http://staging:3000', CSP_UPGRADE_INSECURE: 'true' })).toBe(true);
+    expect(has({ APP_URL: 'https://app.example.com', CSP_UPGRADE_INSECURE: 'false' })).toBe(false);
+    expect(cspHeadersFor('n', e({ NODE_ENV: 'development', CSP_UPGRADE_INSECURE: 'true' })).enforced).not.toContain('upgrade-insecure-requests');
+    expect(buildCsp({ mode: 'moderate', isDev: false, upgradeInsecure: false })).not.toContain('upgrade-insecure-requests');
+  });
   test('dev adds unsafe-eval and websockets; moderate uses unsafe-inline without a nonce', () => {
     expect(buildCsp({ mode: 'strict', nonce: 'abc', isDev: true })).toContain("'unsafe-eval'");
     const mod = buildCsp({ mode: 'moderate', isDev: false });

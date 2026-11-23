@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { disableTotp, recordAudit, revokeOtherSessions } from '@/lib/db';
+import { disableTotp, recordAudit } from '@/lib/db';
 import { afterResponse, auditIp, sendTwoFactorNotice } from '@/lib/account-flows';
 import { reauthWithPassword, verifySecondFactor } from '@/lib/mfa';
 import { accountId, checkPair, clearFailures, mfaPairKey, recordFailure, verdictResponse } from '@/lib/login-throttle';
@@ -34,8 +34,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'invalid code' }, { status: 400 });
     }
     await clearFailures(key);
-    await disableTotp(user.id);
-    const revoked = await revokeOtherSessions(user.id, auth.sessionId);
+    const revoked = await disableTotp(user.id, { keepSessionId: auth.sessionId }); // also kills MFA-pending sessions, atomically
     await recordAudit({
       actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.2fa_disabled', target: `user:${user.id}`,
       ip: auditIp(req), meta: { other_sessions_revoked: revoked, method: result.method },

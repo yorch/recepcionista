@@ -160,6 +160,69 @@ function provisionNumberFallback(areaCode: string) {
   return { phone, mock: true };
 }
 
+/** Numbers issued by the mock pool (+1<area>555xxxx): nothing exists at Twilio for them. */
+export const isMockPoolNumber = (e164: string): boolean => /^\+1\d{3}555\d{4}$/.test(e164);
+
+export interface ReleaseNumberResult {
+  ok: boolean;
+  /** Nothing was called: no Twilio credentials, or a mock-pool number. Counts as success. */
+  mock?: boolean;
+  /** The number was already gone at Twilio (nothing matched / 404). Counts as success. */
+  already_released?: boolean;
+  /** Twilio incoming-phone-number sid that was deleted. */
+  sid?: string;
+  /** Refused on purpose (e.g. it is the platform SMS sender number). Not an error to retry. */
+  refused?: string;
+  error?: string;
+}
+
+/**
+ * Release (delete) a number this platform bought for a tenant. IDEMPOTENT: a number Twilio no longer lists, or a 404
+ * on delete, is success. Mock mode (no TWILIO_* credentials, or a mock-pool number) calls nothing and succeeds.
+ * Never releases TWILIO_PHONE_NUMBER (the platform's own SMS sender). The caller must have checked that no other
+ * business uses the number. Never throws.
+ */
+export async function releaseNumber(
+  e164: string,
+  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+): Promise<ReleaseNumberResult> {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const number = (e164 || '').trim();
+  if (!/^\+[1-9]\d{6,14}$/.test(number)) return { ok: false, error: 'not an E.164 number' };
+  if (env.TWILIO_PHONE_NUMBER && env.TWILIO_PHONE_NUMBER.trim() === number) {
+    log.error('number.release_refused', { phone: number, reason: 'TWILIO_PHONE_NUMBER (platform SMS sender)' });
+    return { ok: false, refused: 'this is the platform SMS sender number (TWILIO_PHONE_NUMBER)' };
+  }
+  const sid = env.TWILIO_ACCOUNT_SID;
+  const token = env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token || !env.TWILIO_PHONE_NUMBER || isMockPoolNumber(number)) {
+    log.warn('number.release_mock', { phone: number, reason: isMockPoolNumber(number) ? 'mock-pool number' : 'TWILIO_* incomplete' });
+    return { ok: true, mock: true };
+  }
+  const auth = { authorization: `Basic ${btoa(`${sid}:${token}`)}` };
+  const base = `https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers`;
+  try {
+    const found = await doFetch(`${base}.json?PhoneNumber=${encodeURIComponent(number)}`, { headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS) });
+    if (found.status === 404) return { ok: true, already_released: true };
+    if (!found.ok) return { ok: false, error: `lookup ${found.status}` };
+    const list = (await found.json().catch(() => null)) as { incoming_phone_numbers?: Array<{ sid?: string; phone_number?: string }> } | null;
+    const hit = (list?.incoming_phone_numbers ?? []).find((n) => n.phone_number === number && typeof n.sid === 'string');
+    if (!hit?.sid) return { ok: true, already_released: true };
+    const del = await doFetch(`${base}/${encodeURIComponent(hit.sid)}.json`, { method: 'DELETE', headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS) });
+    if (del.status === 404) return { ok: true, already_released: true };
+    if (!del.ok) {
+      log.warn('number.release_failed', { phone: number, status: del.status });
+      return { ok: false, error: `delete ${del.status}` };
+    }
+    log.info('number.released', { phone: number, sid: hit.sid });
+    return { ok: true, sid: hit.sid };
+  } catch (err) {
+    log.error('number.release_error', { phone: number, err });
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
 export function normalizePhone(raw: string): string {
   const digits = (raw || '').replace(/\D/g, '');
   if (digits.length === 10) return `+1${digits}`;

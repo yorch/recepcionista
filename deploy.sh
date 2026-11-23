@@ -95,6 +95,15 @@ fi
 if [[ -n "${TURNSTILE_SECRET_KEY:-}" && -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]]; then
   die "TURNSTILE_SECRET_KEY is set but NEXT_PUBLIC_TURNSTILE_SITE_KEY is not: every signup would fail closed (no token). Set the site key before building."
 fi
+# Open signup REQUIRES a captcha in production (owner decision): the full Turnstile pair, or the explicit, loud opt-out
+# SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Without either the app refuses public signup (503 signup_disabled; invites still work),
+# so a deploy that would silently ship a dead /signup is refused here instead.
+if [[ -z "${TURNSTILE_SECRET_KEY:-}" || -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]]; then
+  case "${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" in
+    true) ;;
+    *) die "Open signup needs Turnstile in production: set TURNSTILE_SECRET_KEY and NEXT_PUBLIC_TURNSTILE_SITE_KEY, or (not recommended) SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Without either, /api/auth/signup answers 503 signup_disabled and /signup is invite-only (docs/auth.md)." ;;
+  esac
+fi
 # Dev/demo switches must never reach production.
 for v in DEMO_MODE ALLOW_INSECURE_DEV STRIPE_ALLOW_UNSIGNED; do
   [[ "${!v:-}" != "true" ]] || die "${v}=true in .env: never enable it on a production host (docs/runbook.md)."
@@ -126,9 +135,13 @@ if [[ "${OWNER_PHONE_GRANDFATHER:-}" == "true" ]]; then
     || die "OWNER_PHONE_GRANDFATHER=true needs OWNER_PHONE_GRANDFATHER_ACK=i-understand (and, strongly, OWNER_PHONE_GRANDFATHER_UNTIL / _BEFORE). Without the ack the app ignores it. See docs/runbook.md section 6."
   echo "WARNING: OWNER_PHONE_GRANDFATHER=true: unverified owner phones receive alerts that bypass opt-outs and the country allow-list. Turn it off once owners verified." >&2
 fi
-# Signup abuse control: open signup without a captcha invites bot farms and degrades at the cap.
-if [[ -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
-  echo "WARNING: Turnstile is not configured (TURNSTILE_SECRET_KEY / NEXT_PUBLIC_TURNSTILE_SITE_KEY). Signup has only rate limits and the platform cap (docs/auth.md)." >&2
+# Signup abuse control: the captcha waiver is allowed but loud.
+if [[ "${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" == "true" && ( -z "${TURNSTILE_SECRET_KEY:-}" || -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ) ]]; then
+  echo "################################################################################" >&2
+  echo "# WARNING: SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Open signup has NO captcha: only   #" >&2
+  echo "# rate limits and the platform cap stand between it and a bot farm. Configure    #" >&2
+  echo "# Turnstile (TURNSTILE_SECRET_KEY + NEXT_PUBLIC_TURNSTILE_SITE_KEY) instead.     #" >&2
+  echo "################################################################################" >&2
 fi
 
 # The proxy's network is host-level infrastructure, not something this stack

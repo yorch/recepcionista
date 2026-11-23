@@ -7,6 +7,8 @@ import { peekRateLimit, rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
 import { validateBusinessName, validatePublicEmail, validateStrongPassword } from '@/lib/user-policy';
 import type { User } from '@/lib/types';
+export { signupAvailability, signupConfigWarning, turnstileFullyConfigured } from '@/lib/signup-config';
+export type { SignupAvailability } from '@/lib/signup-config';
 
 const log = logger('signup');
 

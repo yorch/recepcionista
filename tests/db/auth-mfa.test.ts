@@ -8,11 +8,11 @@ import crypto from 'node:crypto';
 import { ADMIN_TOKEN, PASSWORD, TEST_URL, captureMail, clearLimiter, cookieFrom, loadAuthModules, req, rid } from '../helpers/auth-harness';
 
 const suite = TEST_URL ? describe : describe.skip;
-const LIMITER = ['auth/login', 'auth/mfa', 'auth/2fa'];
+const LIMITER = ['auth/login', 'auth/mfa', 'auth/2fa', 'auth/reset-password'];
 
 suite('2FA, sessions and admin sessions (postgres)', () => {
   let db: any, s: any, pw: any, mail: ReturnType<typeof captureMail>, totp: any;
-  let login: any, logout: any, mfa: any, enroll: any, confirm: any, disable: any, regen: any, sessionsRoute: any, sessionRoute: any, others: any, revokeAdmin: any, bizRoute: any;
+  let login: any, logout: any, mfa: any, enroll: any, confirm: any, disable: any, regen: any, reset: any, sessionsRoute: any, sessionRoute: any, others: any, revokeAdmin: any, bizRoute: any;
   const run = rid();
   const email = (n: string) => `${n}-${run}@example.test`;
   const bizId = `biz_mfa_${run}`;
@@ -27,6 +27,7 @@ suite('2FA, sessions and admin sessions (postgres)', () => {
     enroll = await import('../../src/app/api/auth/2fa/enroll/route');
     confirm = await import('../../src/app/api/auth/2fa/confirm/route');
     disable = await import('../../src/app/api/auth/2fa/disable/route');
+    reset = await import('../../src/app/api/auth/reset-password/route');
     regen = await import('../../src/app/api/auth/2fa/recovery-codes/route');
     sessionsRoute = await import('../../src/app/api/auth/sessions/route');
     sessionRoute = await import('../../src/app/api/auth/sessions/[id]/route');
@@ -237,6 +238,30 @@ suite('2FA, sessions and admin sessions (postgres)', () => {
       // login is single-step again
       const res = await loginRes('dis');
       expect((await res.json()).data.authenticated).toBe(true);
+    });
+
+    test('disabling 2FA revokes MFA-pending sessions of the same user: they never become full sessions', async () => {
+      const { user, cookie } = await enable2fa('dispend');
+      const pending = await pendingCookie('dispend'); // password accepted, second factor outstanding
+      expect(await s.resolvePendingMfa(new Headers({ cookie: pending }))).not.toBeNull();
+      await db.prisma.user.update({ where: { id: user.id }, data: { totpLastUsedStep: null } });
+      const d = await post(disable, '/api/auth/2fa/disable', { password: PASSWORD, code: await codeFor(user.id, 1) }, cookie);
+      expect(d.status).toBe(200);
+      expect((await s.resolvePrincipal(new Headers({ cookie: pending }))).ok).toBe(false); // would be a FULL session if it survived
+      expect(await s.resolvePendingMfa(new Headers({ cookie: pending }))).toBeNull();
+      expect(await db.prisma.userSession.count({ where: { userId: user.id } })).toBe(1); // only the caller's own session is left
+      expect((await s.resolvePrincipal(new Headers({ cookie }))).ok).toBe(true);
+    });
+
+    test('a password reset revokes MFA-pending sessions too (and the 2FA the squatter planted is wiped)', async () => {
+      const { user } = await enable2fa('rstpend');
+      const pending = await pendingCookie('rstpend');
+      const { token } = await db.createEmailToken({ purpose: 'reset', email: email('rstpend'), user_id: user.id });
+      const r = await post(reset, '/api/auth/reset-password', { token, password: 'a brand new passphrase 42' });
+      expect(r.status).toBe(200);
+      expect(await db.prisma.userSession.count({ where: { userId: user.id } })).toBe(0);
+      expect(await s.resolvePendingMfa(new Headers({ cookie: pending }))).toBeNull();
+      expect((await s.resolvePrincipal(new Headers({ cookie: pending }))).ok).toBe(false);
     });
 
     test('REQUIRE_2FA_FOR_ADMINS: a DB admin without 2FA can only reach the enrolment endpoints', async () => {

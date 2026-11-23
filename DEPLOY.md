@@ -111,7 +111,7 @@ Every one of these must use the public origin from `APP_URL`:
 
 **Required `.env` values.** Besides the database, `DOMAIN`/`APP_URL` and the provider secrets above, `deploy.sh` refuses to run without
 `APP_SECRET_KEY` (32 random bytes, base64), `EMAIL_PROVIDER` = `resend`|`smtp` with `EMAIL_FROM` and its key (signup verification,
-password reset and invitations send mail; `log` is refused in production), the Turnstile site/secret pair when either is set, and
+password reset and invitations send mail; `log` is refused in production), the Turnstile site/secret pair (REQUIRED for open signup in production; the only alternative is the explicit, loud `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true`, otherwise signup answers `503 signup_disabled` and deploy.sh fails), and
 `BILLING_ENFORCED` set explicitly (`true`, or deliberately `false`, which prints a loud banner: production **fails closed**, so unset/invalid is refused here and in
 `compose.production.yaml`), with `BILLING_ENFORCED=true` also `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and `STRIPE_BILLING_WEBHOOK_SECRET`, and
 `OWNER_PHONE_GRANDFATHER=true` only together with `OWNER_PHONE_GRANDFATHER_ACK=i-understand`. It also refuses

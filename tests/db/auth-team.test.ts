@@ -104,6 +104,25 @@ suite('team management (postgres)', () => {
     expect(bearer.status).toBe(200);
   });
 
+  test('a role change signs the target out everywhere, MFA-pending sessions included; changing your own role keeps your own session', async () => {
+    const extra = await db.createUser({ email: email('rolechg'), password_hash: await pw.hashPassword(PASSWORD), role: 'staff', business_id: A, email_verified: true });
+    ids.rolechg = extra.id;
+    const s1 = (await db.createSession(extra.id)).token;
+    const s2 = (await db.createSession(extra.id)).token; // stands in for a pending session: any row of the user must go
+    expect((await patch('ownerA', extra.id, { role: 'owner' })).status).toBe(200);
+    for (const t of [s1, s2]) expect((await s.resolvePrincipal(new Headers({ cookie: `rc_user_session=${t}` }))).ok).toBe(false);
+    expect(await db.prisma.userSession.count({ where: { userId: extra.id } })).toBe(0);
+    // no change => nothing revoked
+    const keep = (await db.createSession(extra.id)).token;
+    expect((await patch('ownerA', extra.id, { role: 'owner' })).status).toBe(200);
+    expect((await s.resolvePrincipal(new Headers({ cookie: `rc_user_session=${keep}` }))).ok).toBe(true);
+    // self-demotion keeps the caller's own session, kills the rest
+    const other = (await db.createSession(extra.id)).token;
+    const res = await userRoute.PATCH(req(`/api/team/users/${extra.id}`, { method: 'PATCH', json: { role: 'staff' }, headers: { cookie: `rc_user_session=${keep}` } }), ctx(extra.id));
+    expect(res.status).toBe(200);
+    expect((await s.resolvePrincipal(new Headers({ cookie: `rc_user_session=${other}` }))).ok).toBe(false);
+  });
+
   test('role change, disable (revokes sessions), enable, remove; audited', async () => {
     const r = await patch('ownerA', ids.staffA, { role: 'owner' });
     expect(r.status).toBe(200);

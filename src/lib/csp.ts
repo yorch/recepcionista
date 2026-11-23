@@ -24,6 +24,8 @@ export interface CspOptions {
    * challenges.cloudflare.com (as Cloudflare documents). Nothing else is opened up.
    */
   turnstile?: boolean;
+  /** Emit `upgrade-insecure-requests`. Default: on in production (see upgradeInsecureEnabled for the env switch). */
+  upgradeInsecure?: boolean;
 }
 
 export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
@@ -32,6 +34,21 @@ export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 export function turnstileConfigured(env: Record<string, string | undefined> = process.env): boolean {
   // The literal process.env.NEXT_PUBLIC_* read lets Next inline the build-time value into the proxy bundle.
   return Boolean((env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY || '').trim());
+}
+
+/**
+ * Should the policy carry `upgrade-insecure-requests`? It makes the browser rewrite every http:// subresource to https://,
+ * which BREAKS a plain-HTTP deployment (a staging box on `http://host:3000` logs ERR_SSL_PROTOCOL_ERROR for every asset).
+ * CSP_UPGRADE_INSECURE=true|false forces it; unset/auto = on only in production AND when the public origin
+ * (PUBLIC_BASE_URL / APP_URL / NEXT_PUBLIC_APP_URL) is https. Never in development.
+ */
+export function upgradeInsecureEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  if (env.NODE_ENV !== 'production') return false;
+  const v = (env.CSP_UPGRADE_INSECURE ?? '').trim().toLowerCase();
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  const origin = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().toLowerCase();
+  return origin.startsWith('https://');
 }
 
 export function buildCsp(o: CspOptions): string {
@@ -54,7 +71,7 @@ export function buildCsp(o: CspOptions): string {
     "base-uri 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",
-    ...(dev ? [] : ['upgrade-insecure-requests']),
+    ...((o.upgradeInsecure ?? !dev) ? ['upgrade-insecure-requests'] : []),
     ...(o.reportUri ? [`report-uri ${o.reportUri}`] : []),
   ];
   return directives.join('; ');
@@ -75,11 +92,12 @@ export function cspHeadersFor(nonce: string, env: NodeJS.ProcessEnv = process.en
   const reportUri = env.CSP_REPORT_URI?.trim() || undefined;
   const isDev = env.NODE_ENV !== 'production';
   const turnstile = turnstileConfigured(env);
-  const strict = buildCsp({ nonce, mode: 'strict', isDev, reportUri, turnstile });
+  const upgradeInsecure = upgradeInsecureEnabled(env);
+  const strict = buildCsp({ nonce, mode: 'strict', isDev, reportUri, turnstile, upgradeInsecure });
   if (env.CSP_REPORT_ONLY === 'true') {
     // The strict policy stays on the REQUEST (see `enforced`) so Next stamps the nonce on its scripts; the enforced
     // response header is the nonce-less moderate one ('unsafe-inline' would be ignored if a nonce were present).
-    const moderate = buildCsp({ mode: 'moderate', isDev, reportUri, turnstile });
+    const moderate = buildCsp({ mode: 'moderate', isDev, reportUri, turnstile, upgradeInsecure });
     return { response: [['Content-Security-Policy', moderate], ['Content-Security-Policy-Report-Only', strict]], enforced: strict };
   }
   return { response: [['Content-Security-Policy', strict]], enforced: strict };

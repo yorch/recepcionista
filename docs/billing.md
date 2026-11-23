@@ -175,10 +175,48 @@ stripe listen --forward-to localhost:3000/api/billing/webhook \
 Local development without Stripe: leave `STRIPE_SECRET_KEY` unset and set `DEMO_MODE=true`; checkout then goes to
 `/api/billing/mock-activate`, which starts a local trial for the signed-in owner. It does nothing in production or when a Stripe key is set.
 
+## Releasing canceled tenants (numbers, agents)
+
+A business whose subscription ended keeps its Twilio number (monthly rent) and its ElevenLabs agent until an operator releases them.
+`scripts/release-canceled-tenants.ts` does that safely; **dry run by default**:
+
+```sh
+# on the production host (tools container), after reading the output of the dry run add --apply; run it daily from cron
+docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/release-canceled-tenants.ts --force-i-know
+docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/release-canceled-tenants.ts --force-i-know --apply
+# options: --grace-days 30  --notify-days 7  --include-recent  --business <id>
+```
+
+Rules (`src/lib/billing/release.ts`; tested in `tests/release-decision.test.ts` and `tests/db/release-tenant.test.ts`):
+
+- Only `billing_status` **canceled** or **unpaid**. Never trialing, active, past_due or none, never an admin-comped plan (`legacy`, `grandfathered`), never a business without
+  a dated end (`current_period_end`, else `trial_ends_at`; set it with `/api/admin/billing` if missing).
+- **Grace**: release date R = the end of the paid period (or the last admin override/comp, whichever is later) + `--grace-days` (default 30).
+- **Heads-up e-mail** to every active owner `--notify-days` (default 7; `0` = no notice) before R, recorded as audit `billing.release_notice` with `meta.notified_at`
+  so it is sent once per cancellation (a re-cancellation after an earlier notice mails again). The release itself only happens when now >= R **and** now >= `notified_at` + notify-days, so a late run
+  never mails and releases in the same run. A business with no owner e-mail address is skipped (use the admin API with `skip_notice`).
+- **Recent activity**: a business with calls in the last 7 days is skipped unless `--include-recent`.
+- **Shared resources**: a number that another business also holds (same E.164) is never released at Twilio (only this business's reference is dropped); the platform's own
+  `TWILIO_PHONE_NUMBER` is never released. The ElevenLabs agent is deleted (the shared phone number is detached from it first, best-effort), and the
+  workspace tools (`/api/voice/tools/*`, shared by every tenant) are deleted **only when no other business still has an agent**; provisioning recreates them.
+- Provider calls are idempotent: a 404 (already gone) is success; mock mode (no `TWILIO_*` / `ELEVENLABS_API_KEY`, mock-pool numbers, `mock_agent_*` ids) calls nothing. A provider failure leaves
+  that database reference set, exits 1, and the next run retries.
+- On success the business loses `phone`/`phone_e164`/`phone_key`/`agent_id` and becomes `paused`; audit `billing.tenant_released` (last 4 digits of the number only). Resubscribing and re-provisioning
+  buys a new number: a released number cannot be recovered, which the heads-up mail says.
+
+One business by hand, as an admin (Bearer `ADMIN_TOKEN` or admin session). `dry_run` defaults to **true**; `dry_run:false` performs one step (the heads-up, or the release when due):
+
+```sh
+curl -sS -X POST https://<DOMAIN>/api/admin/release-tenant -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"business_id":"<id>"}'                                   # what WOULD happen
+curl -sS -X POST ... -d '{"business_id":"<id>","dry_run":false}' # send the heads-up / release when due
+# optional: grace_days, notify_days, include_recent, skip_notice (explicit override of the heads-up wait; audited as notice "skipped")
+```
+
 ## Operations
 
 - Audit trail: `billing.checkout_started`, `billing.subscription_updated`, `billing.payment_failed`, `billing.invoice_paid`,
-  `billing.webhook_refused`, `billing.admin_override`.
+  `billing.webhook_refused`, `billing.admin_override`, `billing.release_notice`, `billing.tenant_released`.
 - Lost webhook delivery: Stripe retries for 3 days; use "Resend" in the dashboard for older ones. State can always be set by hand with
   `/api/admin/billing`.
 - Out-of-order events are tolerated for status transitions on one subscription (the last delivered wins); the first `checkout.session.completed`

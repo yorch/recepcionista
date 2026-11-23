@@ -34,7 +34,7 @@ function outcome(r: TeamChange<unknown>) {
 
 /**
  * `{ role?: "owner"|"staff", disabled?: boolean }`. Owner/admin only. The last active owner cannot be demoted or
- * disabled. You cannot disable yourself here. Disabling signs the user out everywhere.
+ * disabled. You cannot disable yourself here. Disabling or changing the role signs the user out everywhere (their own session survives when they change their own role).
  */
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
@@ -50,7 +50,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   if (self && body.disabled === true) return teamError(400, 'you cannot disable your own account');
 
   if (body.role !== undefined && body.role !== target.role) {
-    const r = await changeTeamRole(auth.business.id, target.id, body.role);
+    const r = await changeTeamRole(auth.business.id, target.id, body.role, { keepSessionId: self && auth.sessionId ? auth.sessionId : undefined });
     const bad = outcome(r);
     if (bad) return bad;
     await recordAudit({ ...actor, business_id: auth.business.id, action: 'user.role_changed', target: `user:${target.id}`, ip: auditIp(req), meta: { from: target.role, to: body.role } });

@@ -134,6 +134,9 @@ services:
       # healthcheck and Traefik label both assume.
       PORT: "3000"
       HOSTNAME: "0.0.0.0"
+      # Production signup needs Turnstile (TURNSTILE_SECRET_KEY + NEXT_PUBLIC_TURNSTILE_SITE_KEY) or this explicit opt-out
+      # ("true" only); otherwise public signup answers 503 signup_disabled. Passed through so it is visible in this file.
+      SIGNUP_ALLOW_WITHOUT_CAPTCHA: ${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}
       # Built over the private network rather than read from .env, whose value
       # points at localhost for native `bun dev`. Same expression as
       # nextjs-mvp-super-template's docker-compose.app.yml; set

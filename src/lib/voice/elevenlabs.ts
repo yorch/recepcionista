@@ -629,3 +629,101 @@ export async function bindPhoneNumber(agentId: string): Promise<void> {
     log.error('phone.bind_error', { phone_number_id: phoneNumberId, agent: agentId, err });
   }
 }
+
+// ------------------------------------------------------------ release (canceled tenants)
+
+export interface ReleaseCallDeps { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv }
+export interface ReleaseAgentResult {
+  ok: boolean;
+  /** No API key, or a mock agent id: nothing exists at ElevenLabs. Counts as success. */
+  mock?: boolean;
+  /** The agent was already gone (404). Counts as success. */
+  already_deleted?: boolean;
+  /** The shared phone number was detached from this agent first. */
+  unbound?: boolean;
+  error?: string;
+}
+
+/**
+ * Delete an agent. IDEMPOTENT (404 = success), mock-safe (no key or `mock_agent_*` id = success without a call), never
+ * throws. If the shared ElevenLabs phone number (ELEVENLABS_PHONE_NUMBER_ID) is currently assigned to THIS agent it is
+ * detached first (best-effort; the phone-number read/patch shapes are UNVERIFIED like the rest of the phone binding), because
+ * a number can keep an agent alive. The caller must have checked that no other business uses the agent.
+ */
+export async function deleteAgent(agentId: string, deps: ReleaseCallDeps = {}): Promise<ReleaseAgentResult> {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const id = (agentId || '').trim();
+  if (!id) return { ok: true, already_deleted: true };
+  if (!env.ELEVENLABS_API_KEY || id.startsWith('mock_')) return { ok: true, mock: true };
+  const h = { 'content-type': 'application/json', 'xi-api-key': env.ELEVENLABS_API_KEY };
+  let unbound = false;
+  try {
+    const phoneId = (env.ELEVENLABS_PHONE_NUMBER_ID || '').trim();
+    if (phoneId) {
+      try {
+        const cur = await doFetch(`${API}/convai/phone-numbers/${encodeURIComponent(phoneId)}`, { headers: h, signal: AbortSignal.timeout(10_000) });
+        if (cur.ok) {
+          const j = (await cur.json().catch(() => null)) as { assigned_agent?: { agent_id?: string } | null; agent_id?: string | null } | null;
+          const assigned = j?.assigned_agent?.agent_id ?? j?.agent_id ?? null;
+          if (assigned === id) {
+            const un = await doFetch(`${API}/convai/phone-numbers/${encodeURIComponent(phoneId)}`, {
+              method: 'PATCH', headers: h, body: JSON.stringify({ agent_id: null }), signal: AbortSignal.timeout(15_000),
+            });
+            unbound = un.ok;
+            if (!un.ok) log.warn('agent.unbind_failed', { agent: id, status: un.status });
+          }
+        }
+      } catch (err) {
+        log.warn('agent.unbind_error', { agent: id, error: (err as Error).name });
+      }
+    }
+    const res = await doFetch(`${API}/convai/agents/${encodeURIComponent(id)}`, { method: 'DELETE', headers: h, signal: AbortSignal.timeout(15_000) });
+    if (res.status === 404) return { ok: true, already_deleted: true, unbound };
+    if (!res.ok) {
+      log.warn('agent.delete_failed', { agent: id, status: res.status });
+      return { ok: false, unbound, error: `delete ${res.status}` };
+    }
+    log.info('agent.deleted', { agent: id, unbound });
+    return { ok: true, unbound };
+  } catch (err) {
+    log.error('agent.delete_error', { agent: id, err });
+    return { ok: false, unbound, error: (err as Error).message };
+  }
+}
+
+export interface ReleaseToolsResult { ok: boolean; mock?: boolean; deleted: number; already_deleted: number; error?: string }
+
+/**
+ * Delete the webhook tools this app registered in the ElevenLabs workspace (`<APP_URL>/api/voice/tools/<name>`).
+ * Tools are WORKSPACE-WIDE and shared by every tenant's agent (there are no per-business tools), so the caller must only
+ * run this when no other business still has an agent. Re-provisioning recreates them (upsertTool). Idempotent (404 =
+ * success), mock-safe, never throws; also clears the in-process tool-id cache.
+ */
+export async function deleteAgentTools(deps: ReleaseCallDeps = {}): Promise<ReleaseToolsResult> {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  toolIdCache.clear();
+  if (!env.ELEVENLABS_API_KEY) return { ok: true, mock: true, deleted: 0, already_deleted: 0 };
+  const h = { 'content-type': 'application/json', 'xi-api-key': env.ELEVENLABS_API_KEY };
+  const prefix = `${appUrl()}/api/voice/tools/`;
+  let deleted = 0;
+  let gone = 0;
+  try {
+    const res = await doFetch(`${API}/convai/tools`, { headers: h, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return { ok: false, deleted, already_deleted: gone, error: `list ${res.status}` };
+    const json = (await res.json().catch(() => null)) as { tools?: { id?: string; tool_config?: { type?: string; api_schema?: { url?: string } } }[] } | null;
+    const ours = (json?.tools ?? []).filter((t) => t.id && t.tool_config?.type === 'webhook' && (t.tool_config.api_schema?.url ?? '').startsWith(prefix));
+    let failed = 0;
+    for (const t of ours) {
+      const del = await doFetch(`${API}/convai/tools/${encodeURIComponent(t.id as string)}`, { method: 'DELETE', headers: h, signal: AbortSignal.timeout(15_000) });
+      if (del.status === 404) gone++;
+      else if (del.ok) deleted++;
+      else { failed++; log.warn('tool.delete_failed', { tool: t.id, status: del.status }); }
+    }
+    return failed ? { ok: false, deleted, already_deleted: gone, error: `${failed} tool delete(s) failed` } : { ok: true, deleted, already_deleted: gone };
+  } catch (err) {
+    log.error('tool.delete_error', { err });
+    return { ok: false, deleted, already_deleted: gone, error: (err as Error).message };
+  }
+}

@@ -16,6 +16,7 @@ Not legal advice.
    `ELEVENLABS_TOOL_SECRET`, `ELEVENLABS_PHONE_NUMBER_ID` and the LLM key. `ELEVENLABS_TOOL_SECRET_ID`
    (optional): id of an ElevenLabs workspace secret holding the same value as `ELEVENLABS_TOOL_SECRET`, so the tool
    header is stored as a secret reference instead of a literal.
+   Open signup also needs a captcha in production: `TURNSTILE_SECRET_KEY` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, or the explicit, not recommended `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` (deploy.sh fails without one of them; at runtime `POST /api/auth/signup` answers `503 signup_disabled` and `/signup` shows an invite-only notice; invites keep working).
    Must be absent or off: `ALLOW_INSECURE_DEV`, `DEMO_MODE`, `STRIPE_ALLOW_UNSIGNED`. Keep `RETENTION_JOB` unset
    until step 6. Set `TRUSTED_PROXY=true` only behind a proxy you control.
 3. **Deploy** (`./deploy.sh`), then run `bun run verify:deploy` (section 3) before touching DNS/number routing.
@@ -150,8 +151,25 @@ STOP/HELP replies and verification codes still go out and are counted). Over the
 `/api/voice/incoming` give the caller the out-of-service line and mark the call `handed_off` with `flagged_reason='out_of_service:<reason>'`;
 search the logs for `call.refused`. The gate reads the live state on every call (no cache), the initiation override cuts such a call to 60 seconds
 (`conversation.max_duration_seconds`, needs the initiation webhook override enabled on the agent, which provisioning does), and the owner's "MISSED CALL" text is limited to
-1 per 10 minutes and 6 per hour per business. A business that stays canceled keeps its number and agent until an operator releases them. Call time is added once per conversation by the post-call webhook (a conversation whose
+1 per 10 minutes and 6 per hour per business. A business that stays canceled keeps its number and agent until `scripts/release-canceled-tenants.ts` (or `POST /api/admin/release-tenant`) releases them after the grace period and a heads-up e-mail; see section 7. Call time is added once per conversation by the post-call webhook (a conversation whose
 post-call never arrives is not metered).
 
 **Legacy bookings** (made before follow-up consent was recorded) are never texted for gratitude; a customer's own `YES`/`SI`/`START`
 to the business number opts them in. `POST /api/gratitude/run` reports `skipped_no_consent` and the other skip reasons.
+
+## 7. Releasing canceled tenants (provider cleanup)
+
+Canceled/unpaid tenants keep paying us rent for a Twilio number and an ElevenLabs agent until they are released. Run daily (cron on the host, through the tools container):
+
+```sh
+# 1. DRY RUN: prints SKIP / WAIT / NOTIFY / RELEASE per canceled business, touches nothing
+docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/release-canceled-tenants.ts --force-i-know
+# 2. act: sends due heads-up mails, releases what is due (exit code 1 when a provider call failed: it is retried next run)
+docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/release-canceled-tenants.ts --force-i-know --apply
+```
+
+Defaults: 30 days of grace after the paid period ends, heads-up e-mail 7 days before (`--grace-days`, `--notify-days`), businesses with calls in the last 7 days are skipped (`--include-recent`).
+Check before the first `--apply`: `EMAIL_PROVIDER` works (the heads-up needs it), the dry-run list contains only tenants you expect, and the Twilio/ElevenLabs credentials are those of the production
+account. Never released: comped plans, a number shared with another business, `TWILIO_PHONE_NUMBER`. One business: `POST /api/admin/release-tenant` (`dry_run` defaults to true). Details and rules: docs/billing.md.
+After a release the owner can resubscribe; re-provisioning (`POST /api/businesses/:id/provision`) buys a NEW number. The ElevenLabs phone-number detach/unassign call shape is UNVERIFIED (like the rest of the phone binding):
+after the first real release check in the ElevenLabs dashboard that the agent is gone and the shared number is not assigned to a deleted agent. Twilio: confirm the number disappeared from Phone Numbers > Active numbers.

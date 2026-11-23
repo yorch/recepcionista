@@ -355,12 +355,19 @@ export async function confirmTotpEnrollment(userId: string, step: number, recove
   });
 }
 
-/** Turn 2FA off: clears the secret, step and recovery codes. Does NOT touch sessions (callers decide). */
-export async function disableTotp(userId: string): Promise<void> {
-  await prisma.$transaction([
+/**
+ * Turn 2FA off: clears the secret, step and recovery codes AND, in the same transaction, revokes every session of the user
+ * except `keepSessionId` (the caller's own, already second-factor-verified). This matters most for MFA-PENDING sessions
+ * (password accepted, second factor not yet): they are only "pending" while 2FA is on, so without the revocation they would
+ * silently become full sessions the moment 2FA is disabled.
+ */
+export async function disableTotp(userId: string, opts: { keepSessionId?: string } = {}): Promise<number> {
+  const [, , sessions] = await prisma.$transaction([
     prisma.user.update({ where: { id: userId }, data: { totpSecretEnc: null, totpEnabledAt: null, totpLastUsedStep: null } }),
     prisma.recoveryCode.deleteMany({ where: { userId } }),
+    prisma.userSession.deleteMany({ where: { userId, ...(opts.keepSessionId ? { id: { not: opts.keepSessionId } } : {}) } }),
   ]);
+  return sessions.count;
 }
 
 /**

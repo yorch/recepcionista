@@ -1,606 +1,313 @@
-# PRD: AI Front-Desk Employee for Miami Home-Service SMBs
+# Recepcionista: product requirements (current state)
 
-> **Implementation status vs PRD (as of 2026-11-23).** This is the original
-> hackathon plan (v1.0), kept for history. It is not the current spec. The
-> items below are **not implemented**, or only partly implemented, in the build:
->
-> - **Supabase** schema and client (Sec. 5, WS1): the app uses Postgres 17 with
->   Prisma. The `SUPABASE_*` env vars are not read by the code.
-> - **Next.js 14** (Sec. 7): the app uses Next.js 16.
-> - **6 PM auto-briefing** (FR-3.1): briefings are generated on demand only.
->   Nothing schedules them.
-> - **Owner voice reply to the briefing** (FR-3 step 4, stretch): not implemented.
-> - **24h gratitude SMS** (FR-4.1, stretch): the sweep exists, but nothing
->   schedules it.
-> - **Settings panel** for voice and hours (Sec. 5): no route or UI.
-> - **Calendar grid** (Sec. 5): the bookings page is a list.
-> - **Call recording player** (Sec. 5): `recording_url` is stored, but no player.
-> - **Live human transfer** (FR-2.6): `handoff_to_human` flags a callback. It
->   does not transfer the call.
-> - **Phone provisioning via Twilio** (FR-1.3): mock fallback. Live inbound
->   routing uses ElevenLabs phone binding.
-> - **Spanglish detection** (FR-2.1): prompt-driven. No detection in code.
-> - **Gas-leak and carbon-monoxide guidance** (guardrails, Sec. 6): only in the
->   demo prompt. Not in production prompts.
-> - **Recording consent and AI disclosure**: not in any prompt or greeting.
-> - **SMS opt-out (STOP/HELP) and 10DLC/A2P registration**: not implemented.
-> - **Live KB correction by voice and live transcript** (stretch): not implemented.
-> - **Stripe test mode enforcement** (Sec. 2): test keys by convention only.
-> - **Unsourced claims**: the "30-50% of calls lost" figure, the market
->   underservice claim, and the demo phone number (`+1-305-555-0199`, which
->   differs from the seeded number in CONTRACTS.md) have no source here.
->
-> Shipped as described: URL-to-KB extraction, the seven voice tools, booking
-> with availability checks, bilingual SMS confirmations, emergency deposit links
-> (with the $500 cap), the briefing content, and the 4-5 star review routing.
-
-## Buildersgiving: Miami AI Hackathon — November 14, 2026
-
-**One-liner:** Paste your website, and in 2 minutes you have a bilingual
-employee who answers, books, gets paid, and tells you about your day.
+- **Status date:** 2026-11-23
+- **Supersedes:** the v1.0 hackathon PRD (Nov 14, 2026). That plan is in git history.
+- **Evidence rule:** every "Shipped" row cites a file that exists in the repo today. Items not in the
+  code are marked "Not built". Operator steps (legal, provider consoles) are listed separately.
+- **Not legal advice.** Legal items below are engineering notes for counsel to review.
 
 ---
 
-## 1. Problem, Target User, Why Now
+## 1. Product
 
-| | |
+Recepcionista is a self-serve SaaS that gives a small home-service business a bilingual (English and
+Spanish) AI receptionist on its existing business phone. The owner signs up, pastes the business website,
+reviews the generated knowledge base, verifies an alert phone, subscribes through a Stripe trial, gets an
+AI phone number, forwards their business line to it, and checks it with a test call.
+
+Once live, the receptionist:
+
+- answers calls, discloses that it is an AI and that the call may be recorded (English and Spanish);
+- answers prices and service questions from the knowledge base (it is told not to invent prices);
+- books appointments against the business's hours and existing bookings, in local time;
+- texts a booking confirmation with STOP/HELP wording;
+- sends a Stripe payment link by text for an emergency deposit (capped at $500);
+- sends an emergency or handoff alert to the owner's verified phone;
+- tells callers in an emergency to hang up and call 911 first (gas, carbon monoxide, fire, smoke, sparking);
+- sends an optional review or gratitude text after a job, if the customer consented.
+
+The owner gets a dashboard with Today, Calls (transcripts), Calendar (bookings), Brain (knowledge base),
+Briefings, Team, Billing, Security, Settings, and an admin-only demo console.
+
+## 2. Target market
+
+- **Primary:** owner-operated HVAC, plumbing and electrical businesses, one to five people, in Florida
+  (Miami-Dade first). Owners often answer the phone on a job, or miss calls.
+- **Language:** English- and Spanish-speaking callers. Bilingual is the wedge; the product itself is not
+  Miami-only (nothing in the code restricts the market).
+- **Not sized.** No market-size, call-volume or willingness-to-pay data is in this repo. The v1.0 claim that
+  "30-50% of calls are lost" had no source and is removed.
+
+## 3. Personas
+
+| Persona | Who | Needs |
+| --- | --- | --- |
+| **Owner** | Signs up, pays, sets up, reads the daily briefing, gets alerts | Calls answered, jobs booked, no surprises on the bill, legal safety |
+| **Staff** | Office or dispatch member invited by the owner | Read-mostly view of calls, bookings, briefings; can send confirmations and gratitude texts |
+| **Caller** (customer) | Calls or texts the business | Fast, honest answer in their language; an emergency routed to 911 first |
+| **Operator** (us) | Runs deployment, provider accounts, billing and compliance | Logs, audit trail, caps, kill switches, verify-deploy checks |
+
+## 4. User journey
+
+1. **Sign up** at `/signup` (email, password, business name). Honeypot, per-IP and per-address limits,
+   optional Turnstile, and a platform-wide signup cap. No session is issued until the email is verified.
+2. **Verify email** from the link (the GET page only renders; the button POSTs).
+3. **Onboarding** (`/onboarding`), steps: Your business (paste website, AI extracts services, hours,
+   prices, FAQs) → Review (edit the knowledge base) → Your phone (verify the owner alert number by SMS code)
+   → Plan (Stripe Checkout with trial) → Her number (AI phone number provisioned) → Connect (carrier-specific
+   call-forwarding instructions) → Test call (the page polls until the first call arrives).
+4. **Billing trial.** Checkout requires a card on file. Trial length defaults to 7 days. One trial per
+   person (normalised email and card fingerprint). No number or agent is provisioned before a plan is active
+   (production fails closed).
+5. **Provision.** The owner (verified email) triggers provisioning. The app buys a Twilio number, creates the
+   ElevenLabs agent from the knowledge base and binds the number. See the known bug in section 9.
+6. **Forward calls.** The owner forwards their existing line (no answer, busy, unreachable) to the AI number.
+7. **Test call.** The owner calls from another phone and hears the disclosure, then tries English and Spanish.
+8. **Daily use.** Calls and transcripts appear post-call. Bookings and confirmations are sent. Emergency
+   and handoff alerts go to the owner. The owner generates the day's briefing (on demand). Plan caps apply
+   each month. Billing status, team and security are managed from the dashboard.
+
+## 5. Feature list and status
+
+Status: **Shipped** = built and in the code path; **Partial** = built with a stated gap; **Not built** = absent.
+"Operator" means the feature works only after a manual step in the runbook.
+
+### 5.1 Accounts, access, security
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Self-signup with email verification (no session until verified) | Shipped | `src/app/api/auth/signup/route.ts`, `src/lib/signup.ts`, `docs/auth.md` |
+| Signup abuse controls (honeypot, per-IP/address limits, optional Turnstile, platform cap) | Shipped | `src/lib/signup.ts`, `src/components/auth/turnstile.tsx`, `docs/auth.md` |
+| Roles: admin, owner, staff; tenant isolation (404 on cross-tenant) | Shipped | `src/lib/session.ts`, `src/proxy.ts`, `tests/auth-db.test.ts` |
+| Password login with per-account and per-IP throttling | Shipped | `src/lib/login-throttle.ts`, `src/app/api/auth/login/route.ts` |
+| TOTP 2FA with recovery codes, MFA-pending sessions | Shipped | `src/lib/totp.ts`, `src/lib/mfa.ts`, `src/app/api/auth/2fa/*` |
+| Active session list and revoke | Shipped | `src/app/api/auth/sessions/*`, `src/app/dashboard/security/page.tsx` |
+| Password reset (1 h token, revokes all sessions) | Shipped | `src/app/api/auth/reset-password/route.ts` |
+| Team invites, role change, disable, remove, audit trail | Shipped | `src/app/api/team/*`, `src/app/dashboard/team/`, `src/app/dashboard/team/audit/` |
+| Break-glass `ADMIN_TOKEN` (revocable 12 h sessions) | Shipped | `docs/auth.md` |
+| Cookie CSRF same-origin checks | Shipped | `src/proxy.ts`, `src/lib/session.ts` |
+| Admin can create users; demo console (admin only, `DEMO_MODE`) | Shipped | `src/app/api/admin/users/route.ts`, `src/app/dashboard/demo/page.tsx` |
+
+### 5.2 Billing
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Stripe subscription Checkout with card on file and trial | Shipped (operator: live keys, price, webhook) | `src/app/api/billing/checkout/route.ts`, `src/lib/providers/stripe-billing.ts`, `docs/billing.md` |
+| Trial length `BILLING_TRIAL_DAYS` (default 7, 0-90) | Shipped | `src/lib/providers/stripe-billing.ts` |
+| One trial per person (email and card fingerprint, HMAC) | Shipped | `src/lib/billing/trial.ts` |
+| Signed Stripe webhook, idempotent | Shipped | `src/app/api/billing/webhook/route.ts`, `src/lib/billing/webhook.ts` |
+| Customer portal (manage, cancel at period end) | Shipped | `src/app/api/billing/portal/route.ts` |
+| Past-due grace (`BILLING_PAST_DUE_GRACE_DAYS`, default 5) | Shipped | `src/lib/db/usage.ts` |
+| Provisioning gated on an active plan (production fails closed) | Shipped | `src/lib/billing/gate.ts`, `src/lib/db/usage.ts` |
+| Monthly caps: 500 texts, 300 call minutes (env defaults; per-business overrides) | Shipped | `src/lib/db/usage.ts`, `src/lib/messaging/index.ts` |
+| Over-cap behaviour: texts `blocked_cap`, calls get an out-of-service line | Shipped | `src/lib/voice/capacity.ts`, `docs/compliance.md` |
+| Grandfathering existing tenants | Shipped (operator script) | `scripts/grandfather-existing.ts`, `docs/billing.md` |
+| Mock checkout for local development only (`DEMO_MODE=true`, no Stripe key, never in production) | Shipped | `src/app/api/billing/mock-activate/route.ts`, `src/lib/providers/stripe-billing.ts` |
+
+### 5.3 Onboarding and knowledge base
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Website to knowledge base (SSRF-guarded fetch, redirect re-validation) | Shipped | `src/app/api/extract/route.ts`, `src/lib/extraction/index.ts`, `src/lib/net/safe-fetch.ts` |
+| Template fallback when no LLM key is set | Shipped | `src/lib/extraction/index.ts`, `src/lib/providers/llm.ts` |
+| Knowledge base and prompt editor | Shipped | `src/components/dashboard/knowledge-editor.tsx`, `src/app/dashboard/knowledge/page.tsx` |
+| Owner alert phone verification (SMS code, rate limited) | Shipped | `src/lib/messaging/owner-verify.ts`, `src/app/api/businesses/[id]/owner-phone/verify/*` |
+| Carrier call-forwarding instructions (AT&T, T-Mobile, Verizon, GSM, landline, VoIP) | Shipped | `src/app/onboarding/forwarding.ts` |
+| Test-call step (polls until the first call) | Shipped | `src/app/onboarding/step-test.tsx` |
+| Minimum content checks (5 services, 3 FAQs) | Not built | v1.0 target; no check in `src/lib/extraction/index.ts` |
+
+### 5.4 Phone and voice
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| AI phone number purchase through Twilio | **Partial.** Buys when Twilio is configured. On any failure it falls back to a fake `+1305555xxxx` mock number and still sets the business `live`. See section 9. | `src/lib/providers/twilio.ts` (`provisionNumberFallback`), `src/app/api/businesses/[id]/provision/route.ts` |
+| Number bound to the ElevenLabs agent (inbound voice) | Shipped (operator: verify the binding) | `src/lib/voice/elevenlabs.ts` (`bindPhoneNumber`), `docs/runbook.md` |
+| Conversation-initiation webhook: disclosure evidence and cap enforcement | Partial. Request shape verified against vendor docs; the API calls that configure it are unverified (`docs/runbook.md` section 6). | `src/app/api/voice/initiation/route.ts`, `docs/runbook.md` |
+| Disclosure at call start, English and Spanish (owner text can extend, not replace) | Shipped | `src/lib/voice/elevenlabs.ts` (`firstMessageFor`), `src/lib/kb/disclosure.ts` |
+| Declined recording: sticky `declined`, transcript withheld, provider conversation deleted (best effort) | Shipped | `src/lib/voice/postcall.ts`, `docs/compliance.md` |
+| Post-call webhook with HMAC check; one row per call | Shipped | `src/app/api/voice/post-call/route.ts`, `src/app/api/voice/webhook/route.ts`, `src/lib/voice/postcall.ts` |
+| Seven voice tools: `check_availability`, `create_booking`, `send_sms`, `create_payment_link`, `flag_emergency`, `get_pricing`, `handoff_to_human` | Shipped | `src/lib/voice/tools.ts`, `src/app/api/voice/tools/[tool]/route.ts` |
+| Tool calls authenticated by a shared secret header | Shipped | `src/lib/voice/elevenlabs.ts` (`verifyToolSecret`) |
+| Bilingual conversation (English and Spanish) | Partial. Driven by the prompt and the model. No language detection in code, and quality is not measured. | `src/lib/voice/elevenlabs.ts`, `src/lib/kb/index.ts` |
+| Booking: local wall-clock time, hours, past times refused, slot conflicts, 2-bookings-per-call cap | Shipped | `src/lib/scheduler.ts`, `src/lib/availability.ts`, `src/lib/voice/tools.ts`, `tests/integration/` |
+| Emergency: 911 first for gas, CO, fire, smoke, sparking; then `flag_emergency` | Shipped (prompt and tool). Not a substitute for a human; see risks. | `src/lib/voice/emergency.ts`, `src/lib/kb/index.ts` |
+| Live human transfer | Not built. `handoff_to_human` texts the owner and flags a callback; it does not transfer the call. | `src/lib/voice/tools.ts` (`handoffToHuman`) |
+| Owner voice reply or correction of the knowledge base by voice | Not built | none |
+| Live transcript during a call | Not built. Transcripts arrive after the call. | `src/lib/voice/postcall.ts` |
+
+### 5.5 Messaging and consent
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Customer SMS (confirmation, payment link, replies) via Twilio, logged in `sms_log` | Shipped | `src/lib/messaging/index.ts`, `src/lib/messaging/templates.ts` |
+| "Reply STOP to opt out" footer; 300 characters and 5 segments | Shipped | `src/lib/messaging/policy.ts` |
+| STOP/START/HELP keywords, English and Spanish | Shipped. Twilio's own STOP handling can block a number before the webhook sees it. | `src/lib/messaging/keywords.ts`, `src/app/api/sms/inbound/route.ts`, `docs/compliance.md` |
+| Owner alerts only to a verified owner phone; no alert otherwise, and the caller is told honestly | Shipped | `src/lib/voice/owner-alert.ts`, `src/lib/messaging/owner.ts` |
+| Gratitude and review texts: consent-gated, 9pm-8am quiet hours, 4-5 star routes to review, 1-3 to owner | Shipped as a manual sweep (`POST /api/gratitude/run`). Not scheduled. | `src/lib/gratitude/index.ts`, `src/lib/gratitude/reply.ts`, `src/app/api/gratitude/run/route.ts` |
+| Consent recorded from the confirmation text ("We may text you after your visit") | Shipped | `src/lib/messaging/actions.ts`, `docs/compliance.md` |
+| Free-text SMS by the owner (`manual`) | Shipped. The caller cannot choose the consent basis. | `src/app/api/sms/send/route.ts` |
+| 10DLC / A2P brand and campaign registration | Not built in app. Operator task before US texting. | `docs/runbook.md` section 5 |
+
+### 5.6 Payments (customer deposits)
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Stripe Payment Link for a deposit, texted to the caller's own number | Shipped (operator: Stripe keys) | `src/lib/providers/stripe.ts`, `src/app/api/payments/create-link/route.ts`, `src/app/api/sms/payment-link/route.ts` |
+| $500 deposit cap in three places | Shipped | `src/lib/voice/tools.ts` (`DEPOSIT_CAP_CENTS`), `src/app/api/payments/create-link/route.ts` (`MAX_CENTS`) |
+| Production fails closed if Stripe errors (no mock link) | Shipped | `src/lib/providers/stripe.ts` |
+| Signed deposit webhook confirms the booking and records the deposit | Shipped | `src/app/api/payments/webhook/route.ts` |
+| Refund and dispute policy | Not built | none |
+
+### 5.7 Dashboard and reporting
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Today, Calls, Calendar, Brain, Briefings, Team, Billing, Security, Settings | Shipped | `src/components/dashboard/shell.tsx`, `src/app/dashboard/*` |
+| Calls page: transcript, summary, status | Shipped | `src/app/dashboard/calls/page.tsx` |
+| Call recording player | Not built. `recording_url` is stored when consent is `disclosed` (`src/lib/voice/postcall.ts`) but never shown. | `src/app/dashboard/calls/page.tsx` (no reference) |
+| Calendar as a grid | Not built. `/dashboard/bookings` is titled "Calendar" and is a list grouped by business day. | `src/app/dashboard/bookings/page.tsx` |
+| Daily briefing: content (calls, bookings, revenue, flags) | Shipped | `src/lib/briefing/index.ts`, `src/app/api/briefings/generate/route.ts` |
+| Briefing audio (ElevenLabs TTS; text only without a TTS key) | Partial. Audio only with `ELEVENLABS_API_KEY`. Served by an authenticated route. | `src/lib/briefing/tts.ts`, `src/app/api/briefings/audio/[name]/route.ts` |
+| 6 PM automatic briefing | Not built. Generation is on demand; no scheduler exists in the app. | `src/instrumentation.ts` (only the retention timer), `src/app/api/briefings/generate/route.ts` |
+| Settings: alert phone, call disclosure text, retention window | Shipped. The v1.0 voice and hours settings are not built. | `src/components/dashboard/settings-form.tsx`, `src/app/api/businesses/[id]/settings/route.ts` |
+| Settings: voice selection, edit of hours | Not built (not found in the settings UI) | `src/components/dashboard/settings-form.tsx` |
+
+### 5.8 Privacy and retention
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Export one customer's data (owner or admin) | Shipped (API) | `src/app/api/privacy/export/route.ts`, `src/lib/privacy.ts` |
+| Erase one customer's data (calls, SMS log, briefings, bookings anonymised) | Shipped (API) | `src/app/api/privacy/erase/route.ts` |
+| Retention purge: per-business `retention_days`, daily | Shipped. **Off by default** (`RETENTION_JOB` must be set). | `src/lib/retention-job.ts`, `src/instrumentation.ts`, `src/app/api/admin/retention/route.ts` |
+| Opt-outs are never purged | Shipped | `docs/compliance.md` |
+| Privacy policy, terms, DPAs | Not in app. Operator task. | `docs/runbook.md` section 5 |
+
+### 5.9 Operations
+
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Docker Compose production stack behind Traefik; Postgres 17 pinned by digest | Shipped | `compose.production.yaml`, `Dockerfile`, `deploy.sh` |
+| Health endpoint | Shipped | `src/app/api/health/route.ts` |
+| Post-deploy checks (signatures, auth, public pages) | Shipped | `scripts/verify-deploy.ts`, `docs/runbook.md` section 3 |
+| Audit log of security and billing events | Shipped | `src/lib/db/audit.ts`, `docs/auth.md`, `docs/billing.md` |
+| CI: install, typecheck, lint, build, migrate, `bun test` | Shipped | `.github/workflows/ci.yml` |
+| Test suite (around 230 `test()` calls under `tests/`, plus `tests/db` and `tests/integration`) | Shipped. Not re-run for this document. | `tests/`, `docs/testing.md` |
+
+## 6. Non-goals
+
+- Multi-location or franchise accounts. One business per owner account.
+- Outbound marketing or outbound calls.
+- Dispatching subcontractors or sending technicians.
+- Live human transfer or a staffed answering service.
+- Google Calendar or other external calendar sync. The internal calendar is the source of truth.
+- Card data over the phone or inside the app. Deposits use Stripe-hosted payment links.
+- Legal advice, HIPAA, PCI scope, data residency.
+- Native mobile app. The dashboard is responsive web.
+
+## 7. Architecture
+
+```
+caller ──PSTN──> ElevenLabs agent (bound to Twilio number)
+                    │  tool calls (shared-secret header)      ▲ post-call webhook (HMAC)
+                    ▼                                          │
+owner/staff ──> Next.js 16 app (route handlers + server components)
+                    │  proxy.ts: cheap cookie/shape gate; real checks in lib/session.ts
+                    ├── Postgres 17 via Prisma (all state, audit, rate-limit buckets, leases)
+                    ├── Twilio: number purchase, outbound SMS, inbound SMS webhook
+                    ├── ElevenLabs: agents, voice (TTS for briefings), post-call and initiation webhooks
+                    ├── Stripe: subscriptions and billing webhook; deposit Payment Links and webhook
+                    ├── LLM (OpenAI or Anthropic, whichever key is set): knowledge-base generation
+                    └── Email (Resend or SMTP): verification, invites, billing notices
+```
+
+Key design points, all in the code:
+
+- **Tenancy.** Every business-scoped handler resolves the business from the principal, not from the request.
+- **Webhooks** verify signatures and fail closed in production. Stripe, Twilio and ElevenLabs each have a check.
+- **Idempotency.** Processed-event records and DB leases guard webhooks, provisioning and the retention job.
+- **Consent evidence.** The app records the disclosure only from server-side evidence, never from what the caller says.
+- **Metering.** Usage counters are per business per calendar month, in the business's time zone.
+- **Deployment.** Single image set (app, tools for migrate and seed). Migrations run before the app starts.
+
+## 8. Tech stack
+
+| Layer | Choice (verified in `package.json`, `Dockerfile`, `compose.production.yaml`) |
 | --- | --- |
-| **Problem** | Miami home-service SMBs (HVAC, plumbing, electrical) lose 30–50% of inbound calls to voicemail or language barriers. Owners answer phones themselves while on jobs, or hire bilingual dispatchers they can't afford. |
-| **Target user** | Owner-operator of a 1–5 person HVAC/plumbing company in Miami-Dade. Speaks English or Spanish (or both). Has a website or Google Business page. Wants to stop losing calls but can't afford a full-time dispatcher. |
-| **Why now** | ElevenLabs Agents + phone integrations make human-quality voice AI cheap and fast. Mel's multi-agent execution lets one engineer build what used to need a team. Miami's bilingual market is underserved by generic AI phone products. |
-
----
-
-## 2. Scope: MVP vs Stretch vs Out of Scope
-
-### MVP (must demo)
-
-- [ ] Owner pastes a URL → agents extract business info → generate knowledge
-      base + system prompt → return a phone number
-- [ ] Inbound call answered by ElevenLabs voice agent in Spanglish
-- [ ] Triage: urgency detection (emergency vs routine), language switching
-- [ ] Booking: check availability, create appointment in internal calendar
-- [ ] SMS confirmation + quote sent via Twilio
-- [ ] Emergency deposit: Stripe payment link generated and shared over SMS
-- [ ] End-of-day voice briefing (ElevenLabs TTS) summarizing calls, bookings,
-      revenue
-- [ ] Owner dashboard (Next.js) showing calls, bookings, settings
-
-### Stretch (if time permits)
-
-- [ ] Next-day gratitude SMS/call with review request
-- [ ] Owner can correct knowledge base by talking to the agent (voice feedback
-      loop)
-- [ ] Real Google Calendar integration (replace internal calendar)
-- [ ] Live call transcript in dashboard
-
-### Out of Scope
-
-- Multi-location / franchise support
-- Outbound marketing calls
-- AI dispatch to subcontractors
-- Mobile app (responsive web only)
-- Real-time calendar sync with external systems
-- Actual payment processing (Stripe test mode only)
-
----
-
-## 3. User Flows
-
-### Flow A: Owner Setup from URL
-
-1. Owner visits dashboard, clicks "Add Your Business"
-2. Pastes website URL or Google Business link
-3. Mel agent scrapes/extracts: business name, services, hours, service area,
-   pricing, FAQs
-4. LLM generates: knowledge base JSON, system prompt, call script
-5. Owner reviews and edits in dashboard (or skips for demo)
-6. System provisions Twilio phone number (or uses pre-provisioned pool)
-7. Dashboard shows: "Your AI employee is live at +1-305-XXX-XXXX"
-
-### Flow B: Inbound Spanglish Call → Triage → Booking → SMS/Payment
-
-1. Customer calls the business number
-2. ElevenLabs voice agent answers: "Gracias por llamar a [Business]. ¿En qué
-   puedo ayudarle? / Thanks for calling. How can I help?"
-3. Customer speaks in English, Spanish, or Spanglish
-4. Agent detects language, responds in same language
-5. **Triage**: "Is this an emergency? Is water leaking? Is anyone elderly or
-   vulnerable?"
-6. **Routine**: Check availability → create booking → SMS confirmation with
-   quote
-7. **Emergency**: Generate Stripe payment link → SMS link for deposit → flag for
-   owner
-8. **Uncertain**: Offer to transfer to owner (human handoff)
-
-### Flow C: End-of-Day Voice Briefing
-
-1. At 6 PM (or on demand), system generates briefing
-2. ElevenLabs TTS reads: "Hola Jorge. Today you had 4 calls. 2 bookings for
-   tomorrow: AC repair at 10 AM, duct cleaning at 2 PM. $150 deposit collected.
-   1 emergency flagged — check your dashboard."
-3. Briefing saved as audio file, playable in dashboard
-4. Owner can tap "Reply" and record a voice message (stretch)
-
-### Flow D: Next-Day Gratitude Follow-Up
-
-1. 24 hours after completed job, agent sends SMS: "Hi Maria, how did the AC
-   repair go? Reply 1-5."
-2. If 4–5: "So glad! Would you leave us a review? [Google Review link]"
-3. If 1–3: "I'm sorry to hear that. Let me connect you with the owner." → Flag
-   in dashboard
-
----
-
-## 4. Functional Requirements & Acceptance Criteria
-
-### FR-1: Business Onboarding
-
-| ID | Requirement | Acceptance Criteria |
-| --- | --- | --- |
-| FR-1.1 | URL input | Owner can paste any URL; system attempts extraction within 30s |
-| FR-1.2 | Knowledge base generation | Extracts ≥5 services, hours, service area, ≥3 FAQs |
-| FR-1.3 | Phone provisioning | Returns a working US phone number (pre-provisioned pool acceptable) |
-| FR-1.4 | Dashboard review | Owner can edit business info before going live |
-
-### FR-2: Voice Call Handling
-
-| ID | Requirement | Acceptance Criteria |
-| --- | --- | --- |
-| FR-2.1 | Language detection | Agent responds in caller's detected language; handles mid-sentence switches |
-| FR-2.2 | Triage | Asks 2–3 urgency questions; routes emergency vs routine |
-| FR-2.3 | Booking creation | Checks mock calendar, creates appointment with customer name, phone, address, service |
-| FR-2.4 | SMS confirmation | Sends text within 10s of booking with date, time, service, estimated price |
-| FR-2.5 | Emergency payment | Generates Stripe test payment link; SMS includes link and amount |
-| FR-2.6 | Human handoff | Offers to "connect you with the owner" for unanswerable requests |
-
-### FR-3: End-of-Day Briefing
-
-| ID | Requirement | Acceptance Criteria |
-| --- | --- | --- |
-| FR-3.1 | Auto-generation | Briefing generated at 6 PM or on-demand button |
-| FR-3.2 | Content | Includes: call count, booking count, revenue, flagged items |
-| FR-3.3 | Audio playback | 30–60s audio playable in dashboard |
-
-### FR-4: Gratitude Loop
-
-| ID | Requirement | Acceptance Criteria |
-| --- | --- | --- |
-| FR-4.1 | Timing | SMS sent 24h after job completion |
-| FR-4.2 | Review routing | Happy customers (4–5) get review link; unhappy (1–3) get owner flag |
-
----
-
-## 5. System Architecture
-
-```text
-┌─────────────────────────────────────────────────────────────────────┐
-│                         OWNER DASHBOARD                              │
-│                    (Next.js 14 App Router + shadcn)                  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │
-│  │  Onboarding │  │  Call Log   │  │  Calendar   │  │  Settings   │ │
-│  │   (URL →    │  │  (transcript│  │  (bookings) │  │  (voice,    │ │
-│  │   KB gen)   │  │   audio)    │  │             │  │   hours)    │ │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘ │
-└─────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                         SUPABASE (Postgres)                          │
-│  businesses │ knowledge_bases │ calls │ bookings │ briefings │ sms_log │
-└─────────────────────────────────────────────────────────────────────┘
-                                    │
-        ┌───────────────────────────┼───────────────────────────┐
-        ▼                           ▼                           ▼
-┌───────────────┐         ┌─────────────────┐         ┌───────────────┐
-│  ELEVENLABS   │         │     TWILIO      │         │    STRIPE     │
-│  Voice Agent  │◄───────►│  Phone / SMS    │         │ Payment Links │
-│  (conversational│        │  (inbound call  │         │  (test mode)  │
-│   voice + TTS) │        │   + outbound SMS)│        │               │
-└───────────────┘         └─────────────────┘         └───────────────┘
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                         LLM SERVICES                                 │
-│  OpenAI GPT-4o / Claude 3.5: website extraction, call summaries,     │
-│  knowledge base generation, briefing text generation                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Data Model
-
-#### businesses
-
-| field | type | notes |
-| --- | --- | --- |
-| id | uuid PK | |
-| name | text | |
-| url | text | source URL |
-| phone | text | Twilio number |
-| owner_phone | text | for SMS alerts |
-| hours | jsonb | {monday: {open, close}, ...} |
-| service_area | text[] | zip codes or cities |
-| status | enum | onboarding \| live \| paused |
-| created_at | timestamptz | |
-
-#### knowledge_bases
-
-| field | type | notes |
-| --- | --- | --- |
-| id | uuid PK | |
-| business_id | uuid FK | |
-| services | jsonb[] | {name, description, base_price, duration} |
-| faqs | jsonb[] | {question, answer} |
-| system_prompt | text | full ElevenLabs system prompt |
-| call_script | text | suggested opening + flow |
-| updated_at | timestamptz | |
-
-#### calls
-
-| field | type | notes |
-| --- | --- | --- |
-| id | uuid PK | |
-| business_id | uuid FK | |
-| caller_phone | text | |
-| started_at | timestamptz | |
-| ended_at | timestamptz | |
-| duration_sec | int | |
-| language | text | en / es / mixed |
-| transcript | text | |
-| summary | text | LLM-generated |
-| urgency | enum | emergency \| routine \| unsure |
-| status | enum | in_progress \| completed \| failed \| handed_off |
-| recording_url | text | ElevenLabs recording |
-
-#### bookings
-
-| field | type | notes |
-| --- | --- | --- |
-| id | uuid PK | |
-| call_id | uuid FK | |
-| business_id | uuid FK | |
-| customer_name | text | |
-| customer_phone | text | |
-| service | text | |
-| scheduled_at | timestamptz | |
-| address | text | |
-| price_estimate | decimal | |
-| deposit_amount | decimal | nullable |
-| deposit_paid | boolean | default false |
-| status | enum | pending \| confirmed \| completed \| cancelled |
-
-#### briefings
-
-| field | type | notes |
-| --- | --- | --- |
-| id | uuid PK | |
-| business_id | uuid FK | |
-| date | date | |
-| audio_url | text | ElevenLabs TTS output |
-| transcript | text | |
-| stats | jsonb | {calls, bookings, revenue, flags} |
-| created_at | timestamptz | |
-
-### External APIs & Webhooks
-
-| Service | Endpoint | Purpose |
-| --- | --- | --- |
-| ElevenLabs | `/v1/convai/agents` | Create/configure voice agent |
-| ElevenLabs | `/v1/convai/conversation` | Webhook: call started/ended |
-| ElevenLabs | `/v1/text-to-speech` | Generate briefing audio |
-| Twilio | Incoming call webhook | Route to ElevenLabs |
-| Twilio | `/Messages` | Send SMS confirmations |
-| Stripe | `/v1/payment_links` | Create emergency deposit links |
-| OpenAI | `/v1/chat/completions` | Extraction, summarization, KB generation |
-
-### Environment Variables
-
-```bash
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
-
-# ElevenLabs
-ELEVENLABS_API_KEY=
-ELEVENLABS_AGENT_ID=
-ELEVENLABS_VOICE_ID=
-
-# Twilio
-TWILIO_ACCOUNT_SID=
-TWILIO_AUTH_TOKEN=
-TWILIO_PHONE_NUMBER=
-
-# Stripe
-STRIPE_SECRET_KEY=
-STRIPE_PUBLISHABLE_KEY=
-
-# OpenAI
-OPENAI_API_KEY=
-
-# App
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-```
-
----
-
-## 6. Voice Agent Design
-
-### System Prompt Outline
-
-```text
-You are Maria, the friendly bilingual front-desk employee for {business_name}.
-You answer calls in English, Spanish, or Spanglish — whatever the caller prefers.
-If the caller switches languages, you switch seamlessly.
-
-SERVICES:
-{services_list}
-
-HOURS: {hours}
-SERVICE AREA: {service_area}
-PRICING: {pricing_notes}
-
-YOUR GOALS:
-1. Greet warmly and identify the customer's need
-2. Triage urgency: "Is this an emergency? Is water leaking? Is anyone elderly or vulnerable?"
-3. For emergencies: collect deposit, flag for owner
-4. For routine: check availability, book appointment, send SMS confirmation
-5. Never make up prices — use the pricing guide or say "I'll need to check with the owner"
-6. If unsure, offer to connect to the owner
-
-TONE: Warm, professional, Miami-local. Use "¿Cómo estás?" and "No problem at all" naturally.
-```
-
-### Agent Tools/Functions
-
-| Tool | Description | Parameters |
-| --- | --- | --- |
-| `check_availability` | Check open slots in calendar | date (YYYY-MM-DD), duration_minutes |
-| `create_booking` | Create appointment | customer_name, phone, service, date, time, address |
-| `send_sms` | Send text to customer | phone, message |
-| `create_payment_link` | Generate Stripe deposit link | amount_cents, description |
-| `flag_emergency` | Alert owner of urgent issue | reason, customer_phone |
-| `get_pricing` | Look up service price | service_name |
-| `handoff_to_human` | Offer to transfer | reason |
-
-### Language Switching Behavior
-
-- Detect language on every user utterance (ElevenLabs handles this)
-- Respond in the language of the last utterance
-- If mixed ("I need un technician para el AC"), respond in the dominant language
-  or ask: "¿Prefiere hablar en español o English?"
-- Greeting is always bilingual: "Gracias por llamar a [Business]. Thanks for
-  calling. ¿En qué puedo ayudarle? / How can I help?"
-
-### Guardrails
-
-- **No made-up prices**: If price unknown, say "Let me check with the owner and
-  call you back"
-- **No medical advice**: For health emergencies, say "Please call 911"
-- **Human handoff**: Any request outside services/hours → offer transfer
-- **Deposit cap**: Max $500 deposit via Stripe link
-- **Confirmation required**: Always confirm booking details before creating
-
----
-
-## 7. Parallel Mel Work Plan
-
-### Workstream 1: Supabase Schema + API Routes
-
-**Owner:** Agent A
-**Files:** `supabase/migrations/`, `src/app/api/businesses/`,
-`src/app/api/calls/`, `src/app/api/bookings/`, `src/lib/supabase.ts`
-**Interfaces:**
-
-- Exports: `createBusiness(data)`, `getBusiness(id)`, `createCall(data)`,
-  `createBooking(data)`, `getBookings(businessId)`
-- Expects: None (foundational)
-**Task Prompt:**
-
-```text
-Set up Supabase project with tables: businesses, knowledge_bases, calls, bookings, briefings, sms_log.
-Create Next.js API routes: POST /api/businesses, GET/PUT /api/businesses/[id], POST /api/calls, POST /api/bookings, GET /api/bookings?business_id=.
-Write src/lib/supabase.ts with typed client.
-Seed with one demo business: "Miami Cool Air Conditioning" with 3 services, hours, FAQs.
-```
-
-### Workstream 2: Next.js Dashboard + UI
-
-**Owner:** Agent B
-**Files:** `src/app/`, `src/components/`, `src/app/globals.css`,
-`tailwind.config.ts`
-**Interfaces:**
-
-- Imports: API routes from WS1, Supabase types
-- Exports: Dashboard pages, onboarding flow, call log, calendar view
-**Task Prompt:**
-
-```text
-Build Next.js 14 App Router dashboard with:
-- /onboarding: URL input form, business info review/edit form, "Go Live" button
-- /dashboard: sidebar nav, call log table (with audio player), calendar view (bookings), settings panel
-- /dashboard/briefings: list of daily briefings with audio player
-Use shadcn/ui components: Button, Card, Table, Dialog, Form, Calendar.
-Style with Tailwind. Responsive layout.
-Mock data for demo: 3 past calls, 2 bookings, 1 briefing.
-```
-
-### Workstream 3: Website Extraction + Knowledge Base Generation
-
-**Owner:** Agent C
-**Files:** `src/app/api/extract/`, `src/lib/extraction.ts`,
-`src/lib/kb-generator.ts`
-**Interfaces:**
-
-- Imports: None (standalone service)
-- Exports: `extractFromURL(url)`, `generateKnowledgeBase(extractedData)`,
-  `generateSystemPrompt(kb, business)`
-**Task Prompt:**
-
-```text
-Build URL extraction pipeline:
-- POST /api/extract: takes URL, uses cheerio/puppeteer to scrape text, then OpenAI GPT-4o to extract: business name, services (name, description, price), hours, service area, FAQs.
-- generateKnowledgeBase(): converts extraction to JSON matching knowledge_bases schema.
-- generateSystemPrompt(): creates full ElevenLabs system prompt from KB.
-- Include fallback: if scraping fails, return template KB for "AC repair company".
-- Add POST /api/kb/generate: accepts extracted data, returns KB + system prompt.
-```
-
-### Workstream 4: ElevenLabs Voice Agent + Twilio Integration
-
-**Owner:** Agent D
-**Files:** `src/app/api/voice/`, `src/lib/elevenlabs.ts`, `src/lib/twilio.ts`,
-`src/app/api/webhooks/elevenlabs/`, `src/app/api/webhooks/twilio/`
-**Interfaces:**
-
-- Imports: WS1 API routes (createCall, createBooking)
-- Exports: `handleIncomingCall()`, `handleCallEnded()`,
-  `sendSMS(phone, message)`
-**Task Prompt:**
-
-```text
-Build voice pipeline:
-- Twilio webhook: incoming call → route to ElevenLabs Conversational AI agent
-- ElevenLabs webhook: call started → create call record; call ended → update transcript, summary
-- ElevenLabs agent tools: implement check_availability, create_booking, send_sms, create_payment_link, flag_emergency as HTTP endpoints at /api/voice/tools/[tool]
-- These tool endpoints call Supabase (via WS1 API routes) and Twilio/Stripe APIs
-- Test with ElevenLabs agent configured for "Miami Cool Air Conditioning"
-- Spanglish handling: system prompt instructs bilingual responses; language detection is ElevenLabs-native
-```
-
-### Workstream 5: SMS + Stripe Payment Links
-
-**Owner:** Agent E
-**Files:** `src/app/api/sms/`, `src/app/api/payments/`, `src/lib/twilio.ts`,
-`src/lib/stripe.ts`
-**Interfaces:**
-
-- Imports: WS1 (getBusiness, createBooking), WS4 (triggered from voice agent)
-- Exports: `sendConfirmationSMS(booking)`,
-  `sendPaymentLinkSMS(booking, amount)`,
-  `createPaymentLink(amount, description)`
-**Task Prompt:**
-
-```text
-Build SMS and payment infrastructure:
-- POST /api/sms/send: generic SMS sender using Twilio
-- POST /api/sms/confirmation: triggered after booking, sends confirmation with date/time/service/price
-- POST /api/sms/payment-link: triggered for emergencies, sends Stripe payment link
-- POST /api/payments/create-link: creates Stripe test payment link, returns URL
-- POST /api/sms/gratitude: next-day follow-up SMS (stretch — build the endpoint, wire later)
-- Mock/demo: pre-create 2 Stripe payment links for demo amounts ($150, $300)
-```
-
-### Workstream 6: End-of-Day Briefing + Gratitude Loop
-
-**Owner:** Agent F
-**Files:** `src/app/api/briefings/`, `src/lib/briefing.ts`,
-`src/app/api/gratitude/`, `src/lib/gratitude.ts`
-**Interfaces:**
-
-- Imports: WS1 (getCalls, getBookings for date range)
-- Exports: `generateBriefing(businessId, date)`, `generateBriefingAudio(text)`,
-  `sendGratitudeSMS(bookingId)`
-**Task Prompt:**
-
-```text
-Build briefing and gratitude system:
-- POST /api/briefings/generate: fetches today's calls/bookings for business, generates summary text with OpenAI, creates briefing record
-- POST /api/briefings/audio: takes briefing text, calls ElevenLabs TTS, saves audio URL
-- GET /api/briefings?business_id=: list briefings
-- POST /api/gratitude/send: sends SMS 24h after job; if reply is 4-5, send review link; if 1-3, flag owner
-- Dashboard component: briefing player + "Generate Now" button
-- Demo: pre-generate one briefing for "Miami Cool Air Conditioning"
-```
-
-### Integration Step (3:30–5:15)
-
-1. **Merge all branches** into main
-2. **Environment setup**: verify all API keys, test credentials
-3. **End-to-end test**: call the number → speak Spanglish → book → check SMS →
-   check dashboard
-4. **Demo data**: ensure 3 calls, 2 bookings, 1 briefing pre-loaded
-5. **Phone number**: confirm Twilio number is live and routed
-
----
-
-## 8. Hour-by-Hour Timeline
-
-| Time | Activity | Owner |
-| --- | --- | --- |
-| 12:00–12:15 | Kickoff: assign workstreams, verify API keys, create repo | Lead |
-| 12:15–12:30 | Scaffold Next.js + Supabase project, push to GitHub | Lead |
-| 12:30–3:00 | **Parallel build**: all 6 workstreams running simultaneously | Agents A–F |
-| 3:00–3:30 | Lunch break | All |
-| 3:30–4:00 | Merge branches, resolve conflicts, env setup | Lead |
-| 4:00–5:00 | End-to-end testing: call flow, SMS, dashboard, briefing | All |
-| 5:00–5:15 | Bug fixes, polish, demo data seeding | All |
-| 5:15–5:45 | Record demo video (fallback), take Mel screenshots | Lead |
-| 5:45–6:00 | Submit: GitHub repo, Mel session exports, problem/solution writeup | Lead |
-
----
-
-## 9. Demo Script (3 Minutes)
-
-**Setup:** Judge names a business (or we use pre-loaded "Miami Cool Air
-Conditioning")
-
-| Second | Action | What Judge Sees |
-| --- | --- | --- |
-| 0–15 | "Let's onboard a business. I paste this URL..." | Dashboard: URL input, extraction loading spinner |
-| 15–30 | "Done. Here's the knowledge base..." | Dashboard: extracted services, hours, FAQs, editable |
-| 30–45 | "Going live... here's the phone number." | Dashboard: "Live at +1-305-555-0199" |
-| 45–90 | "Now I'm a customer calling..." (judge or we call) | Live call: "Gracias por llamar a Miami Cool Air. ¿En qué puedo ayudarle?" |
-| 90–120 | Speak in Spanglish: "Hi, my AC is broken, hace mucho calor" | Agent switches: "No problem, ¿es una emergencia? Is it leaking water?" |
-| 120–150 | "It's leaking a little..." | Agent: "I can book you for tomorrow at 2 PM. I'll send you a text." |
-| 150–165 | Hang up, show phone | SMS arrives: confirmation with date, time, quote |
-| 165–180 | "Now the owner checks their day..." | Dashboard: briefing audio plays — "Hola Jorge. Today you had 1 call..." |
-| 180+ | Show bookings in calendar, flagged emergencies | Dashboard: calendar view, call log with transcript |
-
-**Pre-recorded fallback:** If live call fails, play 90-second screen recording
-of full flow.
-
----
-
-## 10. Risks and Mitigations
-
-| Risk | Likelihood | Impact | Mitigation |
+| Web framework | Next.js 16.4.6 (App Router), React 19.3.0, Tailwind CSS 4.3.3 |
+| Runtime and package manager | Bun 1.4.1 (Docker image `oven/bun`); Node runtime for route handlers |
+| Database | PostgreSQL 17 (`postgres:17-alpine`, pinned by digest), Prisma 6.16.2 |
+| Voice | ElevenLabs Agents (conversational agent, phone binding), ElevenLabs TTS for briefing audio |
+| Telephony and SMS | Twilio (number purchase, SMS, inbound SMS webhook) |
+| Payments | Stripe (Billing subscriptions with Checkout and Portal; Payment Links for deposits) |
+| LLM | OpenAI (`LLM_MODEL`) or Anthropic (`ANTHROPIC_MODEL`), whichever key is set |
+| Email | Resend REST API or SMTP via nodemailer (`EMAIL_PROVIDER`) |
+| Bot protection | Cloudflare Turnstile (optional, signup) |
+| Other libraries | `libphonenumber-js` (E.164), `cheerio` (page extraction), `qrcode` (2FA setup), `date-fns`, `sonner` |
+| Deployment | Docker Compose behind Traefik (`compose.production.yaml`), `deploy.sh` |
+| Not used | Supabase. The `SUPABASE_*` variables in v1.0 are not read anywhere in the code. |
+
+## 9. Risks and mitigations
+
+| Risk | Likelihood / impact | Current mitigation | Gap or action |
 | --- | --- | --- | --- |
-| ElevenLabs latency >2s on demo call | Medium | High | Pre-warm agent 5 min before demo; have pre-recorded call audio as fallback |
-| Twilio phone provisioning fails | Low | High | Pre-provision 3 numbers before hackathon; use pool approach |
-| Website scraping fails for judge's URL | Medium | Medium | Fallback to template KB; demo uses pre-loaded business |
-| Demo-day Wi-Fi unstable | Medium | High | Tether to phone hotspot; test on hotspot beforehand |
-| Stripe payment link generation slow | Low | Medium | Pre-create 2 payment links for demo amounts |
-| Spanglish detection fails | Medium | High | Test 5 Spanglish phrases beforehand; have script ready |
-| Mel agent conflicts during parallel work | Medium | Medium | Clear file ownership per workstream; integration buffer built in |
+| **Recording consent (Florida all-party consent, Fla. Stat. 934.03; other states differ)** | High / High | Disclosure at call start in English and Spanish; declined calls keep metadata only; provider conversation deleted on decline (best effort) | Counsel must review wording and consent bases per state. Provider-side audio retention must be set by the operator. |
+| **TCPA, 10DLC and texting consent** | Medium / High | STOP/HELP handling; gratitude texts need recorded consent; quiet hours; per-business rate limits | 10DLC registration is not in the app. Counsel review of the consent basis. Twilio may block a number before the webhook sees a STOP. |
+| **Personal data (caller phone, names, addresses, transcripts, recordings)** | Medium / High | Export and erase endpoints; E.164 matching; audit trail; opt-outs never purged | Retention purge is **off by default**. Turn on only after each business's window is reviewed. No DPA or privacy policy in the repo. |
+| **Life safety (gas, CO, fire) during a call** | Low / Severe | 911-first instruction in every production prompt; `flag_emergency` speaks the 911 advice | The agent is not an emergency service. Human-transfer gap (section 5.4) means emergencies depend on owner response. Alerts only reach a verified phone. |
+| **Cost abuse (signup spam, SMS pumping, call-minute drain)** | Medium / High | Plan gate; per-business monthly caps (texts and minutes); signup cap and per-IP limits; alert-phone verification; owner-alert rate limits | Caps count messages, not SMS segments, so a long text can cost more than one unit. The number-purchase fallback (below) can create unpaid numbers. |
+| **Number purchase fallback creates a fake live line** | Medium / High | Production billing gate before provisioning | **Known bug:** a failed Twilio purchase assigns a fake `+1305555xxxx` number and sets the business `live` (`src/app/api/businesses/[id]/provision/route.ts`, `src/lib/providers/twilio.ts`). Fix: refuse `live` when the number is mock. |
+| **Provider dependency (ElevenLabs, Twilio, Stripe, LLM, email)** | High / High | Each provider has a mock path outside production; Stripe and webhooks fail closed in production | Voice binding and the initiation webhook use ElevenLabs API calls whose shape is not fully verified (runbook section 6). Re-test after each vendor change. Voice depends on one vendor. |
+| **Prompt injection and bad answers** (caller or website text reaches the agent prompt) | Medium / Medium | Tool allow-list; no free-text recipient for voice SMS; prices must come from `get_pricing` | Bilingual quality and hallucination rate are not measured. Add call-quality review before scaling. |
+| **Double booking and time zones** | Low / Medium | Local wall-clock handling; overlap tests including a 20-way race (`tests/integration/`) | Re-run the integration suite on every booking change. |
+| **Operator skips a legal or provider step** | Medium / High | `verify-deploy` script; runbook checklists; deploy refuses unset required variables | Checklist items in runbook section 5 are not enforced by code. |
 
----
+## 10. Success metrics (proposed, no baseline yet)
 
-## 11. Submission Checklist
+These are targets to set after the first paying cohort. None is measured today.
 
-- [ ] GitHub repo with README (setup instructions, architecture diagram)
-- [ ] Mel session history exported (screenshots of agent work)
-- [ ] Problem/solution description (1 page)
-- [ ] How Mel was used: parallel workstreams, agent assignments
-- [ ] Live demo OR recorded walkthrough (3 min max)
-- [ ] API keys rotated / sanitized in repo
-- [ ] Stripe in test mode, Twilio numbers are real
+| Metric | Definition | Why it matters |
+| --- | --- | --- |
+| Activation | Signed-up owners who complete onboarding and receive a first call | Shows whether the URL-to-agent flow works |
+| Time to first call | Minutes from signup to first inbound call | Tests the "set up in minutes" claim |
+| Trial to paid | Trials that convert to an active subscription | Core revenue health |
+| Missed-call recovery | Calls answered by the agent that end in a booking, a deposit or a callback | Core value |
+| Disclosure coverage | Share of calls with `consent_status = disclosed` before the post-call | Legal and product quality gate (target: all calls outside declined) |
+| Opt-out rate | STOP replies per 100 texts sent | Texting health and compliance |
+| Cap hits | Businesses that hit the text or minute cap in a month | Pricing and cap tuning |
+| Cost per call and per business-month | Provider spend per answered call and per active business | Unit economics (see `docs/product/monetization.md`) |
+| Churn | Cancellations within 60 days of paid start | Retention |
 
----
+## 11. Open roadmap (not built, verified against the code)
 
-## 12. Product Name Ideas
+Ordered by what most blocks a paying launch:
 
-| Name | Why It Works |
+1. **Fix the mock-number fallback**: never set `live` for a mock number in production.
+2. **Automatic briefing at a set time** (the v1.0 6 PM briefing). Needs a scheduler. None exists today.
+3. **Scheduled gratitude sweep.** `POST /api/gratitude/run` exists but nothing calls it.
+4. **Live human transfer** for emergencies and requested humans, instead of a callback flag.
+5. **Count SMS segments** in the cap, not only messages.
+6. **Recording player** on the call page (the URL is stored but not shown).
+7. **Calendar grid** view (the page is a list).
+8. **Owner voice correction** of the knowledge base, and an owner voice reply to the briefing (stretch from v1.0).
+9. **Live transcript** during calls (stretch from v1.0).
+10. **Refund and dispute policy** and deposit support text.
+11. **Minimum content checks** on extraction (5 services, 3 FAQs) before go-live.
+12. **Operator-independent compliance:** 10DLC registration support and a per-state disclosure setting.
+
+Not planned: Google Calendar sync, multi-location, outbound calls.
+
+## 12. Changes from v1.0
+
+| v1.0 claim | Now |
 | --- | --- |
-| **Recepcionista** | Spanish for "receptionist"; immediately clear what it does; sounds professional |
-| **HolaDesk** | Bilingual greeting + desk; friendly, memorable, domain-friendly |
-| **Switchboard AI** | Nods to old-school switchboard + AI; "switch" hints at language switching |
-| **Atiende** | Spanish for "attends to" / "answers"; action-oriented, warm |
-| **FrontDesk Miami** | Descriptive, local, SEO-friendly; boring but clear |
-
-**Recommendation:** **Recepcionista** — distinctive, bilingual by default,
-memorable for judges.
-
----
-
-> PRD v1.0 — November 14, 2026 — Buildersgiving Miami AI Hackathon
+| Supabase schema and client | Removed. Postgres 17 with Prisma. |
+| Next.js 14 | Next.js 16.4.6. |
+| "30-50% of calls lost" and "Miami market is underserved" | Removed. No source. |
+| Demo number `+1-305-555-0199` | Removed. Demo numbers are mock numbers. |
+| Owner dashboard with settings for voice and hours | Partial. Alert phone, disclosure, retention. |
+| 6 PM auto-briefing | Not built. |
+| Live human transfer | Not built. Callback flag only. |
+| Spanglish detection | Partial. Prompt-driven, no detection code. |
+| Stripe test mode only | Operator setting. No code check that the keys are test-mode keys. |
+| Recording and consent disclosure: absent in v1.0 | Shipped (section 5.4). |
+| Stretch: gratitude, KB voice correction, live transcript | Gratitude sweep shipped but manual. Others not built. |

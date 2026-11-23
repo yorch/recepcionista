@@ -4,7 +4,7 @@
  *   TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:54329/scratch bun test tests/db/auth-lifecycle.test.ts
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { ADMIN_TOKEN, PASSWORD, TEST_URL, captureMail, clearLimiter, cookieFrom, loadAuthModules, req, rid } from '../helpers/auth-harness';
 
 const suite = TEST_URL ? describe : describe.skip;
@@ -103,6 +103,47 @@ suite('account lifecycle (postgres)', () => {
       expect(mail.to(e)[0].link).not.toContain('token=');
       await doSignup(e);
       expect(mail.to(e).length).toBe(1); // second notice inside the hour is suppressed
+    });
+
+    describe('production captcha requirement', () => {
+      const KEYS = ['NODE_ENV', 'TURNSTILE_SECRET_KEY', 'NEXT_PUBLIC_TURNSTILE_SITE_KEY', 'SIGNUP_ALLOW_WITHOUT_CAPTCHA'] as const;
+      const saved: Record<string, string | undefined> = {};
+      const env = process.env as Record<string, string | undefined>;
+      beforeAll(() => { for (const k of KEYS) saved[k] = env[k]; });
+      afterEach(() => { for (const k of KEYS) { if (saved[k] === undefined) delete env[k]; else env[k] = saved[k]; } });
+
+      test('production without captcha config: 503 signup_disabled and nothing is created', async () => {
+        env.NODE_ENV = 'production'; delete env.TURNSTILE_SECRET_KEY; delete env.NEXT_PUBLIC_TURNSTILE_SITE_KEY; delete env.SIGNUP_ALLOW_WITHOUT_CAPTCHA;
+        const e = email('prod-nocaptcha');
+        userEmails.push(e);
+        const res = await doSignup(e);
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ ok: false, error: 'signup_disabled' });
+        expect(await db.getUserByEmail(e)).toBeNull();
+        expect(mail.to(e).length).toBe(0);
+      });
+
+      test('production with the Turnstile pair: signup works (and a failed captcha is still refused)', async () => {
+        env.NODE_ENV = 'production'; env.TURNSTILE_SECRET_KEY = 'ts-secret'; env.NEXT_PUBLIC_TURNSTILE_SITE_KEY = 'ts-site'; delete env.SIGNUP_ALLOW_WITHOUT_CAPTCHA;
+        const e = email('prod-captcha');
+        userEmails.push(e);
+        expect((await doSignup(e)).status).toBe(400); // no token: fails closed
+        const res = await doSignup(e, { turnstile_token: 'tok' });
+        expect(res.status).toBe(200);
+        const user = await db.getUserByEmail(e);
+        expect(user).not.toBeNull();
+        bizIds.push(user.business_id);
+      });
+
+      test('production with the explicit opt-out: signup works without a token', async () => {
+        env.NODE_ENV = 'production'; delete env.TURNSTILE_SECRET_KEY; delete env.NEXT_PUBLIC_TURNSTILE_SITE_KEY; env.SIGNUP_ALLOW_WITHOUT_CAPTCHA = 'true';
+        const e = email('prod-waived');
+        userEmails.push(e);
+        expect((await doSignup(e)).status).toBe(200);
+        const user = await db.getUserByEmail(e);
+        expect(user).not.toBeNull();
+        bizIds.push(user.business_id);
+      });
     });
 
     test('atomic: a failure creating the owner rolls the business back (no orphan business)', async () => {
@@ -347,6 +388,32 @@ suite('account lifecycle (postgres)', () => {
       expect(body.error).toContain('already has an account');
       expect(await db.peekEmailToken('invite', m.token)).not.toBeNull();
       expect((await db.getUserByEmail(email('already'))).business_id).not.toBe(biz.id);
+    });
+
+    test('race: an account for the address appears AFTER the pre-check: 409 and the token is NOT burned (atomic accept)', async () => {
+      const { biz } = await newOwner('inv-race');
+      const cookie = await signIn('inv-race');
+      const e = email('racer');
+      userEmails.push(e);
+      expect((await invite.POST(req('/api/team/invite', { method: 'POST', json: { email: e, role: 'staff' }, headers: { cookie } }))).status).toBe(201);
+      const m = mail.to(e).at(-1)!;
+      const orig = pw.hashPassword;
+      let injected = false;
+      const spy = spyOn(pw, 'hashPassword').mockImplementation(async (...args: any[]) => {
+        if (!injected) { // the window between the pre-check and the transaction
+          injected = true;
+          await db.createUser({ email: e, password_hash: 'x'.repeat(20), role: 'owner', business_id: (await newOwner('racer-biz')).biz.id, email_verified: true });
+        }
+        return orig(...args);
+      });
+      try {
+        const r = await post(accept, '/api/auth/accept-invite', { token: m.token, password: PASSWORD });
+        expect(injected).toBe(true);
+        expect(r.status).toBe(409);
+        expect((await r.json()).code).toBe('account_exists');
+      } finally { spy.mockRestore(); }
+      expect(await db.peekEmailToken('invite', m.token)).not.toBeNull(); // not consumed
+      expect((await db.getUserByEmail(e)).business_id).not.toBe(biz.id);
     });
 
     test('inviting someone already on the team is a 409; expired and revoked invitations fail', async () => {

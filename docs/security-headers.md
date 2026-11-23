@@ -20,7 +20,7 @@ style-src 'self' 'unsafe-inline'
 img-src 'self' data: blob:        font-src 'self' data:        media-src 'self' blob:
 connect-src 'self'                (+ ws: wss: in dev for HMR)
 object-src 'none'  base-uri 'self'  form-action 'self'  frame-ancestors 'none'
-upgrade-insecure-requests         (production only)
+upgrade-insecure-requests         (production + https origin only; CSP_UPGRADE_INSECURE overrides)
 ```
 
 ### How the nonce works in Next 16
@@ -78,5 +78,5 @@ Load them from a nonced script (`<Script nonce=...>` gets the nonce automaticall
 ## Known limits
 
 - Dev (`next dev`) adds `'unsafe-eval'` for React's debugging; production never does.
-- `upgrade-insecure-requests` is production only so `http://localhost` development keeps working.
+- `upgrade-insecure-requests` is emitted only in production AND when the public origin (`PUBLIC_BASE_URL`/`APP_URL`) is `https://`. It rewrites every `http://` subresource to `https://`, which breaks a plain-HTTP staging box (`ERR_SSL_PROTOCOL_ERROR` on each asset). `CSP_UPGRADE_INSECURE=true|false` forces it on/off (default: unset = automatic as above; production deploys through deploy.sh always have an https `APP_URL`, so it stays on there). Never in development.
 - Responses produced by the proxy itself (the 401/403/503 JSON, the login redirect) do not carry the page CSP; they contain no HTML.

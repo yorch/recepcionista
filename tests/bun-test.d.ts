@@ -11,4 +11,7 @@ declare module 'bun:test' {
   export function afterEach(fn: Fn): void;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   export function expect(value: unknown): any;
+  export namespace expect { function stringContaining(s: string): unknown; }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  export function spyOn(obj: any, method: string): { mockImplementation: (fn: (...args: any[]) => any) => { mockRestore: () => void }; mockRestore: () => void };
 }
