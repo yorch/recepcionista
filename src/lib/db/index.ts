@@ -5,7 +5,7 @@
  * `@/lib/types` (ISO date strings, not JS Dates), so no route, page or agent
  * tool ever touches Prisma types directly.
  */
-import { prisma } from './client';
+import { prisma, type DbClient } from './client';
 import { logger } from '@/lib/log';
 import { dayRange as zonedDayRange, tzOf, DEFAULT_TIMEZONE, isValidTimeZone } from '@/lib/time';
 import {
@@ -33,7 +33,7 @@ export * from './usage';
 /** Every write logs what changed; reads stay quiet (they are the hot path). */
 const log = logger('db');
 
-const DEFAULT_HOURS: Hours = {
+export const DEFAULT_HOURS: Hours = {
   monday: { open: '08:00', close: '18:00' },
   tuesday: { open: '08:00', close: '18:00' },
   wednesday: { open: '08:00', close: '18:00' },
@@ -330,8 +330,10 @@ export async function getBusinessByPhone(phone: string, country: string = defaul
 
 export async function createBusiness(
   input: Partial<Business> & { name: string },
+  /** Pass a transaction client to create the business atomically with other rows (e.g. signup: business + owner). */
+  db: DbClient = prisma,
 ): Promise<Business> {
-  const row = await prisma.business.create({
+  const row = await db.business.create({
     data: {
       name: input.name,
       url: input.url ?? null,
@@ -907,4 +909,4 @@ export async function disconnect(): Promise<void> {
   await prisma.$disconnect();
 }
 
-export const DEFAULT_HOURS_EXPORT = DEFAULT_HOURS;
+export const DEFAULT_HOURS_EXPORT = DEFAULT_HOURS; // kept for older imports

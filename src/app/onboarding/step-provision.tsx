@@ -39,7 +39,8 @@ export function ProvisionStep({ businessId, status, go, refresh }: StepProps) {
       else if (e.status === 409) {
         setError({ text: 'Your number is already being set up. Give it a moment, then check again.' });
         void refresh();
-      } else if (e.status === 403) setError({ text: 'This account cannot turn on a number yet. Everything you entered is saved. Please contact support to finish.' });
+      } else if (e.status === 403 && /email/i.test(e.message)) setError({ text: 'Confirm your email address first (check your inbox for our link), then try again. Everything you entered is saved.' });
+      else if (e.status === 403) setError({ text: 'This account cannot turn on a number yet. Everything you entered is saved. Please contact support to finish.' });
       else if (e.status === 429) setError({ text: 'Too many tries in a row. Wait a minute and try again.' });
       else if (e.status === 422) setError({ text: `We could not read your website: ${e.message}. Go back and enter your services by hand.` });
       else setError({ text: `${e.message}. Nothing was charged for a failed attempt. Try again.` });

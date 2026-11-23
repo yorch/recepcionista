@@ -101,8 +101,9 @@ designed for a server that already runs Traefik. See [DEPLOY.md](DEPLOY.md); the
 short version:
 
 ```sh
-cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN,
-                        # STRIPE_WEBHOOK_SECRET, provider keys
+cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN, APP_SECRET_KEY,
+                        # EMAIL_PROVIDER + EMAIL_FROM + its key, STRIPE_WEBHOOK_SECRET, provider keys
+                        # (every variable: docs/env-vars.md; deploy.sh refuses to run without the required ones)
 ./deploy.sh             # build, back up the DB, migrate, start
 ./deploy.sh --seed --i-know-this-wipes-data   # …plus the demo dataset (wipes data)
 ```
@@ -159,6 +160,10 @@ at a public host. Each item is a check, not a promise that the code does it.
 - [ ] `STRIPE_WEBHOOK_SECRET` is set, and `STRIPE_ALLOW_UNSIGNED` is unset.
 - [ ] `ELEVENLABS_WEBHOOK_SECRET` is set. Unsigned voice webhook calls are rejected.
 - [ ] `DEMO_MODE` is unset. `POST /api/demo/reset` is not reachable from the internet.
+- [ ] `APP_SECRET_KEY` (32 random bytes, base64) and a real `EMAIL_PROVIDER` (`resend`/`smtp`) are set: signup verification,
+      password reset and 2FA depend on them. With `BILLING_ENFORCED=true`: `STRIPE_PRICE_ID`, `STRIPE_BILLING_WEBHOOK_SECRET`, and
+      existing tenants comped first (`bun scripts/grandfather-existing.ts`, docs/billing.md).
+- [ ] Pages carry a nonce-based `Content-Security-Policy` (docs/security-headers.md); `bun run verify:deploy` passes.
 - [ ] Without a token, `/dashboard`, `/api/businesses` and `/api/sms/send` return
       401. Check this with `curl` against the public URL.
 - [ ] `STRIPE_SECRET_KEY` is a test key (`sk_test_…`) until the payment flow has

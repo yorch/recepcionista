@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
+import { connection } from 'next/server';
 import { Toaster } from 'sonner';
 import { SkipLink } from '@/components/ui/skip-link';
 import { siteUrl } from '@/app/site-config';
@@ -34,7 +35,10 @@ export const viewport: Viewport = {
   initialScale: 1,
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // Render every page per request: the Content-Security-Policy nonce is minted per request in src/proxy.ts and Next can
+  // only stamp it on scripts during request-time rendering, never into a prerendered (static) page.
+  await connection();
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
       <body className="min-h-screen">

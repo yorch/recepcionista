@@ -1,5 +1,5 @@
 import { ok, fail } from '@/lib/http';
-import { authenticate } from '@/lib/session';
+import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
@@ -60,11 +60,17 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
-  const auth = await authenticate(req, { role: 'admin' }); // buys numbers / creates agents: admin-only
+  // Buys a number / creates an agent: the OWNER of the business (verified email, billing gate below) or an admin.
+  const auth = await authenticate(req, { role: 'owner', verifiedEmail: true });
   if (!auth.ok) return auth.response as ReturnType<typeof fail>;
+  const { id } = await params;
+  try {
+    requireBusinessAccess(auth.principal, id); // another tenant's business is a 404, never confirmed
+  } catch (err) {
+    return (authErrorResponse(err) ?? fail(err, 500)) as ReturnType<typeof fail>;
+  }
   const limited = await limitRequest(req, 'businesses/provision', 5, 60_000, { globalLimit: 100 });
   if (limited) return limited as ReturnType<typeof fail>;
-  const { id } = await params;
   try {
     const run = await withLease(`provision:${id}`, PROVISION_LEASE_MS, (_lease, signal) => provision(req, id, signal, auth.principal));
     if (!run.acquired) return fail('provisioning already in progress', 409);
@@ -110,7 +116,8 @@ async function provision(
     let force = false;
     try {
       const body = await req.clone().json().catch(() => ({}));
-      force = Boolean((body as { force?: unknown })?.force);
+      // `force` rebuilds the KB from scratch and re-registers the agent: admin-only (owners get the idempotent path).
+      force = principal.kind === 'admin' && Boolean((body as { force?: unknown })?.force);
     } catch {
       force = false;
     }

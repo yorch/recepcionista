@@ -54,7 +54,7 @@ export function PlanStep({
   async function startTrial() {
     setError(null);
     try {
-      const res = await request<{ url?: string }>('/api/billing/checkout', { method: 'POST', body: { business_id: businessId } });
+      const res = await request<{ url?: string }>('/api/billing/checkout', { method: 'POST', body: { business_id: businessId, return_path: '/onboarding' } });
       if (!res.url) throw new Error('Checkout did not return a link. Please try again.');
       window.location.assign(res.url);
     } catch (err) {

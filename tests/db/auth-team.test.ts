@@ -206,8 +206,38 @@ suite('team management (postgres)', () => {
     expect(p1.events.length).toBe(2);
     expect(p1.next_before).toBeTruthy();
     const p2 = (await (await get('ownerA', `?limit=2&before=${encodeURIComponent(p1.next_before)}`)).json()).data;
-    expect(p2.events.every((e: any) => e.at < p1.next_before)).toBe(true);
+    expect(p2.events.every((e: any) => e.at <= p1.next_before.split('~')[0])).toBe(true);
+    expect(p2.events.some((e: any) => p1.events.some((x: any) => x.id === e.id))).toBe(false);
     expect((await get('ownerA', '?before=garbage')).status).toBe(422);
+    expect((await get('ownerA', '?before=2026-01-01T00:00:00.000Z~bad%20id')).status).toBe(422);
+  });
+
+  test('audit viewer: events sharing one timestamp are neither skipped nor repeated across pages (at,id cursor)', async () => {
+    const C = `biz_tc_${run}`;
+    await db.prisma.business.create({ data: { id: C, name: `Team ${C}`, status: 'live' } });
+    try {
+      const at = new Date(Date.now() + 3_600_000);
+      for (let i = 0; i < 7; i++) await db.recordAudit({ actor_kind: 'system', business_id: C, action: `tie.${i}`, target: 'x', at });
+      await db.recordAudit({ actor_kind: 'system', business_id: C, action: 'tie.older', target: 'x', at: new Date(at.getTime() - 5000) });
+      const seen: string[] = [];
+      let before: string | null = null;
+      for (let page = 0; page < 10; page++) {
+        const q: string = `?business_id=${C}&limit=3${before ? `&before=${encodeURIComponent(before)}` : ''}`;
+        const data = (await (await auditRoute.GET(req(`/api/team/audit${q}`, { headers: ADMIN }))).json()).data;
+        seen.push(...data.events.map((e: any) => e.action));
+        before = data.next_before;
+        if (!before) break;
+      }
+      expect(seen.length).toBe(8);
+      expect(new Set(seen).size).toBe(8);
+      expect(seen[seen.length - 1]).toBe('tie.older');
+      // legacy bare-timestamp cursor still works (strictly older rows)
+      const legacy = (await (await auditRoute.GET(req(`/api/team/audit?business_id=${C}&limit=50&before=${encodeURIComponent(at.toISOString())}`, { headers: ADMIN }))).json()).data;
+      expect(legacy.events.map((e: any) => e.action)).toEqual(['tie.older']);
+    } finally {
+      await db.prisma.auditEvent.deleteMany({ where: { businessId: C } });
+      await db.prisma.business.deleteMany({ where: { id: C } });
+    }
   });
 
   test('an admin user (DB role) can manage any business; the business switcher is just business_id', async () => {

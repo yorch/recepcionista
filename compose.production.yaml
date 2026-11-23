@@ -119,6 +119,10 @@ services:
     build:
       context: .
       target: runner
+      # Inlined at build time (see Dockerfile); changing them in .env needs `./deploy.sh` (it rebuilds).
+      args:
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}
+        NEXT_PUBLIC_PLAN_PRICE_DISPLAY: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY:-}
     image: ${APP_IMAGE:-recepcionista-app:local}
     restart: unless-stopped
     init: true
@@ -150,6 +154,13 @@ services:
       # whenever ELEVENLABS_API_KEY is set.
       ELEVENLABS_TOOL_SECRET: ${ELEVENLABS_TOOL_SECRET:-}
       ELEVENLABS_WEBHOOK_SECRET: ${ELEVENLABS_WEBHOOK_SECRET:-}
+      # Account lifecycle (docs/env-vars.md). deploy.sh enforces these before building:
+      # sealed TOTP secrets, and the mail provider for verification / reset / invite emails.
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      # Never true in production: the mock checkout / demo routes stay off.
+      DEMO_MODE: "false"
       # Only set true when Traefik is the sole path to the app (it overwrites X-Forwarded-For).
       TRUSTED_PROXY: ${TRUSTED_PROXY:-true}
       ALLOW_INSECURE_DEV: "false"

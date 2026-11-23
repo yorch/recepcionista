@@ -97,6 +97,11 @@ export function demoBusiness() {
     hours: DEMO_HOURS,
     serviceArea: ['Miami', 'Hialeah', 'Doral', 'Kendall', 'Miami Beach', 'Little Havana', 'Coral Gables', 'Homestead'],
     status: 'live',
+    // A demo install must work with BILLING_ENFORCED=true and without OWNER_PHONE_GRANDFATHER: the owner phone is
+    // verified and the business is on a (comped) active plan, so alerts, texts, calls and provisioning are all allowed.
+    ownerPhoneVerifiedAt: day(-14, 9),
+    billingStatus: 'active',
+    plan: 'demo',
     createdAt: day(-14, 9),
   };
 }

@@ -3,34 +3,10 @@ import type { NextConfig } from 'next';
 const isProd = process.env.NODE_ENV === 'production';
 
 /**
- * Content-Security-Policy.
- *
- * script-src keeps 'unsafe-inline' because Next's bootstrap/RSC payload scripts are inline. A strict
- * nonce + 'strict-dynamic' policy needs a per-request nonce minted in src/proxy.ts and every page
- * rendered dynamically (docs: content-security-policy); that touches the auth proxy and gives up static
- * pages, so it is a documented follow-up (docs/security-headers.md). Everything else is locked down:
- * no framing, no plugins, same-origin form posts and connections, and no mixed content in production.
- * Set CSP_REPORT_ONLY=true to ship the same policy as Content-Security-Policy-Report-Only while
- * watching for violations before enforcing it on a new deployment.
- * Dev needs 'unsafe-eval' (React debugging) and ws: (HMR).
+ * Content-Security-Policy is NOT set here: it carries a per-request nonce, so src/proxy.ts mints it (src/lib/csp.ts;
+ * rationale and the CSP_REPORT_ONLY / CSP_REPORT_URI switches in docs/security-headers.md). These are the static headers.
  */
-const csp = [
-  "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isProd ? '' : " 'unsafe-eval'"}`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data:",
-  `connect-src 'self'${isProd ? '' : ' ws: wss:'}`,
-  "media-src 'self' blob:",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-  ...(isProd ? ['upgrade-insecure-requests'] : []),
-].join('; ');
-
 const securityHeaders = [
-  { key: process.env.CSP_REPORT_ONLY === 'true' ? 'Content-Security-Policy-Report-Only' : 'Content-Security-Policy', value: csp },
   { key: 'X-Content-Type-Options', value: 'nosniff' },
   { key: 'X-Frame-Options', value: 'DENY' },
   { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },

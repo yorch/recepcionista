@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Card, CardHead } from '@/components/ui/card';
 import { getDashboardContext, requireRolePage } from '@/lib/dashboard-context';
-import { listAuditEvents } from '@/lib/db';
+import { auditCursor, listAuditEvents, parseAuditCursor } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Activity log' };
@@ -14,11 +14,11 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
   const ctx = await getDashboardContext();
   requireRolePage(ctx, 'owner');
   const sp = await searchParams;
-  const before = sp.before && !Number.isNaN(new Date(sp.before).getTime()) ? sp.before : undefined;
+  const before = sp.before && parseAuditCursor(sp.before) ? sp.before : undefined;
   const all = ctx.role === 'admin' && sp.all === '1';
   const rows = await listAuditEvents({ business_id: all ? undefined : ctx.business.id, before, limit: PAGE + 1 });
   const events = rows.slice(0, PAGE);
-  const nextBefore = rows.length > PAGE ? events[events.length - 1].at : null;
+  const nextBefore = rows.length > PAGE ? auditCursor(events[events.length - 1]) : null;
   const qs = (b: string) => `?before=${encodeURIComponent(b)}${all ? '&all=1' : ''}`;
   return (
     <main className="mx-auto w-full max-w-4xl px-6 py-8">

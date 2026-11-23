@@ -2,7 +2,7 @@ import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, requireVerifiedEmail, scopeBusinessId } from '@/lib/session';
 import { getBusiness, recordAudit } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
-import { billingMode, createCheckoutSession, returnBaseUrl } from '@/lib/providers/stripe-billing';
+import { billingMode, checkoutReturnPath, createCheckoutSession, returnBaseUrl } from '@/lib/providers/stripe-billing';
 import { ensureCustomer } from '@/lib/billing/customer';
 import { billingErrorResponse } from '@/lib/billing/http';
 
@@ -11,7 +11,7 @@ export const runtime = 'nodejs';
 
 /**
  * Owner (or admin): start a Stripe Checkout for the subscription with trial and a card on file.
- * Body: `{ business_id? }` (users are pinned to their own business; admins must name one).
+ * Body: `{ business_id?, return_path? }` (return_path: allowlisted same-origin page to come back to: /dashboard/billing (default) or /onboarding) (users are pinned to their own business; admins must name one).
  * Needs a verified email. Answers `{ url, mock }`; the browser then navigates to `url`.
  */
 export async function POST(req: Request) {
@@ -21,8 +21,9 @@ export async function POST(req: Request) {
   const limited = await limitRequest(req, 'billing/checkout', 10);
   if (limited) return limited;
   try {
-    const body = await readJson<{ business_id?: unknown }>(req).catch(() => ({} as { business_id?: unknown }));
+    const body = await readJson<{ business_id?: unknown; return_path?: unknown }>(req).catch(() => ({} as { business_id?: unknown; return_path?: unknown }));
     const requested = typeof body.business_id === 'string' && body.business_id ? body.business_id : null;
+    const returnPath = checkoutReturnPath(body.return_path);
     const businessId = scopeBusinessId(principal, requested);
     if (!businessId) return fail('business_id is required', 422);
     const business = await getBusiness(businessId);
@@ -36,7 +37,8 @@ export async function POST(req: Request) {
     const mode = billingMode(); // throws BillingConfigError -> 503 (always in production without Stripe)
 
     if (mode === 'mock') {
-      const url = `${returnBaseUrl()}/api/billing/mock-activate?business_id=${encodeURIComponent(business.id)}`;
+      const url = `${returnBaseUrl()}/api/billing/mock-activate?business_id=${encodeURIComponent(business.id)}`
+        + (returnPath === '/dashboard/billing' ? '' : `&return_path=${encodeURIComponent(returnPath)}`);
       return ok({ url, mock: true });
     }
 
@@ -44,7 +46,7 @@ export async function POST(req: Request) {
     const customerId = await ensureCustomer(business, email);
     // One free trial per business: a business that already had a subscription or trial starts paid.
     const withTrial = !business.trial_ends_at && !business.stripe_subscription_id;
-    const session = await createCheckoutSession({ business, customerId, withTrial });
+    const session = await createCheckoutSession({ business, customerId, withTrial, returnPath });
     await recordAudit({
       actor_kind: principal.kind === 'admin' && !principal.user ? 'admin_token' : 'user',
       actor_user_id: principal.kind === 'user' ? principal.user.id : principal.user?.id ?? null,

@@ -3,7 +3,10 @@
  * edit, and each reload would otherwise open a new pool until Postgres refuses
  * connections — the global cache is what makes hot reload survivable.
  */
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type Prisma } from '@prisma/client';
+
+/** The shared client or an interactive-transaction client: helpers that must join a caller's transaction accept either. */
+export type DbClient = PrismaClient | Prisma.TransactionClient;
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 

@@ -73,7 +73,7 @@ export function InfoStep({
     try {
       const id = await ensureBusiness(name.trim() || hostName(normalized), normalized);
       await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: { url: normalized } });
-      const ex = await apiRequest<ExtractionResult>('/api/extract', { body: { url: normalized }, timeoutMs: 90_000 });
+      const ex = await apiRequest<ExtractionResult>('/api/extract', { body: { url: normalized, business_id: id }, timeoutMs: 90_000 });
       setPhase(PHASES.length - 1);
       const draft = draftFromExtraction(ex, status?.owner_name ?? '');
       // Save immediately so a refresh (or another device) resumes at review with these values.
@@ -84,7 +84,8 @@ export function InfoStep({
       await onReady(draft, { source: ex.source, confidence: ex.confidence, url: normalized }, id);
     } catch (err) {
       const e2 = err as ApiError;
-      if (e2.status === 403) setFormError('Reading websites is not turned on for your account yet. Enter your details by hand below. It takes about two minutes.');
+      if (e2.status === 403 && /email/i.test(e2.message)) setFormError('Confirm your email address first (we sent you a link), then read your website. Or enter your details by hand below.');
+      else if (e2.status === 403) setFormError('Reading websites is not turned on for your account yet. Enter your details by hand below. It takes about two minutes.');
       else if (e2.status === 429) setFormError('Too many tries in a row. Wait a minute and try again, or enter your details by hand.');
       else setFormError(`${e2.message}. You can try again or enter your details by hand.`);
     } finally {

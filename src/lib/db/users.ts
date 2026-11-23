@@ -5,7 +5,7 @@
  * does not yield usable sessions.
  */
 import crypto from 'node:crypto';
-import { prisma } from './client';
+import { prisma, type DbClient } from './client';
 import type { SessionKind, User, UserRole, UserSession } from '@/lib/types';
 
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -73,7 +73,7 @@ export async function createUser(input: {
   email_verified?: boolean;
   /** E.164 (see toE164) or null. */
   phone?: string | null;
-}): Promise<User> {
+}, db: DbClient = prisma): Promise<User> {
   const email = normalizeEmail(input.email);
   if (!email || !email.includes('@')) throw new Error('createUser: invalid email');
   if (!ROLES.includes(input.role)) throw new Error('createUser: invalid role');
@@ -82,7 +82,7 @@ export async function createUser(input: {
     throw new Error('createUser: owner/staff need a business_id; admin must not have one');
   }
   try {
-    const row = await prisma.user.create({
+    const row = await db.user.create({
       data: {
         email, passwordHash: input.password_hash, role: input.role, businessId,
         emailVerifiedAt: input.email_verified ? new Date() : null,

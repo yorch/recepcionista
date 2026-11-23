@@ -63,16 +63,39 @@ export async function recordAudit(input: AuditInput): Promise<boolean> {
   }
 }
 
-/** Newest first. `before` is an ISO timestamp cursor (exclusive). */
+/** Opaque-ish page cursor: the (at, id) of the last row of a page, `<iso>~<id>`. */
+export function auditCursor(e: Pick<AuditEvent, 'at' | 'id'>): string {
+  return `${e.at}~${e.id}`;
+}
+
+/** Parse a cursor: `<iso>~<id>` (composite) or a bare ISO timestamp (legacy, timestamp only). Null when malformed. */
+export function parseAuditCursor(raw: string | undefined | null): { at: Date; id: string | null } | null {
+  if (!raw) return null;
+  const k = raw.indexOf('~');
+  const iso = k === -1 ? raw : raw.slice(0, k);
+  const id = k === -1 ? null : raw.slice(k + 1);
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime()) || (id !== null && !/^[A-Za-z0-9_-]{1,64}$/.test(id))) return null;
+  return { at, id };
+}
+
+/**
+ * Newest first (at DESC, id DESC). `before` is the previous page's cursor (see auditCursor), exclusive: rows that
+ * share the cursor's timestamp are paged by id, so events with equal timestamps are neither skipped nor repeated.
+ * A bare ISO timestamp is still accepted (strictly older rows only).
+ */
 export async function listAuditEvents(opts: {
   business_id?: string; actor_user_id?: string; action?: string; before?: string; limit?: number;
 } = {}): Promise<AuditEvent[]> {
+  const cur = parseAuditCursor(opts.before);
   const rows = await prisma.auditEvent.findMany({
     where: {
       ...(opts.business_id ? { businessId: opts.business_id } : {}),
       ...(opts.actor_user_id ? { actorUserId: opts.actor_user_id } : {}),
       ...(opts.action ? { action: opts.action } : {}),
-      ...(opts.before ? { at: { lt: new Date(opts.before) } } : {}),
+      ...(cur
+        ? { OR: [{ at: { lt: cur.at } }, ...(cur.id ? [{ at: cur.at, id: { lt: cur.id } }] : [])] }
+        : {}),
     },
     orderBy: [{ at: 'desc' }, { id: 'desc' }],
     take: Math.min(Math.max(opts.limit ?? 50, 1), 500),

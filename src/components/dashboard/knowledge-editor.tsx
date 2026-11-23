@@ -77,7 +77,7 @@ export function KnowledgeEditor({
     if (!business.url) return;
     if (dirty && !window.confirm('Your unsaved edits are kept. The website only fills gaps and adds what is missing. Continue?')) return;
     try {
-      const ex = await request<ExtractionResult>('/api/extract', { method: 'POST', body: { url: business.url }, timeoutMs: 90_000 });
+      const ex = await request<ExtractionResult>('/api/extract', { method: 'POST', body: { url: business.url, business_id: businessId }, timeoutMs: 90_000 });
       const { draft: merged, summary } = mergeExtraction(draft, ex);
       setDraft(merged);
       setExtractedFrom(business.url);

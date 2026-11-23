@@ -3,7 +3,7 @@ import { isPublicPath, normalizePath, clientKey } from '../src/lib/auth';
 
 describe('isPublicPath', () => {
   test('known public paths', () => {
-    for (const p of ['/', '/login', '/api/health', '/api/auth/login', '/api/voice/tools/create_booking', '/pay/bk_1', '/favicon.ico', '/_next/static/chunk.js', '/api/pay/mock-complete',
+    for (const p of ['/', '/robots.txt', '/sitemap.xml', '/login', '/api/health', '/api/auth/login', '/api/voice/tools/create_booking', '/pay/bk_1', '/favicon.ico', '/_next/static/chunk.js', '/api/pay/mock-complete',
       '/signup', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite', '/login/mfa',
       '/api/auth/signup', '/api/auth/verify-email', '/api/auth/resend-verification', '/api/auth/forgot-password', '/api/auth/reset-password',
       '/api/auth/accept-invite', '/api/auth/mfa', '/api/auth/logout']) {

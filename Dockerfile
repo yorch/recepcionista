@@ -45,6 +45,13 @@ FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# NEXT_PUBLIC_* values are inlined into the bundle at BUILD time (the .env file is not in the build context), so they
+# arrive as build args from compose (app.build.args). Public values only: never put a secret in these.
+ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY=""
+ARG NEXT_PUBLIC_PLAN_PRICE_DISPLAY=""
+ENV NEXT_PUBLIC_TURNSTILE_SITE_KEY=$NEXT_PUBLIC_TURNSTILE_SITE_KEY \
+    NEXT_PUBLIC_PLAN_PRICE_DISPLAY=$NEXT_PUBLIC_PLAN_PRICE_DISPLAY
+
 # `next build` evaluates route modules, and several of them construct clients
 # from their env at import time. The dummy URL satisfies that without a database
 # ever being contacted — it is scoped to this RUN so it is not part of the image

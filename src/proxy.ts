@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
+import { API_CSP, cspHeadersFor, newNonce } from '@/lib/csp';
 import {
   authConfig, checkSameOrigin, hasAdminCredentials, hasBearer, hasSessionCookie, isPublicPath, SAFE_METHODS, userSessionTokenFrom,
 } from '@/lib/auth';
@@ -16,10 +17,22 @@ export async function proxy(req: NextRequest) {
   // header of the same name is never trusted. Used only to let admins who must enrol in 2FA reach the security page.
   const forwarded = new Headers(req.headers);
   forwarded.set('x-rc-pathname', pathname);
-  const next = () => NextResponse.next({ request: { headers: forwarded } });
+  const isApi = pathname.startsWith('/api/');
+  // Content-Security-Policy with a per-request nonce (docs/security-headers.md). The policy goes on the REQUEST too:
+  // Next.js reads the nonce from it while rendering and stamps it on its own scripts. A client-sent CSP/nonce header is
+  // always overwritten here, never trusted.
+  const csp = cspHeadersFor(newNonce());
+  forwarded.delete('content-security-policy-report-only');
+  forwarded.set('content-security-policy', csp.enforced);
+  forwarded.delete('x-nonce');
+  const withCsp = (res: NextResponse): NextResponse => {
+    if (isApi) res.headers.set('Content-Security-Policy', API_CSP);
+    else for (const [k, v] of csp.response) res.headers.set(k, v);
+    return res;
+  };
+  const next = () => withCsp(NextResponse.next({ request: { headers: forwarded } }));
   if (isPublicPath(pathname)) return next();
 
-  const isApi = pathname.startsWith('/api/');
   const cfg = authConfig();
   if (cfg.mode === 'misconfigured') {
     if (isApi) return NextResponse.json({ ok: false, error: 'server auth not configured' }, { status: 503 });

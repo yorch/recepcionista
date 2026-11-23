@@ -9,7 +9,7 @@ import { acceptsSubscription, fromUnix, idOf, mapStripeStatus, subscriptionPatch
 import { bannerFor, daysLeft } from '../src/lib/billing/banner-state';
 import { renderBillingEmail } from '../src/lib/billing/emails';
 import { assertProvisioningAllowed, BillingRequiredError } from '../src/lib/billing/gate';
-import { billingMode, BillingConfigError, trialDays, createCheckoutSession } from '../src/lib/providers/stripe-billing';
+import { billingMode, BillingConfigError, trialDays, createCheckoutSession, checkoutReturnPath } from '../src/lib/providers/stripe-billing';
 import { AuthError, requireVerifiedEmail, type Principal } from '../src/lib/session';
 import type { User } from '../src/lib/types';
 
@@ -229,6 +229,36 @@ describe('stripe-billing provider config', () => {
       globalThis.fetch = real;
       for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
       Object.assign(process.env, saved);
+    }
+  });
+});
+
+describe('checkout return_path', () => {
+  test('allowlist: exact same-origin paths only, anything else falls back to the billing page', () => {
+    expect(checkoutReturnPath('/onboarding')).toBe('/onboarding');
+    expect(checkoutReturnPath('/dashboard/billing')).toBe('/dashboard/billing');
+    for (const bad of [undefined, null, 5, '', '/dashboard', '/onboarding?x=1', '/onboarding/', 'https://evil.test/onboarding', '//evil.test', '/\\evil.test', '/onboarding#a', '/onboarding/../api']) {
+      expect(checkoutReturnPath(bad)).toBe('/dashboard/billing');
+    }
+  });
+
+  test('success/cancel URLs honour the validated path', async () => {
+    const real = globalThis.fetch;
+    const forms: URLSearchParams[] = [];
+    globalThis.fetch = (async (_u: string, init: RequestInit) => {
+      forms.push(init.body as URLSearchParams);
+      return new Response(JSON.stringify({ id: 'cs_1', url: 'https://checkout.test/1' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const env = { STRIPE_SECRET_KEY: 'sk_test_x', STRIPE_PRICE_ID: 'price_x', PUBLIC_BASE_URL: 'https://app.test' } as unknown as NodeJS.ProcessEnv;
+      const b = { id: 'b1', name: 'B' };
+      await createCheckoutSession({ business: b, customerId: 'cus_1', withTrial: true, returnPath: '/onboarding' }, env);
+      await createCheckoutSession({ business: b, customerId: 'cus_1', withTrial: true }, env);
+      expect(forms[0].get('success_url')).toBe('https://app.test/onboarding?checkout=success');
+      expect(forms[0].get('cancel_url')).toBe('https://app.test/onboarding?checkout=cancel');
+      expect(forms[1].get('success_url')).toBe('https://app.test/dashboard/billing?checkout=success');
+    } finally {
+      globalThis.fetch = real;
     }
   });
 });

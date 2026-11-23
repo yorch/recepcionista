@@ -3,7 +3,7 @@ import { fail } from '@/lib/http';
 import { demoModeEnabled } from '@/lib/auth';
 import { authenticate, scopeBusinessId } from '@/lib/session';
 import { getBusiness, recordAudit, setBillingState } from '@/lib/db';
-import { returnBaseUrl, trialDays, planName } from '@/lib/providers/stripe-billing';
+import { checkoutReturnPath, returnBaseUrl, trialDays, planName } from '@/lib/providers/stripe-billing';
 import { billingErrorResponse } from '@/lib/billing/http';
 
 export const dynamic = 'force-dynamic';
@@ -37,7 +37,7 @@ export async function GET(req: Request) {
       actor_kind: 'user', actor_user_id: auth.principal.kind === 'user' ? auth.principal.user.id : auth.principal.user?.id ?? null,
       business_id: business.id, action: 'billing.mock_activated', target: `business:${business.id}`,
     });
-    return NextResponse.redirect(`${returnBaseUrl()}/dashboard/billing?checkout=success`, 303);
+    return NextResponse.redirect(`${returnBaseUrl()}${checkoutReturnPath(new URL(req.url).searchParams.get('return_path'))}?checkout=success`, 303);
   } catch (err) {
     return billingErrorResponse(err);
   }

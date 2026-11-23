@@ -10,7 +10,7 @@ Not legal advice.
    `DATABASE_URL=<scratch> bunx prisma migrate deploy`. Read the migration list for anything that rewrites or
    deletes data (for example `20261124120000` rewrites stored prompts). Only then run it against production.
    Take a fresh backup (`pg_dump -Fc`) immediately before the real run and note its filename.
-2. **Environment variables** (`.env.example` is the source of truth). Required in production: `APP_URL` (https),
+2. **Environment variables** (`.env.example` is the template; docs/env-vars.md tabulates every variable and deploy.sh enforces the required ones). Also required in production: `APP_SECRET_KEY`, `EMAIL_PROVIDER` (`resend`/`smtp`) with `EMAIL_FROM` and its key, and with `BILLING_ENFORCED=true` also `STRIPE_PRICE_ID` and `STRIPE_BILLING_WEBHOOK_SECRET` (then comp existing tenants first: docs/billing.md). Required in production: `APP_URL` (https),
    `ADMIN_TOKEN`, `DATABASE_URL`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`,
    `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `ELEVENLABS_API_KEY`, `ELEVENLABS_WEBHOOK_SECRET`,
    `ELEVENLABS_TOOL_SECRET`, `ELEVENLABS_PHONE_NUMBER_ID` and the LLM key. `ELEVENLABS_TOOL_SECRET_ID`
@@ -58,14 +58,14 @@ Record the results (date, who, call ids) in the release notes. A failure in 1, 7
 
 ```
 APP_URL=https://app.example.com TWILIO_AUTH_TOKEN=... STRIPE_WEBHOOK_SECRET=... \
-ELEVENLABS_WEBHOOK_SECRET=... ELEVENLABS_TOOL_SECRET=... [PUBLIC_BASE_URL=...] bun run verify:deploy [--strict]
+STRIPE_BILLING_WEBHOOK_SECRET=... ELEVENLABS_WEBHOOK_SECRET=... ELEVENLABS_TOOL_SECRET=... [PUBLIC_BASE_URL=...] bun run verify:deploy [--strict]
 ```
 
 Run it from an operator machine with the same secrets as the server. It is read-only: forged requests use benign
 event shapes (ignored Stripe type, `post_call_audio`, an SMS to a number no business owns) and never write rows.
 A secret that is not exported is SKIPped (`--strict` turns skips into failures). Failures of the form "ACCEPTS
 correctly signed" mean the secret you hold differs from the server's, or `PUBLIC_BASE_URL`/scheme differs from the
-URL Twilio signs. It prints a PASS/FAIL table and never prints secrets. Security-header checks require headers
+URL Twilio signs. It also checks `POST /api/voice/initiation` (401 without the tool secret; with it, 200 and a well-formed body for an unknown agent), `/api/billing/webhook` (unsigned/badly signed rejected, a signed synthetic event acknowledged), that `/login`, `/signup`, `/robots.txt` and `/sitemap.xml` are public, and that every mutating `/api/auth/*` endpoint refuses a cross-site cookie POST. It prints a PASS/FAIL table and never prints secrets. Security-header checks require headers
 (CSP, X-Content-Type-Options, X-Frame-Options/frame-ancestors, Referrer-Policy, Permissions-Policy, HSTS on https)
 on `/login` and `/pay/*`; fix the deployment (app or Traefik middleware) if they fail.
 
@@ -136,7 +136,8 @@ provisioning, and do these in the UI if the API route did not take effect (or se
 3. Find the stragglers: `SELECT id, name FROM businesses WHERE owner_phone IS NOT NULL AND owner_phone_verified_at IS NULL;`
 4. Unset `OWNER_PHONE_GRANDFATHER` and redeploy. From then on unverified numbers get no alerts (log
    `owner_alert.owner_unverified`, sms_log status `blocked_owner_unverified`, and the voice tool tells the caller the owner was not notified).
-Demo installs: keep `OWNER_PHONE_GRANDFATHER=true`.
+Alternatively verify and comp every existing business in one step with `bun scripts/grandfather-existing.ts` (dry run by default, `--apply` to write; docs/billing.md).
+Demo installs need none of this: `scripts/seed.ts` creates the demo business with a verified owner phone and `billing_status='active'`.
 
 **Usage caps.** `BILLING_ENFORCED=true` turns plan caps on. Over the SMS cap customer texts are logged `blocked_cap` (owner alerts,
 STOP/HELP replies and verification codes still go out and are counted). Over the call-minutes cap `/api/voice/initiation` and

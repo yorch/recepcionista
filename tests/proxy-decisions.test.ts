@@ -49,7 +49,7 @@ async function decide(path: string, headers: Record<string, string> = {}): Promi
 describe('proxy with ADMIN_TOKEN set', () => {
   test('public paths pass without credentials', async () => {
     setEnv({ ADMIN_TOKEN: TOKEN });
-    for (const p of ['/', '/login', '/api/health', '/api/voice/post-call', '/api/voice/incoming', '/api/payments/webhook', '/api/voice/tools/create_booking', '/pay/abc', '/api/sms/gratitude-reply', '/signup', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite', '/login/mfa', '/api/auth/signup', '/api/auth/mfa']) {
+    for (const p of ['/', '/robots.txt', '/sitemap.xml', '/login', '/api/health', '/api/voice/post-call', '/api/voice/incoming', '/api/payments/webhook', '/api/voice/tools/create_booking', '/pay/abc', '/api/sms/gratitude-reply', '/signup', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite', '/login/mfa', '/api/auth/signup', '/api/auth/mfa']) {
       expect([p, await decide(p)]).toEqual([p, 'next']);
     }
   });
@@ -94,6 +94,7 @@ describe('proxy with ADMIN_TOKEN set', () => {
       '/api/payments/webhook/../create-link',
       '/api/auth/login/../../businesses',
       '/pay', // only /pay/<id> is public
+      '/robots.txt/x', '/sitemap.xml/../dashboard', '/robots.txt.bak', '/sitemap.xml%2f',
       '/API/businesses',
       '/api/businesses;/x',
       '/api/voice/post-call%00',

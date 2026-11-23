@@ -104,10 +104,29 @@ Optional fields: `trial_ends_at`, `current_period_end` (ISO date or `null`), `sm
 for the plan default). Every call is audited (`billing.admin_override`). Comp accounts must not be linked to a Stripe customer: a later Stripe
 event for a linked customer overwrites the status. Admins also bypass the provisioning gate, so you can provision on a customer's behalf.
 
+#### Bulk: `scripts/grandfather-existing.ts` (recommended for more than a handful of tenants)
+
+```sh
+bun scripts/grandfather-existing.ts --force-i-know            # DRY RUN (default): lists what would change, writes nothing
+bun scripts/grandfather-existing.ts --force-i-know --apply    # comps them
+```
+
+Run it where `DATABASE_URL` points at the production database (on the production host, through the one-shot tools container: `docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/grandfather-existing.ts --force-i-know [--apply]`; this only runs the script, nothing is seeded).
+It uses the same safe-database guard as `seed`/`db-reset`: databases without a whole `dev`/`test`/`scratch`/`local` word in the name need `--force-i-know`;
+read the dry-run output first. For every business with `billing_status='none'` and no Stripe subscription it sets `billing_status='active'`, `plan='legacy'`;
+where an `owner_phone` is stored but unverified it sets `owner_phone_verified_at` (alerts keep flowing; owners can re-verify in Settings). Businesses with any
+other billing state are untouched, so it is idempotent and safe to re-run; each change is audited (`billing.grandfathered`).
+
+#### Owner phones without the script: `OWNER_PHONE_GRANDFATHER`
+
+Owner alerts only go to a *verified* owner phone. `OWNER_PHONE_GRANDFATHER=true` is the runtime alternative to the script's phone step: every existing
+`owner_phone` is treated as verified until its owner re-verifies, so a deploy does not silence alerts. It does not touch billing (use the script or
+`/api/admin/billing` for that). Turn it off once owners have verified. The seeded demo business is created already verified and `active`, so a demo install needs neither.
+
 ### 6. Turn it on
 
 1. Verify in test mode (checklist below).
-2. Comp the existing tenants (step 5) and confirm with `GET /api/billing/status?business_id=<id>` (`provisioning_allowed: true`).
+2. Comp the existing tenants (step 5: `scripts/grandfather-existing.ts`) and confirm with `GET /api/billing/status?business_id=<id>` (`provisioning_allowed: true`).
 3. Switch to live keys (live price id, live webhook endpoint and secret), set `BILLING_ENFORCED=true`, redeploy.
 4. Roll back by unsetting `BILLING_ENFORCED`: nothing is refused again (billing data is kept).
 

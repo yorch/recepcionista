@@ -85,19 +85,20 @@ export async function takeGlobalSignupSlot(): Promise<boolean> {
 
 /**
  * Create the business (minimal fields, billing_status 'none', status 'onboarding') and its owner
- * (email unverified) together. Returns null when the email already has an account.
+ * (email unverified) in ONE transaction: a crash or a lost race for the address rolls the business back too,
+ * so no orphan business can exist. Returns null when the email already has an account.
  * Nothing paid is provisioned here: that waits for a verified email and the billing flow.
- * If the user insert loses a race for the address, the business just created is removed again.
  */
 export async function createSignupAccount(input: { email: string; passwordHash: string; businessName: string }): Promise<{ user: User; businessId: string } | null> {
   if (await getUserByEmail(input.email)) return null;
-  const business = await createBusiness({ name: input.businessName });
   try {
-    const user = await createUser({ email: input.email, password_hash: input.passwordHash, role: 'owner', business_id: business.id, email_verified: false });
-    return { user, businessId: business.id };
+    return await prisma.$transaction(async (tx) => {
+      const business = await createBusiness({ name: input.businessName }, tx);
+      const user = await createUser({ email: input.email, password_hash: input.passwordHash, role: 'owner', business_id: business.id, email_verified: false }, tx);
+      return { user, businessId: business.id };
+    });
   } catch (err) {
-    await prisma.business.deleteMany({ where: { id: business.id } }).catch(() => undefined);
-    if (err instanceof EmailTakenError) return null;
+    if (err instanceof EmailTakenError) return null; // lost the race for the address: the transaction rolled the business back
     throw err;
   }
 }

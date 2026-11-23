@@ -11,6 +11,11 @@
  *   - ElevenLabs:  `post_call_audio` event (acknowledged and ignored)
  *   - Stripe:      `verify_deploy.synthetic` event type (acknowledged and ignored)
  *   - Tool route:  call with a bogus agent id (passes the secret check, then answers ok:false: no tenant, no write)
+ *   - Initiation:  POST /api/voice/initiation with a bogus agent id (passes the secret check, 200 with a well-formed
+ *                  conversation_initiation_client_data body and an EMPTY business_id: no tenant, no call row)
+ *   - Billing:     `verify_deploy.synthetic` event type signed with STRIPE_BILLING_WEBHOOK_SECRET (acknowledged and ignored)
+ * Also checks the public pages (/login, /signup, /robots.txt, /sitemap.xml) and that every mutating /api/auth/* endpoint
+ * refuses a cross-site cookie POST.
  * /api/voice/incoming is checked for rejection only: a validly signed call would create a call row.
  * Secrets are never printed. Exit code 1 if any check fails; secrets that are not set are SKIPped (counted as
  * a failure with --strict).
@@ -28,6 +33,7 @@ const SIGN_BASE = (process.env.PUBLIC_BASE_URL || BASE).trim().replace(/\/+$/, '
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const STRIPE_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const EL_SECRET = process.env.ELEVENLABS_WEBHOOK_SECRET;
+const BILLING_SECRET = process.env.STRIPE_BILLING_WEBHOOK_SECRET;
 const TOOL_SECRET = process.env.ELEVENLABS_TOOL_SECRET;
 
 type Status = 'PASS' | 'FAIL' | 'SKIP';
@@ -92,7 +98,9 @@ async function main() {
     await check(`blocked unauth ${method} ${path}`, async () => {
       const r = await http(path, { method, ...(method === 'POST' ? { headers: { 'content-type': 'application/json' }, body: '{}' } : {}) });
       // 404 is acceptable for odd paths that simply do not exist; leaking content (2xx) is not.
-      expect(blocked(r) || r.status === 404 || r.status === 400 || r.status === 405, `status ${r.status} (expected 401/403/login redirect)`);
+      // 308 = Next's canonical trailing-slash redirect (no content; the redirect target is itself checked as the un-slashed path)
+      const canonical = r.status === 308 && path.endsWith('/') && (r.headers.get('location') ?? '').replace(/^https?:\/\/[^/]+/, '') === path.slice(0, -1);
+      expect(blocked(r) || canonical || r.status === 404 || r.status === 400 || r.status === 405, `status ${r.status} (expected 401/403/login redirect)`);
       return `${r.status}`;
     });
   }
@@ -212,6 +220,76 @@ async function main() {
     const j = (await r.json()) as { ok?: boolean };
     expect(j.ok === false, 'synthetic agent unexpectedly resolved a tenant');
     return '200 ok:false';
+  });
+
+  // ElevenLabs conversation-initiation webhook (native Twilio path): same shared secret header as the tools.
+  const initPost = (secret?: string) =>
+    http('/api/voice/initiation', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(secret ? { 'x-recepcionista-tool-secret': secret } : {}) },
+      body: JSON.stringify({ agent_id: `agent_${SYN}`, caller_id: NOT_A_NUMBER, called_number: NOT_A_NUMBER, call_sid: `CA${SYN}`, conversation_id: `conv_${SYN}` }),
+    });
+  await check('Initiation webhook rejects missing/invalid tool secret', async () => {
+    const a = await initPost();
+    const b = await initPost('not-the-secret');
+    expect(a.status === 401, `missing: status ${a.status}`);
+    expect(b.status === 401, `wrong: status ${b.status}`);
+    return '401/401';
+  });
+  await check('Initiation webhook accepts the tool secret (unknown agent -> 200, well-formed, no tenant)', async () => {
+    if (!TOOL_SECRET) return { skip: 'ELEVENLABS_TOOL_SECRET not set here' };
+    const r = await initPost(TOOL_SECRET);
+    expect(r.status === 200, `status ${r.status} (tool secret differs from the server's)`);
+    const j = (await r.json()) as { type?: string; dynamic_variables?: { business_id?: string }; conversation_config_override?: unknown };
+    expect(j.type === 'conversation_initiation_client_data', `unexpected body type ${String(j.type)}`);
+    expect(j.dynamic_variables?.business_id === '', 'a synthetic agent unexpectedly resolved a tenant');
+    expect(j.conversation_config_override === undefined, 'no disclosure override may be sent for an unknown tenant');
+    return '200 well-formed, no tenant';
+  });
+
+  // Stripe BILLING webhook (subscriptions; a different endpoint secret from the deposit webhook).
+  const bbBody = JSON.stringify({ id: `evt_${SYN}`, object: 'event', type: 'verify_deploy.synthetic', data: { object: {} } });
+  const bbPost = (sig?: string) =>
+    http('/api/billing/webhook', { method: 'POST', headers: { 'content-type': 'application/json', ...(sig ? { 'stripe-signature': sig } : {}) }, body: bbBody });
+  await check('Billing webhook rejects unsigned and bad signature', async () => {
+    const a = await bbPost();
+    const b = await bbPost(stripeSign('whsec_not_the_secret', bbBody));
+    // 400 invalid signature; 503 = STRIPE_BILLING_WEBHOOK_SECRET unset on the server (refuses everything, still safe)
+    expect(a.status === 400 || a.status === 503, `unsigned: status ${a.status}`);
+    expect(b.status === 400 || b.status === 503, `bad sig: status ${b.status}`);
+    return `${a.status}/${b.status}`;
+  });
+  await check('Billing webhook ACCEPTS correctly signed synthetic event (ignored type)', async () => {
+    if (!BILLING_SECRET) return { skip: 'STRIPE_BILLING_WEBHOOK_SECRET not set here' };
+    const r = await bbPost(stripeSign(BILLING_SECRET, bbBody));
+    expect(r.status === 200, `status ${r.status} (secret differs from the billing endpoint's signing secret)`);
+    return '200';
+  });
+
+  // Public pages and crawler files must be reachable without credentials.
+  for (const path of ['/login', '/signup', '/robots.txt', '/sitemap.xml']) {
+    await check(`public ${path} is reachable`, async () => {
+      const r = await http(path);
+      expect(r.status === 200, `status ${r.status} (expected 200; a redirect to /login means the path is not on the public allowlist)`);
+      return '200';
+    });
+  }
+
+  // Mutating /api/auth/* endpoints must refuse a cross-site cookie POST (CSRF), whether or not the cookie is real.
+  const authPosts = ['login', 'logout', 'signup', 'mfa', 'verify-email', 'resend-verification', 'forgot-password', 'reset-password', 'accept-invite',
+    '2fa/enroll', '2fa/confirm', '2fa/disable', '2fa/recovery-codes', 'sessions/revoke-others', 'revoke-admin-sessions'];
+  await check(`cross-site cookie POST refused on ${authPosts.length} /api/auth/* endpoints`, async () => {
+    const bad: string[] = [];
+    for (const p of authPosts) {
+      const r = await http(`/api/auth/${p}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: 'rc_user_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' },
+        body: '{}',
+      });
+      if (r.status !== 403 && r.status !== 401) bad.push(`${p}:${r.status}`);
+    }
+    expect(bad.length === 0, `not refused: ${bad.join(', ')}`);
+    return '403';
   });
 
   // 4. security headers on public pages

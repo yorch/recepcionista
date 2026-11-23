@@ -71,6 +71,26 @@ integration('billing routes (postgres)', () => {
     expect(body.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}`);
   });
 
+  test('checkout: return_path is allowlisted (mock activation returns to /onboarding, hostile values are ignored)', async () => {
+    const biz = await newBusiness();
+    const owner = await login(biz.id, 'owner');
+    const ok = await json(await checkout(req('POST', '/api/billing/checkout', owner, { return_path: '/onboarding' })));
+    expect(ok.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}&return_path=%2Fonboarding`);
+    const evil = await json(await checkout(req('POST', '/api/billing/checkout', owner, { return_path: 'https://evil.test/' })));
+    expect(evil.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}`);
+    await withEnv({ DEMO_MODE: 'true' }, async () => {
+      const act = await mockActivate(req('GET', `/api/billing/mock-activate?business_id=${biz.id}&return_path=%2Fonboarding`, owner));
+      expect(act.status).toBe(303);
+      expect(act.headers.get('location')).toBe('https://app.example.test/onboarding?checkout=success');
+    });
+    const biz2 = await newBusiness();
+    const owner2 = await login(biz2.id, 'owner');
+    await withEnv({ DEMO_MODE: 'true' }, async () => {
+      const act = await mockActivate(req('GET', `/api/billing/mock-activate?business_id=${biz2.id}&return_path=//evil.test`, owner2));
+      expect(act.headers.get('location')).toBe('https://app.example.test/dashboard/billing?checkout=success');
+    });
+  });
+
   test('checkout refuses: unauthenticated, staff, unverified email', async () => {
     const biz = await newBusiness();
     expect((await checkout(req('POST', '/api/billing/checkout', null, {}))).status).toBe(401);

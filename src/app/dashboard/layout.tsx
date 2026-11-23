@@ -30,6 +30,12 @@ export default async function DashboardLayout({ children }: { children: React.Re
       />
       <div className="min-w-0 flex-1">
         <Suspense fallback={null}><OnboardingReturn unprovisioned={!live && isOwner} /></Suspense>
+        {ctx.principal.kind === 'user' && !ctx.principal.email_verified ? (
+          <div role="status" className="border-b border-warn-line bg-warn-bg px-4 py-3 text-[13px] text-warn sm:px-6">
+            Confirm your email address ({ctx.who}) to start your plan and turn on your receptionist. We sent you a link.{' '}
+            <Link href="/verify-email-sent" className="font-semibold underline underline-offset-2">Send it again</Link>
+          </div>
+        ) : null}
         <BillingBanner business={biz} canManage={isOwner} />
         {!live && isOwner ? (
           <div role="status" className="border-b border-warn-line bg-warn-bg px-4 py-3 text-[13px] text-warn sm:px-6">

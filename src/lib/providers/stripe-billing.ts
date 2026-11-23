@@ -63,6 +63,18 @@ export function returnBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   return 'http://localhost:3000';
 }
 
+/** Same-origin paths a Checkout may return to (the checkout=success|cancel query is appended). */
+export const CHECKOUT_RETURN_PATHS = ['/dashboard/billing', '/onboarding'] as const;
+export type CheckoutReturnPath = (typeof CHECKOUT_RETURN_PATHS)[number];
+
+/**
+ * Validate a client-supplied `return_path` against the allowlist (exact match only: no query, fragment, host or
+ * traversal can ride along, so it can never become an open redirect). Anything else yields the billing page.
+ */
+export function checkoutReturnPath(raw: unknown): CheckoutReturnPath {
+  return typeof raw === 'string' && (CHECKOUT_RETURN_PATHS as readonly string[]).includes(raw) ? (raw as CheckoutReturnPath) : '/dashboard/billing';
+}
+
 async function stripe<T>(method: 'GET' | 'POST', path: string, form?: URLSearchParams): Promise<T> {
   let res: Response;
   try {
@@ -109,6 +121,8 @@ export interface CheckoutInput {
   customerId: string;
   /** false when this business already used its trial (no second free trial). */
   withTrial: boolean;
+  /** Where Stripe sends the browser back to (default the billing page); see checkoutReturnPath. */
+  returnPath?: CheckoutReturnPath;
 }
 
 /** Subscription Checkout Session: trial + card collected up front. Returns the hosted URL. */
@@ -132,8 +146,9 @@ export async function createCheckoutSession(input: CheckoutInput, env: NodeJS.Pr
     form.set('subscription_data[trial_settings][end_behavior][missing_payment_method]', 'cancel');
   }
   if (env.BILLING_ALLOW_PROMO_CODES === 'true') form.set('allow_promotion_codes', 'true');
-  form.set('success_url', `${base}/dashboard/billing?checkout=success`);
-  form.set('cancel_url', `${base}/dashboard/billing?checkout=cancel`);
+  const back = checkoutReturnPath(input.returnPath);
+  form.set('success_url', `${base}${back}?checkout=success`);
+  form.set('cancel_url', `${base}${back}?checkout=cancel`);
   const json = await stripe<{ id: string; url?: string }>('POST', '/checkout/sessions', form);
   if (!json.url) throw new BillingProviderError('Stripe returned no checkout url');
   return { url: json.url, id: json.id };

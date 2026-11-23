@@ -26,6 +26,8 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
   const [phone, setPhone] = useState(initial);
   const [code, setCode] = useState('');
   const [sentTo, setSentTo] = useState<string | null>(null);
+  /** Signed challenge from /verify/start: echoed back with the phone and code to /verify/confirm. */
+  const [challenge, setChallenge] = useState<string | null>(null);
   const [cooldown, setCooldown] = useState(0);
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const [codeError, setCodeError] = useState<string | null>(null);
@@ -50,7 +52,8 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
           method: 'PATCH', body: { owner_phone: e164, ...(name.trim() ? { owner_name: name.trim() } : {}) },
         });
       }
-      await request(`/api/businesses/${businessId}/owner-phone/verify/start`, { method: 'POST', body: { phone: e164 } });
+      const started = await request<{ challenge: string }>(`/api/businesses/${businessId}/owner-phone/verify/start`, { method: 'POST', body: { phone: e164 } });
+      setChallenge(started.challenge);
       setSentTo(e164);
       setCooldown(RESEND_SECONDS);
       toast.success(`Code sent to ${prettyPhone(e164)}`);
@@ -64,11 +67,13 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
     setCodeError(null);
     const digits = code.replace(/\D/g, '');
     if (digits.length < 4) { setCodeError('Enter the code from the text message.'); return; }
+    if (!challenge || !sentTo) { setCodeError('Request a new code first.'); return; }
     try {
-      await request(`/api/businesses/${businessId}/owner-phone/verify/confirm`, { method: 'POST', body: { code: digits } });
+      await request(`/api/businesses/${businessId}/owner-phone/verify/confirm`, { method: 'POST', body: { phone: sentTo, code: digits, challenge } });
       toast.success('Phone verified');
       setChanging(false);
       setSentTo(null);
+      setChallenge(null);
       setCode('');
       await refresh();
     } catch (err) {

@@ -3,6 +3,7 @@ import { Card, CardHead } from '@/components/ui/card';
 import { SettingsForm } from '@/components/dashboard/settings-form';
 import { DEFAULT_DISCLOSURE, MAX_DISCLOSURE_LENGTH } from '@/lib/kb/disclosure';
 import { tzOf } from '@/lib/time';
+import Link from 'next/link';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,6 +20,20 @@ export default async function SettingsPage() {
           What the receptionist says about recording, and how long customer data is kept.
         </p>
       </header>
+
+      <Card className="mt-6">
+        <CardHead title="Your alert phone" subtitle="Emergency, hand-off and payment texts go only to a number you have verified" />
+        <div className="p-4 text-[13px] text-[#c4cedb]">
+          {biz.owner_phone_verified_at ? (
+            <p>{biz.owner_phone} is verified. Alerts go there.</p>
+          ) : (
+            <p>
+              {biz.owner_phone ? `${biz.owner_phone} is not verified, so alerts are not sent to it. ` : 'No alert phone yet. '}
+              <Link href="/onboarding?step=verify" className="font-semibold text-[#ffb08a] underline underline-offset-2">Verify your phone</Link>
+            </p>
+          )}
+        </div>
+      </Card>
 
       <Card className="mt-6">
         <CardHead title="Call disclosure and retention" subtitle={biz.name} />

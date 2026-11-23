@@ -105,6 +105,21 @@ suite('account lifecycle (postgres)', () => {
       expect(mail.to(e).length).toBe(1); // second notice inside the hour is suppressed
     });
 
+    test('atomic: a failure creating the owner rolls the business back (no orphan business)', async () => {
+      const { createSignupAccount } = await import('../../src/lib/signup');
+      const name = `Orphan Check ${run}`;
+      await expect(createSignupAccount({ email: 'no-at-sign', passwordHash: 'x'.repeat(20), businessName: name })).rejects.toThrow();
+      expect(await db.prisma.business.count({ where: { name } })).toBe(0);
+      const e = email('atomic');
+      userEmails.push(e);
+      const ok = await createSignupAccount({ email: e, passwordHash: 'x'.repeat(20), businessName: name });
+      bizIds.push(ok!.businessId);
+      expect(ok!.user.business_id).toBe(ok!.businessId);
+      expect(await db.prisma.business.count({ where: { name } })).toBe(1);
+      expect(await createSignupAccount({ email: e, passwordHash: 'x'.repeat(20), businessName: name })).toBeNull(); // existing address
+      expect(await db.prisma.business.count({ where: { name } })).toBe(1);
+    });
+
     test('validation: weak password, junk email, junk business name', async () => {
       expect((await doSignup(email('v1'), { password: 'short' })).status).toBe(422);
       expect((await doSignup(email('v2'), { password: 'aaaaaaaaaaaaaaaa' })).status).toBe(422);
