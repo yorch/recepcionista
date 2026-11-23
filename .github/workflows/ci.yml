@@ -34,7 +34,7 @@ jobs:
       # and the checks below never contact the database.
       DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci?schema=public
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
