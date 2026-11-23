@@ -10,6 +10,7 @@ import {
 import { appUrl } from '@/lib/providers/stripe';
 import { generateTextSafe } from '@/lib/providers/llm';
 import { ok, fail, readJson } from '@/lib/http';
+import { demoModeEnabled, internalAuthHeaders } from '@/lib/auth';
 import { logger } from '@/lib/log';
 import type { Booking, Call, PaymentLink, SmsLog } from '@/lib/types';
 
@@ -91,7 +92,7 @@ async function post<T>(path: string, body: unknown): Promise<T | null> {
   try {
     const res = await fetch(`${appUrl()}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...internalAuthHeaders() },
       body: JSON.stringify(body),
     });
     const json = await res.json();
@@ -103,6 +104,7 @@ async function post<T>(path: string, body: unknown): Promise<T | null> {
 }
 
 export async function POST(req: Request) {
+  if (!demoModeEnabled()) return fail('not found', 404);
   try {
     const body = await readJson<Body>(req);
     const scriptId: Script = body.script ?? 'routine';

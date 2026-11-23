@@ -7,6 +7,12 @@
  */
 import { prisma } from './client';
 import { logger } from '@/lib/log';
+import { dayRange as zonedDayRange, tzOf, DEFAULT_TIMEZONE, isValidTimeZone } from '@/lib/time';
+import {
+  bookingInterval, clampDuration, intervalsOverlap, validateSlot, MAX_DURATION_MIN,
+  type Interval, type SlotRejection,
+} from '@/lib/availability';
+import { phoneKey } from '@/lib/format';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
   Service, FAQ, BriefingStats,
@@ -46,6 +52,7 @@ function toBusiness(row: any): Business {
     service_area: (row.serviceArea ?? []) as string[],
     status: row.status,
     agent_id: row.agentId ?? null,
+    timezone: tzOf(row.timezone),
     created_at: isoReq(row.createdAt),
   };
 }
@@ -67,6 +74,7 @@ function toCall(row: any): Call {
   return {
     id: row.id,
     business_id: row.businessId,
+    call_sid: row.callSid ?? null,
     caller_phone: row.callerPhone ?? null,
     caller_name: row.callerName ?? null,
     started_at: isoReq(row.startedAt),
@@ -91,6 +99,7 @@ function toBooking(row: any): Booking {
     customer_phone: row.customerPhone,
     service: row.service,
     scheduled_at: isoReq(row.scheduledAt),
+    duration_minutes: row.durationMinutes ?? 60,
     address: row.address ?? null,
     price_estimate: row.priceEstimate ?? null,
     deposit_amount: row.depositAmount ?? null,
@@ -129,6 +138,7 @@ function toSms(row: any): SmsLog {
 /** Domain patch -> Prisma column names. Only defined keys are written. */
 function callPatch(patch: Partial<Call>) {
   const out: Record<string, unknown> = {};
+  if (patch.call_sid !== undefined) out.callSid = patch.call_sid;
   if (patch.caller_phone !== undefined) out.callerPhone = patch.caller_phone;
   if (patch.caller_name !== undefined) out.callerName = patch.caller_name;
   if (patch.started_at !== undefined) out.startedAt = new Date(patch.started_at);
@@ -151,6 +161,7 @@ function bookingPatch(patch: Partial<Booking>) {
   if (patch.customer_phone !== undefined) out.customerPhone = patch.customer_phone;
   if (patch.service !== undefined) out.service = patch.service;
   if (patch.scheduled_at !== undefined) out.scheduledAt = new Date(patch.scheduled_at);
+  if (patch.duration_minutes !== undefined) out.durationMinutes = clampDuration(patch.duration_minutes);
   if (patch.address !== undefined) out.address = patch.address;
   if (patch.price_estimate !== undefined) out.priceEstimate = patch.price_estimate;
   if (patch.deposit_amount !== undefined) out.depositAmount = patch.deposit_amount;
@@ -163,7 +174,8 @@ function businessPatch(patch: Partial<Business>) {
   const out: Record<string, unknown> = {};
   if (patch.name !== undefined) out.name = patch.name;
   if (patch.url !== undefined) out.url = patch.url;
-  if (patch.phone !== undefined) out.phone = patch.phone;
+  if (patch.phone !== undefined) { out.phone = patch.phone; out.phoneKey = phoneKey(patch.phone); }
+  if (patch.timezone !== undefined && isValidTimeZone(patch.timezone)) out.timezone = patch.timezone;
   if (patch.owner_phone !== undefined) out.ownerPhone = patch.owner_phone;
   if (patch.owner_name !== undefined) out.ownerName = patch.owner_name;
   if (patch.hours !== undefined) out.hours = patch.hours;
@@ -173,11 +185,9 @@ function businessPatch(patch: Partial<Business>) {
   return out;
 }
 
-/** local YYYY-MM-DD day bounds in America/New_York, as a UTC range */
-function dayRange(date: string): { gte: Date; lt: Date } {
-  const gte = new Date(`${date}T00:00:00-05:00`);
-  const lt = new Date(gte.getTime() + 24 * 60 * 60 * 1000);
-  return { gte, lt };
+/** Local YYYY-MM-DD day bounds in the business zone, as a UTC range (DST-correct). */
+function dayRange(date: string, tz: string = DEFAULT_TIMEZONE): { gte: Date; lt: Date } {
+  return zonedDayRange(date, tz);
 }
 
 // ---------- businesses ----------
@@ -191,10 +201,11 @@ export async function getBusiness(id: ID): Promise<Business | null> {
   return row ? toBusiness(row) : null;
 }
 
+/** Indexed lookup on the normalized (last-10-digit) phone key — no table scan. */
 export async function getBusinessByPhone(phone: string): Promise<Business | null> {
-  const digits = phone.replace(/\D/g, '').slice(-10);
-  const rows = await prisma.business.findMany({ where: { phone: { not: null } } });
-  const row = rows.find((r) => r.phone && r.phone.replace(/\D/g, '').slice(-10) === digits);
+  const key = phoneKey(phone);
+  if (!key) return null;
+  const row = await prisma.business.findFirst({ where: { phoneKey: key }, orderBy: { createdAt: 'asc' } });
   return row ? toBusiness(row) : null;
 }
 
@@ -206,6 +217,8 @@ export async function createBusiness(
       name: input.name,
       url: input.url ?? null,
       phone: input.phone ?? null,
+      phoneKey: phoneKey(input.phone),
+      timezone: isValidTimeZone(input.timezone) ? input.timezone : DEFAULT_TIMEZONE,
       ownerPhone: input.owner_phone ?? null,
       ownerName: input.owner_name ?? null,
       hours: (input.hours ?? DEFAULT_HOURS) as object,
@@ -238,28 +251,29 @@ export async function getKnowledgeBase(businessId: ID): Promise<KnowledgeBase | 
   return row ? toKnowledgeBase(row) : null;
 }
 
+/** Merges: only keys present in `patch` are written; everything else is preserved. */
 export async function upsertKnowledgeBase(
   businessId: ID,
   patch: Partial<Omit<KnowledgeBase, 'id' | 'business_id' | 'updated_at'>>,
 ): Promise<KnowledgeBase> {
-  const data = {
-    services: (patch.services ?? []) as object,
-    faqs: (patch.faqs ?? []) as object,
-    pricingNotes: patch.pricing_notes ?? '',
-    systemPrompt: patch.system_prompt ?? '',
-    callScript: patch.call_script ?? '',
-  };
+  const data: Record<string, unknown> = {};
+  if (patch.services !== undefined) data.services = patch.services as object;
+  if (patch.faqs !== undefined) data.faqs = patch.faqs as object;
+  if (patch.pricing_notes !== undefined) data.pricingNotes = patch.pricing_notes;
+  if (patch.system_prompt !== undefined) data.systemPrompt = patch.system_prompt;
+  if (patch.call_script !== undefined) data.callScript = patch.call_script;
 
-  const existing = await prisma.knowledgeBase.findUnique({ where: { businessId } });
-  const row = existing
-    ? await prisma.knowledgeBase.update({ where: { businessId }, data })
-    : await prisma.knowledgeBase.create({ data: { businessId, ...data } });
+  const row = await prisma.knowledgeBase.upsert({
+    where: { businessId },
+    update: data,
+    create: { businessId, ...data },
+  });
   log.debug('knowledge_base.saved', {
     business: businessId,
-    created: !existing,
-    services: (patch.services ?? []).length,
-    faqs: (patch.faqs ?? []).length,
-    prompt_chars: (patch.system_prompt ?? '').length,
+    fields: Object.keys(data),
+    services: (row.services as unknown[] | null)?.length ?? 0,
+    faqs: (row.faqs as unknown[] | null)?.length ?? 0,
+    prompt_chars: row.systemPrompt.length,
   });
   return toKnowledgeBase(row);
 }
@@ -269,6 +283,7 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
   const row = await prisma.call.create({
     data: {
       businessId: input.business_id,
+      callSid: input.call_sid ?? null,
       callerPhone: input.caller_phone ?? null,
       callerName: input.caller_name ?? null,
       startedAt: input.started_at ? new Date(input.started_at) : new Date(),
@@ -311,11 +326,52 @@ export async function getCall(id: ID): Promise<Call | null> {
   return row ? toCall(row) : null;
 }
 
-export async function listCalls(businessId?: ID, date?: string): Promise<Call[]> {
+export async function getCallBySid(callSid: string): Promise<Call | null> {
+  if (!callSid) return null;
+  const row = await prisma.call.findUnique({ where: { callSid } });
+  return row ? toCall(row) : null;
+}
+
+/**
+ * Resolve the live call a tool belongs to. Strict order: explicit id, then SID, then —
+ * only when unambiguous — the single in-progress call (optionally for this caller phone)
+ * in the last few hours. Two concurrent callers => null rather than the wrong call.
+ */
+export async function findActiveCall(
+  businessId: ID,
+  hint: { callId?: string; callSid?: string; callerPhone?: string } = {},
+  windowMs = 3 * 60 * 60 * 1000,
+): Promise<Call | null> {
+  if (hint.callId) {
+    const row = await prisma.call.findFirst({ where: { id: hint.callId, businessId } });
+    if (row) return toCall(row);
+  }
+  if (hint.callSid) {
+    const row = await prisma.call.findFirst({ where: { callSid: hint.callSid, businessId } });
+    if (row) return toCall(row);
+  }
+  const key = phoneKey(hint.callerPhone);
+  const rows = await prisma.call.findMany({
+    where: {
+      businessId,
+      status: 'in_progress',
+      startedAt: { gte: new Date(Date.now() - windowMs) },
+    },
+    orderBy: { startedAt: 'desc' },
+    take: 5,
+  });
+  if (key) {
+    const mine = rows.filter((r) => phoneKey(r.callerPhone) === key);
+    if (mine.length >= 1) return toCall(mine[0]);
+  }
+  return rows.length === 1 ? toCall(rows[0]) : null;
+}
+
+export async function listCalls(businessId?: ID, date?: string, tz?: string): Promise<Call[]> {
   const row = await prisma.call.findMany({
     where: {
       ...(businessId ? { businessId } : {}),
-      ...(date ? { startedAt: dayRange(date) } : {}),
+      ...(date ? { startedAt: dayRange(date, tz) } : {}),
     },
     orderBy: { startedAt: 'desc' },
   });
@@ -323,40 +379,129 @@ export async function listCalls(businessId?: ID, date?: string): Promise<Call[]>
 }
 
 // ---------- bookings ----------
-export async function createBooking(input: Partial<Booking> & {
-  business_id: ID; customer_name: string; customer_phone: string;
-  service: string; scheduled_at: string;
-}): Promise<Booking> {
-  const row = await prisma.booking.create({
-    data: {
-      businessId: input.business_id,
-      callId: input.call_id ?? null,
-      customerName: input.customer_name,
-      customerPhone: input.customer_phone,
-      service: input.service,
-      scheduledAt: new Date(input.scheduled_at),
-      address: input.address ?? null,
-      priceEstimate: input.price_estimate ?? null,
-      depositAmount: input.deposit_amount ?? null,
-      depositPaid: input.deposit_paid ?? false,
-      status: input.status ?? 'confirmed',
-    },
-  });
+export type BookingRejection = SlotRejection | 'slot_taken' | 'invalid_time' | 'business_not_found';
+
+/** Thrown by createBooking when the slot cannot be booked; `reason` is machine-readable. */
+export class BookingRejectedError extends Error {
+  constructor(public reason: BookingRejection) {
+    super(`booking rejected: ${reason}`);
+    this.name = 'BookingRejectedError';
+  }
+}
+
+/** Postgres exclusion violation (23P01) / unique violation, however Prisma surfaces it. */
+function isOverlapViolation(err: unknown): boolean {
+  const e = err as { code?: string; message?: string; meta?: { code?: string; message?: string } };
+  const text = `${e?.message ?? ''} ${e?.meta?.message ?? ''}`;
+  return (
+    e?.meta?.code === '23P01' || e?.code === '23P01' ||
+    /bookings_no_overlap|exclusion constraint|23P01/i.test(text)
+  );
+}
+
+/**
+ * Atomically books a slot: advisory lock per business, re-validation (not in the past,
+ * inside opening hours and finishing by close), duration-overlap check against
+ * non-cancelled bookings, insert. A Postgres exclusion constraint is the backstop.
+ * Throws BookingRejectedError for any business-rule rejection. Pass `{ enforce: false }`
+ * to skip only the past/hours validation (overlap is always enforced).
+ */
+export async function createBooking(
+  input: Partial<Booking> & {
+    business_id: ID; customer_name: string; customer_phone: string;
+    service: string; scheduled_at: string;
+  },
+  opts: { enforce?: boolean } = {},
+): Promise<Booking> {
+  const enforce = opts.enforce ?? true;
+  const start = new Date(input.scheduled_at);
+  if (Number.isNaN(start.getTime())) throw new BookingRejectedError('invalid_time');
+  const duration = clampDuration(input.duration_minutes);
+  const candidate: Interval = { start: start.getTime(), end: start.getTime() + duration * 60_000 };
+  const status = input.status ?? 'confirmed';
+
+  let row;
+  try {
+    row = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.business_id}))`;
+      const biz = await tx.business.findUnique({ where: { id: input.business_id } });
+      if (!biz) throw new BookingRejectedError('business_not_found');
+
+      if (enforce) {
+        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now());
+        if (!v.ok) throw new BookingRejectedError(v.reason);
+      }
+
+      if (status !== 'cancelled') {
+        const near = await tx.booking.findMany({
+          where: {
+            businessId: input.business_id,
+            status: { not: 'cancelled' },
+            scheduledAt: {
+              gte: new Date(candidate.start - MAX_DURATION_MIN * 60_000),
+              lt: new Date(candidate.end),
+            },
+          },
+          select: { scheduledAt: true, durationMinutes: true },
+        });
+        const clash = near.some((b) => intervalsOverlap(candidate, bookingInterval({
+          scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes,
+        })));
+        if (clash) throw new BookingRejectedError('slot_taken');
+      }
+
+      return tx.booking.create({
+        data: {
+          businessId: input.business_id,
+          callId: input.call_id ?? null,
+          customerName: input.customer_name,
+          customerPhone: input.customer_phone,
+          service: input.service,
+          scheduledAt: start,
+          durationMinutes: duration,
+          address: input.address ?? null,
+          priceEstimate: input.price_estimate ?? null,
+          depositAmount: input.deposit_amount ?? null,
+          depositPaid: input.deposit_paid ?? false,
+          status,
+        },
+      });
+    });
+  } catch (err) {
+    if (err instanceof BookingRejectedError) throw err;
+    if (isOverlapViolation(err)) throw new BookingRejectedError('slot_taken');
+    throw err;
+  }
+
   log.info('booking.created', {
     id: row.id,
     business: input.business_id,
     service: input.service,
     at: input.scheduled_at,
-    deposit: input.deposit_amount ?? null,
+    minutes: duration,
+    deposit_cents: input.deposit_amount ?? null,
   });
   return toBooking(row);
 }
 
-export async function listBookings(businessId?: ID, date?: string): Promise<Booking[]> {
+export async function listBookings(businessId?: ID, date?: string, tz?: string): Promise<Booking[]> {
   const rows = await prisma.booking.findMany({
     where: {
       ...(businessId ? { businessId } : {}),
-      ...(date ? { scheduledAt: dayRange(date) } : {}),
+      ...(date ? { scheduledAt: dayRange(date, tz) } : {}),
+    },
+    orderBy: { scheduledAt: 'asc' },
+  });
+  return rows.map(toBooking);
+}
+
+/** Bookings scheduled for, or created on, a local calendar day (briefing bucketing). */
+export async function listBookingsForDay(businessId: ID, date: string, tz?: string): Promise<Booking[]> {
+  const range = dayRange(date, tz);
+  const rows = await prisma.booking.findMany({
+    where: {
+      businessId,
+      OR: [{ scheduledAt: range }, { createdAt: range }],
     },
     orderBy: { scheduledAt: 'asc' },
   });
@@ -381,9 +526,55 @@ export async function updateBooking(id: ID, patch: Partial<Booking>): Promise<Bo
   }
 }
 
-export async function getBookedSlots(businessId: ID, date: string): Promise<string[]> {
-  const bookings = await listBookings(businessId, date);
-  return bookings.map((b) => b.scheduled_at);
+/**
+ * Blocked time ranges (non-cancelled bookings, scheduled_at + duration) that intersect
+ * [fromMs, toMs). One ranged query — replaces whole-history scans.
+ */
+export async function listBlockingIntervals(businessId: ID, fromMs: number, toMs: number): Promise<Interval[]> {
+  const rows = await prisma.booking.findMany({
+    where: {
+      businessId,
+      status: { not: 'cancelled' },
+      scheduledAt: { gte: new Date(fromMs - MAX_DURATION_MIN * 60_000), lt: new Date(toMs) },
+    },
+    select: { scheduledAt: true, durationMinutes: true },
+  });
+  return rows
+    .map((b) => bookingInterval({ scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes }))
+    .filter((iv) => iv.end > fromMs && iv.start < toMs);
+}
+
+/** Start instants (ISO) of non-cancelled bookings on a local day. Kept for compatibility. */
+export async function getBookedSlots(businessId: ID, date: string, tz?: string): Promise<string[]> {
+  const { gte, lt } = dayRange(date, tz);
+  const intervals = await listBlockingIntervals(businessId, gte.getTime(), lt.getTime());
+  return intervals.map((iv) => new Date(iv.start).toISOString());
+}
+
+/**
+ * Record a successful deposit (Stripe webhook / demo checkout). Idempotent; sets
+ * deposit_paid + deposit_amount (integer cents); only a `pending` booking becomes
+ * `confirmed` — cancelled/completed bookings keep their status.
+ */
+export async function markDepositPaid(bookingId: string, amountCents: number): Promise<{ updated: boolean }> {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    log.warn('deposit.invalid_amount', { booking: bookingId, amount_cents: amountCents });
+    return { updated: false };
+  }
+  const paid = await prisma.booking.updateMany({
+    where: {
+      id: bookingId,
+      OR: [{ depositPaid: false }, { depositAmount: null }, { depositAmount: { not: amountCents } }],
+    },
+    data: { depositPaid: true, depositAmount: amountCents },
+  });
+  const confirmed = await prisma.booking.updateMany({
+    where: { id: bookingId, status: 'pending' },
+    data: { status: 'confirmed' },
+  });
+  const updated = paid.count > 0 || confirmed.count > 0;
+  if (updated) log.info('deposit.paid', { booking: bookingId, amount_cents: amountCents, confirmed: confirmed.count > 0 });
+  return { updated };
 }
 
 // ---------- briefings ----------

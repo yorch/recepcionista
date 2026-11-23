@@ -2,6 +2,7 @@ import { fail, ok, readJson } from '@/lib/http';
 import { getBooking, getBusiness } from '@/lib/db';
 import { paymentLinkSms, type Lang } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
+import { limitRequest } from '@/lib/ratelimit';
 import { createPaymentLink } from '@/lib/providers/stripe';
 import type { SmsLog } from '@/lib/types';
 
@@ -14,6 +15,8 @@ export interface PaymentLinkSmsResult {
 }
 
 export async function POST(req: Request) {
+  const limited = limitRequest(req, 'sms/payment-link', 10);
+  if (limited) return limited;
   try {
     const body = await readJson<{
       business_id?: string;
@@ -22,8 +25,6 @@ export async function POST(req: Request) {
       amount_cents?: number;
       description?: string;
       language?: Lang;
-      /** Pre-built link from the voice tool's create_payment_link — reuse it. */
-      url?: string;
     }>(req);
 
     const business = body.business_id ? await getBusiness(body.business_id) : null;
@@ -39,9 +40,9 @@ export async function POST(req: Request) {
     const description = body.description?.trim()
       || `${business.name} deposit${booking ? ` — ${booking.service}` : ''}`;
 
-    const link = body.url
-      ? { url: body.url, id: '', amount_cents: amountCents, mock: true }
-      : await createPaymentLink(amountCents, description, business.name);
+    // Always generate the link server-side; any caller-supplied `url` is ignored
+    // (otherwise this route is an open "SMS arbitrary link" primitive).
+    const link = await createPaymentLink(Math.round(amountCents), description, business.name);
 
     const text = paymentLinkSms({
       business,

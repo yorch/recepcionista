@@ -64,6 +64,13 @@ COPY prisma ./prisma
 COPY scripts ./scripts
 COPY src ./src
 
+# Run as an unprivileged uid, like the runner. The sources stay root-owned and
+# read-only to this user. HOME points at /tmp because bunx and the Prisma CLI
+# write caches under $HOME, and /tmp is writable by any user.
+ENV HOME=/tmp
+RUN getent passwd 1000 >/dev/null || useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin app
+USER 1000:1000
+
 # `prisma migrate deploy` — idempotent, applies only pending migrations.
 CMD ["bunx", "prisma", "migrate", "deploy"]
 

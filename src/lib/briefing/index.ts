@@ -5,41 +5,40 @@
  */
 import { generateTextSafe } from '@/lib/providers/llm';
 import {
-  createBriefing, getBusiness, listBookings, listCalls,
+  createBriefing, getBusiness, listBookingsForDay, listCalls,
 } from '@/lib/db';
+import { isDateKey, localDateKey, tzOf } from '@/lib/time';
+import { formatCents } from '@/lib/money';
 import type { Booking, Briefing, Business, Call } from '@/lib/types';
 import { synthesizeBriefing } from './tts';
 import { logger } from '@/lib/log';
 
 const log = logger('briefing');
 
-const TZ = 'America/New_York';
 const MIN_WORDS = 90;
 const MAX_WORDS = 160;
 
-function dayKey(date = new Date()): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(date);
-}
-
-function clock(iso: string): string {
+// All clock/day rendering is in the BUSINESS zone, never the process zone.
+function clock(iso: string, tz: string): string {
   return new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TZ,
+    hour: 'numeric', minute: '2-digit', hour12: true, timeZone: tz,
   }).format(new Date(iso));
 }
 
-function spanishClock(iso: string): string {
+function spanishClock(iso: string, tz: string): string {
   return new Intl.DateTimeFormat('es-US', {
-    hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TZ,
+    hour: 'numeric', minute: '2-digit', hour12: true, timeZone: tz,
   }).format(new Date(iso));
 }
 
-function weekday(iso: string): string {
-  return new Intl.DateTimeFormat('es-US', { weekday: 'long', timeZone: TZ }).format(new Date(iso));
+function weekday(iso: string, tz: string): string {
+  return new Intl.DateTimeFormat('es-US', { weekday: 'long', timeZone: tz }).format(new Date(iso));
 }
 
-function money(n?: number | null): string {
-  if (n == null) return 'el precio acordado';
-  return `$${Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+/** Cents in, spoken-ready dollars out. */
+function money(cents?: number | null): string {
+  if (cents == null) return 'el precio acordado';
+  return formatCents(cents);
 }
 
 function nameOf(booking: Booking): string {
@@ -51,12 +50,11 @@ function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
-async function gather(businessId: string, date: string) {
-  const calls = await listCalls(businessId, date);
-  const allBookings = await listBookings(businessId);
-  const bookings = allBookings.filter(
-    (b) => b.scheduled_at.startsWith(date) || b.created_at.startsWith(date),
-  );
+async function gather(businessId: string, date: string, tz?: string) {
+  // One consistent local-day range (business zone) for both calls and bookings, in SQL.
+  const calls = await listCalls(businessId, date, tz);
+  // Cancelled bookings are excluded from stats and narration alike.
+  const bookings = (await listBookingsForDay(businessId, date, tz)).filter((b) => b.status !== 'cancelled');
   const flagged = calls.filter((c) => c.flagged_reason);
 
   const revenue = bookings.reduce((sum, b) => {
@@ -93,6 +91,7 @@ function fallbackScript(
   data: Awaited<ReturnType<typeof gather>>,
 ): string {
   const owner = business.owner_name || 'Jorge';
+  const tz = tzOf(business);
   const { calls, bookings, flagged, deposits } = data;
   const parts: string[] = [`Hola ${owner}.`];
 
@@ -121,20 +120,20 @@ function fallbackScript(
   } else if (upcoming.length === 1) {
     const b = upcoming[0];
     parts.push(
-      `Se cerró una cita: ${nameOf(b)}, ${b.service.toLowerCase()}, el ${weekday(b.scheduled_at)} a las ${spanishClock(b.scheduled_at)}, por ${money(b.price_estimate)}.`,
+      `Se cerró una cita: ${nameOf(b)}, ${b.service.toLowerCase()}, el ${weekday(b.scheduled_at, tz)} a las ${spanishClock(b.scheduled_at, tz)}, por ${money(b.price_estimate)}.`,
     );
   } else {
     const list = upcoming
       .slice(0, 3)
-      .map((b) => `${nameOf(b)} el ${weekday(b.scheduled_at)} a las ${spanishClock(b.scheduled_at)} para ${b.service.toLowerCase()}`)
+      .map((b) => `${nameOf(b)} el ${weekday(b.scheduled_at, tz)} a las ${spanishClock(b.scheduled_at, tz)} para ${b.service.toLowerCase()}`)
       .join('; ');
     parts.push(`Se cerraron ${upcoming.length} citas: ${list}.`);
   }
 
   if (deposits > 0) {
-    parts.push(`Ya entraron $${deposits.toLocaleString('en-US')} en depósitos, así que ese dinero está seguro.`);
+    parts.push(`Ya entraron ${formatCents(deposits)} en depósitos, así que ese dinero está seguro.`);
   } else if (data.stats.revenue > 0) {
-    parts.push(`El día cerró alrededor de $${data.stats.revenue.toLocaleString('en-US')} en trabajo.`);
+    parts.push(`El día cerró alrededor de ${formatCents(data.stats.revenue)} en trabajo.`);
   }
 
   const handled = calls.filter((c) => c.summary).length;
@@ -170,6 +169,7 @@ async function narrate(
   date: string,
 ): Promise<string> {
   const fallback = fallbackScript(business, data);
+  const tz = tzOf(business);
 
   const facts = {
     owner: business.owner_name ?? 'Jorge',
@@ -185,14 +185,14 @@ async function narrate(
     bookings: data.bookings.map((b: Booking) => ({
       customer: b.customer_name,
       service: b.service,
-      at: `${weekday(b.scheduled_at)} ${clock(b.scheduled_at)}`,
-      price: b.price_estimate,
+      at: `${weekday(b.scheduled_at, tz)} ${clock(b.scheduled_at, tz)}`,
+      price_usd: b.price_estimate == null ? null : b.price_estimate / 100,
       deposit_paid: b.deposit_paid,
-      deposit: b.deposit_amount,
+      deposit_usd: b.deposit_amount == null ? null : b.deposit_amount / 100,
       status: b.status,
     })),
-    deposits_collected: data.deposits,
-    total_revenue: data.stats.revenue,
+    deposits_collected_usd: data.deposits / 100,
+    total_revenue_usd: data.stats.revenue / 100,
   };
 
   const { value } = await generateTextSafe(
@@ -233,8 +233,11 @@ export async function generateBriefing(businessId: string, date?: string): Promi
     throw new Error('business not found');
   }
 
-  const day = date ?? dayKey();
-  const data = await gather(businessId, day);
+  const tz = tzOf(business);
+  const day = date ?? localDateKey(new Date(), tz);
+  // The date becomes a DB key and part of an audio file path: accept only a real calendar date.
+  if (!isDateKey(day)) throw new Error('invalid date: expected YYYY-MM-DD');
+  const data = await gather(businessId, day, tz);
   log.info('generate.start', {
     business: businessId,
     date: day,

@@ -115,6 +115,10 @@ services:
       # return URLs are built from this — so it must be the public https origin
       # and must match DOMAIN. deploy.sh refuses to run when they disagree.
       APP_URL: ${APP_URL:?Set APP_URL in .env (https://<DOMAIN>)}
+      # Fail closed: without these, the owner dashboard/API is unauthenticated
+      # and Stripe webhooks can be forged. deploy.sh also checks both.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env (openssl rand -hex 32)}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?Set STRIPE_WEBHOOK_SECRET in .env}
     volumes:
       # Briefing audio is written at runtime and served as /audio/<file>.mp3.
       # The volume overrides the image's (empty) directory, which is why the

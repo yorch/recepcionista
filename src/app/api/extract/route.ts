@@ -1,11 +1,14 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { extractFromUrl, ExtractionError } from '@/lib/extraction';
+import { limitRequest } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
 import type { ExtractionResult } from '@/lib/types';
 
 const log = logger('api/extract');
 
 export async function POST(req: Request): Promise<ReturnType<typeof ok<ExtractionResult>> | ReturnType<typeof fail>> {
+  const limited = limitRequest(req, 'extract', 10);
+  if (limited) return limited as ReturnType<typeof fail>;
   let requested = '';
   try {
     const { url } = await readJson<{ url?: string }>(req);

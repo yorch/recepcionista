@@ -5,6 +5,7 @@
 import { logger } from '@/lib/log';
 
 const log = logger('llm');
+const LLM_TIMEOUT_MS = 30_000;
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
 export interface LlmJsonOptions<T> {
@@ -47,6 +48,7 @@ async function callOpenAi(messages: ChatMessage[], temperature: number): Promise
         authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
     });
     if (res.ok) {
       const json = await res.json();
@@ -93,6 +95,7 @@ async function callAnthropic(messages: ChatMessage[], temperature: number): Prom
       system,
       messages: rest,
     }),
+    signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
   const json = await res.json();

@@ -6,6 +6,7 @@ import { provisionNumber } from '@/lib/providers/twilio';
 import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
+import { limitRequest } from '@/lib/ratelimit';
 import type { Business, KnowledgeBase } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -41,12 +42,35 @@ function kbNeedsRegen(kb: KnowledgeBase, business: Business): boolean {
   return promptIsDeficient(kb.system_prompt) || kbIsStale(kb, business);
 }
 
+/**
+ * In-process lock per business id so two concurrent provision calls cannot both
+ * buy a number / create an agent. NOTE: this only protects a single instance;
+ * a multi-instance deployment needs a DB-level lock (advisory lock or a
+ * conditional update on a `provisioning` status column).
+ */
+const inFlight = new Set<string>();
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
-  const started = Date.now();
+  const limited = limitRequest(req, 'businesses/provision', 5);
+  if (limited) return limited as ReturnType<typeof fail>;
   const { id } = await params;
+  if (inFlight.has(id)) return fail('provisioning already in progress', 409);
+  inFlight.add(id);
+  try {
+    return await provision(req, id);
+  } finally {
+    inFlight.delete(id);
+  }
+}
+
+async function provision(
+  req: Request,
+  id: string,
+): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
+  const started = Date.now();
   try {
     const business = await getBusiness(id);
     if (!business) {
@@ -64,6 +88,20 @@ export async function POST(
 
     let kb = await getKnowledgeBase(id);
     let regenerated = false;
+
+    // Idempotent: already provisioned (number + agent + healthy KB) -> return it
+    // instead of buying a number / creating an agent again.
+    if (!force && business.phone && business.agent_id && kb && !kbIsStale(kb, business) && !kbNeedsRegen(kb, business)) {
+      log.info('already_provisioned', { business: id, phone: business.phone });
+      return ok<ProvisionResult>({
+        business,
+        knowledge_base: kb,
+        phone: business.phone,
+        mock: business.phone.includes('555'),
+        agent_id: business.agent_id,
+        regenerated: false,
+      });
+    }
 
     if (!kb || force || kbIsStale(kb, business)) {
       // Preserve curated services/faqs; only rebuild what is missing or out of date.

@@ -51,14 +51,17 @@ Landing page:
 ```sh
 export PATH="/opt/homebrew/bin:$HOME/.bun/bin:$PATH"
 bun install
-cp .env.example .env.local     # optional: add keys to go live
+cp .env.example .env           # Prisma and Next read .env, not .env.local
 
 docker compose -f compose.dev.yaml up -d   # Postgres 17 on localhost:5433
-bunx prisma migrate deploy     # create the tables
+bunx prisma migrate deploy     # create the tables (uses DATABASE_URL from .env)
 bun scripts/seed.ts            # demo business: Miami Cool Air Conditioning
 
 bun dev                        # http://localhost:3000
 ```
+
+The `DATABASE_URL` line in `.env.example` already matches `compose.dev.yaml`.
+Add provider keys to `.env` to go live; leave them blank to keep the mocks.
 
 **Requirements:** Node/Bun, Docker. Nothing is installed system-wide — Postgres
 runs in a
@@ -84,10 +87,57 @@ designed for a server that already runs Traefik. See [DEPLOY.md](DEPLOY.md); the
 short version:
 
 ```sh
-cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, provider keys
-./deploy.sh             # build, migrate, start
-./deploy.sh --seed      # …plus the demo dataset
+cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN,
+                        # STRIPE_WEBHOOK_SECRET, provider keys
+./deploy.sh             # build, back up the DB, migrate, start
+./deploy.sh --seed --i-know-this-wipes-data   # …plus the demo dataset (wipes data)
 ```
+
+## Authentication
+
+The owner dashboard and the JSON API are protected by one shared secret,
+`ADMIN_TOKEN`.
+
+- **Dashboard:** open `/login` and sign in with the token.
+- **API:** send the token as a bearer header:
+  `curl -H "Authorization: Bearer $ADMIN_TOKEN" https://<DOMAIN>/api/businesses`
+- **Generate a token:** `openssl rand -hex 32`. Put it in `.env` and never
+  commit it.
+- **Provider callbacks are not bearer-authenticated.** Twilio, ElevenLabs and
+  Stripe calls are verified with their own signatures (`ELEVENLABS_WEBHOOK_SECRET`,
+  `STRIPE_WEBHOOK_SECRET`), not with `ADMIN_TOKEN`.
+
+`deploy.sh` refuses to deploy without `ADMIN_TOKEN` and `STRIPE_WEBHOOK_SECRET`.
+Set `ADMIN_TOKEN` locally too, so you test the same sign-in path you deploy.
+
+## Security checklist before going live
+
+Work through this before pointing a real phone number or a real Stripe account
+at a public host. Each item is a check, not a promise that the code does it.
+
+- [ ] `ADMIN_TOKEN` is set to a fresh `openssl rand -hex 32` value, and it is not
+      reused from any other system.
+- [ ] `STRIPE_WEBHOOK_SECRET` is set, and `STRIPE_ALLOW_UNSIGNED` is unset.
+- [ ] `ELEVENLABS_WEBHOOK_SECRET` is set. Unsigned voice webhook calls are rejected.
+- [ ] `DEMO_MODE` is unset. `POST /api/demo/reset` is not reachable from the internet.
+- [ ] Without a token, `/dashboard`, `/api/businesses` and `/api/sms/send` return
+      401. Check this with `curl` against the public URL.
+- [ ] `STRIPE_SECRET_KEY` is a test key (`sk_test_…`) until the payment flow has
+      been reviewed, and the mock checkout at `/pay/[id]` is not the path used for
+      live deposits.
+- [ ] Postgres has no published port. `docker compose -f compose.production.yaml ps`
+      shows no host mapping for `db`.
+- [ ] Traefik has a rate limit, and `/api/demo` and `/api/voice/tools` are
+      restricted to provider IPs or blocked from the internet.
+- [ ] A pre-deploy backup exists in `backups/`, and you have tested a restore.
+- [ ] Callers are told the call is recorded and that the assistant is an AI. Florida
+      requires all-party consent for recording. Get counsel review.
+- [ ] Texts include an opt-out (STOP) path, and A2P/10DLC registration is complete.
+      `SMS_ALLOWED_COUNTRY_CODES` lists only the countries you serve.
+- [ ] Gas-smell and carbon-monoxide calls are told to leave the building and call
+      911 before any booking is taken.
+- [ ] Any `.env` or key that was pasted into chat, a ticket or a screenshot is
+      rotated.
 
 Verify it:
 
@@ -202,6 +252,8 @@ the boot configuration and catches server errors that routes never see.
 
 ```bash
 LOG_LEVEL=debug bun dev                        # everything, including LLM/DB timing
+# Example only: a personal systemd user unit, not part of this repo. Replace
+# the unit name with your own, or just watch the `bun dev` terminal.
 journalctl --user -u recepcionista-dev -f      # live trail
 journalctl --user -u recepcionista-dev | grep ' agent\.'  # every agent create/update
 ```

@@ -1,9 +1,12 @@
 import { fail, ok } from '@/lib/http';
+import { limitRequest } from '@/lib/ratelimit';
 import { runGratitudeSweep } from '@/lib/gratitude';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
+  const limited = limitRequest(req, 'gratitude/run', 3);
+  if (limited) return limited;
   try {
     // Body is optional: the sweep defaults to every business.
     const body = (await req.json().catch(() => ({}))) as { business_id?: string };

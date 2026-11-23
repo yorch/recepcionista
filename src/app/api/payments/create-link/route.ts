@@ -1,5 +1,6 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { getBusiness } from '@/lib/db';
+import { limitRequest } from '@/lib/ratelimit';
 import { createPaymentLink } from '@/lib/providers/stripe';
 import type { PaymentLink } from '@/lib/types';
 
@@ -14,6 +15,8 @@ export interface CreateLinkResult extends PaymentLink {
 }
 
 export async function POST(req: Request) {
+  const limited = limitRequest(req, 'payments/create-link', 20);
+  if (limited) return limited;
   try {
     const body = await readJson<{
       business_id?: string;

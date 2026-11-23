@@ -6,31 +6,36 @@
 import { differenceInCalendarDays, format } from 'date-fns';
 import { es as esLocale } from 'date-fns/locale';
 import type { Booking, Business } from '@/lib/types';
+import { DEFAULT_TIMEZONE, tzOf } from '@/lib/time';
+import { formatCents } from '@/lib/money';
 
 export type Lang = 'en' | 'es' | 'mixed';
 
-const TZ = 'America/New_York';
+const DEFAULT_TZ = DEFAULT_TIMEZONE;
 
 /** Hard ceiling so a long address or a wide URL can never split an SMS. */
 export const SMS_LIMIT = 300;
 
-const etParts = new Intl.DateTimeFormat('en-US', {
-  timeZone: TZ,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-});
+const wallFormatters = new Map<string, Intl.DateTimeFormat>();
+function wallFormatter(tz: string): Intl.DateTimeFormat {
+  let f = wallFormatters.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    });
+    wallFormatters.set(tz, f);
+  }
+  return f;
+}
 
 /**
  * date-fns formats in the runtime's local zone, so we first move the instant
- * onto its America/New_York wall clock. "today"/"tomorrow" then compare
+ * onto its wall clock in the business zone. "today"/"tomorrow" then compare
  * correctly even when the server itself runs in UTC.
  */
-function etWallClock(input: string | Date): Date {
-  const parts = etParts.formatToParts(new Date(input));
+function etWallClock(input: string | Date, tz: string = DEFAULT_TZ): Date {
+  const parts = wallFormatter(tz).formatToParts(new Date(input));
   const pick = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
   return new Date(
     pick('year'),
@@ -42,9 +47,10 @@ function etWallClock(input: string | Date): Date {
 }
 
 /** "today at 2:00 PM" / "tomorrow at 9:00 AM" / "Saturday at 9:00 AM" */
-export function formatWhen(iso: string, language: Lang = 'en'): string {
-  const when = etWallClock(iso);
-  const days = differenceInCalendarDays(when, etWallClock(new Date()));
+export function formatWhen(iso: string, language: Lang = 'en', timezone?: string): string {
+  const tz = tzOf(timezone);
+  const when = etWallClock(iso, tz);
+  const days = differenceInCalendarDays(when, etWallClock(new Date(), tz));
   const time = format(when, 'h:mm a');
   const spanish = language === 'es';
 
@@ -58,11 +64,7 @@ export function formatWhen(iso: string, language: Lang = 'en'): string {
 
 /** "$189" — cents in, human money out. */
 export function money(cents: number): string {
-  const dollars = Math.round(cents) / 100;
-  return `$${dollars.toLocaleString('en-US', {
-    minimumFractionDigits: dollars % 1 === 0 ? 0 : 2,
-    maximumFractionDigits: 2,
-  })}`;
+  return formatCents(cents);
 }
 
 function firstName(name: string): string {
@@ -81,9 +83,9 @@ export interface ConfirmationArgs {
 
 export function confirmationSms({ business, booking, language = 'en' }: ConfirmationArgs): string {
   const name = firstName(booking.customer_name);
-  const when = formatWhen(booking.scheduled_at, language);
+  const when = formatWhen(booking.scheduled_at, language, business.timezone);
   const where = booking.address ? `, ${booking.address}` : '';
-  const price = booking.price_estimate ? money(booking.price_estimate * 100) : null;
+  const price = booking.price_estimate ? money(booking.price_estimate) : null;
 
   if (language === 'es') {
     const estimate = price ? ` Aprox. ${price}.` : '';

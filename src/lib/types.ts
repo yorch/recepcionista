@@ -11,6 +11,7 @@ export type BookingStatus = 'pending' | 'confirmed' | 'completed' | 'cancelled';
 export interface Service {
   name: string;
   description?: string;
+  /** Catalog price in whole DOLLARS (the only dollar-denominated value; use dollarsToCents). */
   base_price?: number | null;
   duration_minutes?: number;
 }
@@ -35,6 +36,8 @@ export interface Business {
   service_area: string[];
   status: BusinessStatus;
   agent_id?: string | null;
+  /** IANA zone, e.g. America/New_York. Defaults to America/New_York when absent. */
+  timezone?: string;
   created_at: string;
 }
 
@@ -52,6 +55,8 @@ export interface KnowledgeBase {
 export interface Call {
   id: ID;
   business_id: ID;
+  /** Telephony call SID (Twilio/ElevenLabs) — the reliable way to match a live call. */
+  call_sid?: string | null;
   caller_phone?: string | null;
   caller_name?: string | null;
   started_at: string;
@@ -74,8 +79,12 @@ export interface Booking {
   customer_phone: string;
   service: string;
   scheduled_at: string;           // ISO
+  /** Job length; blocks [scheduled_at, scheduled_at + duration). Default 60. */
+  duration_minutes?: number;
   address?: string | null;
+  /** INTEGER CENTS */
   price_estimate?: number | null;
+  /** INTEGER CENTS */
   deposit_amount?: number | null;
   deposit_paid: boolean;
   status: BookingStatus;
@@ -85,6 +94,7 @@ export interface Booking {
 export interface BriefingStats {
   calls: number;
   bookings: number;
+  /** INTEGER CENTS */
   revenue: number;
   flags: number;
 }

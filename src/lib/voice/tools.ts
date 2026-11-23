@@ -7,10 +7,15 @@
  * America/New_York, which is where the demo business lives.
  */
 import {
-  getBusiness, getKnowledgeBase, getCall, listCalls, listBookings, createCall,
-  updateCall, createBooking as dbCreateBooking, getBookedSlots, logSms,
+  getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall,
+  updateCall, updateBooking, createBooking as dbCreateBooking, logSms, BookingRejectedError,
 } from '@/lib/db';
-import { slotsForDate, nextAvailable, isWithinHours } from '@/lib/scheduler';
+import { slotsForDate, nextAvailable } from '@/lib/scheduler';
+import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
+import {
+  addDaysToDateKey, isDateKey, localDateKey, parseScheduledAt, partsInTz, spokenTimeInTz, tzOf,
+} from '@/lib/time';
+import { dollarsToCents, formatCents } from '@/lib/money';
 import { logger } from '@/lib/log';
 import { sendSms, normalizePhone } from '@/lib/providers/twilio';
 import { createPaymentLink as providerCreatePaymentLink, appUrl } from '@/lib/providers/stripe';
@@ -30,11 +35,11 @@ export interface ToolResult {
 interface BaseArgs {
   business_id?: string;
   call_id?: string;
+  /** Telephony call SID, when the agent platform passes it (preferred way to find the live call). */
+  call_sid?: string;
   language?: string;
 }
 
-const TZ = 'America/New_York';
-const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const WEEKDAY_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const WEEKDAY_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 
@@ -50,44 +55,23 @@ function say(lang: ToolLanguage, en: string, es: string): string {
 
 // ------------------------------------------------------------- time strings
 
-interface EtParts { dateKey: string; weekday: string; hour: number; minute: number }
-
-function etParts(iso: string): EtParts {
-  const out: Record<string, string> = {};
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', weekday: 'long',
-  });
-  for (const part of fmt.formatToParts(new Date(iso))) out[part.type] = part.value;
-  return {
-    dateKey: `${out.year}-${out.month}-${out.day}`,
-    weekday: out.weekday ?? '',
-    hour: Number(out.hour ?? 0),
-    minute: Number(out.minute ?? 0),
-  };
+// All of these render in the BUSINESS zone (never the process zone).
+function spokenTime(iso: string, tz: string): string {
+  return spokenTimeInTz(iso, tz);
 }
 
-function spokenTime(iso: string): string {
-  const { hour, minute } = etParts(iso);
-  const h12 = hour % 12 === 0 ? 12 : hour % 12;
-  const ampm = hour < 12 ? 'AM' : 'PM';
-  return minute === 0 ? `${h12} ${ampm}` : `${h12}:${String(minute).padStart(2, '0')} ${ampm}`;
-}
-
-function dayPhrase(iso: string, lang: ToolLanguage): string {
-  const key = etParts(iso).dateKey;
-  const todayKey = etParts(new Date().toISOString()).dateKey;
-  const tomorrowKey = etParts(new Date(Date.now() + 86_400_000).toISOString()).dateKey;
+function dayPhrase(iso: string, lang: ToolLanguage, tz: string): string {
+  const key = localDateKey(iso, tz);
+  const todayKey = localDateKey(new Date(), tz);
   if (key === todayKey) return lang === 'es' ? 'hoy' : 'today';
-  if (key === tomorrowKey) return lang === 'es' ? 'mañana' : 'tomorrow';
-  const idx = WEEKDAY_EN.findIndex((d) => d.toLowerCase() === etParts(iso).weekday.toLowerCase());
-  if (idx < 0) return etParts(iso).dateKey;
+  if (key === addDaysToDateKey(todayKey, 1)) return lang === 'es' ? 'mañana' : 'tomorrow';
+  const idx = partsInTz(iso, tz).weekday;
   return lang === 'es' ? WEEKDAY_ES[idx] : WEEKDAY_EN[idx];
 }
 
-function whenPhrase(iso: string, lang: ToolLanguage): string {
-  const day = dayPhrase(iso, lang);
-  const time = spokenTime(iso);
+function whenPhrase(iso: string, lang: ToolLanguage, tz: string): string {
+  const day = dayPhrase(iso, lang, tz);
+  const time = spokenTime(iso, tz);
   return lang === 'es' ? `${day} a las ${time}` : `${day} at ${time}`;
 }
 
@@ -103,11 +87,11 @@ function joinList(items: string[], conjunction: string, lang: ToolLanguage): str
 }
 
 /** "tomorrow at 10 AM or 2 PM" — groups slots that share a day. */
-function describeSlots(slots: TimeSlot[], lang: ToolLanguage): string {
+function describeSlots(slots: TimeSlot[], lang: ToolLanguage, tz: string): string {
   const groups: { day: string; times: string[] }[] = [];
   for (const slot of slots) {
-    const day = dayPhrase(slot.start, lang);
-    const time = spokenTime(slot.start);
+    const day = dayPhrase(slot.start, lang, tz);
+    const time = spokenTime(slot.start, tz);
     const group = groups.find((g) => g.day === day);
     if (group) {
       if (!group.times.includes(time)) group.times.push(time);
@@ -123,41 +107,26 @@ function describeSlots(slots: TimeSlot[], lang: ToolLanguage): string {
   return joinList(phrased, lang === 'es' ? 'o' : 'or', lang);
 }
 
-function money(cents: number): string {
-  return `$${(cents / 100).toLocaleString('en-US', { maximumFractionDigits: cents % 100 === 0 ? 0 : 2 })}`;
-}
-
-function parseHhmm(hhmm: string): number {
-  const [h, m] = hhmm.split(':').map(Number);
-  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
-}
-
-/** Strict open-hours check in the business's own timezone. */
-function insideOpenHours(business: Business, iso: string): boolean {
-  const { weekday, hour, minute } = etParts(iso);
-  const idx = WEEKDAY_EN.findIndex((d) => d.toLowerCase() === weekday.toLowerCase());
-  if (idx < 0) return false;
-  const hours = business.hours?.[DAY_KEYS[idx]];
-  if (!hours) return false;
-  const minutes = hour * 60 + minute;
-  return minutes >= parseHhmm(hours.open) && minutes <= parseHhmm(hours.close);
-}
-
-function minutesOf(iso: string): number {
-  return Math.floor(new Date(iso).getTime() / 60_000);
-}
-
 /** A short "I could do X instead" clause built from the real calendar. */
-async function alternativeClause(business: Business, lang: ToolLanguage): Promise<string> {
-  const slot = (await nextAvailable(business, 1))[0];
+async function alternativeClause(business: Business, lang: ToolLanguage, durationMinutes = DEFAULT_DURATION_MIN): Promise<string> {
+  const slot = (await nextAvailable(business, 1, durationMinutes))[0];
   if (!slot) {
     return say(lang,
       'Nothing is open in the next two weeks.',
       'No hay nada disponible en las próximas dos semanas.');
   }
   return say(lang,
-    `I can do ${whenPhrase(slot.start, lang)} instead.`,
-    `Puedo ${whenPhrase(slot.start, lang)}.`);
+    `I can do ${whenPhrase(slot.start, lang, tzOf(business))} instead.`,
+    `Puedo ${whenPhrase(slot.start, lang, tzOf(business))}.`);
+}
+
+/** Structured, loggable failure for a tool that threw. Never swallow: log, then return this. */
+function toolFailure(
+  tool: string, err: unknown, lang: ToolLanguage, message: string, extra: Record<string, unknown> = {},
+): ToolResult {
+  const detail = err instanceof Error ? err.message : String(err);
+  log.error(`${tool}.failed`, { err });
+  return { ok: false, message, data: { error: { tool, code: 'tool_error', message: detail }, ...extra } };
 }
 
 // ------------------------------------------------------------- infrastructure
@@ -182,14 +151,16 @@ function missingBusiness(lang: ToolLanguage): ToolResult {
   };
 }
 
-async function activeCall(businessId: string, callId?: string): Promise<Call | null> {
-  const explicit = str(callId);
-  if (explicit) {
-    const call = await getCall(explicit);
-    if (call) return call;
-  }
-  // Most recent in-progress call for this business.
-  return (await listCalls(businessId)).find((c) => c.status === 'in_progress') ?? null;
+/** Match by id, then SID, then caller phone, then "the only call in progress" — never a guess between two. */
+async function activeCall(
+  businessId: string,
+  args: { call_id?: string; call_sid?: string; caller_phone?: string },
+): Promise<Call | null> {
+  return findActiveCall(businessId, {
+    callId: str(args.call_id) || undefined,
+    callSid: str(args.call_sid) || undefined,
+    callerPhone: str(args.caller_phone) || undefined,
+  });
 }
 
 async function postInternal(path: string, body: unknown): Promise<unknown | null> {
@@ -208,18 +179,52 @@ async function postInternal(path: string, body: unknown): Promise<unknown | null
   }
 }
 
-async function alertOwner(business: Business, body: string): Promise<SmsLog | null> {
-  if (!business.owner_phone) return null;
-  const to = normalizePhone(business.owner_phone);
-  const sent = await sendSms(to, body);
-  return await logSms({
-    business_id: business.id,
-    to_phone: to,
-    body,
-    kind: 'owner_alert',
-    provider_id: sent.id || null,
-    status: sent.status,
-  });
+export interface OwnerAlert {
+  /** True ONLY if the SMS really went out (or demo mode mock). Never claim the owner was told otherwise. */
+  notified: boolean;
+  reason: 'sent' | 'no_owner_phone' | 'sms_failed' | 'sms_error';
+  sms: SmsLog | null;
+}
+
+async function alertOwner(business: Business, body: string): Promise<OwnerAlert> {
+  if (!business.owner_phone) {
+    log.error('owner_alert.no_owner_phone', { business: business.id });
+    return { notified: false, reason: 'no_owner_phone', sms: null };
+  }
+  try {
+    const to = normalizePhone(business.owner_phone);
+    const sent = await sendSms(to, body);
+    const sms = await logSms({
+      business_id: business.id,
+      to_phone: to,
+      body,
+      kind: 'owner_alert',
+      provider_id: sent.id || null,
+      status: sent.status,
+    });
+    // 'mock' means no Twilio configured: only counts as delivered in explicit demo mode.
+    const delivered = sent.status === 'sent' || (sent.status === 'mock' && process.env.DEMO_MODE === 'true');
+    if (!delivered) log.error('owner_alert.not_delivered', { business: business.id, status: sent.status, error: sent.error ?? null });
+    return { notified: delivered, reason: delivered ? 'sent' : 'sms_failed', sms };
+  } catch (err) {
+    log.error('owner_alert.error', { business: business.id, err });
+    return { notified: false, reason: 'sms_error', sms: null };
+  }
+}
+
+/** What to tell a caller when we could NOT reach the owner. */
+function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolean): { message: string; data: Record<string, unknown> } {
+  const phone = business.owner_phone ? normalizePhone(business.owner_phone) : null;
+  const call911 = say(lang,
+    'If there is a gas smell, carbon monoxide, smoke or fire, hang up and call 911 right now.',
+    'Si huele a gas, hay monóxido de carbono, humo o fuego, cuelgue y llame al 911 ahora mismo.');
+  const owner = phone
+    ? say(lang, `You can also call the owner directly at ${phone}.`, `También puede llamar al dueño directamente al ${phone}.`)
+    : say(lang, 'I will keep trying to reach the owner and they will call you back.', 'Voy a seguir intentando comunicarme con el dueño y él le devolverá la llamada.');
+  return {
+    message: emergency ? `${call911} ${owner}` : owner,
+    data: { call_911_for: ['gas', 'carbon_monoxide', 'smoke', 'fire'], owner_phone: phone },
+  };
 }
 
 // ------------------------------------------------------------------- tools
@@ -234,14 +239,29 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
   try {
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
+    const tz = tzOf(business);
 
-    const duration = Number(args.duration_minutes) || 60;
+    const duration = clampDuration(args.duration_minutes);
     const requested = str(args.date);
-    const dateStr = /^\d{4}-\d{2}-\d{2}$/.test(requested)
-      ? requested
-      : requested
-        ? new Date(requested).toISOString().slice(0, 10)
-        : '';
+    let dateStr = '';
+    if (requested) {
+      if (isDateKey(requested)) {
+        dateStr = requested;
+      } else {
+        // Accept a full datetime and take its local date; reject anything else so the agent re-asks.
+        const parsed = parseScheduledAt(requested, tz);
+        if (!parsed.ok) {
+          return {
+            ok: false,
+            message: say(lang,
+              'Which day did you have in mind? Please give me the date.',
+              '¿Qué día tenía en mente? Deme la fecha, por favor.'),
+            data: { reason: 'invalid_date', received: requested },
+          };
+        }
+        dateStr = localDateKey(parsed.date, tz);
+      }
+    }
 
     let slots: TimeSlot[];
     let dayFull = false;
@@ -265,7 +285,7 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
       };
     }
 
-    const list = describeSlots(slots, lang);
+    const list = describeSlots(slots, lang, tz);
     const multiple = slots.length > 1;
     const prefix = dayFull
       ? say(lang, `That day is full, but I have ${list}`, `Ese día está lleno, pero tengo ${list}`)
@@ -274,14 +294,11 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
       ? say(lang, `${prefix} — which works better?`, `${prefix} — ¿cuál le queda mejor?`)
       : say(lang, `${prefix} open — does that work for you?`, `${prefix} disponible — ¿le queda bien?`);
 
-    return { ok: true, message, data: { slots } };
-  } catch {
-    return {
-      ok: false,
-      message: say(lang,
-        'Let me check the calendar with the owner and call you right back.',
-        'Déjeme revisar el calendario con el dueño y le llamo ahora.'),
-    };
+    return { ok: true, message, data: { slots, timezone: tz } };
+  } catch (err) {
+    return toolFailure('check_availability', err, lang, say(lang,
+      'Let me check the calendar with the owner and call you right back.',
+      'Déjeme revisar el calendario con el dueño y le llamo ahora.'));
   }
 }
 
@@ -289,16 +306,22 @@ export interface CreateBookingArgs extends BaseArgs {
   customer_name?: string;
   customer_phone?: string;
   service?: string;
+  /** Local wall-clock ISO in the business zone ("2026-11-24T10:00:00") or with an explicit offset. */
   scheduled_at?: string;
+  duration_minutes?: number | string;
   address?: string;
+  /** DOLLARS, as the agent speaks them; stored as integer cents. */
   price_estimate?: number | string;
 }
+
+const MAX_PRICE_CENTS = 10_000_000; // $100k sanity cap
 
 export async function createBooking(args: CreateBookingArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
+    const tz = tzOf(business);
 
     const name = str(args.customer_name);
     const phone = str(args.customer_phone);
@@ -315,72 +338,48 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
       };
     }
 
-    const when = new Date(scheduledAt);
-    if (Number.isNaN(when.getTime())) {
+    // Offset-less strings are wall-clock time in the BUSINESS zone, never UTC.
+    const parsed = parseScheduledAt(scheduledAt, tz);
+    if (!parsed.ok) {
       return {
         ok: false,
         message: say(lang,
           'I did not catch that day and time — can you say it again?',
           'No le entendí la fecha y la hora — ¿me la repite?'),
+        data: { reason: 'invalid_time', detail: parsed.reason, received: scheduledAt },
       };
     }
-    const iso = when.toISOString();
-    const dateKey = etParts(iso).dateKey;
+    const iso = parsed.date.toISOString();
 
-    if (!insideOpenHours(business, iso)) {
-      const alt = await alternativeClause(business, lang);
-      return {
-        ok: false,
-        message: say(lang,
-          `That is outside our hours. ${alt}`,
-          `Eso está fuera de nuestro horario. ${alt}`),
-        data: { reason: 'outside_hours', scheduled_at: iso },
-      };
-    }
+    // Length of the job: explicit arg, else the matched catalog service, else 60 min.
+    const kb = await getKnowledgeBase(business.id);
+    const matched = kb ? matchService(kb.services, service)[0] : undefined;
+    const duration = clampDuration(args.duration_minutes ?? matched?.duration_minutes, DEFAULT_DURATION_MIN);
 
-    const bookedMinutes = new Set<number>([
-      ...(await getBookedSlots(business.id, dateKey)).map(minutesOf),
-      ...(await listBookings(business.id))
-        .filter((b) => etParts(b.scheduled_at).dateKey === dateKey)
-        .map((b) => minutesOf(b.scheduled_at)),
-    ]);
-    if (bookedMinutes.has(minutesOf(iso))) {
-      const alt = await alternativeClause(business, lang);
-      return {
-        ok: false,
-        message: say(lang,
-          `That slot just got taken. ${alt}`,
-          `Ese horario se acaba de ocupar. ${alt}`),
-        data: { reason: 'slot_taken', scheduled_at: iso },
-      };
-    }
+    const call = await activeCall(business.id, { ...args, caller_phone: phone });
 
-    if (!(await isWithinHours(business, iso))) {
-      const alt = await alternativeClause(business, lang);
-      return {
-        ok: false,
-        message: say(lang,
-          `I cannot fit that one in. ${alt}`,
-          `No puedo acomodar esa hora. ${alt}`),
-        data: { reason: 'not_within_hours', scheduled_at: iso },
-      };
-    }
-
-    const call = await activeCall(business.id, args.call_id);
-    const priceEstimate = args.price_estimate == null || str(args.price_estimate) === ''
+    const priceDollars = args.price_estimate == null || str(args.price_estimate) === ''
       ? null
-      : Number(args.price_estimate);
+      : dollarsToCents(args.price_estimate);
+    const priceEstimate = priceDollars == null ? null : Math.min(MAX_PRICE_CENTS, Math.max(0, priceDollars));
 
-    const booking = await dbCreateBooking({
-      business_id: business.id,
-      call_id: call?.id ?? null,
-      customer_name: name,
-      customer_phone: normalizePhone(phone),
-      service,
-      scheduled_at: iso,
-      address: str(args.address) || null,
-      price_estimate: priceEstimate != null && Number.isFinite(priceEstimate) ? priceEstimate : null,
-    });
+    let booking;
+    try {
+      booking = await dbCreateBooking({
+        business_id: business.id,
+        call_id: call?.id ?? null,
+        customer_name: name,
+        customer_phone: normalizePhone(phone),
+        service,
+        scheduled_at: iso,
+        duration_minutes: duration,
+        address: str(args.address) || null,
+        price_estimate: priceEstimate,
+      });
+    } catch (err) {
+      if (err instanceof BookingRejectedError) return await rejectionResult(err.reason, business, lang, duration, iso);
+      throw err;
+    }
 
     if (call && !call.caller_name) await updateCall(call.id, { caller_name: name });
 
@@ -393,17 +392,41 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     return {
       ok: true,
       message: say(lang,
-        `You're all set for ${whenPhrase(iso, lang)}. I'm sending your confirmation text now.`,
-        `Listo, quedó agendado para ${whenPhrase(iso, lang)}. Le mando el texto de confirmación ahora.`),
+        `You're all set for ${whenPhrase(iso, lang, tz)}. I'm sending your confirmation text now.`,
+        `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}. Le mando el texto de confirmación ahora.`),
       data: { booking, sms_sent: sms != null },
     };
-  } catch {
-    return {
-      ok: false,
-      message: say(lang,
-        'I had trouble putting that in the calendar — let me have the owner confirm it with you.',
-        'Tuve un problema agendando eso — voy a pedirle al dueño que se lo confirme.'),
-    };
+  } catch (err) {
+    return toolFailure('create_booking', err, lang, say(lang,
+      'I had trouble putting that in the calendar — let me have the owner confirm it with you.',
+      'Tuve un problema agendando eso — voy a pedirle al dueño que se lo confirme.'));
+  }
+}
+
+/** Friendly "offer alternatives" answer for every way a booking can be refused. */
+async function rejectionResult(
+  reason: string, business: Business, lang: ToolLanguage, duration: number, iso: string,
+): Promise<ToolResult> {
+  const alt = await alternativeClause(business, lang, duration);
+  const data = { reason, scheduled_at: iso };
+  switch (reason) {
+    case 'slot_taken':
+      return { ok: false, data, message: say(lang,
+        `That slot just got taken. ${alt}`, `Ese horario se acaba de ocupar. ${alt}`) };
+    case 'past':
+      return { ok: false, data, message: say(lang,
+        `That time has already passed. ${alt}`, `Esa hora ya pasó. ${alt}`) };
+    case 'after_close':
+      return { ok: false, data, message: say(lang,
+        `That job would run past our closing time. ${alt}`,
+        `Ese trabajo terminaría después de nuestra hora de cierre. ${alt}`) };
+    case 'closed_day':
+    case 'before_open':
+      return { ok: false, data, message: say(lang,
+        `That is outside our hours. ${alt}`, `Eso está fuera de nuestro horario. ${alt}`) };
+    default:
+      return { ok: false, data, message: say(lang,
+        `I cannot fit that one in. ${alt}`, `No puedo acomodar esa hora. ${alt}`) };
   }
 }
 
@@ -455,13 +478,10 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
       message: say(lang, 'I just sent that text to you.', 'Le acabo de mandar ese texto.'),
       data: { sms: log },
     };
-  } catch {
-    return {
-      ok: false,
-      message: say(lang,
-        'I could not send that text — let me read it to you instead.',
-        'No pude mandar el texto — mejor se lo leo por teléfono.'),
-    };
+  } catch (err) {
+    return toolFailure('send_sms', err, lang, say(lang,
+      'I could not send that text — let me read it to you instead.',
+      'No pude mandar el texto — mejor se lo leo por teléfono.'));
   }
 }
 
@@ -494,10 +514,13 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const description = str(args.description) || 'Service deposit';
 
     const bookingId = str(args.booking_id);
-    const booking = bookingId
-      ? (await listBookings(business.id)).find((b) => b.id === bookingId) ?? null
-      : null;
-    const call = await activeCall(business.id, args.call_id);
+    const found = bookingId ? await getBooking(bookingId) : null;
+    const booking = found && found.business_id === business.id ? found : null;
+    if (booking && !booking.deposit_paid) {
+      // Remember what is owed so the pay page and dashboard read it from the DB (cents).
+      await updateBooking(booking.id, { deposit_amount: amountCents });
+    }
+    const call = await activeCall(business.id, args);
     const to = normalizePhone(
       str(args.to) || booking?.customer_phone || call?.caller_phone || '',
     );
@@ -518,7 +541,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
       })
       : null;
 
-    const spoken = money(amountCents);
+    const spoken = formatCents(amountCents);
     return {
       ok: true,
       message: say(lang,
@@ -532,13 +555,10 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
         sms_target: to || null,
       },
     };
-  } catch {
-    return {
-      ok: false,
-      message: say(lang,
-        'I could not create that payment link — let me have the owner call you to take the deposit.',
-        'No pude crear el enlace de pago — voy a pedirle al dueño que le llame para el depósito.'),
-    };
+  } catch (err) {
+    return toolFailure('create_payment_link', err, lang, say(lang,
+      'I could not create that payment link — let me have the owner call you to take the deposit.',
+      'No pude crear el enlace de pago — voy a pedirle al dueño que le llame para el depósito.'));
   }
 }
 
@@ -560,11 +580,12 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     const callerPhone = str(args.customer_phone);
     const address = str(args.address);
 
-    let call = await activeCall(business.id, args.call_id);
+    let call = await activeCall(business.id, { ...args, caller_phone: callerPhone });
     if (!call) {
       // No live call to attach to (e.g. a tool call from the demo simulator).
       call = await createCall({
         business_id: business.id,
+        call_sid: str(args.call_sid) || null,
         caller_phone: callerPhone ? normalizePhone(callerPhone) : null,
         caller_name: callerName || null,
         status: 'in_progress',
@@ -588,20 +609,33 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     ].filter(Boolean).join('\n');
     const alert = await alertOwner(business, alertBody);
 
-    return {
-      ok: true,
-      message: say(lang,
-        "I've flagged this as an emergency and the owner has been notified.",
-        'Lo marqué como emergencia y el dueño ya fue notificado.'),
-      data: { call: updated, owner_sms: alert, owner_notified: alert != null },
-    };
-  } catch {
+    if (alert.notified) {
+      return {
+        ok: true,
+        message: say(lang,
+          "I've flagged this as an emergency and the owner has been notified.",
+          'Lo marqué como emergencia y el dueño ya fue notificado.'),
+        data: { call: updated, owner_sms: alert.sms, owner_notified: true },
+      };
+    }
+
+    // Be honest: the emergency is recorded, but nobody was actually alerted.
+    const fb = ownerFallback(business, lang, true);
+    log.error('flag_emergency.owner_not_notified', { business: business.id, call: call.id, why: alert.reason });
     return {
       ok: false,
       message: say(lang,
-        'I have your details and I am getting the owner now — stay on the line.',
-        'Ya tengo sus datos y estoy consiguiendo al dueño — no cuelgue.'),
+        `I've recorded this as an emergency, but I could not reach the owner just now. ${fb.message}`,
+        `Registré esto como emergencia, pero no pude comunicarme con el dueño ahora mismo. ${fb.message}`),
+      data: { call: updated, owner_sms: alert.sms, owner_notified: false, notify_failure: alert.reason, fallback: fb.data },
     };
+  } catch (err) {
+    const business = await resolveBusiness(args).catch(() => null);
+    const fb = business ? ownerFallback(business, lang, true) : null;
+    return toolFailure('flag_emergency', err, lang, say(lang,
+      `I could not alert the owner. ${fb?.message ?? 'If there is gas, carbon monoxide, smoke or fire, call 911 now; otherwise please call the business directly.'}`,
+      `No pude avisarle al dueño. ${fb?.message ?? 'Si hay gas, monóxido de carbono, humo o fuego, llame al 911 ahora; si no, por favor llame directamente al negocio.'}`),
+    { owner_notified: false, fallback: fb?.data ?? { call_911_for: ['gas', 'carbon_monoxide', 'smoke', 'fire'] } });
   }
 }
 
@@ -693,8 +727,8 @@ export async function getPricing(args: GetPricingArgs): Promise<ToolResult> {
     return {
       ok: true,
       message: say(lang,
-        `${match.name} starts at ${money(priced * 100)}. The technician confirms the exact price on site.`,
-        `${match.name} empieza en ${money(priced * 100)}. El técnico confirma el precio exacto en el lugar.`),
+        `${match.name} starts at ${formatCents(dollarsToCents(priced))}. The technician confirms the exact price on site.`,
+        `${match.name} empieza en ${formatCents(dollarsToCents(priced))}. El técnico confirma el precio exacto en el lugar.`),
       data: {
         matched: true,
         price: priced,
@@ -703,13 +737,14 @@ export async function getPricing(args: GetPricingArgs): Promise<ToolResult> {
         pricing_notes: kb?.pricing_notes ?? null,
       },
     };
-  } catch {
+  } catch (err) {
+    log.error('get_pricing.failed', { err });
     return {
       ok: true,
       message: say(lang,
         "I'll have the owner confirm that price for you.",
         'Voy a pedirle al dueño que le confirme ese precio.'),
-      data: { matched: false, price: null },
+      data: { matched: false, price: null, error: { tool: 'get_pricing', code: 'tool_error', message: err instanceof Error ? err.message : String(err) } },
     };
   }
 }
@@ -725,9 +760,9 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     if (!business) return missingBusiness(lang);
 
     const reason = str(args.reason) || 'Caller asked for a human';
-    let call = await activeCall(business.id, args.call_id);
+    let call = await activeCall(business.id, args);
     if (!call) {
-      call = await createCall({ business_id: business.id, status: 'in_progress' });
+      call = await createCall({ business_id: business.id, call_sid: str(args.call_sid) || null, status: 'in_progress' });
     }
 
     const updated = await updateCall(call.id, {
@@ -740,24 +775,35 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
       call.caller_name ? `Caller: ${call.caller_name}` : '',
       call.caller_phone ? `Phone: ${call.caller_phone}` : '',
       `Reason: ${reason}`,
-      'They are waiting for you.',
+      'Please call them back.',
     ].filter(Boolean).join('\n');
     const alert = await alertOwner(business, alertBody);
 
-    return {
-      ok: true,
-      message: say(lang,
-        'Let me connect you with the owner — one moment.',
-        'Permítame comunicarle con el dueño — un momento.'),
-      data: { call: updated, owner_sms: alert, owner_notified: alert != null },
-    };
-  } catch {
+    if (alert.notified) {
+      // This does NOT transfer the line: the owner was texted and will call back.
+      return {
+        ok: true,
+        message: say(lang,
+          "I've sent the owner an urgent message and they will call you back shortly. Is this the best number to reach you?",
+          'Le envié un mensaje urgente al dueño y le devolverá la llamada pronto. ¿Es este el mejor número para localizarle?'),
+        data: { call: updated, owner_sms: alert.sms, owner_notified: true, transferred: false },
+      };
+    }
+
+    const fb = ownerFallback(business, lang, false);
+    log.error('handoff.owner_not_notified', { business: business.id, call: call.id, why: alert.reason });
     return {
       ok: false,
       message: say(lang,
-        'I am getting the owner for you now — please hold.',
-        'Estoy consiguiendo al dueño — por favor espere.'),
+        `I have noted your request, but I could not reach the owner just now. ${fb.message}`,
+        `Anoté su solicitud, pero no pude comunicarme con el dueño ahora mismo. ${fb.message}`),
+      data: { call: updated, owner_sms: alert.sms, owner_notified: false, transferred: false, notify_failure: alert.reason, fallback: fb.data },
     };
+  } catch (err) {
+    return toolFailure('handoff_to_human', err, lang, say(lang,
+      'I could not reach the owner just now — please call the business directly, or I can take a message.',
+      'No pude comunicarme con el dueño ahora — por favor llame directamente al negocio, o puedo tomar un mensaje.'),
+    { owner_notified: false });
   }
 }
 
@@ -804,7 +850,7 @@ export async function runTool(
       message: say(lang, 'Let me get the owner for that.', 'Permítame conseguir al dueño para eso.'),
     };
   }
-  const a = (args ?? {}) as Record<string, never>;
+  const a = (args ?? {}) as Record<string, never>; // NOTE: loosely typed LLM args; each tool validates its own fields
   try {
     const result = await (async (): Promise<ToolResult> => {
       switch (tool) {

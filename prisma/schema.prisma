@@ -16,6 +16,10 @@ model Business {
   name        String
   url         String?
   phone       String?  @unique
+  /** Last 10 digits of `phone`, maintained by the db layer. Indexed lookup for inbound calls. */
+  phoneKey    String?  @map("phone_key")
+  /** IANA zone the business operates in. All hours/slot math happens in it. */
+  timezone    String   @default("America/New_York")
   ownerPhone  String?  @map("owner_phone")
   ownerName   String?  @map("owner_name")
   hours       Json     @default("{}")
@@ -31,6 +35,7 @@ model Business {
   briefings     Briefing[]
   smsLog        SmsLog[]
 
+  @@index([phoneKey])
   @@map("businesses")
 }
 
@@ -81,7 +86,11 @@ model Booking {
   customerPhone String   @map("customer_phone")
   service       String
   scheduledAt   DateTime @map("scheduled_at")
+  /// Length of the job. Together with scheduled_at it forms the blocked interval;
+  /// a Postgres exclusion constraint (see migrations) forbids overlaps per business.
+  durationMinutes Int    @default(60) @map("duration_minutes")
   address       String?
+  /// MONEY IS INTEGER CENTS everywhere (price_estimate, deposit_amount).
   priceEstimate Int?     @map("price_estimate")
   depositAmount Int?     @map("deposit_amount")
   depositPaid   Boolean  @default(false) @map("deposit_paid")

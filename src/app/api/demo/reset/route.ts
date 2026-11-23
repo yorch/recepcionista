@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ok, fail } from '@/lib/http';
+import { demoModeEnabled } from '@/lib/auth';
 import { clearAll, prisma } from '@/lib/db';
 import { logger } from '@/lib/log';
 import {
@@ -18,6 +19,7 @@ export const dynamic = 'force-dynamic';
 const log = logger('api/demo/reset');
 
 export async function POST() {
+  if (!demoModeEnabled()) return fail('not found', 404);
   const started = Date.now();
   try {
     log.warn('requested', { effect: 'wipes every table, reseeds demo data' });

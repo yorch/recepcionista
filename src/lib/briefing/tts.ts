@@ -81,6 +81,10 @@ export async function synthesizeBriefing(
   text: string,
   opts: { businessId: string; date: string },
 ): Promise<TtsResult> {
+  // These flow into a file path: refuse anything that is not a plain id/date.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.date) || !/^[A-Za-z0-9_-]{1,64}$/.test(opts.businessId)) {
+    throw new Error('invalid businessId or date for briefing audio');
+  }
   ensureAudioDir();
   const base = `briefing-${opts.businessId}-${opts.date}`;
   const started = Date.now();

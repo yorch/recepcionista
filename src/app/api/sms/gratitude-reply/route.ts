@@ -1,4 +1,5 @@
-import { fail, ok, readJson } from '@/lib/http';
+import { fail, ok } from '@/lib/http';
+import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { getBooking, getBusiness } from '@/lib/db';
 import { ownerEscalationSms, reviewRequestSms, reviewUrl } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
@@ -21,10 +22,23 @@ export interface GratitudeReplyResult {
  */
 export async function POST(req: Request) {
   try {
-    const { booking_id, rating } = await readJson<{
-      booking_id?: string;
-      rating?: number | string;
-    }>(req);
+    // Twilio posts form-encoded (signed). JSON is accepted only where the signature check is skipped (dev).
+    const isJson = (req.headers.get('content-type') ?? '').includes('application/json');
+    const fields: Record<string, string> = {};
+    let jsonBody: { booking_id?: string; rating?: number | string } = {};
+    if (isJson) {
+      jsonBody = await req.json().catch(() => ({}));
+    } else {
+      (await req.formData().catch(() => new FormData())).forEach((v, k) => {
+        if (typeof v === 'string') fields[k] = v;
+      });
+    }
+    const verdict = verifyTwilioSignature(req, fields);
+    if (!verdict.ok) return fail('forbidden', 403);
+
+    const query = new URL(req.url).searchParams;
+    const booking_id = isJson ? jsonBody.booking_id : (fields.booking_id ?? query.get('booking_id') ?? undefined);
+    const rating = isJson ? jsonBody.rating : (fields.rating ?? fields.Body ?? query.get('rating') ?? undefined);
     if (!booking_id) return fail('booking_id is required', 422);
 
     const score = Number(rating);
