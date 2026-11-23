@@ -13,7 +13,7 @@
 import { appUrl } from '@/lib/providers/stripe';
 import { logger } from '@/lib/log';
 import {
-  createCall, getBusiness, getCall, listBusinesses, listCalls, nowIso, updateCall,
+  createCall, getBusiness, getBusinessByAgentId, getCall, getCallBySid, listCalls, nowIso, updateCall,
 } from '@/lib/db';
 import { generateTextSafe } from '@/lib/providers/llm';
 import type { Business, Call, Urgency } from '@/lib/types';
@@ -289,7 +289,7 @@ function remember(conversationId: string): void {
 
 async function businessForAgent(agentId: string): Promise<Business | null> {
   if (!agentId) return null;
-  return (await listBusinesses()).find((b) => b.agent_id === agentId) ?? null;
+  return getBusinessByAgentId(agentId);
 }
 
 /**
@@ -337,6 +337,11 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
     const c = await getCall(explicit);
     if (c && (!business || c.business_id === business.id)) call = c;
   }
+  // A call row created by a tool during the call is keyed by the conversation id.
+  if (!call && conversationId) {
+    const c = await getCallBySid(conversationId);
+    if (c && (!business || c.business_id === business.id)) call = c;
+  }
   if (!call && business) {
     const startedMs = body.metadata?.start_time_unix_secs
       ? body.metadata.start_time_unix_secs * 1000
@@ -349,7 +354,7 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
     else if (candidates.length > 1) log.warn('ambiguous_call', { business: business.id, candidates: candidates.length });
   }
   if (!call && business) {
-    call = await createCall({ business_id: business.id, status: 'in_progress', started_at: body.metadata?.start_time_unix_secs
+    call = await createCall({ business_id: business.id, call_sid: conversationId || null, status: 'in_progress', started_at: body.metadata?.start_time_unix_secs
       ? new Date(body.metadata.start_time_unix_secs * 1000).toISOString() : undefined });
   }
   if (!call) {

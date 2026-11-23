@@ -1,5 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
-import { getBusiness } from '@/lib/db';
+import { getBooking, getBusiness, updateBooking } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { createPaymentLink } from '@/lib/providers/stripe';
 import type { PaymentLink } from '@/lib/types';
@@ -33,13 +33,19 @@ export async function POST(req: Request) {
       return fail(`amount_cents must be between ${MIN_CENTS} and ${MAX_CENTS}`, 422);
     }
 
+    const found = body.booking_id ? await getBooking(body.booking_id) : null;
+    if (body.booking_id && (!found || found.business_id !== business.id)) return fail('booking not found', 404);
+
+    const cents = Math.round(amountCents);
     const link = await createPaymentLink(
-      Math.round(amountCents),
+      cents,
       body.description?.trim() || `${business.name} deposit`,
       business.name,
+      { bookingId: found?.id ?? null, businessId: business.id },
     );
+    if (found && !found.deposit_paid) await updateBooking(found.id, { deposit_amount: cents });
 
-    return ok<CreateLinkResult>({ ...link, booking_id: body.booking_id ?? null });
+    return ok<CreateLinkResult>({ ...link, booking_id: found?.id ?? null });
   } catch (err) {
     return fail(err, 500);
   }

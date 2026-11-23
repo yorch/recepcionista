@@ -1,9 +1,14 @@
 /**
  * End-to-end smoke test. Run: bun scripts/smoke.ts (dev server must be on :3000)
  * Every assertion goes over HTTP so it tests the real pipeline.
+ * Needs DEMO_MODE=true on the server (reset/simulate routes are 404 otherwise) and, when the
+ * server has ADMIN_TOKEN set, the same ADMIN_TOKEN here (sent as a Bearer token). Pay-page
+ * checks use mock_ ids, which only exist outside production.
  */
 const BASE = process.env.APP_URL || 'http://127.0.0.1:3000';
 const BIZ = 'biz_miami_cool_air';
+
+const AUTH: Record<string, string> = process.env.ADMIN_TOKEN ? { authorization: `Bearer ${process.env.ADMIN_TOKEN}` } : {};
 
 let pass = 0;
 let fail = 0;
@@ -15,14 +20,14 @@ function check(label: string, cond: boolean, detail?: unknown) {
 }
 
 async function get(path: string) {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${BASE}${path}`, { headers: AUTH });
   return { status: res.status, text: await res.text() };
 }
 
 async function post(path: string, body?: unknown) {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...AUTH },
     body: JSON.stringify(body ?? {}),
   });
   const json = await res.json().catch(() => null);
@@ -32,7 +37,7 @@ async function post(path: string, body?: unknown) {
 async function main() {
   console.log('--- pages ---');
   for (const p of ['/', '/dashboard', '/dashboard/calls', '/dashboard/bookings',
-    '/dashboard/knowledge', '/dashboard/briefings', '/dashboard/demo', '/onboarding', '/pay/demo']) {
+    '/dashboard/knowledge', '/dashboard/briefings', '/dashboard/demo', '/onboarding', '/pay/mock_demo']) {
     const r = await get(p);
     check(`page ${p} → 200`, r.status === 200, r.status);
   }
@@ -104,7 +109,7 @@ async function main() {
   const sweep = await post('/api/gratitude/run', {});
   check('sweep runs', sweep.json?.ok === true, sweep.json);
 
-  const bookings = await (await fetch(`${BASE}/api/briefings?business_id=${BIZ}`)).json();
+  const bookings = await (await fetch(`${BASE}/api/briefings?business_id=${BIZ}`, { headers: AUTH })).json();
   void bookings;
 
   console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES'} (${pass}/${pass + fail})`);

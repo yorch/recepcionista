@@ -1,7 +1,7 @@
 import { runTool } from '@/lib/voice/tools';
 import type { ToolResult } from '@/lib/voice/tools';
 import { verifyToolSecret } from '@/lib/voice/elevenlabs';
-import { getCall, listBusinesses } from '@/lib/db';
+import { getBusinessByAgentId, getCall } from '@/lib/db';
 import { logger } from '@/lib/log';
 
 const log = logger('voice/tools');
@@ -66,7 +66,7 @@ async function bindTenant(
   const agentId = typeof args.agent_id === 'string' ? args.agent_id.trim() : '';
   const claimed = String(args.business_id ?? args.businessId ?? '');
   const business = agentId
-    ? (await listBusinesses()).find((b) => b.agent_id === agentId) ?? null
+    ? await getBusinessByAgentId(agentId)
     : null;
 
   const out: Record<string, unknown> = { ...args };

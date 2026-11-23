@@ -3,7 +3,7 @@
  * routed to the owner and never asked publicly. Finding candidates is read-only
  * so the sweep can be run repeatedly without double-texting anyone.
  */
-import { appUrl } from '@/lib/providers/stripe';
+import { sendGratitude } from '@/lib/messaging/actions';
 import { logger } from '@/lib/log';
 import { listBookings, listSms } from '@/lib/db';
 import type { Booking } from '@/lib/types';
@@ -47,26 +47,8 @@ export async function runGratitudeSweep(businessId?: string): Promise<SweepResul
 
   for (const booking of candidates) {
     try {
-      const res = await fetch(`${appUrl()}/api/sms/gratitude`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          booking_id: booking.id,
-          language: 'en',
-        }),
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!res.ok) {
-        log.warn('sweep.request_failed', { booking: booking.id, status: res.status });
-        skipped++;
-        continue;
-      }
-      const json = await res.json();
-      if (json?.ok) ids.push(booking.id);
-      else {
-        log.warn('sweep.rejected', { booking: booking.id, error: json?.error ?? 'unknown' });
-        skipped++;
-      }
+      await sendGratitude(booking.id, 'en');
+      ids.push(booking.id);
     } catch (err) {
       log.warn('sweep.error', { booking: booking.id, err });
       skipped++;

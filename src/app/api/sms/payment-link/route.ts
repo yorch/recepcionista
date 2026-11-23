@@ -1,9 +1,8 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { getBooking, getBusiness } from '@/lib/db';
-import { paymentLinkSms, type Lang } from '@/lib/messaging/templates';
-import { sendAndLog } from '@/lib/messaging';
+import type { Lang } from '@/lib/messaging/templates';
+import { createAndSendPaymentLink } from '@/lib/messaging/actions';
 import { limitRequest } from '@/lib/ratelimit';
-import { createPaymentLink } from '@/lib/providers/stripe';
 import type { SmsLog } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -36,28 +35,17 @@ export async function POST(req: Request) {
       return fail('amount_cents must be between 100 and 50000', 422);
     }
 
-    const booking = body.booking_id ? await getBooking(body.booking_id) : null;
-    const description = body.description?.trim()
-      || `${business.name} deposit${booking ? ` — ${booking.service}` : ''}`;
-
     // Always generate the link server-side; any caller-supplied `url` is ignored
     // (otherwise this route is an open "SMS arbitrary link" primitive).
-    const link = await createPaymentLink(Math.round(amountCents), description, business.name);
-
-    const text = paymentLinkSms({
+    const booking = body.booking_id ? await getBooking(body.booking_id) : null;
+    if (booking && booking.business_id !== business.id) return fail('booking not found', 404);
+    const { sms, body: text, link } = await createAndSendPaymentLink({
       business,
-      amount_cents: amountCents,
-      url: link.url,
-      service: booking?.service ?? description,
-      language: body.language ?? 'en',
-    });
-
-    const { sms } = await sendAndLog({
-      business_id: business.id,
+      booking,
       to: body.to,
-      body: text,
-      kind: 'payment_link',
-      booking_id: booking?.id ?? null,
+      amountCents,
+      description: body.description,
+      language: body.language,
     });
 
     return ok<PaymentLinkSmsResult>({

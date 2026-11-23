@@ -34,6 +34,7 @@ const PATCHABLE: Record<string, (v: unknown) => unknown> = {
 export interface BusinessDetail {
   business: Business;
   knowledge_base: KnowledgeBase | null;
+  /** revenue_month is integer CENTS. */
   stats: { calls_today: number; bookings_upcoming: number; revenue_month: number };
 }
 

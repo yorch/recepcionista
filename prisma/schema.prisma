@@ -36,6 +36,7 @@ model Business {
   smsLog        SmsLog[]
 
   @@index([phoneKey])
+  @@index([agentId])
   @@map("businesses")
 }
 

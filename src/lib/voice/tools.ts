@@ -8,7 +8,7 @@
  */
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall,
-  updateCall, updateBooking, createBooking as dbCreateBooking, logSms, BookingRejectedError,
+  updateCall, createBooking as dbCreateBooking, logSms, BookingRejectedError,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
 import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
@@ -18,7 +18,7 @@ import {
 import { dollarsToCents, formatCents } from '@/lib/money';
 import { logger } from '@/lib/log';
 import { sendSms, normalizePhone } from '@/lib/providers/twilio';
-import { createPaymentLink as providerCreatePaymentLink, appUrl } from '@/lib/providers/stripe';
+import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
 import type { Business, Call, SmsLog, TimeSlot } from '@/lib/types';
 
 const log = logger('voice-tools');
@@ -37,6 +37,10 @@ interface BaseArgs {
   call_id?: string;
   /** Telephony call SID, when the agent platform passes it (preferred way to find the live call). */
   call_sid?: string;
+  /** Platform-supplied conversation id (system__conversation_id); doubles as the call key. */
+  conversation_id?: string;
+  /** Platform-supplied caller number (system__caller_id) — trusted, unlike anything the LLM says. */
+  caller_phone?: string;
   language?: string;
 }
 
@@ -151,32 +155,21 @@ function missingBusiness(lang: ToolLanguage): ToolResult {
   };
 }
 
-/** Match by id, then SID, then caller phone, then "the only call in progress" — never a guess between two. */
+/** The telephony SID or ElevenLabs conversation id that identifies this live call. */
+function callKey(args: { call_sid?: string; conversation_id?: string }): string {
+  return str(args.call_sid) || str(args.conversation_id);
+}
+
+/** Match by id, then SID / conversation id, then caller phone. Never guesses "the latest call". */
 async function activeCall(
   businessId: string,
-  args: { call_id?: string; call_sid?: string; caller_phone?: string },
+  args: { call_id?: string; call_sid?: string; conversation_id?: string; caller_phone?: string },
 ): Promise<Call | null> {
   return findActiveCall(businessId, {
     callId: str(args.call_id) || undefined,
-    callSid: str(args.call_sid) || undefined,
+    callSid: callKey(args) || undefined,
     callerPhone: str(args.caller_phone) || undefined,
   });
-}
-
-async function postInternal(path: string, body: unknown): Promise<unknown | null> {
-  try {
-    const res = await fetch(`${appUrl()}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    // WS4 owns these routes; the voice call must survive their absence.
-    return null;
-  }
 }
 
 export interface OwnerAlert {
@@ -384,10 +377,12 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     if (call && !call.caller_name) await updateCall(call.id, { caller_name: name });
 
     // The confirmation has to come back in the language they called in.
-    const sms = await postInternal('/api/sms/confirmation', {
-      booking_id: booking.id,
-      language: lang,
-    });
+    let sms: unknown | null = null;
+    try {
+      sms = await sendConfirmation(booking.id, lang);
+    } catch (err) {
+      log.warn('confirmation.failed', { booking: booking.id, err });
+    }
 
     return {
       ok: true,
@@ -441,14 +436,32 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
-    const to = str(args.to);
     const body = str(args.body);
-    if (!to || !body) {
+    if (!body) {
       return {
         ok: false,
         message: say(lang,
-          'I need a phone number and a message before I can send that text.',
-          'Necesito un número y el mensaje antes de poder mandar el texto.'),
+          'I need the message text before I can send that.',
+          'Necesito el texto del mensaje antes de poder mandarlo.'),
+      };
+    }
+
+    // The recipient is NEVER taken from the model: only this call's caller or the owner.
+    // (`to` merely selects between those two.)
+    const call = await activeCall(business.id, { call_id: args.call_id, call_sid: args.call_sid, conversation_id: args.conversation_id });
+    const callerPhone = call?.caller_phone || str(args.caller_phone);
+    const key = (p: string) => p.replace(/\D/g, '').slice(-10);
+    const wanted = str(args.to);
+    const to = wanted && business.owner_phone
+      && (wanted.toLowerCase() === 'owner' || key(wanted) === key(business.owner_phone))
+      ? business.owner_phone
+      : callerPhone;
+    if (!to) {
+      return {
+        ok: false,
+        message: say(lang,
+          'I do not have a number I can text from here — let me read you the details instead.',
+          'No tengo un número al cual mandar el texto — mejor se lo leo por teléfono.'),
       };
     }
 
@@ -516,30 +529,33 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const bookingId = str(args.booking_id);
     const found = bookingId ? await getBooking(bookingId) : null;
     const booking = found && found.business_id === business.id ? found : null;
-    if (booking && !booking.deposit_paid) {
-      // Remember what is owed so the pay page and dashboard read it from the DB (cents).
-      await updateBooking(booking.id, { deposit_amount: amountCents });
-    }
     const call = await activeCall(business.id, args);
     const to = normalizePhone(
-      str(args.to) || booking?.customer_phone || call?.caller_phone || '',
+      booking?.customer_phone || str(args.to) || call?.caller_phone || '',
     );
+    if (!to) {
+      return {
+        ok: false,
+        message: say(lang,
+          'What number should I text the payment link to?',
+          '¿A qué número le mando el enlace de pago?'),
+      };
+    }
 
-    const link = await providerCreatePaymentLink(amountCents, description, business.name);
-
-    // Best-effort: WS4 owns /api/sms/payment-link.
-    const sms = to
-      ? await postInternal('/api/sms/payment-link', {
-        business_id: business.id,
-        booking_id: booking?.id ?? (bookingId || undefined),
-        to,
-        amount_cents: amountCents,
-        description,
-        url: link.url,
-        link_id: link.id,
-        language: lang,
-      })
-      : null;
+    // One call, one link: the library creates the link, records the deposit (cents) and texts it.
+    let sms: unknown | null = null;
+    let link: { id: string; url: string; amount_cents: number; mock: boolean } | null = null;
+    try {
+      const sent = await createAndSendPaymentLink({
+        business, booking, to, amountCents, description, language: lang,
+      });
+      sms = sent.sms;
+      link = sent.link;
+    } catch (err) {
+      return toolFailure('create_payment_link', err, lang, say(lang,
+        'I could not create that payment link — let me have the owner call you to take the deposit.',
+        'No pude crear el enlace de pago — voy a pedirle al dueño que le llame para el depósito.'));
+    }
 
     const spoken = formatCents(amountCents);
     return {
@@ -585,7 +601,7 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       // No live call to attach to (e.g. a tool call from the demo simulator).
       call = await createCall({
         business_id: business.id,
-        call_sid: str(args.call_sid) || null,
+        call_sid: callKey(args) || null,
         caller_phone: callerPhone ? normalizePhone(callerPhone) : null,
         caller_name: callerName || null,
         status: 'in_progress',
@@ -762,7 +778,7 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     const reason = str(args.reason) || 'Caller asked for a human';
     let call = await activeCall(business.id, args);
     if (!call) {
-      call = await createCall({ business_id: business.id, call_sid: str(args.call_sid) || null, status: 'in_progress' });
+      call = await createCall({ business_id: business.id, call_sid: callKey(args) || null, status: 'in_progress' });
     }
 
     const updated = await updateCall(call.id, {

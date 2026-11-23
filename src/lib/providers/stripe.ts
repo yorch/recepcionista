@@ -18,10 +18,12 @@ export interface PaymentLinkOptions {
 const STRIPE_TIMEOUT_MS = 15_000;
 const isProd = () => process.env.NODE_ENV === 'production';
 
-function mockLink(amountCents: number, reason: string): PaymentLink & { mock: boolean } {
+function mockLink(amountCents: number, reason: string, bookingId?: string | null): PaymentLink & { mock: boolean } {
   const id = `mock_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
   log.warn('link.mock', { reason, amount_cents: amountCents, id });
-  return { id, url: `${appUrl()}/pay/${id}`, amount_cents: amountCents, mock: true };
+  // With a booking the pay page loads amount/description from the DB by booking id.
+  const path = bookingId ? encodeURIComponent(bookingId) : id;
+  return { id, url: `${appUrl()}/pay/${path}`, amount_cents: amountCents, mock: true };
 }
 
 /**
@@ -41,7 +43,7 @@ export async function createPaymentLink(
   if (!Number.isInteger(cents) || cents <= 0) throw new Error('amount_cents must be a positive integer');
   if (!hasStripe()) {
     if (isProd()) throw new Error('Stripe is not configured (STRIPE_SECRET_KEY unset)');
-    return mockLink(cents, 'no STRIPE_SECRET_KEY');
+    return mockLink(cents, 'no STRIPE_SECRET_KEY', opts.bookingId);
   }
   try {
     const started = Date.now();
@@ -85,7 +87,7 @@ export async function createPaymentLink(
       throw err instanceof Error ? err : new Error('Stripe payment link failed');
     }
     log.warn('link.fallback_to_mock', { amount_cents: cents, err });
-    return mockLink(cents, 'stripe error (non-production)');
+    return mockLink(cents, 'stripe error (non-production)', opts.bookingId);
   }
 }
 

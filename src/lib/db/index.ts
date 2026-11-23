@@ -201,6 +201,14 @@ export async function getBusiness(id: ID): Promise<Business | null> {
   return row ? toBusiness(row) : null;
 }
 
+/** Tenant lookup by ElevenLabs agent id (indexed). */
+export async function getBusinessByAgentId(agentId: string): Promise<Business | null> {
+  const id = agentId.trim();
+  if (!id) return null;
+  const row = await prisma.business.findFirst({ where: { agentId: id }, orderBy: { createdAt: 'asc' } });
+  return row ? toBusiness(row) : null;
+}
+
 /** Indexed lookup on the normalized (last-10-digit) phone key — no table scan. */
 export async function getBusinessByPhone(phone: string): Promise<Business | null> {
   const key = phoneKey(phone);
@@ -364,7 +372,8 @@ export async function findActiveCall(
     const mine = rows.filter((r) => phoneKey(r.callerPhone) === key);
     if (mine.length >= 1) return toCall(mine[0]);
   }
-  return rows.length === 1 ? toCall(rows[0]) : null;
+  // No "only call in progress" guess: without a trusted id/SID or a phone match, there is no call.
+  return null;
 }
 
 export async function listCalls(businessId?: ID, date?: string, tz?: string): Promise<Call[]> {

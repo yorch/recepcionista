@@ -14,7 +14,12 @@ const RELEVANT = new Set([
   'payment_intent.succeeded',
 ]);
 
-/** Event ids and bookings already handled (process-local; Stripe retries land within hours). */
+/**
+ * Event ids and bookings already handled (process-local; Stripe retries land within hours).
+ * TODO(multi-instance): this dedupe is per process, so with several instances a retry can reach a
+ * different one and re-send the owner alert. markDepositPaid is idempotent, so no money state is
+ * affected; persist processed event ids (e.g. a stripe_events table) if the alert must be exactly-once.
+ */
 const SEEN_TTL_MS = 24 * 60 * 60 * 1000;
 const seenEvents = new Map<string, number>();
 const alertedBookings = new Map<string, number>();

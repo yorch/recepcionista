@@ -21,6 +21,8 @@ const PUBLIC_API_EXACT = new Set([
   '/api/voice/incoming',
   '/api/voice/agent-prompt',
   '/api/payments/webhook',
+  // Public checkout page's "Pay" button. The route itself 404s unless DEMO_MODE=true and reads the amount from the DB.
+  '/api/pay/mock-complete',
   '/api/sms/gratitude-reply',
 ]);
 const PUBLIC_API_PREFIX = ['/api/voice/tools/'];
