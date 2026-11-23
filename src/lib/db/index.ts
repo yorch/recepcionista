@@ -402,7 +402,7 @@ export async function listCalls(businessId?: ID, date?: string, tz?: string): Pr
 }
 
 // ---------- bookings ----------
-export type BookingRejection = SlotRejection | 'slot_taken' | 'invalid_time' | 'business_not_found';
+export type BookingRejection = SlotRejection | 'call_cap' | 'slot_taken' | 'invalid_time' | 'business_not_found';
 
 /** Thrown by createBooking when the slot cannot be booked; `reason` is machine-readable. */
 export class BookingRejectedError extends Error {
@@ -427,14 +427,15 @@ function isOverlapViolation(err: unknown): boolean {
  * inside opening hours and finishing by close), duration-overlap check against
  * non-cancelled bookings, insert. A Postgres exclusion constraint is the backstop.
  * Throws BookingRejectedError for any business-rule rejection. Pass `{ enforce: false }`
- * to skip only the past/hours validation (overlap is always enforced).
+ * to skip only the past/hours validation (overlap is always enforced). `max_per_call` caps
+ * non-cancelled bookings per call_id inside the transaction ('call_cap').
  */
 export async function createBooking(
   input: Partial<Booking> & {
     business_id: ID; customer_name: string; customer_phone: string;
     service: string; scheduled_at: string;
   },
-  opts: { enforce?: boolean } = {},
+  opts: { enforce?: boolean; max_per_call?: number } = {},
 ): Promise<Booking> {
   const enforce = opts.enforce ?? true;
   const start = new Date(input.scheduled_at);
@@ -449,6 +450,12 @@ export async function createBooking(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.business_id}))`;
       const biz = await tx.business.findUnique({ where: { id: input.business_id } });
       if (!biz) throw new BookingRejectedError('business_not_found');
+
+      // Per-call cap: counted under the same advisory lock as the insert, so concurrent calls cannot overshoot.
+      if (opts.max_per_call != null && input.call_id) {
+        const made = await tx.booking.count({ where: { callId: input.call_id, status: { not: 'cancelled' } } });
+        if (made >= opts.max_per_call) throw new BookingRejectedError('call_cap');
+      }
 
       if (enforce) {
         const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now());

@@ -56,5 +56,5 @@ CI (`.github/workflows/ci.yml`) starts a `postgres:16` service, runs `prisma mig
 run unless its name contains `dev`, `test`, `scratch` or `local`, or you pass `--force-i-know`
 (`bun scripts/seed.ts --force-i-know`; the ws scripts forward the flag to the seed they run). `smoke.ts` also
 refuses a non-local `APP_URL` without the flag, because it calls `/api/demo/reset` on that server. Note that the
-default dev database from `.env.example` is named `recepcionista`, so either rename it (for example
-`recepcionista_dev`) or pass the flag.
+default dev database from `.env.example` is `recepcionista_dev`, which passes. A local volume created before
+the rename still holds a database called `recepcionista`; see "Renaming the dev database" in the README.

@@ -1,17 +1,6 @@
 import Link from 'next/link';
-import { getLatestBriefing, listBusinesses, listCalls, listBookings } from '@/lib/db';
-import { money } from '@/lib/format';
-
-export const dynamic = 'force-dynamic';
-
-export default async function Home() {
-  const businesses = await listBusinesses();
-  const demo = businesses[0];
-  const calls = demo ? await listCalls(demo.id) : [];
-  const bookings = demo ? await listBookings(demo.id) : [];
-  const briefing = demo ? await getLatestBriefing(demo.id) : null;
-  const revenue = bookings.reduce((sum, b) => sum + (b.deposit_paid ? b.deposit_amount ?? 0 : 0), 0);
-
+/** Public landing page: static marketing copy only. Never renders any tenant's data. */
+export default function Home() {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-8">
       <header className="flex items-center justify-between">
@@ -79,26 +68,6 @@ export default async function Home() {
           </a>
         </div>
       </section>
-
-      {demo ? (
-        <section className="rise mt-20 grid gap-4 sm:grid-cols-3">
-          <div className="rounded-2xl border border-[#1f2937] bg-[#0d1117]/80 p-5">
-            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Calls handled</p>
-            <p className="mt-2 text-3xl font-semibold tabular-nums">{calls.length}</p>
-            <p className="mt-1 text-xs text-[#8b98ab]">{calls.filter((c) => c.language === 'mixed' || c.language === 'es').length} en español</p>
-          </div>
-          <div className="rounded-2xl border border-[#1f2937] bg-[#0d1117]/80 p-5">
-            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Jobs booked</p>
-            <p className="mt-2 text-3xl font-semibold tabular-nums">{bookings.length}</p>
-            <p className="mt-1 text-xs text-[#8b98ab]">{money(revenue)} in deposits</p>
-          </div>
-          <div className="rounded-2xl border border-[#1f2937] bg-[#0d1117]/80 p-5">
-            <p className="text-[11px] uppercase tracking-wider text-[#6b7b91]">Owner briefing</p>
-            <p className="mt-2 text-3xl font-semibold">{briefing ? '1' : '0'}</p>
-            <p className="mt-1 text-xs text-[#8b98ab]">{calls.filter((c) => c.flagged_reason).length} item needs you</p>
-          </div>
-        </section>
-      ) : null}
 
       <section className="mt-20 grid gap-px overflow-hidden rounded-2xl border border-[#1f2937] bg-[#1f2937] sm:grid-cols-2 lg:grid-cols-4">
         {[

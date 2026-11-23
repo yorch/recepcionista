@@ -13,7 +13,7 @@
 import { appUrl } from '@/lib/providers/stripe';
 import { logger } from '@/lib/log';
 import {
-  createCall, getBusiness, getBusinessByAgentId, getCall, getCallBySid, listCalls, nowIso, updateCall,
+  claimEvent, createCall, getBusiness, getBusinessByAgentId, getCall, getCallBySid, listCalls, nowIso, releaseEvent, updateCall,
 } from '@/lib/db';
 import { generateTextSafe } from '@/lib/providers/llm';
 import type { Business, Call, Urgency } from '@/lib/types';
@@ -277,15 +277,7 @@ export type PostCallOutcome =
   | { status: 200; body: { call: Call | null } | { ignored: string } }
   | { status: 400; error: string };
 
-/** Conversations already stored (process-local guard against webhook retries). */
-const processedConversations = new Map<string, number>();
-const PROCESSED_TTL_MS = 6 * 60 * 60 * 1000;
-
-function remember(conversationId: string): void {
-  const now = Date.now();
-  for (const [k, t] of processedConversations) if (now - t > PROCESSED_TTL_MS) processedConversations.delete(k);
-  processedConversations.set(conversationId, now);
-}
+const CLAIM_SOURCE = 'elevenlabs-postcall';
 
 async function businessForAgent(agentId: string): Promise<Business | null> {
   if (!agentId) return null;
@@ -306,12 +298,25 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
   }
   const body: PostCallData = envelope.data && typeof envelope.data === 'object' ? envelope.data : envelope;
 
+  // DB-backed idempotency: the first delivery claims the conversation; retries are ignored.
+  // A failed attempt releases the claim so the sender's retry is processed.
   const conversationId = String(body.conversation_id ?? '');
-  const agentId = String(body.agent_id ?? '');
-  if (conversationId && processedConversations.has(conversationId)) {
+  if (conversationId && !(await claimEvent(CLAIM_SOURCE, conversationId))) {
     log.info('duplicate', { conversation: conversationId });
     return { status: 200, body: { ignored: 'duplicate' } };
   }
+  try {
+    const outcome = await storePostCall(body, conversationId);
+    if (outcome.status !== 200 && conversationId) await releaseEvent(CLAIM_SOURCE, conversationId);
+    return outcome;
+  } catch (err) {
+    if (conversationId) await releaseEvent(CLAIM_SOURCE, conversationId);
+    throw err;
+  }
+}
+
+async function storePostCall(body: PostCallData, conversationId: string): Promise<PostCallOutcome> {
+  const agentId = String(body.agent_id ?? '');
 
   const transcript = transcriptText(body.transcript);
   const duration = body.duration_sec
@@ -377,7 +382,6 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
       status: alreadyHandedOff ? 'handed_off' : 'completed',
     });
     if (conversationId) {
-      remember(conversationId);
       await deleteProviderConversation(conversationId);
     }
     log.info('stored.declined', { call: call.id, business: call.business_id });
@@ -427,7 +431,6 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
     urgency: call.urgency === 'emergency' ? 'emergency' : urgency,
     status: alreadyHandedOff ? 'handed_off' : 'completed',
   });
-  if (conversationId) remember(conversationId);
   log.info('stored', { call: call.id, business: call.business_id, conversation: conversationId || null });
   return { status: 200, body: { call: updated } };
 }

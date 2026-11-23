@@ -1,15 +1,24 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { NextRequest } from 'next/server';
 
-process.env.DATABASE_URL ||= 'postgresql://x:x@127.0.0.1:1/none';
-process.env.ADMIN_TOKEN = 'test-admin-token-123';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let auth: typeof import('../src/lib/auth'), s: typeof import('../src/lib/session'), proxyMod: any;
 
+const savedEnv: Record<string, string | undefined> = {};
 beforeAll(async () => {
+  for (const k of ['DATABASE_URL', 'ADMIN_TOKEN']) savedEnv[k] = process.env[k];
+  process.env.DATABASE_URL ||= 'postgresql://x:x@127.0.0.1:1/none'; // never connected; only satisfies client construction
+  process.env.ADMIN_TOKEN = 'test-admin-token-123';
   auth = await import('../src/lib/auth');
   s = await import('../src/lib/session');
   proxyMod = await import('../src/proxy');
+});
+
+afterAll(() => {
+  for (const [k, v] of Object.entries(savedEnv)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 const user = (role: 'owner' | 'staff', biz = 'biz_a') =>

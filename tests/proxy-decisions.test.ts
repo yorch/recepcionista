@@ -3,7 +3,7 @@
  * (which covers the basics of isPublicPath): this file drives src/proxy.ts itself.
  * No database needed.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { NextRequest } from 'next/server';
 import { proxy } from '../src/proxy';
 import { isPublicPath, sessionValue, SESSION_COOKIE } from '../src/lib/auth';
@@ -11,7 +11,12 @@ import { isPublicPath, sessionValue, SESSION_COOKIE } from '../src/lib/auth';
 const TOKEN = 'proxy-matrix-admin-token';
 const ENV_KEYS = ['ADMIN_TOKEN', 'ALLOW_INSECURE_DEV', 'NODE_ENV'] as const;
 const env = process.env as Record<string, string | undefined>; // NODE_ENV is read-only in the typings
-const saved: Record<string, string | undefined> = Object.fromEntries(ENV_KEYS.map((k) => [k, env[k]]));
+// Captured per test, not at load: other files set these variables at load time and we must not undo that.
+let saved: Record<string, string | undefined> = {};
+
+beforeEach(() => {
+  saved = Object.fromEntries(ENV_KEYS.map((k) => [k, env[k]]));
+});
 
 afterEach(() => {
   for (const k of ENV_KEYS) {

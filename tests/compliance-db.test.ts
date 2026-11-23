@@ -11,8 +11,11 @@ suite('sendAndLog compliance policy (postgres)', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let db: any, msg: typeof import('../src/lib/messaging');
   const ids: string[] = [];
+  const envKeys = ['DATABASE_URL', 'ALLOW_INSECURE_DEV', 'TWILIO_ACCOUNT_SID'] as const;
+  const savedEnv: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
+    for (const k of envKeys) savedEnv[k] = process.env[k];
     process.env.DATABASE_URL = url;
     process.env.ALLOW_INSECURE_DEV = 'true';
     delete process.env.TWILIO_ACCOUNT_SID;
@@ -22,6 +25,10 @@ suite('sendAndLog compliance policy (postgres)', () => {
   afterAll(async () => {
     await db.prisma.business.deleteMany({ where: { id: { in: ids } } });
     await db.prisma.$disconnect();
+    for (const k of envKeys) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
   });
 
   test('opt-out blocks customer texts but not owner alerts; STOP footer; quiet hours; logging', async () => {

@@ -60,7 +60,21 @@ bun scripts/seed.ts            # demo business: Miami Cool Air Conditioning
 bun dev                        # http://localhost:3000  (set ADMIN_TOKEN, or ALLOW_INSECURE_DEV=true for local-only no-auth dev)
 ```
 
-The `DATABASE_URL` line in `.env.example` already matches `compose.dev.yaml`.
+The `DATABASE_URL` line in `.env.example` already matches `compose.dev.yaml` (database `recepcionista_dev`).
+
+**Renaming the dev database (one time, existing local volumes only).** `POSTGRES_DB` only applies when the
+volume is first created, so a volume from before the rename still has a database named `recepcionista`, which
+`db:seed` refuses. Either rename it in place:
+
+```bash
+docker compose -f compose.dev.yaml up -d
+docker exec recepcionista-db psql -U recepcionista -d postgres \
+  -c 'ALTER DATABASE recepcionista RENAME TO recepcionista_dev;'
+```
+
+(close any open connections first, e.g. stop `bun dev`), or throw the data away with
+`docker compose -f compose.dev.yaml down -v && bun run db:up` and reseed. Then update `DATABASE_URL` in your
+`.env` to end in `/recepcionista_dev?schema=public`.
 Add provider keys to `.env` to go live; leave them blank to keep the mocks.
 
 **Requirements:** Node/Bun, Docker. Nothing is installed system-wide — Postgres

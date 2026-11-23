@@ -16,7 +16,7 @@ services:
     environment:
       POSTGRES_USER: recepcionista
       POSTGRES_PASSWORD: recepcionista
-      POSTGRES_DB: recepcionista
+      POSTGRES_DB: recepcionista_dev
     ports:
       # Loopback only: a bare `5433:5432` publishes the database on every
       # interface the laptop has, including coffee-shop wifi.
@@ -24,7 +24,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U recepcionista -d recepcionista"]
+      test: ["CMD-SHELL", "pg_isready -U recepcionista -d recepcionista_dev"]
       interval: 5s
       timeout: 5s
       retries: 10

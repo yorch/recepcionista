@@ -126,7 +126,9 @@ async function handleEvent(
 
   // Unmatched payment: never drop money on the floor — tell the owner instead.
   const business = businessId ? await getBusiness(businessId) : null;
-  if (business?.owner_phone) {
+  if (!(amountCents > 0)) {
+    log.info('payment.unmatched_zero', { type });
+  } else if (business?.owner_phone) {
     await sendAndLog({
       business_id: business.id,
       to: business.owner_phone,

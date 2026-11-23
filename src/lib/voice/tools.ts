@@ -8,7 +8,7 @@
  */
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall,
-  updateCall, createBooking as dbCreateBooking, BookingRejectedError, listBookings,
+  updateCall, createBooking as dbCreateBooking, BookingRejectedError,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
 import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
@@ -358,24 +358,10 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     const duration = await resolveDuration(business.id, service, args.duration_minutes);
 
     // Call matching and the confirmation number use the PLATFORM caller id, never
-    // a number the model relays. The model's number is only a fallback (when there is
-    // no trusted caller id), and sendSms still enforces E.164 + allowed countries.
+    // a number the model relays. The model's customer_phone is only used when the call row has no
+    // caller id, and sendSms still enforces E.164 + allowed countries.
     const call = await activeCall(business.id, args);
-    const trustedPhone = call?.caller_phone || str(args.caller_phone);
-    const bookingPhone = trustedPhone || phone;
-
-    if (call) {
-      const made = (await listBookings(business.id)).filter((b) => b.call_id === call.id).length;
-      if (made >= MAX_BOOKINGS_PER_CALL) {
-        return {
-          ok: false,
-          message: say(lang,
-            'I have already booked two appointments on this call — let me have the owner help with anything else.',
-            'Ya agendé dos citas en esta llamada — voy a pedirle al dueño que le ayude con lo demás.'),
-          data: { reason: 'booking_cap' },
-        };
-      }
-    }
+    const bookingPhone = call?.caller_phone || phone;
 
     const priceDollars = args.price_estimate == null || str(args.price_estimate) === ''
       ? null
@@ -398,8 +384,17 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
         duration_minutes: duration,
         address: str(args.address) || null,
         price_estimate: priceEstimate,
-      });
+      }, { max_per_call: MAX_BOOKINGS_PER_CALL });
     } catch (err) {
+      if (err instanceof BookingRejectedError && err.reason === 'call_cap') {
+        return {
+          ok: false,
+          message: say(lang,
+            'I have already booked two appointments on this call — let me have the owner help with anything else.',
+            'Ya agendé dos citas en esta llamada — voy a pedirle al dueño que le ayude con lo demás.'),
+          data: { reason: 'booking_cap' },
+        };
+      }
       if (err instanceof BookingRejectedError) return await rejectionResult(err.reason, business, lang, duration, iso);
       throw err;
     }
@@ -479,7 +474,7 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
     // The recipient is NEVER taken from the model: only this call's caller or the owner.
     // (`to` merely selects between those two.)
     const call = await activeCall(business.id, { call_id: args.call_id, call_sid: args.call_sid, conversation_id: args.conversation_id });
-    const callerPhone = call?.caller_phone || str(args.caller_phone);
+    const callerPhone = call?.caller_phone || '';
     const key = (p: string) => p.replace(/\D/g, '').slice(-10);
     const wanted = str(args.to);
     const to = wanted && business.owner_phone
@@ -575,7 +570,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const call = await activeCall(business.id, args);
     // Recipient is never taken from the model: the booking's number or this call's caller id.
     const to = normalizePhone(
-      booking?.customer_phone || call?.caller_phone || str(args.caller_phone) || '',
+      booking?.customer_phone || call?.caller_phone || '',
     );
     if (!to) {
       return {
