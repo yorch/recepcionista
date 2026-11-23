@@ -43,7 +43,25 @@ export interface Business {
   /** Custom recording disclosure spoken at call start; null = default text. */
   recording_disclosure_text?: string | null;
   created_at: string;
+  /** E.164 forms (null when the stored number could not be normalised). */
+  phone_e164?: string | null;
+  owner_phone_e164?: string | null;
+  owner_phone_verified_at?: string | null;
+  /** Billing. Absent/'none' on legacy and demo tenants (only enforced when BILLING_ENFORCED=true). */
+  billing_status?: BillingStatus;
+  plan?: string | null;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+  trial_ends_at?: string | null;
+  current_period_end?: string | null;
+  cancel_at_period_end?: boolean;
+  /** When billing_status last became 'past_due' (start of the grace period). */
+  past_due_since?: string | null;
+  sms_cap_override?: number | null;
+  call_minutes_cap_override?: number | null;
 }
+
+export type BillingStatus = 'none' | 'trialing' | 'active' | 'past_due' | 'canceled' | 'unpaid';
 
 export interface KnowledgeBase {
   id: ID;
@@ -158,14 +176,55 @@ export interface User {
   role: UserRole;
   created_at: string;
   disabled_at: string | null;
+  email_verified_at: string | null;
+  /** E.164 or null. */
+  phone: string | null;
+  /** True once TOTP enrolment was confirmed. The secret itself never leaves src/lib/db/users.ts. */
+  totp_enabled: boolean;
 }
+
+export type SessionKind = 'user' | 'admin_token';
 
 export interface UserSession {
   id: ID;
-  user_id: ID;
+  /** Null only for kind 'admin_token' (break-glass). */
+  user_id: ID | null;
+  kind: SessionKind;
   expires_at: string;
   created_at: string;
   last_used_at: string;
+  mfa_verified_at: string | null;
+  ip: string | null;
+  user_agent: string | null;
+}
+
+export type EmailTokenPurpose = 'verify' | 'reset' | 'invite';
+
+export interface EmailToken {
+  id: ID;
+  user_id: ID | null;
+  email: string;
+  purpose: EmailTokenPurpose;
+  business_id: ID | null;
+  role: 'owner' | 'staff' | null;
+  invited_by: ID | null;
+  expires_at: string;
+  used_at: string | null;
+  created_at: string;
+}
+
+export type AuditActorKind = 'user' | 'admin_token' | 'system' | 'webhook';
+
+export interface AuditEvent {
+  id: ID;
+  at: string;
+  actor_user_id: ID | null;
+  actor_kind: AuditActorKind;
+  business_id: ID | null;
+  action: string;
+  target: string;
+  ip: string | null;
+  meta: Record<string, unknown>;
 }
 
 export interface ExtractionResult {

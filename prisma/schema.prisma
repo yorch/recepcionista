@@ -39,6 +39,25 @@ model Business {
   recordingDisclosureText String?  @map("recording_disclosure_text")
   createdAt               DateTime @default(now()) @map("created_at")
 
+  /// E.164 form of `phone` / `owner_phone` (nullable: unparseable numbers stay NULL). `phone_key` stays for dual-read.
+  phoneE164              String?   @map("phone_e164")
+  ownerPhoneE164         String?   @map("owner_phone_e164")
+  /// Billing (Stripe). 'none' | 'trialing' | 'active' | 'past_due' | 'canceled' | 'unpaid' (CHECK in the migration).
+  billingStatus          String    @default("none") @map("billing_status")
+  plan                   String?
+  stripeCustomerId       String?   @map("stripe_customer_id")
+  stripeSubscriptionId   String?   @map("stripe_subscription_id")
+  trialEndsAt            DateTime? @map("trial_ends_at") @db.Timestamptz(6)
+  currentPeriodEnd       DateTime? @map("current_period_end") @db.Timestamptz(6)
+  cancelAtPeriodEnd      Boolean   @default(false) @map("cancel_at_period_end")
+  /// Maintained by setBillingState: when billing_status last became 'past_due' (start of the grace period).
+  pastDueSince           DateTime? @map("past_due_since") @db.Timestamptz(6)
+  /// Per-business caps; NULL = use env PLAN_SMS_CAP / PLAN_CALL_MINUTES_CAP.
+  smsCapOverride         Int?      @map("sms_cap_override")
+  callMinutesCapOverride Int?      @map("call_minutes_cap_override")
+  /// Set once the owner proved they control `owner_phone` (alert destination).
+  ownerPhoneVerifiedAt   DateTime? @map("owner_phone_verified_at") @db.Timestamptz(6)
+
   knowledgeBase KnowledgeBase?
   calls         Call[]
   bookings      Booking[]
@@ -46,9 +65,13 @@ model Business {
   smsLog        SmsLog[]
   smsOptOuts    SmsOptOut[]
   users         User[]
+  usageCounters UsageCounter[]
+  emailTokens   EmailToken[]
 
   @@index([phoneKey])
+  @@index([phoneE164])
   @@index([agentId])
+  @@index([stripeCustomerId])
   @@map("businesses")
 }
 
@@ -76,6 +99,8 @@ model Call {
   /// (or by the SID), so a call is one row whichever path created it.
   conversationId     String?   @unique @map("conversation_id")
   callerPhone        String?   @map("caller_phone")
+  /// E.164 form of caller_phone (NULL when unparseable / withheld).
+  callerE164         String?   @map("caller_e164")
   callerName         String?   @map("caller_name")
   startedAt          DateTime  @default(now()) @map("started_at")
   endedAt            DateTime? @map("ended_at")
@@ -96,29 +121,32 @@ model Call {
   bookings Booking[]
 
   @@index([businessId, startedAt])
+  @@index([businessId, callerE164])
   @@map("calls")
 }
 
 model Booking {
-  id              String    @id @default(uuid())
-  callId          String?   @map("call_id")
-  businessId      String    @map("business_id")
-  customerName    String    @map("customer_name")
-  customerPhone   String    @map("customer_phone")
-  service         String
-  scheduledAt     DateTime  @map("scheduled_at")
+  id                    String    @id @default(uuid())
+  callId                String?   @map("call_id")
+  businessId            String    @map("business_id")
+  customerName          String    @map("customer_name")
+  customerPhone         String    @map("customer_phone")
+  /// E.164 form of customer_phone (NULL when unparseable or erased).
+  phoneE164             String?   @map("phone_e164")
+  service               String
+  scheduledAt           DateTime  @map("scheduled_at")
   /// Length of the job. Together with scheduled_at it forms the blocked interval;
   /// a Postgres exclusion constraint (see migrations) forbids overlaps per business.
-  durationMinutes Int       @default(60) @map("duration_minutes")
-  address         String?
+  durationMinutes       Int       @default(60) @map("duration_minutes")
+  address               String?
   /// MONEY IS INTEGER CENTS everywhere (price_estimate, deposit_amount).
-  priceEstimate   Int?      @map("price_estimate")
-  depositAmount   Int?      @map("deposit_amount")
-  depositPaid     Boolean   @default(false) @map("deposit_paid")
-  status          String    @default("confirmed")
-  createdAt       DateTime  @default(now()) @map("created_at")
+  priceEstimate         Int?      @map("price_estimate")
+  depositAmount         Int?      @map("deposit_amount")
+  depositPaid           Boolean   @default(false) @map("deposit_paid")
+  status                String    @default("confirmed")
+  createdAt             DateTime  @default(now()) @map("created_at")
   /// Set when customer PII was nulled (retention purge or erasure request); financial fields are kept.
-  anonymizedAt    DateTime? @map("anonymized_at")
+  anonymizedAt          DateTime? @map("anonymized_at")
   /// When (and how) the customer was told they may get follow-up texts. Recorded by the server when a
   /// confirmation that carries the notice is delivered to this booking's own number; gates gratitude texts.
   followupConsentAt     DateTime? @map("followup_consent_at")
@@ -128,6 +156,7 @@ model Booking {
   call     Call?    @relation(fields: [callId], references: [id], onDelete: SetNull)
 
   @@index([businessId, scheduledAt])
+  @@index([businessId, phoneE164])
   @@map("bookings")
 }
 
@@ -150,6 +179,8 @@ model SmsLog {
   id           String   @id @default(uuid())
   businessId   String   @map("business_id")
   toPhone      String   @map("to_phone")
+  /// E.164 form of to_phone (NULL when unparseable).
+  toE164       String?  @map("to_e164")
   body         String
   kind         String
   bookingId    String?  @map("booking_id")
@@ -162,6 +193,7 @@ model SmsLog {
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@index([businessId, createdAt])
+  @@index([businessId, toE164])
   @@map("sms_log")
 }
 
@@ -171,6 +203,8 @@ model SmsOptOut {
   businessId String   @map("business_id")
   /// Last 10 digits (see phoneKey in src/lib/format.ts).
   phoneKey   String   @map("phone_key")
+  /// E.164 form (NULL for legacy rows that could not be normalised; matched by phone_key meanwhile).
+  phoneE164  String?  @map("phone_e164")
   optedOutAt DateTime @default(now()) @map("opted_out_at")
   /// 'stop_keyword' | 'manual' | 'complaint' | ...
   source     String
@@ -178,6 +212,7 @@ model SmsOptOut {
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@unique([businessId, phoneKey])
+  @@index([businessId, phoneE164])
   @@map("sms_opt_outs")
 }
 
@@ -229,25 +264,122 @@ model User {
   createdAt    DateTime  @default(now()) @map("created_at")
   disabledAt   DateTime? @map("disabled_at")
 
-  business Business?     @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  sessions UserSession[]
+  /// NULL until the address was proven (verify link, or invite acceptance). Pre-existing users are backfilled.
+  emailVerifiedAt  DateTime? @map("email_verified_at") @db.Timestamptz(6)
+  /// E.164, nullable (SMS second factor / alerts).
+  phone            String?
+  /// AES-256-GCM envelope (see src/lib/totp.ts) of the base32 TOTP secret. Set at enrolment, active once totp_enabled_at is set.
+  totpSecretEnc    String?   @map("totp_secret_enc")
+  totpEnabledAt    DateTime? @map("totp_enabled_at") @db.Timestamptz(6)
+  /// Last accepted 30s time step (replay protection): a code is accepted only for a strictly greater step.
+  totpLastUsedStep Int?      @map("totp_last_used_step")
+
+  business      Business?      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  sessions      UserSession[]
+  recoveryCodes RecoveryCode[]
+  emailTokens   EmailToken[]   @relation("TokenUser")
+  invitedTokens EmailToken[]   @relation("TokenInviter")
 
   @@index([businessId])
   @@map("users")
 }
 
 model UserSession {
-  id         String   @id @default(uuid())
-  userId     String   @map("user_id")
+  id            String    @id @default(uuid())
+  /// NULL only for kind 'admin_token' (break-glass ADMIN_TOKEN login); CHECK constraint.
+  userId        String?   @map("user_id")
+  /// 'user' | 'admin_token'
+  kind          String    @default("user")
   /// sha256 hex of the raw token; the raw token is never stored.
-  tokenHash  String   @unique @map("token_hash")
-  expiresAt  DateTime @map("expires_at")
-  createdAt  DateTime @default(now()) @map("created_at")
-  lastUsedAt DateTime @default(now()) @map("last_used_at")
+  tokenHash     String    @unique @map("token_hash")
+  expiresAt     DateTime  @map("expires_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastUsedAt    DateTime  @default(now()) @map("last_used_at")
+  /// Set when the second factor was satisfied for this session (NULL = password only / no MFA).
+  mfaVerifiedAt DateTime? @map("mfa_verified_at") @db.Timestamptz(6)
+  ip            String?
+  userAgent     String?   @map("user_agent")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])
   @@map("user_sessions")
+}
+
+/// One-time TOTP recovery codes. Only the sha256 of the (normalised) code is stored.
+model RecoveryCode {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  codeHash  String    @map("code_hash")
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, codeHash])
+  @@map("recovery_codes")
+}
+
+/// Single-use emailed tokens: purpose 'verify' | 'reset' | 'invite'. Only the sha256 of the token is stored.
+model EmailToken {
+  id         String    @id @default(uuid())
+  /// Set for verify/reset; NULL for invites (the account does not exist yet).
+  userId     String?   @map("user_id")
+  email      String
+  purpose    String
+  tokenHash  String    @unique @map("token_hash")
+  /// Invite only: where the invitee will land and with which role.
+  businessId String?   @map("business_id")
+  role       String?
+  invitedBy  String?   @map("invited_by")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt     DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user     User?     @relation("TokenUser", fields: [userId], references: [id], onDelete: Cascade)
+  business Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  inviter  User?     @relation("TokenInviter", fields: [invitedBy], references: [id], onDelete: SetNull)
+
+  @@index([email, purpose])
+  @@index([userId])
+  @@index([businessId])
+  @@index([expiresAt])
+  @@map("email_tokens")
+}
+
+/// Append-only security/audit trail. No FKs on purpose: the trail must outlive the users/businesses it names.
+model AuditEvent {
+  id          String   @id @default(uuid())
+  at          DateTime @default(now()) @db.Timestamptz(6)
+  actorUserId String?  @map("actor_user_id")
+  /// 'user' | 'admin_token' | 'system' | 'webhook' (CHECK constraint)
+  actorKind   String   @map("actor_kind")
+  businessId  String?  @map("business_id")
+  action      String
+  target      String   @default("")
+  ip          String?
+  /// Small structured context. NEVER secrets, tokens or message bodies.
+  meta        Json     @default("{}")
+
+  @@index([businessId, at])
+  @@index([actorUserId, at])
+  @@index([at])
+  @@map("audit_events")
+}
+
+/// Monthly (business-timezone calendar month) usage for plan caps. Updated only by atomic upserts (src/lib/db/usage.ts).
+model UsageCounter {
+  id          String   @id @default(uuid())
+  businessId  String   @map("business_id")
+  /// First day of the month in the business's timezone.
+  periodStart DateTime @map("period_start") @db.Date
+  smsCount    Int      @default(0) @map("sms_count")
+  callSeconds Int      @default(0) @map("call_seconds")
+  updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, periodStart])
+  @@map("usage_counters")
 }

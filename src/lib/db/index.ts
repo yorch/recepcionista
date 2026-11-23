@@ -13,9 +13,10 @@ import {
   type Interval, type SlotRejection,
 } from '@/lib/availability';
 import { phoneKey } from '@/lib/format';
+import { toE164 } from '@/lib/phone';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
-  Service, FAQ, BriefingStats, ConsentStatus,
+  Service, FAQ, BriefingStats, ConsentStatus, BillingStatus,
 } from '@/lib/types';
 
 export { prisma };
@@ -24,6 +25,9 @@ export * from './events';
 export * from './locks';
 export * from './compliance';
 export * from './users';
+export * from './email-tokens';
+export * from './audit';
+export * from './usage';
 
 /** Every write logs what changed; reads stay quiet (they are the hot path). */
 const log = logger('db');
@@ -60,6 +64,19 @@ function toBusiness(row: any): Business {
     retention_days: row.retentionDays ?? 365,
     recording_disclosure_text: row.recordingDisclosureText ?? null,
     created_at: isoReq(row.createdAt),
+    phone_e164: row.phoneE164 ?? null,
+    owner_phone_e164: row.ownerPhoneE164 ?? null,
+    owner_phone_verified_at: row.ownerPhoneVerifiedAt ? row.ownerPhoneVerifiedAt.toISOString() : null,
+    billing_status: (row.billingStatus ?? 'none') as Business['billing_status'],
+    plan: row.plan ?? null,
+    stripe_customer_id: row.stripeCustomerId ?? null,
+    stripe_subscription_id: row.stripeSubscriptionId ?? null,
+    trial_ends_at: row.trialEndsAt ? row.trialEndsAt.toISOString() : null,
+    current_period_end: row.currentPeriodEnd ? row.currentPeriodEnd.toISOString() : null,
+    cancel_at_period_end: row.cancelAtPeriodEnd ?? false,
+    past_due_since: row.pastDueSince ? row.pastDueSince.toISOString() : null,
+    sms_cap_override: row.smsCapOverride ?? null,
+    call_minutes_cap_override: row.callMinutesCapOverride ?? null,
   };
 }
 
@@ -192,9 +209,9 @@ function businessPatch(patch: Partial<Business>) {
   const out: Record<string, unknown> = {};
   if (patch.name !== undefined) out.name = patch.name;
   if (patch.url !== undefined) out.url = patch.url;
-  if (patch.phone !== undefined) { out.phone = patch.phone; out.phoneKey = phoneKey(patch.phone); }
+  if (patch.phone !== undefined) { out.phone = patch.phone; out.phoneKey = phoneKey(patch.phone); out.phoneE164 = toE164(patch.phone); }
   if (patch.timezone !== undefined && isValidTimeZone(patch.timezone)) out.timezone = patch.timezone;
-  if (patch.owner_phone !== undefined) out.ownerPhone = patch.owner_phone;
+  if (patch.owner_phone !== undefined) { out.ownerPhone = patch.owner_phone; out.ownerPhoneE164 = toE164(patch.owner_phone); }
   if (patch.owner_name !== undefined) out.ownerName = patch.owner_name;
   if (patch.hours !== undefined) out.hours = patch.hours;
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
@@ -240,6 +257,56 @@ export async function getBusinessByAgentId(agentId: string): Promise<Business | 
   return rows.length === 1 ? rows[0] : null;
 }
 
+export type BillingPatch = {
+  billing_status?: BillingStatus;
+  plan?: string | null;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+  trial_ends_at?: Date | string | null;
+  current_period_end?: Date | string | null;
+  cancel_at_period_end?: boolean;
+  sms_cap_override?: number | null;
+  call_minutes_cap_override?: number | null;
+  owner_phone_verified_at?: Date | string | null;
+};
+
+const toDateOrNull = (v: Date | string | null): Date | null => (v === null ? null : v instanceof Date ? v : new Date(v));
+
+/**
+ * Update billing fields of a business (Stripe webhooks, admin overrides). `past_due_since` is maintained here:
+ * set to `now` when the status BECOMES 'past_due', kept while it stays past due, cleared otherwise.
+ * Returns the updated business, or null when it does not exist. Unknown keys are ignored.
+ */
+export async function setBillingState(businessId: string, patch: BillingPatch, now: Date = new Date()): Promise<Business | null> {
+  const data: Record<string, unknown> = {};
+  if (patch.plan !== undefined) data.plan = patch.plan;
+  if (patch.stripe_customer_id !== undefined) data.stripeCustomerId = patch.stripe_customer_id;
+  if (patch.stripe_subscription_id !== undefined) data.stripeSubscriptionId = patch.stripe_subscription_id;
+  if (patch.trial_ends_at !== undefined) data.trialEndsAt = toDateOrNull(patch.trial_ends_at);
+  if (patch.current_period_end !== undefined) data.currentPeriodEnd = toDateOrNull(patch.current_period_end);
+  if (patch.cancel_at_period_end !== undefined) data.cancelAtPeriodEnd = patch.cancel_at_period_end;
+  if (patch.sms_cap_override !== undefined) data.smsCapOverride = patch.sms_cap_override;
+  if (patch.call_minutes_cap_override !== undefined) data.callMinutesCapOverride = patch.call_minutes_cap_override;
+  if (patch.owner_phone_verified_at !== undefined) data.ownerPhoneVerifiedAt = toDateOrNull(patch.owner_phone_verified_at);
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.business.findUnique({ where: { id: businessId }, select: { billingStatus: true, pastDueSince: true } });
+    if (!current) return null;
+    if (patch.billing_status !== undefined) {
+      data.billingStatus = patch.billing_status;
+      data.pastDueSince = patch.billing_status === 'past_due' ? (current.billingStatus === 'past_due' && current.pastDueSince ? current.pastDueSince : now) : null;
+    }
+    const row = await tx.business.update({ where: { id: businessId }, data });
+    return toBusiness(row);
+  });
+}
+
+/** The business billed under a Stripe customer id (null when none). */
+export async function getBusinessByStripeCustomer(stripeCustomerId: string): Promise<Business | null> {
+  if (!stripeCustomerId) return null;
+  const row = await prisma.business.findFirst({ where: { stripeCustomerId }, orderBy: { createdAt: 'asc' } });
+  return row ? toBusiness(row) : null;
+}
+
 /** Indexed lookup on the normalized (last-10-digit) phone key — no table scan. */
 export async function getBusinessByPhone(phone: string): Promise<Business | null> {
   const key = phoneKey(phone);
@@ -257,8 +324,10 @@ export async function createBusiness(
       url: input.url ?? null,
       phone: input.phone ?? null,
       phoneKey: phoneKey(input.phone),
+      phoneE164: toE164(input.phone),
       timezone: isValidTimeZone(input.timezone) ? input.timezone : DEFAULT_TIMEZONE,
       ownerPhone: input.owner_phone ?? null,
+      ownerPhoneE164: toE164(input.owner_phone),
       ownerName: input.owner_name ?? null,
       hours: (input.hours ?? DEFAULT_HOURS) as object,
       serviceArea: input.service_area ?? [],

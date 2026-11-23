@@ -16,17 +16,18 @@
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "bun scripts/seed.ts",
+    "verify:deploy": "bun scripts/verify-deploy.ts",
     "db:reset": "bun scripts/db-reset.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {
     "@prisma/client": "6.16.2",
     "cheerio": "^1.2.0",
-    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
-    "lucide-react": "^1.73.0",
+    "libphonenumber-js": "^1.13.17",
     "next": "16.4.6",
+    "nodemailer": "^10.6.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "sonner": "^2.0.8",
@@ -35,22 +36,19 @@
   "devDependencies": {
     "@tailwindcss/turbopack": "4.3.3",
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
-    "localtunnel": "^2.0.2",
     "prisma": "6.16.2",
     "tailwindcss": "4.3.3",
     "typescript": "^5"
   },
   "packageManager": "bun@1.4.1",
-  "ignoreScripts": [
-    "sharp",
-    "unrs-resolver"
-  ],
   "trustedDependencies": [
     "sharp",
     "unrs-resolver"
-  ]
+  ],
+  "license": "UNLICENSED"
 }

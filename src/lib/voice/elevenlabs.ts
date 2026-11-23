@@ -232,11 +232,18 @@ async function findToolByName(wireName: string, url: string): Promise<string | n
 /**
  * Tool request headers. Carries the shared secret the tool route checks
  * (ELEVENLABS_TOOL_SECRET). Without it (development only) tools are open.
+ *
+ * Current API: a header value is a literal string, `{secret_id}` (workspace secret), `{variable_name}`
+ * (dynamic variable) or `{env_var_label}`. A literal is stored in clear in the tool config; set
+ * ELEVENLABS_TOOL_SECRET_ID to the id of a workspace secret holding the SAME value as ELEVENLABS_TOOL_SECRET
+ * to send it as a secret reference instead (the route still verifies against ELEVENLABS_TOOL_SECRET).
  */
-function toolRequestHeaders(): Record<string, string> {
-  const out: Record<string, string> = { 'content-type': 'application/json' };
+export function toolRequestHeaders(): Record<string, string | { secret_id: string }> {
+  const out: Record<string, string | { secret_id: string }> = { 'content-type': 'application/json' };
   const secret = process.env.ELEVENLABS_TOOL_SECRET;
-  if (secret) out[TOOL_SECRET_HEADER] = secret;
+  const secretId = (process.env.ELEVENLABS_TOOL_SECRET_ID || '').trim();
+  if (secret && secretId) out[TOOL_SECRET_HEADER] = { secret_id: secretId };
+  else if (secret) out[TOOL_SECRET_HEADER] = secret;
   else log.warn('tool.no_secret', { reason: 'ELEVENLABS_TOOL_SECRET unset; tools will be unauthenticated outside production' });
   return out;
 }
