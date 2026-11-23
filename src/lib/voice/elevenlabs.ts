@@ -3,8 +3,9 @@
  * a missing key or a failed API call must never break the phone line.
  */
 import { appUrl } from '@/lib/providers/stripe';
+import { insecureDevAllowed } from '@/lib/auth';
 import { buildSystemPrompt } from '@/lib/kb';
-import { updateBusiness } from '@/lib/db';
+import { listBusinesses, listBusinessesByAgentId, updateBusiness } from '@/lib/db';
 import type { Business, KnowledgeBase } from '@/lib/types';
 import { TOOL_NAMES, type ToolName } from '@/lib/voice/tools';
 import { createHmac, timingSafeEqual } from 'node:crypto';
@@ -20,7 +21,7 @@ export const hasElevenLabs = () => Boolean(process.env.ELEVENLABS_API_KEY);
 
 // ------------------------------------------------------------ webhook auth
 
-const isProd = () => process.env.NODE_ENV === 'production';
+const isProd = () => !insecureDevAllowed();
 const SIGNATURE_TOLERANCE_SECS = 30 * 60;
 
 function safeEq(a: string, b: string): boolean {
@@ -44,7 +45,7 @@ export function verifyElevenLabsSignature(rawBody: string, header: string | null
       log.error('signature.no_secret', { reason: 'ELEVENLABS_WEBHOOK_SECRET unset in production' });
       return { ok: false, error: 'webhook verification not configured' };
     }
-    log.warn('signature.skipped', { reason: 'ELEVENLABS_WEBHOOK_SECRET unset (development)' });
+    log.warn('signature.skipped', { reason: 'ELEVENLABS_WEBHOOK_SECRET unset (ALLOW_INSECURE_DEV)' });
     return { ok: true, skipped: true };
   }
   if (!header) return { ok: false, error: 'missing signature' };
@@ -76,7 +77,7 @@ export function verifyToolSecret(req: Request): AuthVerdict {
       log.error('tool_secret.missing', { reason: 'ELEVENLABS_TOOL_SECRET unset in production' });
       return { ok: false, error: 'tool authentication not configured' };
     }
-    log.warn('tool_secret.skipped', { reason: 'ELEVENLABS_TOOL_SECRET unset (development)' });
+    log.warn('tool_secret.skipped', { reason: 'ELEVENLABS_TOOL_SECRET unset (ALLOW_INSECURE_DEV)' });
     return { ok: true, skipped: true };
   }
   const given = req.headers.get(TOOL_SECRET_HEADER) ?? '';
@@ -97,12 +98,35 @@ function headers(): Record<string, string> {
  * agent and orphaned the previous one.
  */
 export function agentIdFor(business: Business): string {
-  return business.agent_id || process.env.ELEVENLABS_AGENT_ID || '';
+  return business.agent_id || '';
+}
+
+/**
+ * Agent id to use for a business. A business NEVER shares an agent: the
+ * env ELEVENLABS_AGENT_ID is a bootstrap for a single-business install only,
+ * and is refused as soon as another business exists or already owns it.
+ */
+export async function resolveAgentIdFor(business: Business): Promise<string> {
+  if (business.agent_id) return business.agent_id;
+  const envAgent = (process.env.ELEVENLABS_AGENT_ID || '').trim();
+  if (!envAgent) return '';
+  const owners = await listBusinessesByAgentId(envAgent);
+  if (owners.some((b) => b.id !== business.id)) return '';
+  if ((await listBusinesses()).length !== 1) {
+    log.warn('agent.env_not_shared', { business: business.id, reason: 'ELEVENLABS_AGENT_ID is only used when exactly one business exists' });
+    return '';
+  }
+  return envAgent;
 }
 
 export async function rememberAgent(businessId: string, agentId: string): Promise<void> {
   if (!agentId) return;
   try {
+    const owners = await listBusinessesByAgentId(agentId);
+    if (owners.some((b) => b.id !== businessId)) {
+      log.error('agent.shared_refused', { business: businessId, agent: agentId });
+      return;
+    }
     await updateBusiness(businessId, { agent_id: agentId });
   } catch (err) {
     log.warn('agent.persist_failed', { business: businessId, agent: agentId, err });
@@ -120,7 +144,8 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     description: 'Look up open appointment slots. Call this before offering any time to the caller. Omit date for the next available slots.',
     properties: {
       date: { type: 'string', description: 'Day to check, YYYY-MM-DD. Omit for the next available slots.' },
-      duration_minutes: { type: 'number', description: 'Appointment length in minutes. Default 60.' },
+      service: { type: 'string', description: 'Service the caller wants, exactly as you will pass it to create_booking. The slot length comes from this service, so offered slots always fit the booking.' },
+      duration_minutes: { type: 'number', description: 'Optional override of the appointment length in minutes. Normally omit it and pass service instead.' },
     },
     required: [],
   },
@@ -128,8 +153,8 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     description: 'Book the appointment once the caller has agreed to a time. Confirm every detail back before calling.',
     properties: {
       customer_name: { type: 'string', description: "Caller's full name." },
-      customer_phone: { type: 'string', description: 'Callback number.' },
-      service: { type: 'string', description: 'Service being booked.' },
+      customer_phone: { type: 'string', description: 'Callback number. The server texts the number the caller phoned from; this is stored as the callback number.' },
+      service: { type: 'string', description: 'Service being booked (same value you passed to check_availability).' },
       scheduled_at: { type: 'string', description: "Start time as LOCAL wall-clock time in the business's time zone, with NO UTC offset, e.g. 2026-11-15T15:00:00. Never convert to UTC." },
       address: { type: 'string', description: 'Service address.' },
       price_estimate: { type: 'number', description: 'Starting price quoted, in whole dollars (e.g. 189 for $189). The server converts to cents.' },
@@ -368,7 +393,15 @@ export async function createOrUpdateAgent(
   input: { business: Business; kb: KnowledgeBase | null; agent_id?: string },
 ): Promise<AgentResult> {
   const { business, kb } = input;
-  const existing = (input.agent_id || agentIdFor(business)).trim();
+  let existing = (input.agent_id || (await resolveAgentIdFor(business))).trim();
+  if (existing) {
+    // Never PATCH an agent that another business owns (it would rewrite their live prompt).
+    const owners = await listBusinessesByAgentId(existing);
+    if (owners.some((b) => b.id !== business.id)) {
+      log.error('agent.shared_refused', { business: business.id, agent: existing });
+      existing = '';
+    }
+  }
   if (!hasElevenLabs()) {
     log.warn('agent.mock', { business: business.id, name: business.name, reason: 'no API key' });
     return { agent_id: existing || `mock_agent_${business.id}`, mock: true };

@@ -1,4 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBooking, getBusiness } from '@/lib/db';
 import type { Lang } from '@/lib/messaging/templates';
 import { createAndSendPaymentLink } from '@/lib/messaging/actions';
@@ -14,6 +15,8 @@ export interface PaymentLinkSmsResult {
 }
 
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   const limited = limitRequest(req, 'sms/payment-link', 10);
   if (limited) return limited;
   try {

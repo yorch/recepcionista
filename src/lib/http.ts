@@ -6,7 +6,9 @@ export function ok<T>(data: T, init?: number) {
 }
 
 export function fail(error: unknown, status = 400) {
-  const message = error instanceof Error ? error.message : String(error);
+  // Never echo internal error text (Prisma paths, stack hints) on 5xx.
+  const message = status >= 500 && error instanceof Error ? 'internal error' : error instanceof Error ? error.message : String(error);
+  if (status >= 500 && error instanceof Error) console.error('[http] 5xx', error);
   return NextResponse.json({ ok: false, error: message } satisfies ApiResult<never>, { status });
 }
 

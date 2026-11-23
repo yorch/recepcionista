@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/components/ui/cn';
 import { money } from '@/lib/format';
 import { dollarsToCents } from '@/lib/money';
-import { normalizeUrl } from '@/lib/extraction';
+import { normalizeUrl } from '@/lib/extraction/url';
 
 type Stage = 'input' | 'extracting' | 'review' | 'provisioning' | 'done';
 

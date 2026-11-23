@@ -60,6 +60,18 @@ set -a; . ./.env; set +a
 [[ -n "${ADMIN_TOKEN:-}" ]] \
   || die "ADMIN_TOKEN is unset in .env. Required in production: openssl rand -hex 32"
 
+# Voice/SMS providers: in production the app fails closed without these, so a
+# missing secret would deploy "successfully" and then reject every live call.
+if [[ -n "${ELEVENLABS_API_KEY:-}" ]]; then
+  [[ -n "${ELEVENLABS_TOOL_SECRET:-}" ]] \
+    || die "ELEVENLABS_TOOL_SECRET is unset in .env but ELEVENLABS_API_KEY is set. Every voice tool call would 401. openssl rand -hex 32"
+  [[ -n "${ELEVENLABS_WEBHOOK_SECRET:-}" ]] \
+    || die "ELEVENLABS_WEBHOOK_SECRET is unset in .env but ELEVENLABS_API_KEY is set. Post-call webhooks would 401. See README (ElevenLabs webhook secret)."
+fi
+if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -z "${TWILIO_AUTH_TOKEN:-}" ]]; then
+  die "TWILIO_AUTH_TOKEN is unset in .env but TWILIO_ACCOUNT_SID is set."
+fi
+
 # The proxy's network is host-level infrastructure, not something this stack
 # owns. Create it once rather than failing on a fresh host.
 if ! docker network inspect traefik >/dev/null 2>&1; then

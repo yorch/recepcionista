@@ -57,7 +57,7 @@ docker compose -f compose.dev.yaml up -d   # Postgres 17 on localhost:5433
 bunx prisma migrate deploy     # create the tables (uses DATABASE_URL from .env)
 bun scripts/seed.ts            # demo business: Miami Cool Air Conditioning
 
-bun dev                        # http://localhost:3000
+bun dev                        # http://localhost:3000  (set ADMIN_TOKEN, or ALLOW_INSECURE_DEV=true for local-only no-auth dev)
 ```
 
 The `DATABASE_URL` line in `.env.example` already matches `compose.dev.yaml`.
@@ -107,8 +107,25 @@ The owner dashboard and the JSON API are protected by one shared secret,
   Stripe calls are verified with their own signatures (`ELEVENLABS_WEBHOOK_SECRET`,
   `STRIPE_WEBHOOK_SECRET`), not with `ADMIN_TOKEN`.
 
-`deploy.sh` refuses to deploy without `ADMIN_TOKEN` and `STRIPE_WEBHOOK_SECRET`.
+`deploy.sh` refuses to deploy without `ADMIN_TOKEN` and `STRIPE_WEBHOOK_SECRET`,
+and, when `ELEVENLABS_API_KEY` is set, without `ELEVENLABS_TOOL_SECRET` and
+`ELEVENLABS_WEBHOOK_SECRET` (or `TWILIO_AUTH_TOKEN` when `TWILIO_ACCOUNT_SID` is set).
 Set `ADMIN_TOKEN` locally too, so you test the same sign-in path you deploy.
+
+**Nothing fails open because of `NODE_ENV`.** If a secret is unset the app
+rejects the request. To run locally without secrets, opt in explicitly with
+`ALLOW_INSECURE_DEV=true` (ignored in production builds). Never combine it
+with a tunnel or any publicly reachable host.
+
+**ElevenLabs webhook secret.** The first provision creates the post-call
+webhook and returns its signing secret once, in the admin-only provision
+response (`webhook_secret`). The app does not store or log it: copy it to
+`ELEVENLABS_WEBHOOK_SECRET` in `.env` and redeploy. If you lose it, delete the
+webhook in the ElevenLabs workspace and re-provision.
+
+**Login rate limit.** `X-Forwarded-For` is trusted only with `TRUSTED_PROXY=true`
+(set it only behind Traefik). Otherwise all clients share one bucket, plus a global
+per-route cap.
 
 ## Security checklist before going live
 

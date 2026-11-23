@@ -67,8 +67,25 @@ export function money(cents: number): string {
   return formatCents(cents);
 }
 
+/**
+ * Caller-supplied free text (service, address, description, name) is relayed
+ * by an LLM and must not become a phishing vector inside a text that carries
+ * the business's name: strip links/domains and anything but plain characters,
+ * and keep it short.
+ */
+export function safeText(raw: string | null | undefined, max = 60): string {
+  return (raw ?? '')
+    .replace(/\b(?:https?:\/\/|www\.)\S+/gi, '')
+    .replace(/\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?:\/\S*)?/gi, '')
+    .replace(/[^\p{L}\p{N} .,#'&/()+-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max)
+    .trim();
+}
+
 function firstName(name: string): string {
-  return name.trim().split(/\s+/)[0] || 'there';
+  return safeText(name, 30).split(/\s+/)[0] || 'there';
 }
 
 function clip(body: string): string {
@@ -84,23 +101,25 @@ export interface ConfirmationArgs {
 export function confirmationSms({ business, booking, language = 'en' }: ConfirmationArgs): string {
   const name = firstName(booking.customer_name);
   const when = formatWhen(booking.scheduled_at, language, business.timezone);
-  const where = booking.address ? `, ${booking.address}` : '';
+  const addr = safeText(booking.address, 80);
+  const where = addr ? `, ${addr}` : '';
+  const service = safeText(booking.service) || 'service';
   const price = booking.price_estimate ? money(booking.price_estimate) : null;
 
   if (language === 'es') {
     const estimate = price ? ` Aprox. ${price}.` : '';
     return clip(
-      `${business.name}: Confirmado — ${booking.service}, ${when}${where}.${estimate} Responda C para cancelar. ¡Gracias ${name}!`,
+      `${business.name}: Confirmado — ${service}, ${when}${where}.${estimate} Responda C para cancelar. ¡Gracias ${name}!`,
     );
   }
   const estimate = price ? ` Estimate ${price}.` : '';
   if (language === 'mixed') {
     return clip(
-      `${business.name}: You're all set — ${booking.service}, ${when}${where}.${estimate} Text C to cancel. ¡Gracias ${name}!`,
+      `${business.name}: You're all set — ${service}, ${when}${where}.${estimate} Text C to cancel. ¡Gracias ${name}!`,
     );
   }
   return clip(
-    `${business.name}: Confirmed — ${booking.service}, ${when}${where}.${estimate} Reply C to cancel. Thanks ${name}!`,
+    `${business.name}: Confirmed — ${service}, ${when}${where}.${estimate} Reply C to cancel. Thanks ${name}!`,
   );
 }
 
@@ -116,7 +135,7 @@ export function paymentLinkSms({
   business, amount_cents, url, service, language = 'en',
 }: PaymentLinkArgs): string {
   const amount = money(amount_cents);
-  const what = service?.trim() || 'service';
+  const what = safeText(service) || 'service';
 
   if (language === 'es') {
     return clip(
@@ -141,7 +160,8 @@ export interface GratitudeArgs {
 
 export function gratitudeSms({ business, booking, language = 'en' }: GratitudeArgs): string {
   const name = firstName(booking.customer_name);
-  const service = booking.service.charAt(0).toLowerCase() + booking.service.slice(1);
+  const svc = safeText(booking.service) || 'service';
+  const service = svc.charAt(0).toLowerCase() + svc.slice(1);
 
   if (language === 'es') {
     return clip(
@@ -183,7 +203,7 @@ export interface OwnerEscalationArgs {
 /** Owner-facing: Spanglish on purpose, this is Jorge reading it in his truck. */
 export function ownerEscalationSms({ business, customer, reason }: OwnerEscalationArgs): string {
   return clip(
-    `${business.name}: ${customer} — "${reason}". Cliente no está contento / unhappy customer, llámalo hoy. Do not ask them for a review.`,
+    `${business.name}: ${safeText(customer, 40)} — "${safeText(reason, 120)}". Cliente no está contento / unhappy customer, llámalo hoy. Do not ask them for a review.`,
   );
 }
 

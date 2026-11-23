@@ -1,4 +1,5 @@
 import { ok, fail } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBusiness, getKnowledgeBase, listBusinesses } from '@/lib/db';
 import { buildSystemPrompt } from '@/lib/kb';
 import { TOOL_NAMES } from '@/lib/voice/tools';
@@ -17,6 +18,8 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
 };
 
 export async function GET(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const url = new URL(req.url);
     const requestedId = url.searchParams.get('business_id') ?? '';

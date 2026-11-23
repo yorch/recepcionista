@@ -3,6 +3,8 @@
  * sms_log so the dashboard and demo still show a message being "sent".
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { insecureDevAllowed } from '@/lib/auth';
+import { validateRecipient } from '@/lib/messaging/recipient';
 import { logger } from '@/lib/log';
 
 export interface SendSmsResult { id: string; status: 'sent' | 'mock' | 'failed'; error?: string }
@@ -28,8 +30,7 @@ function publicBase(): string {
  * sign `url + concat(sorted key + value)`. `params` are the decoded
  * application/x-www-form-urlencoded POST fields (empty for GET / JSON).
  *
- * Fails closed in production. In development with no TWILIO_AUTH_TOKEN the
- * check is skipped with a warning. Multi-valued params are not supported by
+ * Fails closed unless ALLOW_INSECURE_DEV=true (non-production only). Multi-valued params are not supported by
  * our routes (first value is used by callers).
  */
 export function verifyTwilioSignature(
@@ -37,13 +38,12 @@ export function verifyTwilioSignature(
   params: Record<string, string>,
 ): { ok: true; skipped?: boolean } | { ok: false; error: string } {
   const token = process.env.TWILIO_AUTH_TOKEN;
-  const prod = process.env.NODE_ENV === 'production';
   if (!token) {
-    if (prod) {
-      log.error('signature.no_token', { reason: 'TWILIO_AUTH_TOKEN unset in production' });
+    if (!insecureDevAllowed()) {
+      log.error('signature.no_token', { reason: 'TWILIO_AUTH_TOKEN unset (set it, or ALLOW_INSECURE_DEV=true for local dev)' });
       return { ok: false, error: 'webhook verification not configured' };
     }
-    log.warn('signature.skipped', { reason: 'TWILIO_AUTH_TOKEN unset (development)' });
+    log.warn('signature.skipped', { reason: 'TWILIO_AUTH_TOKEN unset (ALLOW_INSECURE_DEV)' });
     return { ok: true, skipped: true };
   }
   const header = req.headers.get('x-twilio-signature');
@@ -65,7 +65,14 @@ export function verifyTwilioSignature(
 }
 
 export async function sendSms(to: string, body: string): Promise<SendSmsResult> {
-  const e164 = normalizePhone(to);
+  // Single enforcement point for E.164 + SMS_ALLOWED_COUNTRY_CODES: every text
+  // (tools, confirmations, payment links, alerts, routes) ends up here.
+  const check = validateRecipient(to);
+  if (!check.ok) {
+    log.warn('sms.recipient_rejected', { reason: check.error });
+    return { id: '', status: 'failed', error: check.error };
+  }
+  const e164 = check.to;
   if (!hasTwilio()) {
     await new Promise((r) => setTimeout(r, MOCK_DELAY_MS));
     log.warn('sms.mock', { to: e164, reason: 'TWILIO_* incomplete', chars: body.length });

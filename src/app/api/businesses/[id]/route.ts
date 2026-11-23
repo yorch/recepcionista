@@ -1,4 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings } from '@/lib/db';
 import type { Business, Hours, KnowledgeBase } from '@/lib/types';
 
@@ -42,6 +43,8 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<BusinessDetail>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const { id } = await params;
     const business = await getBusiness(id);
@@ -73,6 +76,8 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<Business>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const { id } = await params;
     const body = await readJson<Record<string, unknown>>(req);

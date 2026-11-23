@@ -23,6 +23,8 @@ export async function proxy(req: NextRequest) {
 }
 
 export const config = {
-  // Everything except Next internals and static assets (audio, icons, etc.).
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|audio/|.*\\.(?:png|jpg|jpeg|svg|gif|webp|ico|mp3|m4a|css|js|map|txt)$).*)'],
+  // Only Next internals and the favicon bypass the proxy. Public API/page
+  // paths are decided by isPublicPath() (never by file extension: a dynamic
+  // /api/**/x.js must still be authenticated). Handlers also call guardAdmin().
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|audio/).*)'],
 };

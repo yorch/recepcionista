@@ -65,6 +65,7 @@ async function bindTenant(
 ): Promise<Record<string, unknown> | null> {
   const agentId = typeof args.agent_id === 'string' ? args.agent_id.trim() : '';
   const claimed = String(args.business_id ?? args.businessId ?? '');
+  // Fails closed: null when no business has this agent OR several do (ambiguous).
   const business = agentId
     ? await getBusinessByAgentId(agentId)
     : null;
@@ -72,10 +73,15 @@ async function bindTenant(
   const out: Record<string, unknown> = { ...args };
   delete out.businessId;
   if (business) {
-    if (claimed && claimed !== business.id) log.warn('tenant.override', { claimed, resolved: business.id });
+    // The platform fills business_id from a per-agent dynamic variable. If it disagrees
+    // with the agent mapping something is misconfigured or forged: refuse, never guess.
+    if (claimed && claimed !== business.id) {
+      log.error('tenant.mismatch', { claimed, resolved: business.id, agent: agentId });
+      return null;
+    }
     out.business_id = business.id;
   } else if (authSkipped && claimed) {
-    // Development only (no ELEVENLABS_TOOL_SECRET): demo simulators post business_id directly.
+    // Local development only (ALLOW_INSECURE_DEV=true, no ELEVENLABS_TOOL_SECRET): demo simulators post business_id directly.
     out.business_id = claimed;
   } else {
     return null;

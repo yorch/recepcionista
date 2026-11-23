@@ -19,7 +19,6 @@ const PUBLIC_API_EXACT = new Set([
   '/api/voice/webhook',
   '/api/voice/post-call',
   '/api/voice/incoming',
-  '/api/voice/agent-prompt',
   '/api/payments/webhook',
   // Public checkout page's "Pay" button. The route itself 404s unless DEMO_MODE=true and reads the amount from the DB.
   '/api/pay/mock-complete',
@@ -29,26 +28,59 @@ const PUBLIC_API_PREFIX = ['/api/voice/tools/'];
 const PUBLIC_PAGE_EXACT = new Set(['/', '/login']);
 const PUBLIC_PAGE_PREFIX = ['/pay/'];
 
+/** Static assets that are really served from public/ or Next internals. */
+const PUBLIC_STATIC_PREFIX = ['/_next/static/', '/_next/image', '/audio/'];
+const PUBLIC_STATIC_EXACT = new Set(['/favicon.ico']);
+
+/** Decode and normalise a path so `%2e%2e`, `//`, `\\` and trailing slashes cannot dodge the allowlists. Returns null if it looks hostile. */
+export function normalizePath(pathname: string): string | null {
+  let p = pathname;
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    return null;
+  }
+  if (p.includes('\\') || p.includes('\0') || !p.startsWith('/')) return null;
+  const out: string[] = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { out.pop(); continue; }
+    out.push(seg);
+  }
+  return '/' + out.join('/');
+}
+
 export function isPublicPath(pathname: string): boolean {
-  const p = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
-  if (PUBLIC_API_EXACT.has(p) || PUBLIC_PAGE_EXACT.has(p)) return true;
-  return [...PUBLIC_API_PREFIX, ...PUBLIC_PAGE_PREFIX].some((x) => p.startsWith(x));
+  const p = normalizePath(pathname);
+  if (p === null) return false;
+  if (PUBLIC_API_EXACT.has(p) || PUBLIC_PAGE_EXACT.has(p) || PUBLIC_STATIC_EXACT.has(p)) return true;
+  return [...PUBLIC_API_PREFIX, ...PUBLIC_PAGE_PREFIX, ...PUBLIC_STATIC_PREFIX].some((x) => p.startsWith(x));
+}
+
+/**
+ * Explicit opt-in for local development only. Skips admin auth, webhook
+ * signature checks and tool-secret checks when the matching secret is unset.
+ * Never honoured when NODE_ENV=production. NODE_ENV alone is NOT enough: a
+ * `next dev` instance behind a tunnel must not silently run open.
+ */
+export function insecureDevAllowed(): boolean {
+  return process.env.ALLOW_INSECURE_DEV === 'true' && process.env.NODE_ENV !== 'production';
 }
 
 let warned = false;
 
 export type AuthConfig =
   | { mode: 'enforce'; token: string }
-  | { mode: 'open' }      // dev, ADMIN_TOKEN unset
-  | { mode: 'misconfigured' }; // prod, ADMIN_TOKEN unset -> fail closed
+  | { mode: 'open' }      // ALLOW_INSECURE_DEV=true (non-production), ADMIN_TOKEN unset
+  | { mode: 'misconfigured' }; // ADMIN_TOKEN unset without the dev opt-in -> fail closed
 
 export function authConfig(): AuthConfig {
   const token = process.env.ADMIN_TOKEN?.trim();
   if (token) return { mode: 'enforce', token };
-  if (process.env.NODE_ENV === 'production') return { mode: 'misconfigured' };
+  if (!insecureDevAllowed()) return { mode: 'misconfigured' };
   if (!warned) {
     warned = true;
-    console.warn('[auth] ADMIN_TOKEN is not set: admin auth is DISABLED (development only).');
+    console.warn('[auth] ADMIN_TOKEN is not set and ALLOW_INSECURE_DEV=true: admin auth is DISABLED (local development only).');
   }
   return { mode: 'open' };
 }
@@ -133,10 +165,19 @@ export function demoModeEnabled(): boolean {
   return process.env.DEMO_MODE === 'true';
 }
 
-/** Best-effort client key for rate limiting. */
+/**
+ * Client key for rate limiting. X-Forwarded-For / X-Real-IP are client
+ * controlled unless a trusted proxy overwrites them, so they are only used
+ * when TRUSTED_PROXY=true (then the right-most hop, appended by the proxy).
+ * Otherwise every caller shares one bucket; callers should also apply a
+ * global per-route cap (see limitRequest).
+ */
 export function clientKey(req: Request): string {
-  const fwd = req.headers.get('x-forwarded-for');
-  const ip = fwd?.split(',')[0]?.trim() || req.headers.get('x-real-ip') || 'unknown';
-  const authz = req.headers.get('authorization');
-  return authz ? `tok:${authz.length}:${ip}` : ip;
+  if (process.env.TRUSTED_PROXY === 'true') {
+    const real = req.headers.get('x-real-ip')?.trim();
+    const hops = (req.headers.get('x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+    const ip = hops.length ? hops[hops.length - 1] : real;
+    if (ip) return ip.slice(0, 64);
+  }
+  return 'untrusted';
 }

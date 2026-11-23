@@ -5,6 +5,7 @@
  * bypassing the ElevenLabs tool secret and agent-id tenant binding that guard the real routes.
  */
 import { NextResponse } from 'next/server';
+import { guardAdmin } from '@/lib/admin-guard';
 import {
   createCall, getBusiness, getKnowledgeBase, listSms, updateCall,
 } from '@/lib/db';
@@ -104,6 +105,8 @@ async function tool<T>(name: string, args: Record<string, unknown>): Promise<{ d
 }
 
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   if (!demoModeEnabled()) return fail('not found', 404);
   try {
     const body = await readJson<Body>(req);
@@ -226,5 +229,7 @@ export async function POST(req: Request) {
 }
 
 export async function GET() {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   return NextResponse.json({ ok: true, data: { scripts: Object.keys(SCRIPTS) } });
 }

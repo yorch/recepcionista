@@ -1,4 +1,5 @@
 import { ok, fail } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
@@ -21,6 +22,9 @@ export interface ProvisionResult {
   agent_id?: string;
   agent_mock?: boolean;
   regenerated?: boolean;
+  /** Shown ONCE, only when this call created the ElevenLabs post-call webhook. Store as ELEVENLABS_WEBHOOK_SECRET; it is not persisted or logged. */
+  webhook_secret?: string;
+  webhook_secret_notice?: string;
 }
 
 /** True when the stored prompt no longer reflects the business's own facts. */
@@ -54,6 +58,8 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<ReturnType<typeof ok<ProvisionResult>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   const limited = limitRequest(req, 'businesses/provision', 5);
   if (limited) return limited as ReturnType<typeof fail>;
   const { id } = await params;
@@ -176,6 +182,7 @@ async function provision(
     //    a failed registration must never leave the business unprovisioned.
     let agentId: string | undefined;
     let agentMock: boolean | undefined;
+    let webhookSecret: string | undefined;
     try {
       const agent = await createOrUpdateAgent({ business: updated, kb });
       agentId = agent.agent_id;
@@ -187,6 +194,7 @@ async function provision(
       if (!agent.mock && agentId) {
         try { await bindPhoneNumber(agentId); } catch { /* best-effort */ }
         const hook = await ensurePostCallWebhook();
+        webhookSecret = hook.webhook_secret;
         if (hook.webhook_id) {
           await registerPostCallWebhookOnAgent(agentId, hook.webhook_id);
         }
@@ -214,6 +222,10 @@ async function provision(
       agent_id: agentId,
       agent_mock: agentMock,
       regenerated,
+      ...(webhookSecret ? {
+        webhook_secret: webhookSecret,
+        webhook_secret_notice: 'Store this as ELEVENLABS_WEBHOOK_SECRET in .env and redeploy. It is shown only once and is not saved by the app.',
+      } : {}),
     });
   } catch (err) {
     // A failed scrape must not provision an agent against the wrong trade, so it

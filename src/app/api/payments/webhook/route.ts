@@ -1,4 +1,5 @@
 import { ok, fail } from '@/lib/http';
+import { insecureDevAllowed } from '@/lib/auth';
 import { getBooking, getBusiness, markDepositPaid } from '@/lib/db';
 import { ownerAlertSms } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
@@ -47,7 +48,7 @@ export async function POST(req: Request) {
 
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   const signature = req.headers.get('stripe-signature');
-  const allowUnsigned = process.env.STRIPE_ALLOW_UNSIGNED === 'true' && process.env.NODE_ENV !== 'production';
+  const allowUnsigned = process.env.STRIPE_ALLOW_UNSIGNED === 'true' && insecureDevAllowed();
 
   if (secret) {
     const verdict = await verifySignature(raw, signature, secret);

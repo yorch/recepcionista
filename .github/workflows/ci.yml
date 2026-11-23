@@ -36,7 +36,15 @@ jobs:
         run: bunx tsc --noEmit
 
       - name: Lint
-        run: bunx eslint src
+        run: bunx eslint src tests
+
+      - name: Build
+        # Catches server-only modules leaking into client bundles. Pages are
+        # force-dynamic, so a dummy DATABASE_URL is enough.
+        run: bunx next build
+        env:
+          ADMIN_TOKEN: ci-build-token
+          NEXT_TELEMETRY_DISABLED: "1"
 
       - name: Test
         # tests/ is being added. Until it exists, this step passes with no tests.

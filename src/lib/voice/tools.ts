@@ -8,7 +8,7 @@
  */
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall,
-  updateCall, createBooking as dbCreateBooking, logSms, BookingRejectedError,
+  updateCall, createBooking as dbCreateBooking, logSms, BookingRejectedError, listBookings,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
 import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
@@ -222,7 +222,23 @@ function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolea
 
 // ------------------------------------------------------------------- tools
 
+/**
+ * One duration rule for BOTH check_availability and create_booking, so a slot
+ * that was offered is a slot that can be booked: explicit minutes, else the
+ * matched catalog service's length, else the default.
+ */
+async function resolveDuration(businessId: string, service: string, explicit?: unknown): Promise<number> {
+  const kb = service ? await getKnowledgeBase(businessId) : null;
+  const matched = kb && service ? matchService(kb.services, service)[0] : undefined;
+  const hasExplicit = explicit != null && str(explicit) !== '';
+  return clampDuration(hasExplicit ? explicit : matched?.duration_minutes, DEFAULT_DURATION_MIN);
+}
+
+/** Max bookings one phone call may create (stops one call from filling the calendar / pumping SMS). */
+const MAX_BOOKINGS_PER_CALL = 2;
+
 export interface CheckAvailabilityArgs extends BaseArgs {
+  service?: string;
   date?: string;
   duration_minutes?: number | string;
 }
@@ -234,7 +250,7 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
     if (!business) return missingBusiness(lang);
     const tz = tzOf(business);
 
-    const duration = clampDuration(args.duration_minutes);
+    const duration = await resolveDuration(business.id, str(args.service), args.duration_minutes);
     const requested = str(args.date);
     let dateStr = '';
     if (requested) {
@@ -344,17 +360,37 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     }
     const iso = parsed.date.toISOString();
 
-    // Length of the job: explicit arg, else the matched catalog service, else 60 min.
-    const kb = await getKnowledgeBase(business.id);
-    const matched = kb ? matchService(kb.services, service)[0] : undefined;
-    const duration = clampDuration(args.duration_minutes ?? matched?.duration_minutes, DEFAULT_DURATION_MIN);
+    // Length of the job: same rule check_availability used for the offered slot.
+    const duration = await resolveDuration(business.id, service, args.duration_minutes);
 
-    const call = await activeCall(business.id, { ...args, caller_phone: phone });
+    // Call matching and the confirmation number use the PLATFORM caller id, never
+    // a number the model relays. The model's number is only a fallback (when there is
+    // no trusted caller id), and sendSms still enforces E.164 + allowed countries.
+    const call = await activeCall(business.id, args);
+    const trustedPhone = call?.caller_phone || str(args.caller_phone);
+    const bookingPhone = trustedPhone || phone;
+
+    if (call) {
+      const made = (await listBookings(business.id)).filter((b) => b.call_id === call.id).length;
+      if (made >= MAX_BOOKINGS_PER_CALL) {
+        return {
+          ok: false,
+          message: say(lang,
+            'I have already booked two appointments on this call — let me have the owner help with anything else.',
+            'Ya agendé dos citas en esta llamada — voy a pedirle al dueño que le ayude con lo demás.'),
+          data: { reason: 'booking_cap' },
+        };
+      }
+    }
 
     const priceDollars = args.price_estimate == null || str(args.price_estimate) === ''
       ? null
       : dollarsToCents(args.price_estimate);
     const priceEstimate = priceDollars == null ? null : Math.min(MAX_PRICE_CENTS, Math.max(0, priceDollars));
+
+    // Prefer the catalog's own name over free text the caller (or an injected prompt) made up.
+    const kbForName = await getKnowledgeBase(business.id);
+    const catalogName = (kbForName ? matchService(kbForName.services, service)[0]?.name : undefined) ?? service;
 
     let booking;
     try {
@@ -362,8 +398,8 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
         business_id: business.id,
         call_id: call?.id ?? null,
         customer_name: name,
-        customer_phone: normalizePhone(phone),
-        service,
+        customer_phone: normalizePhone(bookingPhone),
+        service: catalogName,
         scheduled_at: iso,
         duration_minutes: duration,
         address: str(args.address) || null,
@@ -504,7 +540,6 @@ export interface CreatePaymentLinkArgs extends BaseArgs {
   amount_cents?: number | string;
   description?: string;
   booking_id?: string;
-  to?: string;
 }
 
 export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<ToolResult> {
@@ -522,6 +557,16 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
           '¿De cuánto sería el depósito?'),
       };
     }
+    if (requested < 100) {
+      // Cents expected (18900 = $189). A value under $1 is almost certainly dollars: re-ask rather than make a $1.89 link.
+      return {
+        ok: false,
+        message: say(lang,
+          'Let me double check the deposit amount. How much should it be?',
+          'Déjeme confirmar el monto del depósito. ¿De cuánto sería?'),
+        data: { reason: 'amount_below_minimum', received: requested },
+      };
+    }
     const capped = requested > DEPOSIT_CAP_CENTS;
     const amountCents = capped ? DEPOSIT_CAP_CENTS : requested;
     const description = str(args.description) || 'Service deposit';
@@ -530,8 +575,9 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const found = bookingId ? await getBooking(bookingId) : null;
     const booking = found && found.business_id === business.id ? found : null;
     const call = await activeCall(business.id, args);
+    // Recipient is never taken from the model: the booking's number or this call's caller id.
     const to = normalizePhone(
-      booking?.customer_phone || str(args.to) || call?.caller_phone || '',
+      booking?.customer_phone || call?.caller_phone || str(args.caller_phone) || '',
     );
     if (!to) {
       return {

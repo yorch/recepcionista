@@ -1,4 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { limitRequest } from '@/lib/ratelimit';
 import { generateBriefing } from '@/lib/briefing';
 
@@ -12,6 +13,8 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   const limited = limitRequest(req, 'briefings/generate', 5);
   if (limited) return limited;
   try {

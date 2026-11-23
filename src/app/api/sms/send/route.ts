@@ -1,8 +1,10 @@
 import { fail, ok, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { sendAndLog } from '@/lib/messaging';
 import { getBusiness, listBookings, listCalls } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { normalizePhone } from '@/lib/providers/twilio';
+import { validateRecipient } from '@/lib/messaging/recipient';
 import type { SmsLog } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -12,18 +14,13 @@ const KINDS: SmsLog['kind'][] = [
 ];
 
 const MAX_BODY_CHARS = 480;
-const E164 = /^\+[1-9]\d{6,14}$/;
-
-/** Env SMS_ALLOWED_COUNTRY_CODES, comma separated calling codes (default "1"). */
-function allowedCountryCodes(): string[] {
-  return (process.env.SMS_ALLOWED_COUNTRY_CODES ?? '1')
-    .split(',').map((c) => c.trim().replace(/\D/g, '')).filter(Boolean);
-}
 
 const digits = (p?: string | null) => (p ?? '').replace(/\D/g, '');
 
 /** Admin-only escape hatch: raw text to a known contact of the business, still logged. */
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   const limited = limitRequest(req, 'sms/send', 10);
   if (limited) return limited;
   try {
@@ -36,12 +33,10 @@ export async function POST(req: Request) {
     }
     if (body.body.length > MAX_BODY_CHARS) return fail(`body must be at most ${MAX_BODY_CHARS} characters`, 422);
 
-    const to = normalizePhone(body.to);
-    if (!E164.test(to)) return fail('"to" must be an E.164 number like +13055550123', 422);
+    const check = validateRecipient(body.to);
+    if (!check.ok) return fail(check.error, 422);
+    const to = check.to;
     const d = digits(to);
-    if (!allowedCountryCodes().some((cc) => d.startsWith(cc))) {
-      return fail('destination country is not allowed', 422);
-    }
 
     const business = await getBusiness(body.business_id);
     if (!business) return fail('business not found', 404);

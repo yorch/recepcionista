@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { safeNextPath } from '@/lib/safe-redirect';
 
 export default function LoginPage() {
   const [token, setToken] = useState('');
@@ -22,8 +23,7 @@ export default function LoginPage() {
         return;
       }
       const next = new URLSearchParams(window.location.search).get('next');
-      // Only same-origin absolute paths; reject protocol-relative ("//evil").
-      const safe = next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard';
+      const safe = safeNextPath(next);
       window.location.assign(safe);
     } catch {
       setError('Network error');

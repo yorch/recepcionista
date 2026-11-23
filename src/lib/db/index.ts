@@ -201,12 +201,22 @@ export async function getBusiness(id: ID): Promise<Business | null> {
   return row ? toBusiness(row) : null;
 }
 
-/** Tenant lookup by ElevenLabs agent id (indexed). */
-export async function getBusinessByAgentId(agentId: string): Promise<Business | null> {
+/** Every business that stores this agent id (should never be more than one). */
+export async function listBusinessesByAgentId(agentId: string): Promise<Business[]> {
   const id = agentId.trim();
-  if (!id) return null;
-  const row = await prisma.business.findFirst({ where: { agentId: id }, orderBy: { createdAt: 'asc' } });
-  return row ? toBusiness(row) : null;
+  if (!id) return [];
+  const rows = await prisma.business.findMany({ where: { agentId: id }, orderBy: { createdAt: 'asc' }, take: 5 });
+  return rows.map(toBusiness);
+}
+
+/**
+ * Tenant lookup by ElevenLabs agent id. Fails closed: when several businesses
+ * claim the same agent the mapping is ambiguous, so NO tenant is returned
+ * (never "the oldest one").
+ */
+export async function getBusinessByAgentId(agentId: string): Promise<Business | null> {
+  const rows = await listBusinessesByAgentId(agentId);
+  return rows.length === 1 ? rows[0] : null;
 }
 
 /** Indexed lookup on the normalized (last-10-digit) phone key — no table scan. */

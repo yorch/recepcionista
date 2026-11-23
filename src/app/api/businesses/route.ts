@@ -1,4 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { listBusinesses, createBusiness } from '@/lib/db';
 import type { Business } from '@/lib/types';
 
@@ -10,6 +11,8 @@ function publicBusiness(b: Business): Business {
 }
 
 export async function GET(): Promise<ReturnType<typeof ok<Business[]>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     return ok<Business[]>((await listBusinesses()).map(publicBusiness));
   } catch (err) {
@@ -18,6 +21,8 @@ export async function GET(): Promise<ReturnType<typeof ok<Business[]>> | ReturnT
 }
 
 export async function POST(req: Request): Promise<ReturnType<typeof ok<Business>> | ReturnType<typeof fail>> {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   try {
     const body = await readJson<{ name?: string; url?: string; owner_phone?: string; owner_name?: string }>(req);
     if (!body.name || typeof body.name !== 'string' || !body.name.trim()) {

@@ -111,7 +111,7 @@ export async function ensurePostCallWebhook(): Promise<{
     if (!process.env.ELEVENLABS_WEBHOOK_SECRET) {
       log.warn('webhook.secret_unsaved', {
         webhook: json.webhook_id ?? null,
-        action: 'set ELEVENLABS_WEBHOOK_SECRET to the signing secret from the ElevenLabs dashboard (shown once)',
+        action: 'the signing secret is returned ONCE in the admin-only provision response (webhook_secret): store it as ELEVENLABS_WEBHOOK_SECRET and redeploy. It is never logged.',
         secret_returned: Boolean(json.webhook_secret),
       });
     }

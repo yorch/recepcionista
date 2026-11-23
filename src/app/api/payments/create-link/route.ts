@@ -1,4 +1,5 @@
 import { fail, ok, readJson } from '@/lib/http';
+import { guardAdmin } from '@/lib/admin-guard';
 import { getBooking, getBusiness, updateBooking } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { createPaymentLink } from '@/lib/providers/stripe';
@@ -15,6 +16,8 @@ export interface CreateLinkResult extends PaymentLink {
 }
 
 export async function POST(req: Request) {
+  const denied = await guardAdmin();
+  if (denied) return denied;
   const limited = limitRequest(req, 'payments/create-link', 20);
   if (limited) return limited;
   try {

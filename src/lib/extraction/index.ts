@@ -5,10 +5,15 @@
  * extract usable data. Callers must handle this and show the user a clear
  * message — we never silently fall back to hardcoded AC-repair data.
  */
+// SERVER ONLY: pulls in node:* modules via safe-fetch. Client components must import './url' instead.
+// (The `server-only` package is not installed; do not import this module from a 'use client' file.)
 import * as cheerio from 'cheerio';
 import { logger } from '@/lib/log';
 import { generateJson, hasLlm } from '@/lib/providers/llm';
-import { assertSafeUrlShape, safeFetchText, UnsafeUrlError } from '@/lib/net/safe-fetch';
+import { safeFetchText, UnsafeUrlError } from '@/lib/net/safe-fetch';
+import { normalizeUrl } from './url';
+
+export { normalizeUrl };
 import type { ExtractionResult, FAQ, Hours, Service } from '@/lib/types';
 
 const log = logger('extract');
@@ -60,24 +65,6 @@ export function templateResult(businessName = 'This Business'): ExtractionResult
     confidence: 'low',
     source: 'template',
   };
-}
-
-/** Normalize a user-supplied URL. Returns null when unusable. */
-export function normalizeUrl(raw: string): string | null {
-  if (!raw || typeof raw !== 'string') return null;
-  let s = raw.trim();
-  if (!s) return null;
-  if (s.startsWith('//')) return null;
-  const scheme = s.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
-  if (scheme && !/^https?$/i.test(scheme[1])) return null;
-  if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
-  try {
-    // Structural SSRF checks (scheme, credentials, port, single-label/internal
-    // hosts, non-public IP literals). DNS is re-checked at connect time.
-    return assertSafeUrlShape(new URL(s)).toString();
-  } catch {
-    return null;
-  }
 }
 
 async function fetchText(url: string, cap: number): Promise<string> {
