@@ -1,4 +1,5 @@
 'use client';
+import { utcDate } from '@/components/dashboard/dates';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
@@ -114,7 +115,7 @@ export function TeamPanel({ businessId, isAdmin, canInvite, members, invites }: 
               <li key={i.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
                 <div className="min-w-0 text-[13px]">
                   <p className="truncate text-white">{i.email} <Badge tone="neutral">{i.role}</Badge></p>
-                  <p className="text-[12px] text-[#8b98ab]">Expires {new Date(i.expires_at).toLocaleDateString()}{i.invited_by_email ? ` · invited by ${i.invited_by_email}` : ''}</p>
+                  <p className="text-[12px] text-[#8b98ab]">Expires {utcDate(i.expires_at)}{i.invited_by_email ? ` · invited by ${i.invited_by_email}` : ''}</p>
                 </div>
                 <div className="flex gap-2">
                   <Button

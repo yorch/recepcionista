@@ -62,3 +62,5 @@ run unless its name contains `dev`, `test`, `scratch` or `local`, or you pass `-
 refuses a non-local `APP_URL` without the flag, because it calls `/api/demo/reset` on that server. Note that the
 default dev database from `.env.example` is `recepcionista_dev`, which passes. A local volume created before
 the rename still holds a database called `recepcionista`; see "Renaming the dev database" in the README.
+
+New suites: `tests/calendar.test.ts`, `tests/call-mode.test.ts`, `tests/hardening-pure.test.ts` (pure); `tests/integration/calendar.test.ts`, `tests/integration/call-mode.test.ts` (database); the migration test covers `20261127120000_call_mode_forwarding`.

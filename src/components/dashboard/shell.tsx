@@ -33,6 +33,8 @@ export interface SidebarProps {
   /** The business's own (provisioned) number; null until provisioned. */
   phone?: string | null;
   live: boolean;
+  /** Short status shown next to the green dot while live ('Answering calls', 'Paused', 'Forwarding calls'). */
+  statusText?: string;
   /** Signed-in user's email (or "admin token"). */
   who: string;
   role: 'staff' | 'owner' | 'admin';
@@ -55,7 +57,7 @@ function Icon({ d }: { d: string }) {
 }
 
 export function Sidebar(props: SidebarProps) {
-  const { businessName, live } = props;
+  const { businessName, live, statusText = 'Answering calls' } = props;
   const path = usePathname();
   // `open` remembers the path it was opened on, so navigating closes the drawer without an effect.
   const [openAt, setOpenAt] = useState<string | null>(null);
@@ -110,8 +112,8 @@ export function Sidebar(props: SidebarProps) {
           <div className="min-w-0">
             <p className="truncate text-[13px] font-medium text-white">{businessName}</p>
             <p className="flex items-center gap-1.5 text-xs text-mute">
-              <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-mint' : 'bg-dim')} />
-              {live ? 'Answering calls' : 'Not live'}
+              <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? (statusText === 'Answering calls' ? 'bg-mint' : 'bg-warn') : 'bg-dim')} />
+              {live ? statusText : 'Not live'}
             </p>
           </div>
         </div>
@@ -169,7 +171,7 @@ export function Sidebar(props: SidebarProps) {
 }
 
 function SidebarBody({
-  businessName, phone, live, who, role, isAdmin, isOwner, currentBusinessId, businesses, path,
+  businessName, phone, live, statusText = 'Answering calls', who, role, isAdmin, isOwner, currentBusinessId, businesses, path,
 }: SidebarProps & { path: string }) {
   const router = useRouter();
   const gates = { owner: isOwner, admin: isAdmin };
@@ -206,8 +208,8 @@ function SidebarBody({
         ) : null}
         <p className="truncate text-[13px] font-medium text-white">{businessName}</p>
         <div className="mt-1.5 flex items-center gap-1.5">
-          <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-mint live-dot' : 'bg-dim')} />
-          <span className="text-xs text-mute">{live ? 'Answering calls' : 'Not live yet'}</span>
+          <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? (statusText === 'Answering calls' ? 'bg-mint live-dot' : 'bg-warn') : 'bg-dim')} />
+          <span className="text-xs text-mute">{live ? statusText : 'Not live yet'}</span>
         </div>
         {phone ? (
           <a

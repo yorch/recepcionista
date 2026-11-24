@@ -183,3 +183,10 @@ Legal advice; jurisdiction-specific disclosure variants; verifying that a caller
 disclosure; call-recording by the app itself (recording is the voice provider's); TCPA written-consent
 capture UI; do-not-call list scrubbing; consent line in onboarding; privacy text on the public `/pay` page;
 HIPAA/PCI scope; data residency.
+
+## Paused and forwarded calls
+
+* **Forwarded calls are not recorded or transcribed by the app** (`<Dial>` has no `record`), the call row keeps `recording_disclosed=false`, `consent_status=unknown`. The destination is a number the owner proved they control; owners must still follow their own recording laws on their phone.
+* **Paused calls** only record when the caller is told first: the TwiML speaks (English then Spanish) that the assistant is not answering and that the message will be recorded, and only then `<Record>`s; hanging up declines. The call is marked `disclosed` only because that notice precedes the beep, and a recorded objection (`declined`) stays sticky.
+* On the native ElevenLabs line a paused call uses the AI + recording disclosure first, like any AI call.
+* Missed-call texts to the owner are rate limited (1 per 10 minutes, 6 per hour) and only go to a verified owner phone.

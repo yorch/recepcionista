@@ -1,6 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, hasRole, requireBusinessAccess } from '@/lib/session';
-import { getBusiness, updateBusiness, getKnowledgeBase, listCalls, listBookings, isOptedOut } from '@/lib/db';
+import { getBusiness, updateBusiness, getKnowledgeBase, getDashboardStats, isOptedOut } from '@/lib/db';
+import { tzOf } from '@/lib/time';
 import { countryAllowed } from '@/lib/messaging/recipient';
 import type { Business, Hours, KnowledgeBase } from '@/lib/types';
 
@@ -52,21 +53,9 @@ export async function GET(
     const business = await getBusiness(id);
     if (!business) return fail('business not found', 404);
 
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const monthPrefix = now.toISOString().slice(0, 7);
-
-    const calls = await listCalls(id);
-    const bookings = await listBookings(id);
-
-    const stats = {
-      calls_today: (await listCalls(id, today)).length,
-      bookings_upcoming: bookings.filter((b) => b.scheduled_at > now.toISOString() && b.status !== 'cancelled').length,
-      revenue_month: bookings
-        .filter((b) => b.created_at.startsWith(monthPrefix) && (b.status === 'confirmed' || b.status === 'completed'))
-        .reduce((sum, b) => sum + (b.price_estimate ?? 0), 0),
-    };
-    void calls;
+    // SQL aggregates in the BUSINESS's local day/month (the old code counted by UTC date and loaded every call and booking).
+    const agg = await getDashboardStats(id, tzOf(business));
+    const stats = { calls_today: agg.calls_today, bookings_upcoming: agg.bookings_upcoming, revenue_month: agg.revenue_month_cents };
 
     // The stored system prompt is the owner's configuration (it can name the owner and internal rules): staff get the knowledge, not the prompt.
     const kb = await getKnowledgeBase(id);

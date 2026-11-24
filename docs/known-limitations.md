@@ -33,7 +33,7 @@ remains. Not legal advice (see `docs/compliance.md`).
 - **Several ElevenLabs API call shapes are unverified best effort** (the conversation-initiation webhook configuration on workspace/agent, and, for tenant release, detaching the shared phone number from an agent before deleting it). Failures are logged and the runbook says what to check by hand.
 - **Number provisioning is US-only with a fixed starting area code (305).** When Twilio search/purchase fails (or in production without Twilio credentials) provisioning FAILS with a 502/503 and the business stays `onboarding`; no fake number is ever issued there (the mock-pool number exists only outside production with no Twilio credentials). A purchase whose answer was lost is looked up and adopted, and a number bought before a later failed step is kept and reused by the retry. A tenant outside the US needs an operator-assigned number. Provisioning binds the single configured `ELEVENLABS_PHONE_NUMBER_ID` to an agent; serving several tenant lines on the native-Twilio path
   means importing each number into ElevenLabs, which is an operator step the app does not perform.
-- **Languages: English and Spanish only** for the agent, texts and UI.
+- **Languages: English and Spanish for the agent and texts; the dashboard UI is English only** (the Spanish-speaking owner base reads English labels; translating the UI is not planned for this release).
 - **SMS caps count segments, not sends**, using the GSM-7/UCS-2 rules of `smsSegments`. Carriers can split slightly differently (for example some treat a few characters as extension table), so the count can differ from the Twilio invoice by a segment on edge cases; inbound-reply auto-answers sent by Twilio are counted from our own reply templates. Trial caps (`TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP`) apply only while billing is enforced.
 - **Usage metering depends on the post-call webhook.** Call minutes are added once per conversation when that webhook is accepted; a conversation whose post-call never arrives, is unmatched or is rejected is not metered, so the call cap can under-count.
   Over-cap calls are cut to 60 s by the initiation override (needs that override enabled on the agent); the cap is not enforced mid-call for calls already running.
@@ -56,3 +56,16 @@ remains. Not legal advice (see `docs/compliance.md`).
 - Database migrations are forward-only; rollback means restoring a backup (`docs/runbook.md` section 4).
 - Accepted advisories in dev/CLI-only transitive dependencies are listed in `docs/dependencies.md`.
 - Tests run against a scratch Postgres and fake providers; **no automated test places a real call or sends a real SMS/email**. `bun run verify:deploy` and the manual live test-call protocol (`docs/runbook.md` section 2) cover the real wiring.
+
+## Call handling, calendar and roadmap (this release)
+
+- **Call forwarding on the native ElevenLabs path.** There the platform answers the call before any of our code runs, so the app cannot dial a human. `forward` (and `paused`) become a short script plus message capture, and the call is capped at 60 s. The ElevenLabs "transfer to number" system tool was not used because its per-call configuration could not be verified against documentation. True forwarding works on a Twilio line that posts to `/api/voice/incoming`, or by the owner's own carrier forwarding.
+- **Voicemail audio is Twilio-hosted.** The app stores only the recording URL on the call; deleting recordings is an operator step (Twilio console), as with call recordings.
+- **Cancelling a booking does not refund a paid deposit** and does not text the customer; the owner is told in the UI. Owners cannot reschedule from the calendar (cancel and rebook).
+- **Calendar**: week starts on Sunday for US/CA/MX-style businesses, Monday elsewhere (viewer can switch, stored in the browser). Jobs that cross a DST jump are stretched or squeezed by the skipped hour; overnight opening hours are not supported.
+- **Not built, by owner decision (roadmap)**: owner voice reply, live transcript, Google Calendar sync.
+- **Mock number detection** (`isMockPoolNumber`) is derived from the number shape, not a stored flag; those numbers exist only outside production without Twilio credentials.
+- **HVAC coupling**: the default prompt, triage questions and templates are written for HVAC/home-service businesses; other trades must edit the prompt in Brain.
+- **Structural refactors not done** (no behaviour change, risk on paid-resource paths): extracting `provisionBusiness` from the provision route; replacing the remaining raw hex colours with design tokens everywhere; no automated accessibility audit in CI (the new calendar, panel and switch are keyboard and label tested by hand).
+- **`/pay/[id]` is a bearer link**: the booking id is an unguessable UUID and the page shows service, amount and business name only; anyone holding the link can open it by design.
+- **Deploy**: no reverse-proxy rate-limit middleware ships in compose (the app has its own Postgres limiter); `deploy.sh` still sources `.env` as shell, so values must be shell-safe.

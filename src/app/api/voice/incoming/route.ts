@@ -2,7 +2,10 @@ import { ok, fail } from '@/lib/http';
 import { getBusinessByPhone, listBusinesses, createCall, getCallBySid, updateCall } from '@/lib/db';
 import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
-import { allowMissedCallAlert, callGate, outOfServiceFirstMessage } from '@/lib/voice/capacity';
+import { allowMissedCallAlert, callGate, outOfServiceFirstMessage, pausedFirstMessage } from '@/lib/voice/capacity';
+import { resolveCallRoute } from '@/lib/voice/call-mode';
+import { markForwarded, markPaused } from '@/lib/voice/non-ai';
+import { forwardTwiml, pausedTwiml, twimlResponse } from '@/lib/voice/twiml';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
@@ -57,7 +60,7 @@ export async function POST(req: Request) {
     // A number that is not ours routes to the only business of a single-tenant/demo install, never to
     // "the first of several" (that would hand one tenant another tenant's caller).
     const matched = to ? await getBusinessByPhone(to) : null;
-    const all = matched ? [] : await listBusinesses();
+    const all = matched ? [] : await listBusinesses({ limit: 2 });
     const business: Business | null = matched ?? (all.length === 1 ? all[0] : null);
     if (!business) {
       log.error('no_business', { to: to || null, from: from || null });
@@ -88,6 +91,31 @@ export async function POST(req: Request) {
     // Plan gate: over the call-minutes cap (or no active plan while billing is enforced) the caller hears an honest
     // out-of-service line, the call is handed off (the owner is told when their phone is verified) and no agent is used.
     const gate = await callGate(business.id);
+
+    // Call handling mode (paused / forward). Only a lapsed PLAN stops these too (we do not place or take calls for an
+    // inactive account); a used-up minutes cap does not, because neither mode uses AI minutes.
+    const route = resolveCallRoute(business);
+    if (route.action === 'ai' && (business.call_mode ?? 'ai') === 'forward') {
+      log.warn('forward_not_applied', { business: business.id, why: route.why });
+    }
+    if (route.action !== 'ai' && (gate.ok || gate.reason !== 'no_plan')) {
+      const isJson = (req.headers.get('content-type') ?? '').includes('application/json');
+      if (route.action === 'forward') {
+        await markForwarded(call, route.to);
+        log.info('forwarded', { business: business.id, call: call.id });
+        if (isJson) return ok({ business_id: business.id, call_id: call.id, call_mode: 'forward', forwarded: true, ws_url: null, mock: true });
+        return twimlResponse(forwardTwiml(route.to, { callerId: business.phone_e164 ?? null, action: '/api/voice/voicemail' }));
+      }
+      await markPaused(business, call, from);
+      if (isJson) {
+        return ok({
+          agent_id: '', business_id: business.id, call_id: call.id, business_name: business.name, caller_phone: from || null,
+          ws_url: null, mock: true, call_mode: 'paused', paused: true, fallback_script: pausedFirstMessage(business),
+        });
+      }
+      return twimlResponse(pausedTwiml(business, '/api/voice/voicemail'));
+    }
+
     if (!gate.ok) {
       if (call.status !== 'handed_off') {
         await updateCall(call.id, { status: 'handed_off', flagged_reason: `out_of_service:${gate.reason ?? 'capacity'}` });

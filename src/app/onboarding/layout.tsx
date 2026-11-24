@@ -1,5 +1,9 @@
+import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { getServerPrincipal } from '@/lib/session';
+
+/** Signed-in pages are never indexed. */
+export const metadata: Metadata = { robots: { index: false, follow: false } };
 
 export const dynamic = 'force-dynamic';
 

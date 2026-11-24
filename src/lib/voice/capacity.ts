@@ -69,3 +69,17 @@ export function outOfServiceToolMessage(lang: 'en' | 'es'): string {
 
 /** Tools that stay available when capacity is exhausted: they only alert the owner (exempt from the plan cap). */
 export const CAPACITY_EXEMPT_TOOLS: ReadonlySet<string> = new Set(['flag_emergency', 'handoff_to_human']);
+
+/**
+ * What the agent says on the NATIVE ElevenLabs path while calls are paused (or 'forward' cannot be honoured there: the
+ * platform answers the call before our code can dial anything, see docs/known-limitations.md). The recording/AI notice
+ * comes first, then a message-taking script; the call is cut short (OUT_OF_SERVICE_MAX_SECONDS) like an out-of-service call.
+ */
+export function pausedFirstMessage(business: Business): string {
+  return `${disclosureFor(business)} — `
+    + `Thanks for calling ${business.name}. We are not taking bookings by phone right now. Please tell me your name, your number and a short message and I will pass it to the owner, who will call you back. — `
+    + `Gracias por llamar a ${business.name}. Por el momento no agendamos citas por teléfono. Dígame su nombre, su número y un mensaje breve y se lo paso al dueño, quien le devolverá la llamada.`;
+}
+
+export const pausedOverride = (business: Business): { agent: { first_message: string }; conversation: { max_duration_seconds: number } } =>
+  ({ agent: { first_message: pausedFirstMessage(business) }, conversation: { max_duration_seconds: OUT_OF_SERVICE_MAX_SECONDS } });

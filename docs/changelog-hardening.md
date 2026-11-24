@@ -5,6 +5,8 @@ statements ("no CI", "nothing schedules the briefing", "the app has no authentic
 Each row was checked against the current tree (file, test or doc named in the Evidence column), not copied from a commit message. Where a finding is only partly addressed, or not
 addressed, the row says so.
 
+Area G (this pass) adds migration `20261127120000_call_mode_forwarding` (call mode columns, enum CHECKs, `sms_log` foreign key).
+
 Status words: **Fixed** (the behaviour the review asked for exists and is covered by code/tests), **Partly** (some of it), **Open** (not changed; no code resolves it),
 **Documented** (accepted limitation, written down in `docs/known-limitations.md` or the doc named), **Info** (a positive note or a question, nothing to fix).
 
@@ -17,7 +19,7 @@ Status words: **Fixed** (the behaviour the review asked for exists and is covere
 | C | `527c65a`, `d791dc8`, `92723f3` | self-signup, 2FA, billing/trials, E.164 phone model, email, onboarding/UX overhaul, `verify:deploy` |
 | D | `dfc5026` | fixes review 07 (fail-closed billing, SMS pumping, opt-out repair, 2FA/signup hardening, Turnstile CSP) |
 | E | `de88992` | captcha required for production signup, release of canceled tenants, atomic invites, session revocation |
-| F | this hardening pass | provisioning fails loudly (no fake numbers) and is resumable, the background job runner (6 PM briefing, gratitude sweep, cleanup, retention), SMS metering in segments + trial caps |
+| F | previous hardening pass | provisioning fails loudly (no fake numbers) and is resumable, the background job runner (6 PM briefing, gratitude sweep, cleanup, retention), SMS metering in segments + trial caps |
 
 Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, `20261123120000_timezone_cents_booking_integrity` (A), `20261123180000_unique_agent_id` (A),
 `20261123210000_shared_state_compliance_users` and `20261124120000_review2_call_keys_event_leases_followup_consent` (B), `20261125120000_accounts_billing_e164_constraints` (C),
@@ -37,7 +39,7 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | 8 Legal/compliance | Fixed (B), Documented | disclosure, sticky decline, STOP/opt-out, quiet hours, 911 rules, retention, export/erase. Legal review is the operator's | `docs/compliance.md`, `docs/known-limitations.md` |
 | 9 Docs/PRD overstate the build | Fixed (A-F) | PRD reconciled; the 6 PM briefing and gratitude sweep now really run on a timer (F) | `PRD.md`, `src/lib/jobs/index.ts`, `docs/runbook.md` "Background jobs" |
 | 10 No tests, no CI | Fixed (A, B) | CI exists since `319c453` (`.github/workflows/ci.yml`: Postgres service, typecheck, lint, `next build`, migrate, `bun test`); suite is several hundred tests. CI triggers on `pull_request` only | `.github/workflows/ci.yml`, `tests/`, `docs/testing.md` |
-| Recommended order, Phase 3 (UX/DRY) | Partly | see 03 below | |
+| Recommended order, Phase 3 (UX/DRY) | Fixed (G), Documented | calendar grid, pause/forward switch, pagination, hydration, noindex done; remaining cosmetic refactors are in `docs/known-limitations.md` | `src/components/calendar/`, `docs/known-limitations.md` |
 
 ## 01 Security and integrations
 
@@ -60,11 +62,11 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | M5 Fake checkout in production | Fixed (A) | Stripe failure throws in production; mock only outside it | `src/lib/providers/stripe.ts` (`link.fallback_to_mock` is non-production) |
 | M6 Shared tools / duplicated agents | Fixed (A, B) | tools matched by name AND url, per-business provisioning lease | `src/lib/voice/elevenlabs.ts` (`findToolByName`), `src/lib/db/locks.ts` |
 | M7 No outbound timeouts | Fixed (A) | `AbortSignal.timeout` on LLM, Twilio, Stripe calls | `src/lib/providers/llm.ts`, `src/lib/providers/stripe.ts`, `src/lib/providers/twilio.ts` |
-| L1 PII in logs | Partly | secret-looking keys are redacted; phone numbers still appear at `info` and the mock-mode SMS body is printed (mock mode only) | `src/lib/log.ts`, `src/lib/providers/twilio.ts` |
+| L1 PII in logs | Fixed (G) | value-based scrubbing: phone numbers keep the last four digits, emails the first letter, credentials always masked (`LOG_PII=true` unmasks phone/email for debugging); mock SMS bodies are echoed only outside production or in demo mode | `src/lib/log.ts` (`scrub`), `src/lib/providers/twilio.ts`, `tests/hardening-pure.test.ts` |
 | L2 Internal errors to clients | Fixed (A) | 5xx answer `internal error` | `src/lib/http.ts` |
 | L3 Unvalidated `date` | Fixed (A) | `isDateKey` before any key/path use | `src/lib/briefing/index.ts`, `src/app/api/briefings/generate/route.ts` |
-| L4 Mock detection by substring | Partly (F) | now one regex helper `isMockPoolNumber` (`+1<area>555xxxx`) used by provisioning and onboarding-status; still derived from the number, there is no stored flag | `src/lib/providers/twilio.ts` |
-| L5 Phone-id guidance | Partly | docs and the boot check say `phnum_...`; a code comment in `bindPhoneNumber` still says "UUID" | `src/instrumentation.ts`, `docs/env-vars.md` |
+| L4 Mock detection by substring | Documented | one regex helper; no stored flag by design (mock numbers exist only outside production without Twilio) | `src/lib/providers/twilio.ts`, `docs/known-limitations.md` |
+| L5 Phone-id guidance | Fixed (G) | the `bindPhoneNumber` comment now says `phnum_...` like the docs and the boot check | `src/lib/voice/elevenlabs.ts` |
 | L6 Security headers | Fixed (A, C) | HSTS etc. in `next.config.ts`, per-request nonce CSP in the proxy | `next.config.ts`, `src/lib/csp.ts`, `docs/security-headers.md` |
 | L7 Bought numbers never configured | Documented | operator imports the number into ElevenLabs | `docs/known-limitations.md`, `docs/runbook.md` |
 | L8 Duplicate webhook routes | Fixed (A) | `/api/voice/webhook` is a documented alias of `/api/voice/post-call` (same handler and auth) | `src/app/api/voice/webhook/route.ts` |
@@ -87,27 +89,27 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | M6 `activeCall` wrong call | Fixed (A, B) | keyed on call id / sid / conversation id, tenant-checked | `src/lib/voice/tools.ts` (`activeCall`) |
 | M7 Swallowed tool errors | Fixed (A) | `toolFailure` logs the cause | `src/lib/voice/tools.ts` |
 | M8 Price validation | Fixed (A) | `dollarsToCents` | `src/lib/money.ts` |
-| M9 Duplicate confirmation SMS | Partly | booking-keyed dedupe in a 2-minute window, still check-then-send (no unique intent row) | `src/lib/messaging/actions.ts` |
+| M9 Duplicate confirmation SMS | Fixed (G) | an atomic `processed_events` claim per booking serialises senders, plus the 2-minute recent-send lookup; 6 concurrent resends send one text | `src/lib/messaging/actions.ts`, `tests/integration/calendar.test.ts` |
 | M10 KB upsert clobbers | Fixed (A) | only defined fields are written | `src/lib/db/index.ts` (`upsertKnowledgeBase`) |
-| M11 `updateX` swallow errors | Partly | still returns `null`, but the failure is now logged (`business.update_failed`) | `src/lib/db/index.ts` |
+| M11 `updateX` swallow errors | Fixed (G) | `null` only for "no such row" (P2025); any other failure is logged and thrown | `src/lib/db/index.ts`, `tests/integration/calendar.test.ts` |
 | M12 Inbound lookup scan | Fixed (A, C) | indexed `phone_key` / `phone_e164` | `prisma/schema.prisma` (`@@index([phoneKey])`, `@@index([phoneE164])`) |
-| M13 Extraction hours parsing | Not re-verified | no change was made or traced in this pass | |
-| M14 LLM adapter robustness | Partly | timeouts and fenced-JSON parsing exist; not otherwise re-audited | `src/lib/providers/llm.ts` |
-| M15 Briefing persona / path | Partly | date validated (`isDateKey`). The prompt and the fallback script still hard-code a Miami HVAC persona and the name "Jorge" when the owner name is unset | `src/lib/briefing/index.ts` |
+| M13 Extraction hours parsing | Fixed (G) | `parseClock` / `sanitizeHours`: 12h am/pm (the old `slice(0,5)` read "5:00 PM" as 05:00), noon/midnight, case-insensitive day keys, open<close enforced, always seven days | `src/lib/extraction/index.ts`, `tests/hardening-pure.test.ts` |
+| M14 LLM adapter robustness | Fixed (G) | balanced-bracket JSON extraction (prose and stray brackets), one bounded retry on 429/5xx/network, error bodies clipped to 200 chars | `src/lib/providers/llm.ts`, `tests/hardening-pure.test.ts` |
+| M15 Briefing persona / path | Fixed (G) | prompt uses the business name; no hard-coded persona or owner name ("Hola." when unset) | `src/lib/briefing/index.ts` |
 | M16 Demo seed frozen | Fixed (A) | evaluated per call in the demo zone | `src/lib/demo/seed-data.ts` |
 | M17 Scripts/tests destructive | Fixed (A, B) | `scripts/_safe-db.ts` (whole-token name match), a real suite, DB tests gated on a scratch DB | `scripts/_safe-db.ts`, `tests/helpers/preload.ts`, `docs/testing.md` |
-| L1 Free-form enums | Partly | CHECK constraints were added for several columns in the accounts/billing migration; not every enum column | `prisma/migrations/20261125120000_accounts_billing_e164_constraints` |
-| L2 Whole-file `any` | Open | `db/index.ts` still disables `no-explicit-any` | `src/lib/db/index.ts` |
-| L3 Missing indexes | Partly | indexes added for opt-outs, owner phone, consent basis; `sms_log.booking_id` still has no FK | `prisma/migrations/20261126120000_...` |
-| L4 Unbounded lists | Open | list helpers (`listCalls`, `listBookings`, `listSms`, `listBusinesses`) are still unpaginated; the hourly gratitude sweep reads one business's bookings and texts per pass | `src/lib/db/index.ts` |
+| L1 Free-form enums | Fixed (G) | CHECKs for business/call/booking status, call urgency and sms kind/status, validated, legacy values normalised first | `prisma/migrations/20261127120000_call_mode_forwarding`, `tests/db/migration.test.ts` |
+| L2 Whole-file `any` | Fixed (G) | mappers typed with Prisma row types and `Prisma.*UpdateInput`; the file-level eslint-disable is gone | `src/lib/db/index.ts` |
+| L3 Missing indexes | Fixed (G) | `sms_log.booking_id` has an index and a foreign key (`ON DELETE SET NULL`, dangling ids cleared) | `prisma/migrations/20261127120000_call_mode_forwarding` |
+| L4 Unbounded lists | Fixed (G) | every list helper is bounded; keyset pagination (`listCallsPage`, `listBookingsPage`, `listBookingsInRange`, `listBriefingsPage`, `listSmsPage`, `listBusinessesPage`, audit) with "Load more" on Calls, Agenda and Briefings; Today uses SQL aggregates; the gratitude sweep reads only the 20-48 h window | `src/lib/db/index.ts`, `src/lib/db/paging.ts`, `tests/integration/calendar.test.ts` |
 | L5 `checkAvailability` queries | Fixed (A) | one ranged query | `src/lib/scheduler.ts` |
-| L6 `format.ts` | Partly | `whenET` and money now use the zone/cents helpers; not every quirk listed was re-checked | `src/lib/format.ts` |
-| L7 `log.ts` | Open | redaction is still key-name based | `src/lib/log.ts` |
-| L8 HVAC coupling | Open | the prompt checks and templates remain HVAC-specific | `src/lib/kb/index.ts` |
-| L9 Dead code | Partly | `DEFAULT_HOURS_EXPORT` is still exported "for older imports" | `src/lib/db/index.ts` |
+| L6 `format.ts` | Fixed (G) | injected clock for `relative`, `dayLabelET` for "Today/Tomorrow" in the business zone, tests | `src/lib/format.ts`, `tests/hardening-pure.test.ts` |
+| L7 `log.ts` | Fixed (G) | redaction is also value based (see L1 above) | `src/lib/log.ts` |
+| L8 HVAC coupling | Documented | deliberate product focus | `docs/known-limitations.md` |
+| L9 Dead code | Fixed (G) | `DEFAULT_HOURS_EXPORT` removed | `src/lib/db/index.ts` |
 | L10 `tools.ts` conventions | Fixed (A, B) | tenant no longer taken from the model | `src/lib/voice/tools.ts` |
 | L11 Migration housekeeping | Info | | |
-| DRY 1-10 | Partly | one time module (`lib/time.ts`) and one money module exist; `TOOL_NAMES` is still declared in both `kb/index.ts` and `voice/tools.ts`; mappers and `provisionBusiness` extraction not done | `src/lib/time.ts`, `src/lib/money.ts` |
+| DRY 1-10 | Fixed (G), Documented | one `TOOL_NAMES`, typed mappers, one time and money module; extracting `provisionBusiness` is a documented non-goal | `src/lib/kb/index.ts`, `docs/known-limitations.md` |
 
 ## 03 Frontend and UX
 
@@ -121,26 +123,26 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | 6 Onboarding hard-codes demo values | Fixed (C) | only a placeholder remains | `src/app/onboarding/step-verify.tsx` |
 | 7 Onboarding no recovery | Fixed (C, F) | state derived from the database (`onboarding-status`); F adds the partial-provisioning state and retry guidance | `src/app/api/businesses/[id]/onboarding-status/route.ts`, `src/app/onboarding/step-provision.tsx` |
 | 8 loading/error/not-found | Fixed (A, C) | present | `src/app/loading.tsx`, `src/app/error.tsx`, `src/app/dashboard/loading.tsx`, `src/app/dashboard/error.tsx` |
-| 9 Today page time bugs | Not re-verified | the zone module replaced the ad-hoc code; this page was not re-audited | |
-| 10 Mislabelled stats | Not re-verified | | |
-| 11 Phone display / env bug | Not re-verified | | |
+| 9 Today page time bugs | Fixed (G) | counts by the business's local day/month in SQL, `dayLabelET` instead of splitting a label, one clock read | `src/app/dashboard/page.tsx`, `src/lib/db/index.ts` (`getDashboardStats`), `tests/integration/calendar.test.ts` |
+| 10 Mislabelled stats | Fixed (G) | "Deposits: paid, jobs this month", "Needs you: flagged, last 7 days", bilingual counts today's calls | `src/app/dashboard/page.tsx` |
+| 11 Phone display / env bug | Fixed (G) | the number comes from the server layout (`biz.phone`), no `NEXT_PUBLIC_` phone var remains, `tel:` links are only rendered with a value | `src/components/dashboard/shell.tsx` |
 | 12 VoicePlayer a11y | Fixed (C) | `aria-pressed`, progress label | `src/components/ui/audio.tsx` |
 | 13 No mobile nav | Fixed (C) | `#mobile-nav` disclosure | `src/components/dashboard/shell.tsx` |
 | 14 Knowledge editor state | Fixed (C) | state follows props | `src/components/dashboard/knowledge-editor.tsx` |
-| 15 A11y basics | Partly | not exhaustively re-audited | |
-| 16 DRY / 17 tokens / 18 `Button` client | Open | not addressed | |
+| 15 A11y basics | Documented | focus ring, skip link, `aria-current`, labelled nav exist; the calendar adds roles, labels, arrow-key navigation, focus return and status icons. No automated audit in CI | `src/components/calendar/`, `docs/known-limitations.md` |
+| 16 DRY / 17 tokens / 18 `Button` client | Fixed (G), Documented | `Button` is server-compatible; new UI uses tokens; remaining raw hex is a documented cosmetic non-goal | `src/components/ui/button.tsx` |
 | 19 Unused deps | Fixed (A) | `lucide-react` is not in `package.json` | `package.json` |
 | 20 `next.config.ts` personal domain | Fixed (A) | `ALLOWED_DEV_ORIGINS` env | `next.config.ts` |
-| 21 Metadata / noindex | Partly | `viewport` + `themeColor` set, some page titles; no site-wide `noindex` on the dashboard was found | `src/app/layout.tsx` |
-| 22 Landing claims | Fixed (F), Partly | "a short voice briefing each evening" is now backed by the 18:00 job; hours/settings editing exists (`src/app/dashboard/settings/page.tsx`) | `src/lib/jobs/index.ts` |
-| 23 Hydration/Date | Not re-verified | | |
+| 21 Metadata / noindex | Fixed (G) | dashboard and onboarding are `noindex`; every dashboard page has a title | `src/app/dashboard/layout.tsx`, `src/app/onboarding/layout.tsx` |
+| 22 Landing claims | Fixed (F, G) | briefing job, hours editing, and the calendar / pause switch the page now mentions exist | `src/app/page.tsx` |
+| 23 Hydration/Date | Fixed (G) | locale-dependent `toLocaleString` in client panels replaced by fixed-locale `utcStamp`/`utcDate`; the calendar reads the clock only after mount | `src/components/dashboard/dates.ts` |
 | UX 1 Thin onboarding | Fixed (C) | connect step with forwarding instructions | `src/app/onboarding/step-connect.tsx` |
 | UX 2 Cannot correct what she learned | Fixed (C) | review step edits | `src/app/onboarding/step-review.tsx` |
 | UX 3 No money flow in demo | Fixed (A) | `DEMO_MODE` mock checkout completes and records the deposit | `src/app/api/pay/mock-complete/route.ts` |
-| UX 4 No operational controls | Partly | settings page (retention, disclosure, time zone); no pause/forward switch | `src/app/dashboard/settings/page.tsx` |
-| UX 5 Calendar is a list | Open | `bookings/page.tsx` is still a list titled "Calendar" | `src/app/dashboard/bookings/page.tsx` |
-| UX 6 Bilingual UI | Open | dashboard is English-only (`docs/known-limitations.md`: English and Spanish for agent/texts/UI) | |
-| UX 7 Copy/branding | Not re-verified | | |
+| UX 4 No operational controls | Fixed (G) | pause / forward switch with verified number, schedule and audit | `src/components/dashboard/call-mode.tsx`, `src/lib/voice/call-mode.ts` |
+| UX 5 Calendar is a list | Fixed (G) | week/day/month calendar with side panel and owner actions; the list is the Agenda tab | `src/app/dashboard/bookings/page.tsx`, `src/components/calendar/` |
+| UX 6 Bilingual UI | Documented | dashboard is English only | `docs/known-limitations.md` |
+| UX 7 Copy/branding | Fixed (G) | the "Miami is answering" copy is gone; no persona name is derived from the business name | `src/app/onboarding/` |
 | UX 8 Consent notice / privacy policy | Fixed (B), Documented | recording disclosure shipped; publishing a privacy policy and terms is the operator's task | `docs/compliance.md` |
 
 ## 04 Docs, deploy and product
@@ -151,7 +153,7 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | Top 4 Stripe fail-open | Fixed (A) | `${STRIPE_WEBHOOK_SECRET:?}` in compose, deploy.sh check | `compose.production.yaml`, `deploy.sh` |
 | Top 5 SSRF | Fixed (A) | | `src/lib/net/safe-fetch.ts` |
 | Top 6 Quick start | Fixed (A) | `.env.example` has `DATABASE_URL`; README says Prisma reads `.env` | `.env.example`, `README.md` |
-| Top 7 PRD overstates | Fixed (A-F) | PRD reconciled; consent/STOP/disclosure shipped; the 6 PM briefing and gratitude timer shipped in F; calendar grid still open (03 UX 5) | `PRD.md` |
+| Top 7 PRD overstates | Fixed (A-G) | PRD reconciled; the calendar grid and pause/forward switch shipped in G | `PRD.md` |
 | Top 8 Legal exposure | Fixed (B), Documented | `docs/compliance.md` | |
 | Top 9 Deploy operations | Fixed (A) | `deploy.sh` dies on an unhealthy app, takes a pre-migrate `pg_dump`, `--seed` needs `--i-know-this-wipes-data` | `deploy.sh` |
 | Top 10 Repo hygiene | Fixed (A) | `.github/workflows/ci.yml` and `.github/dependabot.yml` exist, `package.json` has `test`, `LICENSE` exists. The review's "No `.github/`, so no CI" is stale | `.github/workflows/ci.yml`, `package.json`, `LICENSE` |
@@ -159,11 +161,11 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | PRD table: 24h gratitude (FR-4.1) | Fixed (F) | hourly sweep job | `src/lib/jobs/index.ts` |
 | PRD table: phone provisioning (FR-1.3) | Fixed (F), Documented | no fake number in production; US-only/305 documented | `src/lib/providers/twilio.ts`, `docs/known-limitations.md` |
 | PRD table: guardrail 911 / recording consent | Fixed (B) | prompt rules + disclosure | `docs/compliance.md` |
-| PRD table: calendar grid, owner voice reply, live transcript, Google Calendar | Open / by design | unchanged | |
-| PRD table: settings panel, `paused` status | Partly | settings page exists; `paused` is set by tenant release (`clearBusinessProviderResources`) | `src/lib/db/index.ts` |
+| PRD table: calendar grid, owner voice reply, live transcript, Google Calendar | Fixed (G), Documented | calendar grid shipped; owner voice reply, live transcript and Google Calendar sync are roadmap by owner decision | `docs/known-limitations.md` |
+| PRD table: settings panel, `paused` status | Fixed (G) | `call_mode` 'paused' is an owner switch; tenant release still sets `status='paused'` | `src/lib/db/call-mode.ts` |
 | PRD table: Supabase / Next 14 / env block | Fixed (A) | PRD states Postgres + Prisma, Next 16 | `PRD.md` |
-| Doc-accuracy table (README quick start, DEPLOY backup/pointing providers/hardening, `.env.example` drift, CONTRACTS route table) | Fixed (A, B) for the items checked: quick start, backup command (`exec -T db sh -c`), `LOG_LEVEL` commented out, tools image `USER node`; not every row re-verified | `README.md`, `DEPLOY.md`, `.env.example`, `Dockerfile` |
-| Deploy table (digests, Traefik rate limit, `.env` sourcing, `check-elevenlabs-key.sh` path) | Partly | images pinned by digest; no Traefik rate-limit middleware in compose; `deploy.sh` still sources `.env` with `set -a; . ./.env` (values must be shell-safe); `check-elevenlabs-key.sh` no longer hard-codes `/Users/yorch` | `Dockerfile`, `compose.production.yaml`, `deploy.sh` |
+| Doc-accuracy table (README quick start, DEPLOY backup/pointing providers/hardening, `.env.example` drift, CONTRACTS route table) | Fixed (A, B, G) | quick start, backup command, `LOG_LEVEL`, tools image user verified; CONTRACTS route table extended with the new routes | `README.md`, `DEPLOY.md`, `CONTRACTS.md` |
+| Deploy table (digests, Traefik rate limit, `.env` sourcing, `check-elevenlabs-key.sh` path) | Documented | digests pinned, key-check path fixed; no proxy rate-limit middleware and shell-sourced `.env` are documented limits | `docs/known-limitations.md` |
 
 ## 05 Adversarial review of the remediation branch
 
@@ -180,7 +182,7 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | M4 Prod deploy w/o ElevenLabs secrets | Fixed (A) | deploy.sh enforces them when the key is set | `deploy.sh` |
 | M5 Spoofable login limiter key | Fixed (A, B) | trusted-proxy aware client key, per-(account, IP) backoff | `src/lib/auth.ts` (`clientKey`), `src/lib/login-throttle.ts` |
 | L1 `/` leaks tenant metrics | Fixed (B) | | `src/app/page.tsx` |
-| L2 `/pay` ids predictable | Partly | mock completion is `DEMO_MODE` only; the page still shows booking details to anyone with the id | `src/app/api/pay/mock-complete/route.ts` |
+| L2 `/pay` ids predictable | Documented | unguessable UUID bearer link by design | `docs/known-limitations.md` |
 | L3 `.env.example` drift | Fixed (A) | `STRIPE_ALLOW_UNSIGNED=true` | `.env.example` |
 | L4 Stripe dedupe in memory | Fixed (B) | `processed_events` claims | `src/lib/db/events.ts` |
 | L5 Payment-link minimum | Fixed (A) | `MIN_CENTS = 100` and a below-minimum re-ask | `src/app/api/payments/create-link/route.ts`, `src/lib/voice/tools.ts` |
@@ -189,7 +191,7 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | L8 CSRF only SameSite | Fixed (B) | same-origin check on cookie-authenticated writes | `src/lib/session.ts`, `src/proxy.ts` |
 | L9 Post-call 400 for foreign agents | Fixed (B) | answered `200 {ignored}` | `src/lib/voice/postcall.ts` |
 | L10 `gratitude-reply` vs real Twilio | Fixed (B) | `/api/sms/inbound` is the one inbound URL; the legacy route still honours STOP | `src/app/api/sms/inbound/route.ts`, `DEPLOY.md` |
-| L11 CI only on PRs, no build | Partly | `next build` now runs in CI; the trigger is still `pull_request` only | `.github/workflows/ci.yml` |
+| L11 CI only on PRs, no build | Fixed (G) | CI runs `next build` and also on pushes to `main` | `.github/workflows/ci.yml` |
 
 ## 06 Adversarial review, round 2
 
@@ -211,9 +213,9 @@ Migration order: `20261114192900_init`, `20261114203144_add_business_agent_id`, 
 | L5 DB tests skip silently | Fixed (B) | preload throws when `CI` is set without `TEST_DATABASE_URL` | `tests/helpers/preload.ts` |
 | L6 Migration locks / rollback | Documented | forward-only; restore a backup | `docs/known-limitations.md`, `docs/runbook.md` |
 | L7 Staff can read the prompt | Fixed (B) | prompt blanked for staff | `src/app/api/businesses/[id]/route.ts` |
-| L8 Still open | Partly | admin cookie now a DB session; the briefing audio route is authenticated; `GET /api/voice/incoming`/"first tenant" fallback was not traced again | `src/lib/session.ts`, `src/app/api/briefings/audio/[name]/route.ts` |
+| L8 Still open | Fixed (G) | `GET /api/voice/incoming` answers `{ready:true}` only; an unknown number routes only to a single-business install, never "the first of several" (404 test) | `src/app/api/voice/incoming/route.ts`, `tests/integration/call-mode.test.ts` |
 | L9 Docs drift | Fixed (B) | retention and inbound URL are in README/DEPLOY | `README.md`, `DEPLOY.md` |
-| L10 Decline reply asks for data | Open | `tools.ts` still asks "Is this the best number to reach you?" in the callback reply | `src/lib/voice/tools.ts` |
+| L10 Decline reply asks for data | Fixed (G) | handoff confirms the verified caller id ("ending in 0142") and only asks for a number when caller id is withheld; booking only asks for what is missing; prompt and tool schema no longer require a spoken number | `src/lib/voice/tools.ts`, `src/lib/kb/index.ts`, `tests/hardening-pure.test.ts` |
 
 ## 07 Adversarial review, round 3
 

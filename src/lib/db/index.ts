@@ -5,9 +5,15 @@
  * `@/lib/types` (ISO date strings, not JS Dates), so no route, page or agent
  * tool ever touches Prisma types directly.
  */
+import type {
+  Prisma,
+  Business as BusinessRow, KnowledgeBase as KnowledgeBaseRow, Call as CallRow, Booking as BookingRow,
+  Briefing as BriefingRow, SmsLog as SmsRow,
+} from '@prisma/client';
 import { prisma, type DbClient } from './client';
+import { clampLimit, encodeTimeCursor, MAX_LIST, parseTimeCursor, toPage, type Page } from './paging';
 import { logger } from '@/lib/log';
-import { dayRange as zonedDayRange, tzOf, DEFAULT_TIMEZONE, isValidTimeZone } from '@/lib/time';
+import { dayRange as zonedDayRange, localDateKey, tzOf, DEFAULT_TIMEZONE, isValidTimeZone } from '@/lib/time';
 import {
   bookingInterval, clampDuration, intervalsOverlap, validateSlot, MAX_DURATION_MIN,
   type Interval, type SlotRejection,
@@ -17,8 +23,10 @@ import { defaultPhoneCountry, toE164 } from '@/lib/phone';
 import { countryForBusiness, phoneIdent } from './compliance';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
-  Service, FAQ, BriefingStats, ConsentStatus, BillingStatus,
+  Service, FAQ, BriefingStats, ConsentStatus, BillingStatus, CallMode,
 } from '@/lib/types';
+
+const MAX_PAGE_SIZE_RANGE = 500;
 
 export { prisma };
 export { newId, nowIso } from './ids';
@@ -29,6 +37,8 @@ export * from './users';
 export * from './email-tokens';
 export * from './audit';
 export * from './usage';
+export * from './call-mode';
+export * from './paging';
 
 /** Every write logs what changed; reads stay quiet (they are the hot path). */
 const log = logger('db');
@@ -44,12 +54,12 @@ export const DEFAULT_HOURS: Hours = {
 };
 
 // ---------- mappers: DB row -> domain object ----------
-/* eslint-disable @typescript-eslint/no-explicit-any */
+const callModeOf = (v: string | null | undefined): CallMode => (v === 'paused' || v === 'forward' ? v : 'ai');
 
 const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
 const isoReq = (d: Date): string => d.toISOString();
 
-function toBusiness(row: any): Business {
+function toBusiness(row: BusinessRow): Business {
   return {
     id: row.id,
     name: row.name,
@@ -57,9 +67,9 @@ function toBusiness(row: any): Business {
     phone: row.phone ?? null,
     owner_phone: row.ownerPhone ?? null,
     owner_name: row.ownerName ?? null,
-    hours: (row.hours ?? DEFAULT_HOURS) as Hours,
+    hours: (row.hours ?? DEFAULT_HOURS) as unknown as Hours,
     service_area: (row.serviceArea ?? []) as string[],
-    status: row.status,
+    status: row.status as Business['status'],
     agent_id: row.agentId ?? null,
     timezone: tzOf(row.timezone),
     retention_days: row.retentionDays ?? 365,
@@ -78,15 +88,20 @@ function toBusiness(row: any): Business {
     past_due_since: row.pastDueSince ? row.pastDueSince.toISOString() : null,
     sms_cap_override: row.smsCapOverride ?? null,
     call_minutes_cap_override: row.callMinutesCapOverride ?? null,
+    call_mode: callModeOf(row.callMode),
+    forward_number: row.forwardNumber ?? null,
+    forward_number_e164: row.forwardNumberE164 ?? null,
+    forward_number_verified_at: iso(row.forwardNumberVerifiedAt),
+    forward_during_hours: row.forwardDuringHours ?? false,
   };
 }
 
-function toKnowledgeBase(row: any): KnowledgeBase {
+function toKnowledgeBase(row: KnowledgeBaseRow): KnowledgeBase {
   return {
     id: row.id,
     business_id: row.businessId,
-    services: (row.services ?? []) as Service[],
-    faqs: (row.faqs ?? []) as FAQ[],
+    services: (row.services ?? []) as unknown as Service[],
+    faqs: (row.faqs ?? []) as unknown as FAQ[],
     pricing_notes: row.pricingNotes ?? '',
     system_prompt: row.systemPrompt ?? '',
     call_script: row.callScript ?? '',
@@ -94,7 +109,7 @@ function toKnowledgeBase(row: any): KnowledgeBase {
   };
 }
 
-function toCall(row: any): Call {
+function toCall(row: CallRow): Call {
   return {
     id: row.id,
     business_id: row.businessId,
@@ -105,11 +120,11 @@ function toCall(row: any): Call {
     started_at: isoReq(row.startedAt),
     ended_at: iso(row.endedAt),
     duration_sec: row.durationSec ?? null,
-    language: row.language ?? null,
+    language: (row.language ?? null) as Call['language'],
     transcript: row.transcript ?? null,
     summary: row.summary ?? null,
-    urgency: row.urgency,
-    status: row.status,
+    urgency: row.urgency as Call['urgency'],
+    status: row.status as Call['status'],
     recording_url: row.recordingUrl ?? null,
     flagged_reason: row.flaggedReason ?? null,
     recording_disclosed: row.recordingDisclosed ?? false,
@@ -117,7 +132,7 @@ function toCall(row: any): Call {
   };
 }
 
-function toBooking(row: any): Booking {
+function toBooking(row: BookingRow): Booking {
   return {
     id: row.id,
     call_id: row.callId ?? null,
@@ -131,7 +146,7 @@ function toBooking(row: any): Booking {
     price_estimate: row.priceEstimate ?? null,
     deposit_amount: row.depositAmount ?? null,
     deposit_paid: row.depositPaid,
-    status: row.status,
+    status: row.status as Booking['status'],
     created_at: isoReq(row.createdAt),
     anonymized_at: iso(row.anonymizedAt),
     followup_consent_at: iso(row.followupConsentAt),
@@ -139,28 +154,28 @@ function toBooking(row: any): Booking {
   };
 }
 
-function toBriefing(row: any): Briefing {
+function toBriefing(row: BriefingRow): Briefing {
   return {
     id: row.id,
     business_id: row.businessId,
     date: row.date,
     audio_url: row.audioUrl ?? null,
     transcript: row.transcript,
-    stats: (row.stats ?? { calls: 0, bookings: 0, revenue: 0, flags: 0 }) as BriefingStats,
+    stats: (row.stats ?? { calls: 0, bookings: 0, revenue: 0, flags: 0 }) as unknown as BriefingStats,
     created_at: isoReq(row.createdAt),
   };
 }
 
-function toSms(row: any): SmsLog {
+function toSms(row: SmsRow): SmsLog {
   return {
     id: row.id,
     business_id: row.businessId,
     to_phone: row.toPhone,
     body: row.body,
-    kind: row.kind,
+    kind: row.kind as SmsLog['kind'],
     booking_id: row.bookingId ?? null,
     provider_id: row.providerId ?? null,
-    status: row.status,
+    status: row.status as SmsLog['status'],
     consent_basis: row.consentBasis ?? null,
     created_at: isoReq(row.createdAt),
   };
@@ -168,7 +183,7 @@ function toSms(row: any): SmsLog {
 
 /** Domain patch -> Prisma column names. Only defined keys are written. */
 function callPatch(patch: Partial<Call>) {
-  const out: Record<string, unknown> = {};
+  const out: Prisma.CallUncheckedUpdateInput = {};
   if (patch.call_sid !== undefined) out.callSid = patch.call_sid;
   if (patch.conversation_id !== undefined) out.conversationId = patch.conversation_id;
   if (patch.caller_phone !== undefined) out.callerPhone = patch.caller_phone;
@@ -189,7 +204,7 @@ function callPatch(patch: Partial<Call>) {
 }
 
 function bookingPatch(patch: Partial<Booking>) {
-  const out: Record<string, unknown> = {};
+  const out: Prisma.BookingUncheckedUpdateInput = {};
   if (patch.call_id !== undefined) out.callId = patch.call_id;
   if (patch.customer_name !== undefined) out.customerName = patch.customer_name;
   if (patch.customer_phone !== undefined) out.customerPhone = patch.customer_phone;
@@ -207,14 +222,14 @@ function bookingPatch(patch: Partial<Booking>) {
 }
 
 function businessPatch(patch: Partial<Business>, country: string = defaultPhoneCountry()) {
-  const out: Record<string, unknown> = {};
+  const out: Prisma.BusinessUncheckedUpdateInput = {};
   if (patch.name !== undefined) out.name = patch.name;
   if (patch.url !== undefined) out.url = patch.url;
   if (patch.phone !== undefined) { out.phone = patch.phone; out.phoneKey = phoneKey(patch.phone); out.phoneE164 = toE164(patch.phone, country); }
   if (patch.timezone !== undefined && isValidTimeZone(patch.timezone)) out.timezone = patch.timezone;
   if (patch.owner_phone !== undefined) { out.ownerPhone = patch.owner_phone; out.ownerPhoneE164 = toE164(patch.owner_phone, country); }
   if (patch.owner_name !== undefined) out.ownerName = patch.owner_name;
-  if (patch.hours !== undefined) out.hours = patch.hours;
+  if (patch.hours !== undefined) out.hours = patch.hours as Prisma.InputJsonObject;
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.agent_id !== undefined) out.agentId = patch.agent_id;
@@ -224,15 +239,51 @@ function businessPatch(patch: Partial<Business>, country: string = defaultPhoneC
   return out;
 }
 
+/** Prisma's "record to update does not exist" (P2025): the ONLY failure the updateX helpers turn into `null`. */
+function isRecordNotFound(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === 'P2025';
+}
+
 /** Local YYYY-MM-DD day bounds in the business zone, as a UTC range (DST-correct). */
 function dayRange(date: string, tz: string = DEFAULT_TIMEZONE): { gte: Date; lt: Date } {
   return zonedDayRange(date, tz);
 }
 
 // ---------- businesses ----------
-export async function listBusinesses(): Promise<Business[]> {
-  const rows = await prisma.business.findMany({ orderBy: { createdAt: 'asc' } });
+/**
+ * Every business (admin switcher, jobs, routing fallback), oldest first, BOUNDED to `limit` rows (default MAX_LIST) with a
+ * keyset `after` (a business id) for callers that really walk the whole table.
+ */
+export async function listBusinesses(opts: { limit?: number; after?: ID } = {}): Promise<Business[]> {
+  const rows = await prisma.business.findMany({
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: clampLimit(opts.limit, MAX_LIST, MAX_LIST),
+    ...(opts.after ? { cursor: { id: opts.after }, skip: 1 } : {}),
+  });
   return rows.map(toBusiness);
+}
+
+/** EVERY business, walking the keyset pages (for the background jobs, which must not silently skip tenant #1001). */
+export async function listAllBusinesses(): Promise<Business[]> {
+  const out: Business[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: Page<Business> = await listBusinessesPage({ limit: MAX_PAGE_SIZE_RANGE, cursor });
+    out.push(...page.items);
+    cursor = page.next_cursor;
+  } while (cursor);
+  return out;
+}
+
+/** One page of businesses plus the cursor of the next page. */
+export async function listBusinessesPage(opts: { limit?: number; cursor?: string | null } = {}): Promise<Page<Business>> {
+  const limit = clampLimit(opts.limit, 50);
+  const rows = await prisma.business.findMany({
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: limit + 1,
+    ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
+  });
+  return toPage(rows, limit, toBusiness, (r) => r.id);
 }
 
 export async function getBusiness(id: ID): Promise<Business | null> {
@@ -374,10 +425,11 @@ export async function updateBusiness(id: ID, patch: Partial<Business>): Promise<
     log.debug('business.updated', { id, fields: Object.keys(data) });
     return toBusiness(row);
   } catch (err) {
-    // Swallowed on purpose (callers treat a missing row as a 404), but a silent
-    // null used to be indistinguishable from "nothing to update".
+    // Only "no such row" is `null` (callers answer 404). A real failure (database down, constraint violation) is thrown, never
+    // disguised as "not found".
+    if (isRecordNotFound(err)) return null;
     log.warn('business.update_failed', { id, fields: Object.keys(data), err });
-    return null;
+    throw err;
   }
 }
 
@@ -394,8 +446,9 @@ export async function clearBusinessProviderResources(id: ID, what: { phone?: boo
   try {
     return toBusiness(await prisma.business.update({ where: { id }, data }));
   } catch (err) {
+    if (isRecordNotFound(err)) return null;
     log.warn('business.clear_provider_failed', { id, err });
-    return null;
+    throw err;
   }
 }
 
@@ -500,8 +553,9 @@ export async function updateCall(id: ID, patch: Partial<Call>): Promise<Call | n
     log.debug('call.updated', { id, fields: [...Object.keys(data), ...Object.keys(consent)] });
     return toCall(row);
   } catch (err) {
+    if (isRecordNotFound(err)) return null;
     log.warn('call.update_failed', { id, fields: Object.keys(data), err });
-    return null;
+    throw err;
   }
 }
 
@@ -589,15 +643,43 @@ export async function upsertCallForConversation(
   }
 }
 
-export async function listCalls(businessId?: ID, date?: string, tz?: string): Promise<Call[]> {
-  const row = await prisma.call.findMany({
+/**
+ * Calls of one business (or, without an id, every business: admin/ops use only), newest first. BOUNDED: at most `limit`
+ * rows (default MAX_LIST). For a UI list use listCallsPage; for "all calls of a local day" pass `date`.
+ */
+export async function listCalls(
+  businessId?: ID, date?: string, tz?: string, opts: { limit?: number; flaggedSince?: Date } = {},
+): Promise<Call[]> {
+  const rows = await prisma.call.findMany({
     where: {
       ...(businessId ? { businessId } : {}),
       ...(date ? { startedAt: dayRange(date, tz) } : {}),
+      ...(opts.flaggedSince ? { flaggedReason: { not: null }, startedAt: { gte: opts.flaggedSince } } : {}),
     },
-    orderBy: { startedAt: 'desc' },
+    orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
+    take: clampLimit(opts.limit, MAX_LIST, MAX_LIST),
   });
-  return row.map(toCall);
+  return rows.map(toCall);
+}
+
+/** How many calls the business has logged (a count, not a list). */
+export async function countCalls(businessId: ID): Promise<number> {
+  return prisma.call.count({ where: { businessId } });
+}
+
+/** Cursor-paginated calls, newest first. */
+export async function listCallsPage(businessId: ID, opts: { limit?: number; cursor?: string | null } = {}): Promise<Page<Call>> {
+  const limit = clampLimit(opts.limit);
+  const cur = parseTimeCursor(opts.cursor);
+  const rows = await prisma.call.findMany({
+    where: {
+      businessId,
+      ...(cur ? { OR: [{ startedAt: { lt: cur.at } }, { startedAt: cur.at, id: { lt: cur.id } }] } : {}),
+    },
+    orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
+    take: limit + 1,
+  });
+  return toPage(rows, limit, toCall, (r) => encodeTimeCursor(r.startedAt, r.id));
 }
 
 // ---------- bookings ----------
@@ -718,15 +800,140 @@ export async function createBooking(
   return toBooking(row);
 }
 
-export async function listBookings(businessId?: ID, date?: string, tz?: string): Promise<Booking[]> {
+/** Bookings (soonest first), BOUNDED to `limit` rows (default MAX_LIST). UI lists use listBookingsPage / listBookingsInRange. */
+export async function listBookings(businessId?: ID, date?: string, tz?: string, opts: { limit?: number } = {}): Promise<Booking[]> {
   const rows = await prisma.booking.findMany({
     where: {
       ...(businessId ? { businessId } : {}),
       ...(date ? { scheduledAt: dayRange(date, tz) } : {}),
     },
-    orderBy: { scheduledAt: 'asc' },
+    orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
+    take: clampLimit(opts.limit, MAX_LIST, MAX_LIST),
   });
   return rows.map(toBooking);
+}
+
+const asDate = (v: Date | string): Date => (v instanceof Date ? v : new Date(v));
+
+/**
+ * Bookings that OVERLAP the half-open range [fromUtc, toUtc) (a job that started before `fromUtc` but runs into it is
+ * included), soonest first, scoped to ONE business. Keyset-paginated: pass the previous page's `next_cursor` as `cursor`.
+ * One indexed range scan on (business_id, scheduled_at): the calendar fetches exactly the visible week/day/month.
+ * Cancelled bookings are included (the calendar shows them struck through); pass `statuses` to narrow.
+ */
+export async function listBookingsInRange(
+  businessId: ID,
+  fromUtc: Date | string,
+  toUtc: Date | string,
+  opts: { limit?: number; cursor?: string | null; statuses?: Booking['status'][] } = {},
+): Promise<Page<Booking>> {
+  const from = asDate(fromUtc);
+  const to = asDate(toUtc);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to <= from) return { items: [], next_cursor: null };
+  const limit = clampLimit(opts.limit, 100, MAX_PAGE_SIZE_RANGE);
+  const cur = parseTimeCursor(opts.cursor);
+  const earliestStart = new Date(from.getTime() - MAX_DURATION_MIN * 60_000);
+  const rows = await prisma.booking.findMany({
+    where: {
+      businessId,
+      scheduledAt: { gte: cur && cur.at > earliestStart ? cur.at : earliestStart, lt: to },
+      ...(opts.statuses?.length ? { status: { in: opts.statuses } } : {}),
+      ...(cur ? { NOT: { scheduledAt: cur.at, id: { lte: cur.id } } } : {}),
+    },
+    orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
+    take: limit + 1,
+  });
+  const more = rows.length > limit;
+  const slice = more ? rows.slice(0, limit) : rows;
+  // The lower bound is widened by the longest possible job; trim the ones that really ended before `from`.
+  const items = slice
+    .map(toBooking)
+    .filter((b) => bookingInterval(b).end > from.getTime());
+  return { items, next_cursor: more && slice.length > 0 ? encodeTimeCursor(slice[slice.length - 1].scheduledAt, slice[slice.length - 1].id) : null };
+}
+
+/** Every booking overlapping [from, to), following cursors up to `max` rows (a month never has that many for one business). */
+export async function listAllBookingsInRange(businessId: ID, from: Date | string, to: Date | string, max = 2000): Promise<{ items: Booking[]; truncated: boolean }> {
+  const items: Booking[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: Page<Booking> = await listBookingsInRange(businessId, from, to, { limit: MAX_PAGE_SIZE_RANGE, cursor });
+    items.push(...page.items);
+    cursor = page.next_cursor;
+  } while (cursor && items.length < max);
+  return { items: items.slice(0, max), truncated: Boolean(cursor) || items.length > max };
+}
+
+/**
+ * Agenda list: `upcoming` = jobs that have not ended yet (soonest first), `past` = jobs that already ended (most recent
+ * first). Cursor-paginated; `now` is injectable for tests.
+ */
+export async function listBookingsPage(
+  businessId: ID,
+  opts: { direction: 'upcoming' | 'past'; limit?: number; cursor?: string | null; now?: Date },
+): Promise<Page<Booking>> {
+  const limit = clampLimit(opts.limit);
+  const cur = parseTimeCursor(opts.cursor);
+  const now = opts.now ?? new Date();
+  const upcoming = opts.direction === 'upcoming';
+  const rows = await prisma.booking.findMany({
+    where: {
+      businessId,
+      scheduledAt: upcoming ? { gte: now } : { lt: now },
+      ...(cur
+        ? { OR: upcoming
+          ? [{ scheduledAt: { gt: cur.at } }, { scheduledAt: cur.at, id: { gt: cur.id } }]
+          : [{ scheduledAt: { lt: cur.at } }, { scheduledAt: cur.at, id: { lt: cur.id } }] }
+        : {}),
+    },
+    orderBy: upcoming ? [{ scheduledAt: 'asc' }, { id: 'asc' }] : [{ scheduledAt: 'desc' }, { id: 'desc' }],
+    take: limit + 1,
+  });
+  const page = toPage(rows, limit, toBooking, (r) => encodeTimeCursor(r.scheduledAt, r.id));
+  // A job that started before `now` but has not ended yet is still "upcoming"/"in progress": it leads the first page.
+  if (upcoming && !cur) {
+    const running = await prisma.booking.findMany({
+      where: { businessId, scheduledAt: { gte: new Date(now.getTime() - MAX_DURATION_MIN * 60_000), lt: now } },
+      orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
+    });
+    page.items.unshift(...running.map(toBooking).filter((b) => bookingInterval(b).end > now.getTime()));
+  }
+  return page;
+}
+
+export type BookingTransition = 'cancelled' | 'completed';
+
+export type TransitionResult =
+  | { ok: true; booking: Booking; changed: boolean; previous: Booking['status'] }
+  | { ok: false; reason: 'not_found' | 'invalid_transition' | 'not_started'; current?: Booking['status'] };
+
+/**
+ * Owner-driven status change, scoped to the business (a booking of another tenant is `not_found`). Atomic: the update is
+ * conditional on the status it was validated against, so two concurrent clicks cannot both "win".
+ *  - cancelled: from pending | confirmed (a completed job cannot be cancelled); idempotent when already cancelled.
+ *  - completed: from pending | confirmed, and only once the job has started; idempotent when already completed.
+ * Cancelling frees the slot (cancelled bookings never block anything).
+ */
+export async function transitionBooking(
+  businessId: ID, bookingId: ID, to: BookingTransition, now: Date = new Date(),
+): Promise<TransitionResult> {
+  const row = await prisma.booking.findFirst({ where: { id: bookingId, businessId } });
+  if (!row) return { ok: false, reason: 'not_found' };
+  const previous = row.status as Booking['status'];
+  if (previous === to) return { ok: true, booking: toBooking(row), changed: false, previous };
+  if (previous !== 'pending' && previous !== 'confirmed') return { ok: false, reason: 'invalid_transition', current: previous };
+  if (to === 'completed' && row.scheduledAt.getTime() > now.getTime()) return { ok: false, reason: 'not_started', current: previous };
+  const res = await prisma.booking.updateMany({ where: { id: bookingId, businessId, status: previous }, data: { status: to } });
+  const fresh = await prisma.booking.findFirst({ where: { id: bookingId, businessId } });
+  if (!fresh) return { ok: false, reason: 'not_found' };
+  if (res.count === 0) {
+    // Lost a race: report what is there now (same target = fine, anything else = conflict).
+    return fresh.status === to
+      ? { ok: true, booking: toBooking(fresh), changed: false, previous }
+      : { ok: false, reason: 'invalid_transition', current: fresh.status as Booking['status'] };
+  }
+  log.info('booking.transitioned', { id: bookingId, business: businessId, from: previous, to });
+  return { ok: true, booking: toBooking(fresh), changed: true, previous };
 }
 
 /** Bookings scheduled for, or created on, a local calendar day (briefing bucketing). */
@@ -759,8 +966,9 @@ export async function updateBooking(id: ID, patch: Partial<Booking>): Promise<Bo
     log.debug('booking.updated', { id, fields: Object.keys(data) });
     return toBooking(row);
   } catch (err) {
+    if (isRecordNotFound(err)) return null;
     log.warn('booking.update_failed', { id, fields: Object.keys(data), err });
-    return null;
+    throw err;
   }
 }
 
@@ -838,12 +1046,26 @@ export async function createBriefing(input: Partial<Briefing> & {
   return toBriefing(row);
 }
 
-export async function listBriefings(businessId: ID): Promise<Briefing[]> {
+/** Briefings, newest first, BOUNDED to `limit` rows (default 60 = about two months). UI: listBriefingsPage. */
+export async function listBriefings(businessId: ID, opts: { limit?: number } = {}): Promise<Briefing[]> {
   const rows = await prisma.briefing.findMany({
     where: { businessId },
     orderBy: { date: 'desc' },
+    take: clampLimit(opts.limit, 60, MAX_LIST),
   });
   return rows.map(toBriefing);
+}
+
+/** Cursor-paginated briefings (the cursor is the last date of the previous page). */
+export async function listBriefingsPage(businessId: ID, opts: { limit?: number; cursor?: string | null } = {}): Promise<Page<Briefing>> {
+  const limit = clampLimit(opts.limit, 14);
+  const cursor = typeof opts.cursor === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(opts.cursor) ? opts.cursor : null;
+  const rows = await prisma.briefing.findMany({
+    where: { businessId, ...(cursor ? { date: { lt: cursor } } : {}) },
+    orderBy: { date: 'desc' },
+    take: limit + 1,
+  });
+  return toPage(rows, limit, toBriefing, (r) => r.date);
 }
 
 export async function getLatestBriefing(businessId: ID): Promise<Briefing | null> {
@@ -878,12 +1100,74 @@ export async function logSms(entry: Omit<SmsLog, 'id' | 'created_at'>, opts: { c
   return toSms(row);
 }
 
-export async function listSms(businessId?: ID): Promise<SmsLog[]> {
+/** Text log, newest first, BOUNDED to `limit` rows (default MAX_LIST). UI: listSmsPage. */
+export async function listSms(businessId?: ID, opts: { limit?: number; kind?: string; since?: Date } = {}): Promise<SmsLog[]> {
   const rows = await prisma.smsLog.findMany({
-    where: businessId ? { businessId } : {},
-    orderBy: { createdAt: 'desc' },
+    where: {
+      ...(businessId ? { businessId } : {}),
+      ...(opts.kind ? { kind: opts.kind } : {}),
+      ...(opts.since ? { createdAt: { gte: opts.since } } : {}),
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: clampLimit(opts.limit, MAX_LIST, MAX_LIST),
   });
   return rows.map(toSms);
+}
+
+/** How many texts the business has logged (a count, not a list). */
+export async function countSms(businessId: ID): Promise<number> {
+  return prisma.smsLog.count({ where: { businessId } });
+}
+
+/** Cursor-paginated text log, newest first. */
+export async function listSmsPage(businessId: ID, opts: { limit?: number; cursor?: string | null } = {}): Promise<Page<SmsLog>> {
+  const limit = clampLimit(opts.limit);
+  const cur = parseTimeCursor(opts.cursor);
+  const rows = await prisma.smsLog.findMany({
+    where: {
+      businessId,
+      ...(cur ? { OR: [{ createdAt: { lt: cur.at } }, { createdAt: cur.at, id: { lt: cur.id } }] } : {}),
+    },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: limit + 1,
+  });
+  return toPage(rows, limit, toSms, (r) => encodeTimeCursor(r.createdAt, r.id));
+}
+
+/**
+ * Gratitude texts that already went (or are waiting) to any of `phones` for this business, i.e. every status except the
+ * retryable "blocked" ones. Indexed on (business, to_e164); raw numbers that never normalised are matched on `to_phone`.
+ */
+export async function listGratitudeSmsTo(businessId: ID, phones: string[], country: string = defaultPhoneCountry()): Promise<SmsLog[]> {
+  const e164s = [...new Set(phones.map((p) => toE164(p, country)).filter((e): e is string => Boolean(e)))];
+  const raws = [...new Set(phones)];
+  if (e164s.length === 0 && raws.length === 0) return [];
+  const rows = await prisma.smsLog.findMany({
+    where: {
+      businessId,
+      kind: 'gratitude',
+      status: { notIn: ['blocked_quiet_hours', 'blocked_cap'] },
+      OR: [{ toE164: { in: e164s } }, { toPhone: { in: raws } }],
+    },
+    take: 5000,
+  });
+  return rows.map(toSms);
+}
+
+/** Bookings of one business (or all) in a status that STARTED in [from, to): the gratitude sweep's candidate window. */
+export async function listBookingsStartedBetween(
+  opts: { businessId?: ID; from: Date; to: Date; status?: Booking['status']; limit?: number },
+): Promise<Booking[]> {
+  const rows = await prisma.booking.findMany({
+    where: {
+      ...(opts.businessId ? { businessId: opts.businessId } : {}),
+      ...(opts.status ? { status: opts.status } : {}),
+      scheduledAt: { gte: opts.from, lt: opts.to },
+    },
+    orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
+    take: clampLimit(opts.limit, MAX_LIST, MAX_LIST),
+  });
+  return rows.map(toBooking);
 }
 
 /** Sends inside a recent window — used for confirmation de-duplication. */
@@ -900,11 +1184,79 @@ export async function findRecentSms(
       createdAt: { gte: since },
     },
     orderBy: { createdAt: 'desc' },
+    take: 50,
   });
   const match = opts.toE164
     ? rows.find((r) => (r.toE164 ?? toE164(r.toPhone)) === opts.toE164)
     : rows[0];
   return match ? toSms(match) : null;
+}
+
+// ---------- aggregates (SQL, not "load everything and count") ----------
+export interface DashboardStats {
+  /** Calls that started on the business's local day. */
+  calls_today: number;
+  /** Calls today in Spanish or mixed. */
+  bilingual_today: number;
+  /** Non-cancelled jobs that have not ended yet. */
+  bookings_upcoming: number;
+  /** INTEGER CENTS of deposits paid on bookings SCHEDULED in the business's current local month. */
+  deposits_month_cents: number;
+  /** INTEGER CENTS: price of confirmed/completed bookings created in the current local month. */
+  revenue_month_cents: number;
+  /** Calls in the last 7 days that were flagged for the owner. */
+  needs_attention: number;
+}
+
+/** Local month bounds [first day 00:00, next month first day 00:00) as UTC instants. */
+export function monthRange(dateKey: string, tz: string): { gte: Date; lt: Date } {
+  const first = `${dateKey.slice(0, 7)}-01`;
+  const [y, m] = dateKey.split('-').map(Number);
+  const next = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+  return { gte: zonedDayRange(first, tz).gte, lt: zonedDayRange(next, tz).gte };
+}
+
+export async function getDashboardStats(businessId: ID, tz: string, now: Date = new Date()): Promise<DashboardStats> {
+  const today = localDateKey(now, tz);
+  const day = dayRange(today, tz);
+  const month = monthRange(today, tz);
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 3600_000);
+  const upcomingFloor = new Date(now.getTime() - MAX_DURATION_MIN * 60_000);
+  const [callsToday, bilingual, upcomingRows, deposits, revenue, flagged] = await Promise.all([
+    prisma.call.count({ where: { businessId, startedAt: day } }),
+    prisma.call.count({ where: { businessId, startedAt: day, language: { in: ['es', 'mixed'] } } }),
+    prisma.booking.findMany({
+      where: { businessId, status: { not: 'cancelled' }, scheduledAt: { gte: upcomingFloor } },
+      select: { scheduledAt: true, durationMinutes: true },
+      take: 5000,
+    }),
+    prisma.booking.aggregate({ _sum: { depositAmount: true }, where: { businessId, depositPaid: true, scheduledAt: month } }),
+    prisma.booking.aggregate({ _sum: { priceEstimate: true }, where: { businessId, status: { in: ['confirmed', 'completed'] }, createdAt: month } }),
+    prisma.call.count({ where: { businessId, startedAt: { gte: weekAgo }, flaggedReason: { not: null } } }),
+  ]);
+  const nowMs = now.getTime();
+  return {
+    calls_today: callsToday,
+    bilingual_today: bilingual,
+    bookings_upcoming: upcomingRows.filter((b) => b.scheduledAt.getTime() + clampDuration(b.durationMinutes) * 60_000 > nowMs).length,
+    deposits_month_cents: deposits._sum.depositAmount ?? 0,
+    revenue_month_cents: revenue._sum.priceEstimate ?? 0,
+    needs_attention: flagged,
+  };
+}
+
+/** Is `phone` a number this business already knows (its owner, a booking customer or a past caller)? Indexed lookups on E.164. */
+export async function isKnownContact(businessId: ID, phone: string): Promise<boolean> {
+  const biz = await prisma.business.findUnique({ where: { id: businessId }, select: { ownerPhoneE164: true, phoneE164: true } });
+  if (!biz) return false;
+  const e164 = toE164(phone, countryForBusiness({ phone_e164: biz.phoneE164 }));
+  if (!e164) return false;
+  if (biz.ownerPhoneE164 === e164) return true;
+  const [booking, call] = await Promise.all([
+    prisma.booking.findFirst({ where: { businessId, phoneE164: e164 }, select: { id: true } }),
+    prisma.call.findFirst({ where: { businessId, callerE164: e164 }, select: { id: true } }),
+  ]);
+  return Boolean(booking || call);
 }
 
 // ---------- lifecycle ----------
@@ -927,4 +1279,3 @@ export async function disconnect(): Promise<void> {
   await prisma.$disconnect();
 }
 
-export const DEFAULT_HOURS_EXPORT = DEFAULT_HOURS; // kept for older imports

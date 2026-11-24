@@ -200,3 +200,20 @@ Check before the first `--apply`: `EMAIL_PROVIDER` works (the heads-up needs it)
 account. Never released: comped plans, a number shared with another business, `TWILIO_PHONE_NUMBER`. One business: `POST /api/admin/release-tenant` (`dry_run` defaults to true). Details and rules: docs/billing.md.
 After a release the owner can resubscribe; re-provisioning (`POST /api/businesses/:id/provision`) buys a NEW number. The ElevenLabs phone-number detach/unassign call shape is UNVERIFIED (like the rest of the phone binding):
 after the first real release check in the ElevenLabs dashboard that the agent is gone and the shared number is not assigned to a deleted agent. Twilio: confirm the number disappeared from Phone Numbers > Active numbers.
+
+## 8. Call handling: pause and forward
+
+Each business has a call handling mode (Today page pill, Settings > Call handling; owner only, audited as `business.call_mode_changed`):
+
+| Mode | Twilio line (`/api/voice/incoming`) | Native ElevenLabs line (`/api/voice/initiation`) |
+| --- | --- | --- |
+| `ai` (default) | the AI answers | the AI answers |
+| `paused` | TwiML: the caller hears that the assistant is off and that a message **will be recorded**, then a voicemail `<Record>`; the call row is `handed_off` and the verified owner phone gets one rate-limited "MISSED CALL" text | first message replaced by the paused script (AI/recording notice first), call capped at 60 s, the agent takes a message (`handoff_to_human`); same owner text |
+| `forward` | TwiML `<Dial>` to the **verified** forward number (never recorded; no answer -> voicemail via `/api/voice/voicemail`) | **not possible**: the platform answers before our code runs, so it behaves like `paused` (documented limitation) |
+
+* `forward_during_hours`: forward only inside the business opening hours (business zone); after hours the AI answers.
+* A forward number is accepted only if it is E.164, in `FORWARD_ALLOWED_COUNTRY_CODES` (default: `SMS_ALLOWED_COUNTRY_CODES`, i.e. `1`), not premium / short code / Caribbean one-ring / non-geographic, and not the business's own line. It must then be verified by a 6-digit SMS code (same limits as owner-phone verification, separate challenge purpose) or be the already-verified owner phone. An unverified number is never dialled: the AI answers instead and the dashboard says so.
+* A lapsed plan still wins (out-of-service message); a used-up call-minutes cap does not block paused/forward (no AI minutes are used).
+* Twilio setup for the voicemail/forward callback: nothing extra; `/api/voice/voicemail` is relative to the incoming URL and verifies the Twilio signature. Recordings are Twilio-hosted: delete them in the Twilio console per your retention policy (`recording_url` is only a reference).
+* Validate the enum CHECK constraints are all validated: `SELECT conname FROM pg_constraint WHERE contype='c' AND NOT convalidated;` returns no rows.
+* Logs: phone numbers are masked to the last four digits and emails to the first letter; set `LOG_PII=true` temporarily to debug (credentials stay masked).

@@ -15,7 +15,9 @@
  */
 import { getBusinessByAgentId, getBusinessByPhone, updateCall, upsertCallForConversation } from '@/lib/db';
 import { firstMessageFor, verifyToolSecret } from '@/lib/voice/elevenlabs';
-import { allowMissedCallAlert, callGate, outOfServiceOverride } from '@/lib/voice/capacity';
+import { allowMissedCallAlert, callGate, outOfServiceOverride, pausedOverride } from '@/lib/voice/capacity';
+import { resolveCallRoute } from '@/lib/voice/call-mode';
+import { markPausedNative } from '@/lib/voice/non-ai';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { nowVariables } from '@/lib/time';
 import { logger } from '@/lib/log';
@@ -84,13 +86,25 @@ export async function POST(req: Request): Promise<Response> {
 
     const gate = await callGate(business.id);
     const outOfService = !gate.ok;
-    const override = outOfService ? outOfServiceOverride(business) : { agent: { first_message: firstMessageFor(business) } };
+
+    // Call handling mode. On this path the platform answers the call itself, so nothing here can dial a human: both
+    // 'paused' and a due 'forward' become the paused script (message + callback capture) with a short maximum duration.
+    // A lapsed plan keeps winning (out-of-service text); a used-up minutes cap does not block these (no AI minutes needed
+    // beyond the short message). See docs/known-limitations.md "Call forwarding on the native ElevenLabs path".
+    const route = resolveCallRoute(business);
+    const nonAi: 'paused' | 'forward' | null = route.action === 'paused' ? 'paused' : route.action === 'forward' ? 'forward' : null;
+    const planLapsed = outOfService && gate.reason === 'no_plan';
+    const usePausedScript = nonAi !== null && !planLapsed;
+    const override = usePausedScript
+      ? pausedOverride(business)
+      : outOfService ? outOfServiceOverride(business) : { agent: { first_message: firstMessageFor(business) } };
 
     if (call) {
       // Both messages open with disclosureFor(business): the override below is the server-side evidence.
       // A previously recorded objection is never overwritten (the write layer keeps 'declined' sticky).
       await updateCall(call.id, { recording_disclosed: true, consent_status: 'disclosed' });
-      if (outOfService && call.status !== 'handed_off') {
+      if (usePausedScript && nonAi) await markPausedNative(business, call, callerId || null, nonAi);
+      else if (outOfService && call.status !== 'handed_off') {
         await updateCall(call.id, { status: 'handed_off', flagged_reason: `out_of_service:${gate.reason ?? 'capacity'}` });
         const who = callerId ? ` from ${callerId}` : '';
         // Rate limited per business (1 / 10 min, 6 / hour): a lapsed tenant must not be a free SMS pump.

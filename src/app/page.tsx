@@ -26,7 +26,7 @@ const FEATURES = [
   { t: 'Triages emergencies', d: 'Asks about leaks, heat and vulnerable people first, and alerts you by text.' },
   { t: 'Collects deposits', d: 'Sends a secure payment link by text. She never takes card numbers over the phone.' },
   { t: 'Reports back', d: 'A short evening briefing on calls, bookings, money and anything that needs you.' },
-  { t: 'You stay in control', d: 'Edit every price and answer she knows. Review transcripts of every call.' },
+  { t: 'You stay in control', d: 'Pause her or forward calls to your own phone with one switch. Edit every price and answer she knows, see your week on a calendar and read every call.' },
 ];
 
 export default function Home() {

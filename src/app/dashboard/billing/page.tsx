@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import { getDashboardContext, requireRolePage } from '@/lib/dashboard-context';
 import { Card, CardHead } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -5,6 +6,8 @@ import { billingSummary } from '@/lib/billing/summary';
 import { daysLeft } from '@/lib/billing/banner-state';
 import { BillingActions } from './billing-actions';
 import type { BillingStatus } from '@/lib/types';
+
+export const metadata: Metadata = { title: 'Billing' };
 
 export const dynamic = 'force-dynamic';
 

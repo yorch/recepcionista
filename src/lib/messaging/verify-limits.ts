@@ -35,6 +35,8 @@ export interface VerifyStartInput {
   /** The signed-in user (null for the break-glass admin token). */
   userId: string | null;
   isAdmin: boolean;
+  /** What is being verified (both share every cap: the platform-wide and per-number limits count both). */
+  purpose?: 'owner-phone' | 'forward-number';
 }
 
 async function countSince(where: { toE164?: string; businessId?: string }, hours: number): Promise<number> {
@@ -83,7 +85,14 @@ export async function checkVerificationStart(i: VerifyStartInput): Promise<Verif
   if (!i.isAdmin) {
     const since = new Date(Date.now() - VERIFIED_ELSEWHERE_DAYS * 24 * HOUR);
     const elsewhere = await prisma.business.findFirst({
-      where: { ownerPhoneE164: i.e164, ownerPhoneVerifiedAt: { gte: since }, id: { not: i.businessId } }, select: { id: true },
+      where: {
+        id: { not: i.businessId },
+        OR: [
+          { ownerPhoneE164: i.e164, ownerPhoneVerifiedAt: { gte: since } },
+          { forwardNumberE164: i.e164, forwardNumberVerifiedAt: { gte: since } },
+        ],
+      },
+      select: { id: true },
     });
     if (elsewhere) return { status: 422, error: 'that number is already verified for another account; contact support' };
   }

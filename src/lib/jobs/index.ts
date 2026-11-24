@@ -21,7 +21,7 @@
  */
 import {
   claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, EMAIL_TOKEN_GRACE_MS,
-  getBusiness, isProvisioningAllowed, listBusinesses, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
+  getBusiness, isProvisioningAllowed, listAllBusinesses, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
   checkSmsAllowed, withLease,
 } from '@/lib/db';
 import { appBaseUrl } from '@/lib/email/templates';
@@ -179,7 +179,7 @@ export async function runDailyBriefings(opts: RunOptions = {}): Promise<JobRepor
 
   const businesses = opts.businessId
     ? liveBusinesses([(await getBusiness(opts.businessId)) as Business].filter(Boolean), opts.businessId)
-    : liveBusinesses(await listBusinesses());
+    : liveBusinesses(await listAllBusinesses());
   if (opts.businessId && businesses.length === 0) report.items.push({ business_id: opts.businessId, outcome: 'skipped_not_live' });
 
   for (const b of businesses) {
@@ -235,7 +235,7 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
 
   const businesses = opts.businessId
     ? liveBusinesses([(await getBusiness(opts.businessId)) as Business].filter(Boolean), opts.businessId)
-    : liveBusinesses(await listBusinesses());
+    : liveBusinesses(await listAllBusinesses());
   if (opts.businessId && businesses.length === 0) report.items.push({ business_id: opts.businessId, outcome: 'skipped_not_live' });
 
   // One query: which businesses were already swept this hour (skipped for free, no per-business round trip).
@@ -410,7 +410,7 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
 }> {
   const on = new Set(enabledJobs(env));
   const setting = jobsSetting(env);
-  const businesses = liveBusinesses(await listBusinesses()).filter((b) => isProvisioningAllowed(b, now, env));
+  const businesses = liveBusinesses(await listAllBusinesses()).filter((b) => isProvisioningAllowed(b, now, env));
   const jobs: JobStatus[] = [];
   for (const name of JOB_NAMES) {
     const last = await lastRunAt(name);

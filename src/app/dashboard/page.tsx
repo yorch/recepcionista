@@ -1,15 +1,20 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { getDashboardContext } from '@/lib/dashboard-context';
 import { hasRole } from '@/lib/session';
-import { getLatestBriefing, listBookings, listCalls, listSms } from '@/lib/db';
-import { money, relative, seconds, timeET, whenET } from '@/lib/format';
-import { localDateKey, tzOf } from '@/lib/time';
+import { countSms, getDashboardStats, getLatestBriefing, listBookingsPage, listCalls, listCallsPage, listSmsPage } from '@/lib/db';
+import { dayLabelET, money, relative, seconds, timeET } from '@/lib/format';
+import { callModeView } from '@/lib/voice/call-mode';
+import { CallModeSwitch } from '@/components/dashboard/call-mode';
+import { tzOf } from '@/lib/time';
 import { longDate, greetingFor } from '@/components/dashboard/dates';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHead } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty';
 import { Stat } from '@/components/ui/stat';
 import { VoicePlayer } from '@/components/ui/audio';
+
+export const metadata: Metadata = { title: 'Today' };
 
 export const dynamic = 'force-dynamic';
 
@@ -18,22 +23,27 @@ export default async function TodayPage() {
   const biz = ctx.business;
   const tz = tzOf(biz);
 
-  const [calls, bookings, briefing, sms] = await Promise.all([
-    listCalls(biz.id), listBookings(biz.id), getLatestBriefing(biz.id), listSms(biz.id),
-  ]);
-
   // Read the clock once so the render stays pure and every value below agrees. "Today" is the BUSINESS's day.
   const now = new Date();
-  const today = localDateKey(now, tz);
-  const callsToday = calls.filter((c) => localDateKey(c.started_at, tz) === today);
-  const bilingualToday = callsToday.filter((c) => c.language === 'es' || c.language === 'mixed').length;
-  const upcoming = bookings
-    .filter((b) => new Date(b.scheduled_at).getTime() > now.getTime() - 3600_000 && b.status !== 'cancelled')
-    .sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
-  const deposits = bookings.reduce((s, b) => s + (b.deposit_paid ? b.deposit_amount ?? 0 : 0), 0);
-  const needsYou = calls.filter((c) => c.flagged_reason);
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 3600_000);
+
+  // Bounded queries only: counts and sums come from SQL aggregates in the business zone, lists are the few rows shown.
+  const [stats, recent, flagged, upcomingPage, briefing, smsPage, smsTotal] = await Promise.all([
+    getDashboardStats(biz.id, tz, now),
+    listCallsPage(biz.id, { limit: 4 }),
+    listCalls(biz.id, undefined, undefined, { limit: 3, flaggedSince: weekAgo }),
+    listBookingsPage(biz.id, { direction: 'upcoming', limit: 12, now }),
+    getLatestBriefing(biz.id),
+    listSmsPage(biz.id, { limit: 2 }),
+    countSms(biz.id),
+  ]);
+  const calls = recent.items;
+  const sms = smsPage.items;
+  const upcoming = upcomingPage.items.filter((b) => b.status !== 'cancelled' && b.status !== 'completed');
+  const needsYou = flagged;
   const isOwner = hasRole(ctx.principal, 'owner');
-  const hasActivity = calls.length > 0 || bookings.length > 0;
+  const hasActivity = recent.items.length > 0 || upcomingPage.items.length > 0 || stats.calls_today > 0;
+  const mode = callModeView(biz, { full: isOwner }, now);
 
   const greeting = greetingFor(now, tz);
 
@@ -46,16 +56,19 @@ export default async function TodayPage() {
             {biz.owner_name ? `${greeting}, ${biz.owner_name}.` : `${greeting}.`}
           </h1>
         </div>
-        {biz.phone ? (
-          <a
-            href={`tel:${biz.phone}`}
-            className="inline-flex min-h-11 items-center gap-2 rounded-full border border-mint-line bg-mint-bg px-4 py-1.5 font-mono text-[13px] text-mint-text transition-colors hover:border-mint"
-          >
-            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-mint live-dot" />
-            <span className="sr-only">Your front desk number: </span>
-            {biz.phone}
-          </a>
-        ) : null}
+        <div className="flex flex-col items-start gap-3 sm:items-end">
+          {biz.phone ? (
+            <a
+              href={`tel:${biz.phone}`}
+              className="inline-flex min-h-11 items-center gap-2 rounded-full border border-mint-line bg-mint-bg px-4 py-1.5 font-mono text-[13px] text-mint-text transition-colors hover:border-mint"
+            >
+              <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-mint live-dot" />
+              <span className="sr-only">Your front desk number: </span>
+              {biz.phone}
+            </a>
+          ) : null}
+          {biz.phone ? <CallModeSwitch businessId={biz.id} initial={mode} canManage={isOwner} compact /> : null}
+        </div>
       </header>
 
       {!hasActivity ? (
@@ -72,10 +85,10 @@ export default async function TodayPage() {
       ) : null}
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="Calls today" value={String(callsToday.length)} sub={`${bilingualToday} bilingual today`} />
-        <Stat label="Booked" value={String(upcoming.length)} sub="upcoming jobs" />
-        <Stat label="Deposits" value={money(deposits)} sub="collected" />
-        <Stat label="Needs you" value={String(needsYou.length)} sub="flagged" tone={needsYou.length ? 'warn' : undefined} />
+        <Stat label="Calls today" value={String(stats.calls_today)} sub={`${stats.bilingual_today} bilingual today`} />
+        <Stat label="Booked" value={String(stats.bookings_upcoming)} sub="upcoming jobs" />
+        <Stat label="Deposits" value={money(stats.deposits_month_cents)} sub="paid, jobs this month" />
+        <Stat label="Needs you" value={String(stats.needs_attention)} sub="flagged, last 7 days" tone={stats.needs_attention ? 'warn' : undefined} />
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-5">
@@ -107,7 +120,7 @@ export default async function TodayPage() {
               {upcoming.slice(0, 4).map((b) => (
                 <li key={b.id} className="flex items-center gap-3 px-5 py-3.5">
                   <div className="w-[86px] shrink-0">
-                    <p className="text-xs font-medium text-brand-soft">{whenET(b.scheduled_at, tz).split(' at ')[0]}</p>
+                    <p className="text-xs font-medium text-brand-soft">{dayLabelET(b.scheduled_at, tz, now)}</p>
                     <p className="font-mono text-[13px] text-white">{timeET(b.scheduled_at, tz)}</p>
                   </div>
                   <div className="min-w-0 flex-1">
@@ -171,7 +184,7 @@ export default async function TodayPage() {
           </Card>
 
           <Card className="mt-4">
-            <CardHead title="Texts sent" subtitle={`${sms.length} total`} />
+            <CardHead title="Texts sent" subtitle={`${smsTotal} total`} />
             <ul className="divide-y divide-[#171f2a]">
               {sms.slice(0, 2).map((s) => (
                 <li key={s.id} className="px-5 py-3">

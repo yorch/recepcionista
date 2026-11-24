@@ -236,6 +236,52 @@ suite('migrations (postgres)', () => {
     }
   }, 180_000);
 
+  test('call-mode migration: defaults keep every business on ai, legacy enum values are normalised, dangling sms booking ids are cleared, constraints hold', async () => {
+    const CALL_MODE = '20261127120000_call_mode_forwarding';
+    const name = await newDb('callmode');
+    const before = historyUpTo('before-callmode', dirs().filter((d) => d < CALL_MODE).at(-1)!);
+    expect(prisma(['migrate', 'deploy'], dbUrl(name), before).code).toBe(0);
+    const c = client(name);
+    try {
+      for (const q of [
+        `INSERT INTO businesses(id,name,status) VALUES ('b1','A','live'),('b2','B','zombie')`,
+        `INSERT INTO calls(id,business_id,status,urgency) VALUES ('c1','b1','completed','routine'),('c2','b1','weird','whenever')`,
+        `INSERT INTO bookings(id,business_id,customer_name,customer_phone,service,scheduled_at,status) VALUES
+           ('k1','b1','x','1','s','2027-01-01 10:00','confirmed'),('k2','b1','y','2','s','2027-01-02 10:00','maybe')`,
+        `INSERT INTO sms_log(id,business_id,to_phone,body,kind,status,booking_id) VALUES
+           ('s1','b1','+13055550100','hi','confirmation','sent','k1'),('s2','b1','+13055550100','hi','spam','delivered?','ghost-booking')`,
+      ]) await c.$executeRawUnsafe(q);
+
+      const r = prisma(['migrate', 'deploy'], dbUrl(name));
+      expect(r.out).toContain(CALL_MODE);
+      expect(r.code).toBe(0);
+      const one = async (sql: string) => (await c.$queryRawUnsafe(sql)) as any[];
+      expect(await one(`SELECT id, call_mode m, forward_number n, forward_number_verified_at v, forward_during_hours h FROM businesses ORDER BY id`)).toEqual([
+        { id: 'b1', m: 'ai', n: null, v: null, h: false }, { id: 'b2', m: 'ai', n: null, v: null, h: false },
+      ]);
+      expect((await one(`SELECT id, status FROM businesses ORDER BY id`)).map((x) => x.status)).toEqual(['live', 'onboarding']);
+      expect(await one(`SELECT id, status, urgency FROM calls ORDER BY id`)).toEqual([
+        { id: 'c1', status: 'completed', urgency: 'routine' }, { id: 'c2', status: 'completed', urgency: 'unsure' },
+      ]);
+      expect((await one(`SELECT status FROM bookings ORDER BY id`)).map((x) => x.status)).toEqual(['confirmed', 'confirmed']);
+      expect(await one(`SELECT id, kind, status, booking_id FROM sms_log ORDER BY id`)).toEqual([
+        { id: 's1', kind: 'confirmation', status: 'sent', booking_id: 'k1' }, { id: 's2', kind: 'other', status: 'failed', booking_id: null },
+      ]);
+      const bad = async (sql: string) => { try { await c.$executeRawUnsafe(sql); return 'accepted'; } catch { return 'rejected'; } };
+      expect(await bad(`UPDATE businesses SET call_mode = 'sleep' WHERE id = 'b1'`)).toBe('rejected');
+      expect(await bad(`UPDATE businesses SET forward_number_e164 = '911' WHERE id = 'b1'`)).toBe('rejected');
+      expect(await bad(`UPDATE businesses SET forward_number_verified_at = now() WHERE id = 'b1'`)).toBe('rejected');
+      expect(await bad(`UPDATE businesses SET call_mode = 'forward', forward_number_e164 = '+13055550142', forward_number_verified_at = now() WHERE id = 'b1'`)).toBe('accepted');
+      expect(await bad(`UPDATE bookings SET status = 'nope' WHERE id = 'k1'`)).toBe('rejected');
+      expect(await bad(`INSERT INTO sms_log(id,business_id,to_phone,body,kind,status,booking_id) VALUES ('s9','b1','x','x','other','sent','ghost')`)).toBe('rejected');
+      expect(await bad(`DELETE FROM bookings WHERE id = 'k1'`)).toBe('accepted');
+      expect((await one(`SELECT booking_id FROM sms_log WHERE id = 's1'`))[0].booking_id).toBeNull(); // ON DELETE SET NULL
+      expect(await c.$queryRawUnsafe(`SELECT 1 FROM pg_constraint WHERE contype='c' AND NOT convalidated`)).toEqual([]);
+    } finally {
+      await c.$disconnect();
+    }
+  }, 180_000);
+
   test('no drift between prisma/migrations and schema.prisma', async () => {
     const shadow = await newDb('shadow');
     const r = rawPrisma(['migrate', 'diff', '--from-migrations', MIGRATIONS, '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--shadow-database-url', dbUrl(shadow), '--exit-code'], dbUrl(shadow));

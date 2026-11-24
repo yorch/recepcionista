@@ -137,6 +137,66 @@ ${text.replace(/<\/?scraped_data>/gi, '')}
 </scraped_data>`;
 }
 
+/**
+ * One clock value from an LLM / website into 24h "HH:MM", or null. Accepts "9:30", "09:30:00", "9am", "9:30 PM", "12am"
+ * (midnight), "12pm" (noon), "noon", "midnight". Rejects out-of-range values ("25:00", "9:75", "13pm"). "24:00" is accepted
+ * (end of day) and only makes sense as a closing time.
+ */
+export function parseClock(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim().toLowerCase().replace(/\./g, '');
+  if (t === 'noon') return '12:00';
+  if (t === 'midnight') return '24:00';
+  const m = /^(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*(am|pm|a|p)?$/.exec(t);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const min = m[2] ? Number(m[2]) : 0;
+  const mer = m[3]?.[0];
+  if (min > 59) return null;
+  if (mer) {
+    if (h < 1 || h > 12) return null;
+    h = (h % 12) + (mer === 'p' ? 12 : 0);
+  }
+  if (h > 24 || (h === 24 && min !== 0)) return null;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+/** "08:00-17:00" / "8am - 5pm" / "8:00 to 17:00" -> { open, close }, or null. */
+function parseRangeText(raw: string): { open: string; close: string } | null {
+  const parts = raw.split(/\s*(?:-|\u2013|\u2014|to|until)\s*/i);
+  if (parts.length !== 2) return null;
+  const open = parseClock(parts[0]);
+  const close = parseClock(parts[1]);
+  return open && close ? { open, close } : null;
+}
+
+/**
+ * Opening hours from model output, always a COMPLETE seven-day map with a valid {open, close} (open < close, same day) or null
+ * (closed/unknown). Day keys are matched case-insensitively in full or abbreviated form ("Monday", "mon", "MON."). A day whose
+ * times are missing, unparseable or not in order is closed rather than guessed (an overnight "22:00-02:00" is also dropped: the
+ * booking maths only handle hours inside one day).
+ */
+export function sanitizeHours(raw: unknown): Hours {
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const byKey = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(src)) byKey.set(k.trim().toLowerCase().replace(/\./g, ''), v);
+  const hours: Hours = {};
+  for (const day of DAY_KEYS) {
+    const entry = byKey.get(day) ?? byKey.get(day.slice(0, 3));
+    let range: { open: string; close: string } | null = null;
+    if (typeof entry === 'string') range = parseRangeText(entry);
+    else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      const e = entry as Record<string, unknown>;
+      const open = parseClock(e.open);
+      const close = parseClock(e.close);
+      range = open && close ? { open, close } : null;
+    }
+    // Open must be before close on the same day, and 24:00 can only close.
+    hours[day] = range && range.open !== '24:00' && range.open < range.close ? range : null;
+  }
+  return hours;
+}
+
 /** Coerce and clamp an arbitrary parsed object into a valid ExtractionResult. */
 function sanitize(raw: unknown, businessName: string, source: ExtractionResult['source']): ExtractionResult {
   const r = (raw ?? {}) as Record<string, unknown>;
@@ -158,23 +218,7 @@ function sanitize(raw: unknown, businessName: string, source: ExtractionResult['
     }];
   });
 
-  const hoursRaw = (r.hours ?? {}) as Record<string, unknown>;
-  const hours: Hours = {};
-  for (const day of DAY_KEYS) {
-    const variants = [day, day.slice(0, 3), day[0].toUpperCase() + day.slice(1, 3)];
-    let entry: unknown;
-    for (const v of variants) {
-      if (hoursRaw[v] !== undefined) { entry = hoursRaw[v]; break; }
-    }
-    if (entry && typeof entry === 'object') {
-      const e = entry as Record<string, unknown>;
-      const open = typeof e.open === 'string' && /^\d{1,2}:\d{2}/.test(e.open) ? e.open.slice(0, 5).padStart(5, '0') : undefined;
-      const close = typeof e.close === 'string' && /^\d{1,2}:\d{2}/.test(e.close) ? e.close.slice(0, 5).padStart(5, '0') : undefined;
-      hours[day] = open && close ? { open, close } : null;
-    } else {
-      hours[day] = null;
-    }
-  }
+  const hours = sanitizeHours(r.hours);
 
   const service_area = (Array.isArray(r.service_area) ? r.service_area : [])
     .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)

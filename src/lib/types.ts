@@ -4,6 +4,8 @@
 export type ID = string;
 
 export type BusinessStatus = 'onboarding' | 'live' | 'paused';
+/** How inbound calls are handled: the AI answers (default), nobody answers (polite message + voicemail), or the call rings a human number. */
+export type CallMode = 'ai' | 'paused' | 'forward';
 export type Urgency = 'emergency' | 'routine' | 'unsure';
 export type CallStatus = 'in_progress' | 'completed' | 'handed_off' | 'failed';
 export type BookingStatus = 'pending' | 'confirmed' | 'completed' | 'cancelled';
@@ -47,6 +49,15 @@ export interface Business {
   phone_e164?: string | null;
   owner_phone_e164?: string | null;
   owner_phone_verified_at?: string | null;
+  /** Call handling mode (default 'ai'). See src/lib/voice/call-mode.ts. */
+  call_mode?: CallMode;
+  /** The human number 'forward' rings, as stored, and its E.164 form. */
+  forward_number?: string | null;
+  forward_number_e164?: string | null;
+  /** When the SMS-code verification of the forward number succeeded (null = not verified; it is never dialled). */
+  forward_number_verified_at?: string | null;
+  /** 'forward' only during business hours; the AI answers outside them. */
+  forward_during_hours?: boolean;
   /** Billing. Absent/'none' on legacy and demo tenants (only enforced when BILLING_ENFORCED=true). */
   billing_status?: BillingStatus;
   plan?: string | null;

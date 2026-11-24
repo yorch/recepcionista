@@ -20,6 +20,27 @@ const ORDER: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 
 /** Anything whose key matches this is never printed, at any depth. */
 const SECRET_KEY = /(api[-_]?key|token|secret|password|authorization|signature|cookie)/i;
 
+/**
+ * Value-based scrubbing, on top of the key-name redaction above: personal data and credentials that end up INSIDE a string
+ * (an error message that quotes a phone number, a provider body that echoes an email or a token) are masked whatever the field
+ * is called. Phone numbers keep their last four digits, emails their first letter and domain. LOG_PII=true turns the
+ * phone/email masking off for debugging (credential patterns are always masked).
+ */
+const PHONE_VALUE = /(\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?(\d{4})\b|\+\d{7,15}\b/g;
+const EMAIL_VALUE = /\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g;
+const CREDENTIAL_VALUE = /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}|\bwhsec_[A-Za-z0-9]{8,}|\bBearer\s+[A-Za-z0-9._~+/=-]{12,}|\bxi-api-key[:=]\s*\S+|\bAC[0-9a-f]{32}\b/g;
+
+export function scrub(text: string, env: Record<string, string | undefined> = process.env): string {
+  let out = text.replace(CREDENTIAL_VALUE, '«redacted»');
+  if (env.LOG_PII === 'true') return out;
+  out = out.replace(EMAIL_VALUE, '$1•••@$2');
+  out = out.replace(PHONE_VALUE, (m: string) => {
+    const digits = m.replace(/\D/g, '');
+    return digits.length < 7 ? m : `${m.startsWith('+') ? '+' : ''}•••${digits.slice(-4)}`;
+  });
+  return out;
+}
+
 const MAX_STRING = 240;
 const MAX_DEPTH = 2;
 const MAX_ITEMS = 12;
@@ -35,7 +56,7 @@ function enabled(at: Level): boolean {
 }
 
 function clip(text: string, max = MAX_STRING): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
+  const flat = scrub(text.replace(/\s+/g, ' ').trim());
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 

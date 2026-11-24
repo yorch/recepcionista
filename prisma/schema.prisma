@@ -58,6 +58,17 @@ model Business {
   /// Set once the owner proved they control `owner_phone` (alert destination).
   ownerPhoneVerifiedAt   DateTime? @map("owner_phone_verified_at") @db.Timestamptz(6)
 
+  /// Call handling mode: 'ai' (default) | 'paused' (AI does not answer: polite message + voicemail) | 'forward' (ring `forward_number`). CHECK in the migration.
+  callMode                String    @default("ai") @map("call_mode")
+  /// Where 'forward' sends calls (as typed) and its E.164 form. Only ever dialled once `forward_number_verified_at` is set
+  /// (or it is the verified owner phone).
+  forwardNumber           String?   @map("forward_number")
+  forwardNumberE164       String?   @map("forward_number_e164")
+  /// SMS-code verification of the forward number (cleared whenever the number changes).
+  forwardNumberVerifiedAt DateTime? @map("forward_number_verified_at") @db.Timestamptz(6)
+  /// 'forward' only during business hours; outside them the AI answers.
+  forwardDuringHours      Boolean   @default(false) @map("forward_during_hours")
+
   knowledgeBase KnowledgeBase?
   calls         Call[]
   bookings      Booking[]
@@ -155,6 +166,7 @@ model Booking {
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
   call     Call?    @relation(fields: [callId], references: [id], onDelete: SetNull)
+  smsLog   SmsLog[]
 
   @@index([businessId, scheduledAt])
   @@index([businessId, phoneE164])
@@ -192,10 +204,12 @@ model SmsLog {
   createdAt    DateTime @default(now()) @map("created_at")
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  booking  Booking?  @relation(fields: [bookingId], references: [id], onDelete: SetNull)
 
   @@index([businessId, createdAt])
   @@index([businessId, toE164])
   @@index([consentBasis, createdAt])
+  @@index([bookingId])
   @@map("sms_log")
 }
 

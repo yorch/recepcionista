@@ -76,7 +76,9 @@ export async function sendSms(to: string, body: string, opts: { anyCountry?: boo
   if (!hasTwilio()) {
     await new Promise((r) => setTimeout(r, MOCK_DELAY_MS));
     log.warn('sms.mock', { to: e164, reason: 'TWILIO_* incomplete', chars: body.length });
-    console.log(`[sms:mock] -> ${e164}\n${body}\n`);
+    // The body (it can hold a verification code or a payment link) is only echoed to the console outside production or in
+    // explicit demo mode; a production box without Twilio logs the length only.
+    if (process.env.NODE_ENV !== 'production' || process.env.DEMO_MODE === 'true') console.log(`[sms:mock] -> ${e164}\n${body}\n`);
     return { id: `mock_${Date.now()}`, status: 'mock' };
   }
   try {

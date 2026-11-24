@@ -24,6 +24,7 @@ import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
 import { alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
 import { isOwnerNumber } from '@/lib/messaging/owner';
 import { countryForBusiness } from '@/lib/db';
+import { TOOL_NAMES, type ToolName } from '@/lib/kb';
 
 export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
@@ -346,6 +347,18 @@ export interface CreateBookingArgs extends BaseArgs {
 
 const MAX_PRICE_CENTS = 10_000_000; // $100k sanity cap
 
+/** Ask only for what is actually missing; a phone number only when caller id is withheld (otherwise it is already known). */
+export function missingBookingFields(lang: ToolLanguage, m: { name: boolean; phone: boolean; service: boolean; scheduled_at: boolean }): string {
+  const en: string[] = [];
+  const es: string[] = [];
+  if (m.name) { en.push('your name'); es.push('su nombre'); }
+  if (m.phone) { en.push('a number to reach you on (I cannot see the number you are calling from)'); es.push('un número para llamarle (no veo el número desde el que llama)'); }
+  if (m.service) { en.push('which service you need'); es.push('qué servicio necesita'); }
+  if (m.scheduled_at) { en.push('which day and time works'); es.push('qué día y hora le queda bien'); }
+  const join = (xs: string[], and: string) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} ${and} ${xs[xs.length - 1]}`);
+  return say(lang, `I just need ${join(en, 'and')}.`, `Solo necesito ${join(es, 'y')}.`);
+}
+
 export async function createBooking(args: CreateBookingArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
@@ -366,9 +379,7 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     if (!name || !phone || !service || !scheduledAt) {
       return {
         ok: false,
-        message: say(lang,
-          'I just need your name, a callback number, and which service you need.',
-          'Solo necesito su nombre, un número para llamarle y qué servicio necesita.'),
+        message: missingBookingFields(lang, { name: !name, phone: !phone, service: !service, scheduled_at: !scheduledAt }),
         data: { missing: { name: !name, phone: !phone, service: !service, scheduled_at: !scheduledAt } },
       };
     }
@@ -881,6 +892,8 @@ export async function getPricing(args: GetPricingArgs): Promise<ToolResult> {
 
 export interface HandoffArgs extends BaseArgs {
   reason?: string;
+  /** A DIFFERENT number the caller asked to be called back on. Relayed by the model, so it is passed to the owner as "caller said", never used for texting. */
+  callback_number?: string;
   /** True when the caller objected to the AI / recording: mark consent declined and take a message. */
   consent_declined?: boolean | string;
 }
@@ -903,10 +916,18 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
       ...(declined ? { consent_status: 'declined' as const } : {}),
     });
 
+    // The number the call came from is already known (platform caller id): confirm it instead of asking for it again.
+    // Only a number the caller VOLUNTEERED as an alternative is relayed (labelled as such), and only when it is a real number.
+    const verified = verifiedCaller(updated ?? call, args);
+    const alt = cleanPhone(args.callback_number);
+    const altDiffers = Boolean(alt && alt !== verified);
+    const callbackLast4 = altDiffers ? alt!.slice(-4) : verified ? verified.slice(-4) : null;
+
     const alertBody = [
       `HANDOFF — ${business.name}`,
       call.caller_name ? `Caller: ${call.caller_name}` : '',
-      call.caller_phone ? `Phone: ${call.caller_phone}` : '',
+      call.caller_phone ? `Phone: ${call.caller_phone}` : verified ? `Phone: ${verified}` : '',
+      altDiffers ? `Asked to be called back on: ${alt} (said by the caller)` : '',
       `Reason: ${reason}`,
       'Please call them back.',
     ].filter(Boolean).join('\n');
@@ -919,10 +940,15 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
         message: declined ? say(lang,
           "Understood — we won't keep a transcript of this call. I've sent the owner a message and they will call you back.",
           'Entendido — no guardaremos una transcripción de esta llamada. Le envié un mensaje al dueño y le devolverá la llamada.')
-        : say(lang,
-          "I've sent the owner an urgent message and they will call you back shortly. Is this the best number to reach you?",
-          'Le envié un mensaje urgente al dueño y le devolverá la llamada pronto. ¿Es este el mejor número para localizarle?'),
-        data: { call: updated, owner_sms: alert.sms, owner_notified: true, transferred: false },
+        : callbackLast4
+          ? say(lang,
+            `I've sent the owner an urgent message and they will call you back shortly on the number ${altDiffers ? 'you gave me' : "you're calling from"}, ending in ${callbackLast4}. If a different number is better, tell me and I'll pass it on.`,
+            `Le envié un mensaje urgente al dueño y le devolverá la llamada pronto al número ${altDiffers ? 'que me dio' : 'desde el que llama'}, que termina en ${callbackLast4}. Si le queda mejor otro número, dígamelo y se lo paso.`)
+          // Caller id withheld: only then is asking for a number necessary.
+          : say(lang,
+            "I've sent the owner an urgent message and they will call you back shortly. I can't see your number: what is the best number to reach you?",
+            'Le envié un mensaje urgente al dueño y le devolverá la llamada pronto. No veo su número: ¿cuál es el mejor número para localizarle?'),
+        data: { call: updated, owner_sms: alert.sms, owner_notified: true, transferred: false, callback_number_known: Boolean(callbackLast4) },
       };
     }
 
@@ -945,17 +971,7 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
 
 // --------------------------------------------------------------- dispatcher
 
-export const TOOL_NAMES = [
-  'check_availability',
-  'create_booking',
-  'send_sms',
-  'create_payment_link',
-  'flag_emergency',
-  'get_pricing',
-  'handoff_to_human',
-] as const;
-
-export type ToolName = typeof TOOL_NAMES[number];
+export { TOOL_NAMES, type ToolName };
 
 /** ElevenLabs may send "Check Availability", "checkAvailability", etc. */
 function canonicalTool(raw: string): ToolName | null {

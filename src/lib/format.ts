@@ -24,6 +24,15 @@ export function whenET(iso: string, tz: string = TZ): string {
   return `${dayET(iso, tz)} at ${timeET(iso, tz)}`;
 }
 
+/** "Today", "Tomorrow" or "Fri, Nov 27" for an instant, in the business zone (never splits another label on " at "). */
+export function dayLabelET(iso: string, tz: string = TZ, now: Date = new Date()): string {
+  const key = localDateKey(iso, tz);
+  const todayKey = localDateKey(now, tz);
+  if (key === todayKey) return 'Today';
+  if (key === addDaysToDateKey(todayKey, 1)) return 'Tomorrow';
+  return dayET(iso, tz);
+}
+
 export function seconds(n?: number | null): string {
   if (n == null) return '—';
   const m = Math.floor(n / 60);
@@ -45,8 +54,8 @@ export function firstName(name?: string | null): string {
   return name?.trim().split(/\s+/)[0] || 'there';
 }
 
-export function relative(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
+export function relative(iso: string, nowMs: number = Date.now()): string {
+  const diff = nowMs - new Date(iso).getTime();
   const min = Math.round(diff / 60000);
   if (min < 1) return diff < -60000 ? 'soon' : 'just now';
   if (min < 60) return `${min}m ago`;

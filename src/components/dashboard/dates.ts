@@ -20,3 +20,16 @@ export function greetingFor(at: Date, tz: string): string {
   const { hour } = partsInTz(at, tz);
   return hour < 12 ? 'Buenos días' : hour < 18 ? 'Buenas tardes' : 'Buenas noches';
 }
+
+/**
+ * "Nov 24, 2026, 3:05 PM UTC" for an instant: a FIXED locale and zone, so the server render and the browser agree
+ * (`toLocaleString()` uses each side's own locale/zone and caused hydration mismatches).
+ */
+export function utcStamp(iso: string): string {
+  return `${new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }).format(new Date(iso))} UTC`;
+}
+
+/** "Nov 24, 2026" in UTC (hydration-safe, see utcStamp). */
+export function utcDate(iso: string): string {
+  return new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(iso));
+}

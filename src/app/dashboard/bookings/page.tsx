@@ -1,90 +1,63 @@
-import { listBookings } from '@/lib/db';
+import type { Metadata } from 'next';
+import Link from 'next/link';
 import { getDashboardContext } from '@/lib/dashboard-context';
-import { Badge } from '@/components/ui/badge';
-import { EmptyState } from '@/components/ui/empty';
+import { hasRole } from '@/lib/session';
+import { countryForBusiness, listAllBookingsInRange, listBookingsPage } from '@/lib/db';
 import { PageHeader } from '@/components/ui/page-header';
-import { dateKeyLabel } from '@/components/dashboard/dates';
-import { money, timeET } from '@/lib/format';
-import { localDateKey, tzOf } from '@/lib/time';
+import { Calendar } from '@/components/calendar/calendar';
+import { Agenda } from '@/components/calendar/agenda';
+import { cn } from '@/components/ui/cn';
+import { defaultWeekStart, isCalendarView, parseWeekStart, rangeFor } from '@/lib/calendar';
+import { isDateKey, localDateKey, tzOf } from '@/lib/time';
+import type { BookingsRangeResult } from '@/app/api/bookings/route';
+
+export const metadata: Metadata = { title: 'Calendar' };
 
 export const dynamic = 'force-dynamic';
 
-export default async function BookingsPage() {
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+export default async function BookingsPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const ctx = await getDashboardContext();
   const biz = ctx.business;
   const tz = tzOf(biz);
-  const bookings = await listBookings(biz.id);
+  const q = await searchParams;
+  const tab = one(q.tab) === 'agenda' ? 'agenda' : 'calendar';
+  const canManage = hasRole(ctx.principal, 'owner');
+  const todayKey = localDateKey(new Date(), tz);
 
-  // Group by the BUSINESS's calendar day (a UTC slice puts evening jobs on tomorrow).
-  const groups = new Map<string, typeof bookings>();
-  for (const b of bookings) {
-    const key = localDateKey(b.scheduled_at, tz);
-    const arr = groups.get(key) ?? [];
-    arr.push(b);
-    groups.set(key, arr);
+  const tabClass = (active: boolean) => cn('inline-flex min-h-11 items-center rounded-xl px-4 text-[13px] font-medium', active ? 'bg-raised text-white' : 'text-mute hover:bg-hover hover:text-soft');
+
+  let body: React.ReactNode;
+  if (tab === 'agenda') {
+    const initial = await listBookingsPage(biz.id, { direction: 'upcoming', limit: 25 });
+    body = <Agenda businessId={biz.id} tz={tz} initial={initial} />;
+  } else {
+    const view = isCalendarView(one(q.view)) ? (one(q.view) as 'week' | 'day' | 'month') : 'week';
+    const rawDate = one(q.date);
+    const date = rawDate && isDateKey(rawDate) ? rawDate : todayKey;
+    const ws = parseWeekStart(one(q.ws), defaultWeekStart({ country: countryForBusiness(biz), timezone: tz }));
+    const range = rangeFor(view, date, tz, ws);
+    const { items, truncated } = await listAllBookingsInRange(biz.id, range.from, range.to);
+    const initial: BookingsRangeResult = {
+      view, date, days: range.days, from: range.from.toISOString(), to: range.to.toISOString(), timezone: tz, week_start: ws, items, truncated,
+    };
+    body = <Calendar businessId={biz.id} canManage={canManage} hours={biz.hours} todayKey={todayKey} initial={initial} />;
   }
-  const keys = [...groups.keys()].sort();
-  const today = localDateKey(new Date(), tz);
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
+    <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
       <PageHeader
         title="Calendar"
-        subtitle={`Jobs she booked while you were on a roof. Times shown in ${tz.replace('_', ' ')}.`}
-        right={<span className="text-xs text-dim">{bookings.length} jobs</span>}
+        subtitle="Jobs she booked while you were on a roof."
+        right={
+          <nav aria-label="Calendar or agenda" className="inline-flex gap-1 rounded-2xl border border-line p-1">
+            <Link href="/dashboard/bookings" aria-current={tab === 'calendar' ? 'page' : undefined} className={tabClass(tab === 'calendar')}>Calendar</Link>
+            <Link href="/dashboard/bookings?tab=agenda" aria-current={tab === 'agenda' ? 'page' : undefined} className={tabClass(tab === 'agenda')}>Agenda</Link>
+          </nav>
+        }
       />
-
-      <div className="mt-6 flex flex-col gap-5">
-        {keys.map((key) => {
-          const dayBookings = groups.get(key)!;
-          const isToday = key === today;
-          return (
-            <section key={key} aria-labelledby={`day-${key}`}>
-              <div className="mb-2 flex items-center gap-2">
-                <h2 id={`day-${key}`} className="text-xs font-medium uppercase tracking-wider text-dim">
-                  {dateKeyLabel(key)}
-                </h2>
-                {isToday ? <Badge tone="routine">today</Badge> : null}
-              </div>
-              <div className="overflow-hidden rounded-2xl border border-line bg-panel/80">
-                <ul className="divide-y divide-[#171f2a]">
-                  {dayBookings.map((b) => (
-                    <li key={b.id} className="flex items-center gap-3 px-4 py-3.5 sm:gap-4 sm:px-5">
-                      <div className="w-[64px] shrink-0 font-mono text-[13px] text-white sm:w-[70px]">{timeET(b.scheduled_at, tz)}</div>
-                      <div aria-hidden="true" className="w-px self-stretch bg-line" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="truncate text-[13px] text-white">{b.customer_name}</p>
-                          <Badge tone={b.status === 'completed' ? 'routine' : b.status === 'cancelled' ? 'emergency' : 'neutral'}>
-                            {b.status}
-                          </Badge>
-                        </div>
-                        <p className="truncate text-xs text-dim">{b.service}{b.address ? ` · ${b.address}` : ''}</p>
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <p className="tabular-nums text-[13px] text-soft">{money(b.price_estimate)}</p>
-                        {b.deposit_amount ? (
-                          <p className={`text-xs ${b.deposit_paid ? 'text-mint-text' : 'text-warn'}`}>
-                            {b.deposit_paid ? 'deposit paid' : `deposit ${money(b.deposit_amount)}`}
-                          </p>
-                        ) : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </section>
-          );
-        })}
-        {keys.length === 0 ? (
-          <EmptyState
-            title="Nothing booked yet"
-            body="When a caller books a job, it lands here with the time, address, price and deposit status. Her booking hours come from your business hours."
-            cta={{ href: '/dashboard/knowledge', label: 'Check your hours and services' }}
-            secondary={{ href: '/dashboard/calls', label: 'See calls' }}
-          />
-        ) : null}
-      </div>
+      <div className="mt-6">{body}</div>
     </main>
   );
 }

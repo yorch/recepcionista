@@ -1,4 +1,5 @@
 'use client';
+import { utcStamp } from '@/components/dashboard/dates';
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -9,7 +10,7 @@ export interface SessionView {
   id: string; created_at: string; last_used_at: string; expires_at: string; ip: string | null; user_agent: string | null; current: boolean;
 }
 
-const when = (iso: string) => new Date(iso).toLocaleString();
+const when = (iso: string) => utcStamp(iso);
 
 function LabeledInput({ label, hint, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: string }) {
   return (

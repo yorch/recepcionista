@@ -8,7 +8,7 @@ import { toE164 } from '@/lib/phone';
 import { tzOf } from '@/lib/time';
 import { decide, smsSegments, withStopFooter } from '@/lib/messaging/policy';
 import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
-import { ownerVerificationText } from '@/lib/messaging/owner-verify';
+import { forwardVerificationText, ownerVerificationText, type VerifyPurpose } from '@/lib/messaging/owner-verify';
 import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
@@ -150,7 +150,9 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
  * verifying) but counted; the destination country allow-list DOES apply (the number is not yet proven).
  * The recipient must be a number that has not opted out of this business's texts.
  */
-export async function sendOwnerVerificationCode(businessId: string, phoneE164: string, code: string): Promise<SendAndLogOutput> {
+export async function sendOwnerVerificationCode(
+  businessId: string, phoneE164: string, code: string, purpose: VerifyPurpose = 'owner-phone',
+): Promise<SendAndLogOutput> {
   const business = await getBusiness(businessId);
   const country = countryForBusiness(business);
   if (await isOptedOut(businessId, phoneE164, country)) {
@@ -160,13 +162,13 @@ export async function sendOwnerVerificationCode(businessId: string, phoneE164: s
     }, { country });
     return { sms, result: { id: '', status: 'failed', error: 'blocked_opt_out' }, blocked: 'blocked_opt_out' };
   }
-  const verificationText = ownerVerificationText(code); // fixed template: nothing tenant-controlled
+  const verificationText = purpose === 'forward-number' ? forwardVerificationText(code) : ownerVerificationText(code); // fixed template: nothing tenant-controlled
   const result = await sendSms(phoneE164, verificationText);
   if (result.status !== 'failed') await meterSms(businessId, smsSegments(verificationText));
   const sms = await logSms({
     business_id: businessId, to_phone: phoneE164,
     // The code itself is not retained in the log.
-    body: '[owner verification code]', kind: 'other', booking_id: null,
+    body: purpose === 'forward-number' ? '[forward number verification code]' : '[owner verification code]', kind: 'other', booking_id: null,
     provider_id: result.id || null, status: mapStatus(result.status), consent_basis: 'owner_verification',
   }, { country });
   return { sms, result };

@@ -114,7 +114,7 @@ export async function resolveAgentIdFor(business: Business): Promise<string> {
   if (!envAgent) return '';
   const owners = await listBusinessesByAgentId(envAgent);
   if (owners.some((b) => b.id !== business.id)) return '';
-  if ((await listBusinesses()).length !== 1) {
+  if ((await listBusinesses({ limit: 2 })).length !== 1) {
     log.warn('agent.env_not_shared', { business: business.id, reason: 'ELEVENLABS_AGENT_ID is only used when exactly one business exists' });
     return '';
   }
@@ -157,13 +157,13 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     description: 'Book the appointment once the caller has agreed to a time. Confirm every detail back before calling.',
     properties: {
       customer_name: { type: 'string', description: "Caller's full name." },
-      customer_phone: { type: 'string', description: 'Callback number. The server texts the number the caller phoned from; this is stored as the callback number.' },
+      customer_phone: { type: 'string', description: 'OPTIONAL. Leave it out: the server uses the number the caller is calling from (caller id) as the contact and for texts. Only pass it when the caller says to use a DIFFERENT callback number. Never ask the caller to read their number out.' },
       service: { type: 'string', description: 'Service being booked (same value you passed to check_availability).' },
       scheduled_at: { type: 'string', description: "Start time as LOCAL wall-clock time in the business's time zone, with NO UTC offset, e.g. 2026-11-15T15:00:00. Never convert to UTC." },
       address: { type: 'string', description: 'Service address.' },
       price_estimate: { type: 'number', description: 'Starting price quoted, in whole dollars (e.g. 189 for $189). The server converts to cents.' },
     },
-    required: ['customer_name', 'customer_phone', 'service', 'scheduled_at'],
+    required: ['customer_name', 'service', 'scheduled_at'],
   },
   send_sms: {
     description: "Send a text message to the caller (default) or the owner. Other numbers are ignored: the server only texts the current caller or the business owner.",
@@ -203,6 +203,7 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     description: 'Transfer the caller to the owner. Use when the caller insists, is upset, or asks about something outside the knowledge base.',
     properties: {
       reason: { type: 'string', description: 'Why the caller needs the owner.' },
+      callback_number: { type: 'string', description: 'ONLY if the caller volunteers a DIFFERENT number to be called back on. Never ask for a number: the one they are calling from is already known.' },
       consent_declined: { type: 'boolean', description: 'Set true ONLY when the caller objected to the call being AI-handled, recorded or transcribed, or told you to stop. Marks the call so no transcript is kept; take a message for a human callback.' },
     },
     required: ['reason'],
@@ -598,8 +599,8 @@ export async function getSignedUrl(agentId: string): Promise<SignedUrlResult> {
 
 /** Bind the single shared ElevenLabs phone number to an agent. */
 export async function bindPhoneNumber(agentId: string): Promise<void> {
-  // Must be the phone_number_id UUID from GET /convai/phone-numbers,
-  // NOT the phone number digits. Example: "abc123def..." not "+12028972767".
+  // Must be the phone_number_id (looks like "phnum_...") from GET /convai/phone-numbers,
+  // NOT the phone number digits. Example: "phnum_abc123..." not "+12028972767".
   const phoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
   if (!phoneNumberId || !hasElevenLabs()) {
     log.warn('phone.bind_skipped', {

@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Suspense } from 'react';
 import { Sidebar } from '@/components/dashboard/shell';
@@ -5,6 +6,10 @@ import { BillingBanner } from '@/components/dashboard/billing-banner';
 import { OnboardingReturn } from '@/components/dashboard/onboarding-return';
 import { getDashboardContext } from '@/lib/dashboard-context';
 import { hasRole } from '@/lib/session';
+import { resolveCallRoute } from '@/lib/voice/call-mode';
+
+/** Signed-in pages are never indexed. */
+export const metadata: Metadata = { robots: { index: false, follow: false } };
 
 export const dynamic = 'force-dynamic';
 
@@ -14,6 +19,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const { business: biz } = ctx;
   const isOwner = hasRole(ctx.principal, 'owner');
   const live = biz.status === 'live' && Boolean(biz.phone);
+  const route = resolveCallRoute(biz).action;
+  const statusText = route === 'paused' ? 'Paused' : route === 'forward' ? 'Forwarding calls' : 'Answering calls';
 
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">
@@ -21,6 +28,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         businessName={biz.name}
         phone={biz.phone}
         live={live}
+        statusText={statusText}
         who={ctx.who}
         role={ctx.role}
         isAdmin={ctx.role === 'admin'}

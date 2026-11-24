@@ -5,8 +5,8 @@
  */
 import { sendGratitude } from '@/lib/messaging/actions';
 import { logger } from '@/lib/log';
-import { countryForBusiness, getBusiness, listBookings, listSms } from '@/lib/db';
-import { defaultPhoneCountry, toE164 } from '@/lib/phone';
+import { countryForBusiness, getBusiness, listBookingsStartedBetween, listGratitudeSmsTo } from '@/lib/db';
+import { toE164 } from '@/lib/phone';
 import type { Booking } from '@/lib/types';
 
 const log = logger('gratitude');
@@ -21,21 +21,25 @@ export function classifyReply(rating: number | string): 'review' | 'owner' {
 /** Identity of a number for "already texted" bookkeeping: E.164 when valid, else the digits (never a last-10 collision). */
 const idOf = (raw: string, country: string) => toE164(raw, country) ?? `raw:${raw.replace(/\D/g, '')}`;
 
-/** Statuses that do not count as "already texted": the text never went out and may be retried by a later sweep. */
-const RETRYABLE = new Set(['blocked_quiet_hours', 'blocked_cap']);
-
 export async function findGratitudeCandidates(businessId?: string): Promise<Booking[]> {
   const now = Date.now();
-  const country = businessId ? countryForBusiness(await getBusiness(businessId)) : undefined;
-  const gratitudeSms = (await listSms(businessId)).filter((s) => s.kind === 'gratitude' && !RETRYABLE.has(s.status));
-  const alreadyTexted = new Set(gratitudeSms.map((s) => `${s.business_id}|${idOf(s.to_phone, country ?? defaultPhoneCountry())}`));
-
-  return (await listBookings(businessId)).filter((b) => {
-    if (b.status !== 'completed') return false;
-    const age = now - new Date(b.scheduled_at).getTime();
-    if (age < MIN_AGE_MS || age > MAX_AGE_MS) return false;
-    return !alreadyTexted.has(`${b.business_id}|${idOf(b.customer_phone, country ?? defaultPhoneCountry())}`);
+  // Only completed jobs that started 20-48 hours ago can qualify: one ranged query, never the whole history.
+  const window = await listBookingsStartedBetween({
+    businessId, status: 'completed', from: new Date(now - MAX_AGE_MS), to: new Date(now - MIN_AGE_MS),
   });
+  if (window.length === 0) return [];
+
+  // "Already texted" bookkeeping per (business, number): only the numbers of these few candidates are looked up.
+  const byBusiness = new Map<string, Booking[]>();
+  for (const b of window) byBusiness.set(b.business_id, [...(byBusiness.get(b.business_id) ?? []), b]);
+  const out: Booking[] = [];
+  for (const [bid, bookings] of byBusiness) {
+    const country = countryForBusiness(await getBusiness(bid));
+    const sent = await listGratitudeSmsTo(bid, bookings.map((b) => b.customer_phone), country);
+    const alreadyTexted = new Set(sent.map((s) => idOf(s.to_phone, country)));
+    for (const b of bookings) if (!alreadyTexted.has(idOf(b.customer_phone, country))) out.push(b);
+  }
+  return out;
 }
 
 export interface SweepResult {

@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import { getKnowledgeBase, listAuditEvents } from '@/lib/db';
 import { hasRole } from '@/lib/session';
 import { getDashboardContext } from '@/lib/dashboard-context';
@@ -9,6 +10,8 @@ import { PageHeader } from '@/components/ui/page-header';
 import { KnowledgeEditor } from '@/components/dashboard/knowledge-editor';
 import { money } from '@/lib/format';
 import { dollarsToCents } from '@/lib/money';
+
+export const metadata: Metadata = { title: 'Brain' };
 
 export const dynamic = 'force-dynamic';
 

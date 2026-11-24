@@ -90,13 +90,14 @@ function fallbackScript(
   business: Business,
   data: Awaited<ReturnType<typeof gather>>,
 ): string {
-  const owner = business.owner_name || 'Jorge';
+  const owner = business.owner_name?.trim() || '';
+  const hola = owner ? `Hola ${owner}.` : 'Hola.';
   const tz = tzOf(business);
   const { calls, bookings, flagged, deposits } = data;
-  const parts: string[] = [`Hola ${owner}.`];
+  const parts: string[] = [hola];
 
   if (calls.length === 0 && bookings.length === 0) {
-    return `Hola ${owner}. Hoy estuvo tranquilo de verdad — cero llamadas y el calendario vacío. Aproveché para dejar todo listo para mañana, así que arrancamos temprano y sin pendientes. Si quieres, mañana te mando el resumen otra vez a la misma hora. Descansa. Eso es todo.`;
+    return `${hola} Hoy estuvo tranquilo de verdad — cero llamadas y el calendario vacío. Aproveché para dejar todo listo para mañana, así que arrancamos temprano y sin pendientes. Si quieres, mañana te mando el resumen otra vez a la misma hora. Descansa. Eso es todo.`;
   }
 
   if (calls.length === 0) {
@@ -172,7 +173,7 @@ async function narrate(
   const tz = tzOf(business);
 
   const facts = {
-    owner: business.owner_name ?? 'Jorge',
+    owner: business.owner_name?.trim() || null,
     business: business.name,
     date,
     calls: data.calls.map((c: Call) => ({
@@ -200,10 +201,10 @@ async function narrate(
       {
         role: 'system',
         content:
-          'You write a 45-second voice note from an AI receptionist to the owner of a Miami HVAC company. ' +
-          'Write in natural SPANGLISH — Spanish sentence structure with English trade words (AC, compressor, booked, deposit, tech). ' +
+          `You write a 45-second voice note from an AI receptionist to the owner of a small local service business called "${business.name}". ` +
+          'Write in natural SPANGLISH — Spanish sentence structure with the English trade words this business would use (booked, deposit, tech, the service names). ' +
           'Warm, spoken, first person. 110-140 words. No bullet points, no headers, no markdown. ' +
-          'Open with "Hola {owner}." Name the real bookings with real times. Say the money collected. ' +
+          'Open with "Hola" and the owner\'s name from the data (just "Hola." when the owner is null). Name the real bookings with real times. Say the money collected. ' +
           'End with the ONE thing needing attention, or say nothing is pending. Close with "Eso es todo."',
       },
       {

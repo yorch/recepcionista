@@ -1,8 +1,11 @@
-import { getKnowledgeBase, listCalls } from '@/lib/db';
+import type { Metadata } from 'next';
+import { countCalls, getKnowledgeBase } from '@/lib/db';
 import { getDashboardContext, requireRolePage } from '@/lib/dashboard-context';
 import { Card, CardHead } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { DemoTools } from '@/components/dashboard/demo-tools';
+
+export const metadata: Metadata = { title: 'Demo console' };
 
 export const dynamic = 'force-dynamic';
 
@@ -11,7 +14,7 @@ export default async function DemoPage() {
   requireRolePage(ctx, 'admin'); // demo console wipes data and sends SMS: admin only
   const biz = ctx.business;
   const kb = await getKnowledgeBase(biz.id);
-  const calls = await listCalls(biz.id);
+  const callCount = await countCalls(biz.id);
 
   return (
     <main className="mx-auto w-full max-w-4xl px-6 py-8">
@@ -46,7 +49,7 @@ export default async function DemoPage() {
           <Card className="p-5">
             <p className="text-xs uppercase tracking-wider text-dim">Loaded state</p>
             <ul className="mt-2 space-y-1.5 text-[12px] text-body">
-              <li className="flex justify-between"><span>Calls</span><span className="tabular-nums">{calls.length}</span></li>
+              <li className="flex justify-between"><span>Calls</span><span className="tabular-nums">{callCount}</span></li>
               <li className="flex justify-between"><span>Services in brain</span><span className="tabular-nums">{kb?.services.length ?? 0}</span></li>
               <li className="flex justify-between"><span>FAQs</span><span className="tabular-nums">{kb?.faqs.length ?? 0}</span></li>
             </ul>

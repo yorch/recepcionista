@@ -26,7 +26,7 @@ export async function GET(req: Request) {
     if (requestedId) requireBusinessAccess(auth.principal, requestedId);
     const business = requestedId
       ? await getBusiness(requestedId)
-      : (await listBusinesses())[0] ?? null;
+      : (await listBusinesses({ limit: 1 }))[0] ?? null;
 
     if (!business) {
       return fail(requestedId ? `business ${requestedId} not found` : 'no business configured', 404);

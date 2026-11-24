@@ -109,3 +109,10 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 `scripts/verify-deploy.ts` reads `APP_URL`, `PUBLIC_BASE_URL`, `TWILIO_AUTH_TOKEN`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_BILLING_WEBHOOK_SECRET`,
 `ELEVENLABS_WEBHOOK_SECRET`, `ELEVENLABS_TOOL_SECRET` (each check is skipped when its secret is not given; `--strict` turns skips into failures).
 `scripts/seed.ts`, `db-reset.ts`, `grandfather-existing.ts` read `DATABASE_URL` and refuse non-disposable database names without `--force-i-know`.
+
+## Call handling (pause / forward)
+
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `FORWARD_ALLOWED_COUNTRY_CODES` | no | `SMS_ALLOWED_COUNTRY_CODES` (`1`) | calling codes a forward number may belong to (premium and non-geographic ranges are refused regardless) |
+| `LOG_PII` | no | unset | `true` stops masking phone numbers and emails in logs (credentials are always masked); debugging only |

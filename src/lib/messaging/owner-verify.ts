@@ -16,20 +16,29 @@ import { appSecretKey } from '@/lib/totp';
 export const OWNER_PHONE_CODE_TTL_MS = 10 * 60 * 1000;
 export const OWNER_PHONE_CODE_DIGITS = 6;
 
-const PURPOSE = 'recepcionista/owner-phone-verification/v1';
+/**
+ * What a challenge proves. Each purpose has its OWN derived key, so a code/challenge issued for one purpose can never
+ * confirm another (a forward-number code cannot verify the owner alert phone, and vice versa).
+ */
+export type VerifyPurpose = 'owner-phone' | 'forward-number';
 
-function key(): Buffer {
-  return crypto.createHmac('sha256', appSecretKey()).update(PURPOSE).digest();
+const PURPOSES: Record<VerifyPurpose, string> = {
+  'owner-phone': 'recepcionista/owner-phone-verification/v1',
+  'forward-number': 'recepcionista/forward-number-verification/v1',
+};
+
+function key(purpose: VerifyPurpose): Buffer {
+  return crypto.createHmac('sha256', appSecretKey()).update(PURPOSES[purpose]).digest();
 }
 
-const hmac = (data: string): Buffer => crypto.createHmac('sha256', key()).update(data).digest();
+const hmac = (data: string, purpose: VerifyPurpose): Buffer => crypto.createHmac('sha256', key(purpose)).update(data).digest();
 
 function safeEqual(a: Buffer, b: Buffer): boolean {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function codeHash(businessId: string, phoneE164: string, exp: number, nonce: string, code: string): Buffer {
-  return hmac(`code|${businessId}|${phoneE164}|${exp}|${nonce}|${code}`);
+function codeHash(businessId: string, phoneE164: string, exp: number, nonce: string, code: string, purpose: VerifyPurpose): Buffer {
+  return hmac(`code|${businessId}|${phoneE164}|${exp}|${nonce}|${code}`, purpose);
 }
 
 export interface OwnerPhoneChallenge {
@@ -39,14 +48,16 @@ export interface OwnerPhoneChallenge {
 }
 
 /** A fresh 6-digit code and the signed challenge that binds it to (business, phone, expiry). */
-export function createOwnerPhoneChallenge(businessId: string, phoneE164: string, now: number = Date.now()): OwnerPhoneChallenge {
+export function createOwnerPhoneChallenge(
+  businessId: string, phoneE164: string, now: number = Date.now(), purpose: VerifyPurpose = 'owner-phone',
+): OwnerPhoneChallenge {
   const code = String(crypto.randomInt(0, 10 ** OWNER_PHONE_CODE_DIGITS)).padStart(OWNER_PHONE_CODE_DIGITS, '0');
   const exp = now + OWNER_PHONE_CODE_TTL_MS;
   const nonce = crypto.randomBytes(9).toString('base64url');
   const payload = Buffer.from(JSON.stringify({
-    b: businessId, p: phoneE164, exp, n: nonce, h: codeHash(businessId, phoneE164, exp, nonce, code).toString('base64url'),
+    b: businessId, p: phoneE164, exp, n: nonce, h: codeHash(businessId, phoneE164, exp, nonce, code, purpose).toString('base64url'),
   })).toString('base64url');
-  return { code, challenge: `${payload}.${hmac(payload).toString('base64url')}`, expires_at: new Date(exp).toISOString() };
+  return { code, challenge: `${payload}.${hmac(payload, purpose).toString('base64url')}`, expires_at: new Date(exp).toISOString() };
 }
 
 export type ChallengeVerdict = { ok: true } | { ok: false; reason: 'malformed' | 'bad_signature' | 'expired' | 'mismatch' | 'wrong_code' };
@@ -61,13 +72,13 @@ export interface ParsedChallenge { b: string; p: string; exp: number; n: string;
  * ignored by the decoder) and a signature that equals the recomputed HMAC as a string. Returns null otherwise.
  * The code is NOT checked here.
  */
-export function parseOwnerPhoneChallenge(challenge: unknown): ParsedChallenge | null {
+export function parseOwnerPhoneChallenge(challenge: unknown, purpose: VerifyPurpose = 'owner-phone'): ParsedChallenge | null {
   if (typeof challenge !== 'string' || challenge.length > 2000) return null;
   const parts = challenge.split('.');
   if (parts.length !== 2) return null;
   const [payload, sig] = parts;
   if (!B64URL.test(payload) || !B64URL.test(sig)) return null;
-  const expected = hmac(payload).toString('base64url');
+  const expected = hmac(payload, purpose).toString('base64url');
   if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
   let p: { b?: unknown; p?: unknown; exp?: unknown; n?: unknown; h?: unknown };
   try {
@@ -82,15 +93,16 @@ export function parseOwnerPhoneChallenge(challenge: unknown): ParsedChallenge | 
 /** Verify signature, expiry, binding to (business, phone) and the code. Constant-time comparisons throughout. */
 export function verifyOwnerPhoneChallenge(
   challenge: unknown, businessId: string, phoneE164: string, code: unknown, now: number = Date.now(),
+  purpose: VerifyPurpose = 'owner-phone',
 ): ChallengeVerdict {
   if (typeof challenge !== 'string' || challenge.length > 2000) return { ok: false, reason: 'malformed' };
-  const p = parseOwnerPhoneChallenge(challenge);
+  const p = parseOwnerPhoneChallenge(challenge, purpose);
   if (!p) return { ok: false, reason: challenge.split('.').length === 2 ? 'bad_signature' : 'malformed' };
   if (now > p.exp) return { ok: false, reason: 'expired' };
   if (p.b !== businessId || p.p !== phoneE164) return { ok: false, reason: 'mismatch' };
   const given = typeof code === 'string' ? code.trim() : '';
   if (!/^\d{6}$/.test(given)) return { ok: false, reason: 'wrong_code' };
-  return safeEqual(codeHash(p.b, p.p, p.exp, p.n, given), Buffer.from(p.h, 'base64url')) ? { ok: true } : { ok: false, reason: 'wrong_code' };
+  return safeEqual(codeHash(p.b, p.p, p.exp, p.n, given, purpose), Buffer.from(p.h, 'base64url')) ? { ok: true } : { ok: false, reason: 'wrong_code' };
 }
 
 /**
@@ -98,11 +110,15 @@ export function verifyOwnerPhoneChallenge(
  * the string the client sent): every spelling of one challenge maps to the same id. Null when the challenge is not
  * authentic (the caller then counts the attempt against the business/phone instead).
  */
-export function challengeId(challenge: unknown): string | null {
-  const p = parseOwnerPhoneChallenge(challenge);
+export function challengeId(challenge: unknown, purpose: VerifyPurpose = 'owner-phone'): string | null {
+  const p = parseOwnerPhoneChallenge(challenge, purpose);
   return p ? crypto.createHash('sha256').update(`${p.b}|${p.p}|${p.exp}|${p.n}`).digest('hex').slice(0, 32) : null;
 }
 
 /** The only text an owner-verification SMS ever contains: a fixed template, no tenant-controlled characters. */
 export const ownerVerificationText = (code: string): string =>
   `Recepcionista verification code: ${code}. It expires in ${OWNER_PHONE_CODE_TTL_MS / 60_000} minutes. If you did not request it, ignore this message.`;
+
+/** The only text a call-forwarding verification SMS contains: a fixed template, no tenant-controlled characters. */
+export const forwardVerificationText = (code: string): string =>
+  `Recepcionista call-forwarding code: ${code}. Enter it to confirm this number may receive forwarded calls. It expires in ${OWNER_PHONE_CODE_TTL_MS / 60_000} minutes. If you did not request it, ignore this message.`;

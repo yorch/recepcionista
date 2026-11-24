@@ -1,9 +1,8 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { sendAndLog } from '@/lib/messaging';
-import { countryForBusiness, getBusiness, listBookings, listCalls } from '@/lib/db';
+import { getBusiness, isKnownContact } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
-import { toE164 } from '@/lib/phone';
 import { validateRecipient } from '@/lib/messaging/recipient';
 
 export const dynamic = 'force-dynamic';
@@ -42,15 +41,8 @@ export async function POST(req: Request) {
     const business = await getBusiness(businessId);
     if (!business) return fail('business not found', 404);
 
-    // Only known contacts: the owner, a booking customer, or a past caller.
-    const country = countryForBusiness(business);
-    const target = toE164(to, country);
-    const known = new Set<string>();
-    const add = (raw: string | null | undefined) => { const e = toE164(raw, country); if (e) known.add(e); };
-    add(business.owner_phone);
-    for (const b of await listBookings(business.id)) add(b.customer_phone);
-    for (const c of await listCalls(business.id)) add(c.caller_phone);
-    if (!target || !known.has(target)) return fail('recipient is not a known contact of this business', 403);
+    // Only known contacts: the owner, a booking customer, or a past caller (indexed E.164 lookups, not a scan of the history).
+    if (!(await isKnownContact(business.id, to))) return fail('recipient is not a known contact of this business', 403);
 
     const { sms } = await sendAndLog({ business_id: business.id, to, body: body.body, kind: 'manual' });
     return ok(sms);
