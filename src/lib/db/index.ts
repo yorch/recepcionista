@@ -1251,6 +1251,21 @@ export async function setBookingPaymentLink(bookingId: ID, linkId: string | null
   return (await prisma.booking.updateMany({ where: { id: bookingId }, data: { stripePaymentLinkId: linkId } })).count === 1;
 }
 
+/**
+ * Store a NEW Payment Link id for the booking and return the one it replaced (null when none), atomically (row lock), so the caller can
+ * deactivate the older link: only the latest id is stored, and an older live link would stay payable after a cancellation.
+ */
+export async function replaceBookingPaymentLink(bookingId: ID, linkId: string): Promise<{ stored: boolean; previous: string | null }> {
+  if (!/^plink_[A-Za-z0-9]{6,100}$/.test(linkId)) return { stored: false, previous: null };
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<{ stripe_payment_link_id: string | null }[]>`SELECT "stripe_payment_link_id" FROM "bookings" WHERE "id" = ${bookingId} FOR UPDATE`;
+    if (rows.length !== 1) return { stored: false, previous: null };
+    await tx.booking.update({ where: { id: bookingId }, data: { stripePaymentLinkId: linkId } });
+    const prev = rows[0].stripe_payment_link_id;
+    return { stored: true, previous: prev && prev !== linkId ? prev : null };
+  });
+}
+
 export async function getBookingPaymentLinkId(bookingId: ID): Promise<string | null> {
   return (await prisma.booking.findUnique({ where: { id: bookingId }, select: { stripePaymentLinkId: true } }))?.stripePaymentLinkId ?? null;
 }
@@ -1296,9 +1311,16 @@ export async function recordRefund(bookingId: ID, input: RecordRefundInput): Pro
   return { updated: res.count === 1, booking: await getBooking(bookingId) };
 }
 
-/** The refund could not be made. Never downgrades a 'refunded' booking. `reason` is logged only (it can quote provider text). */
-export async function markRefundFailed(bookingId: ID, reason?: string): Promise<{ updated: boolean; booking: Booking | null }> {
-  const res = await prisma.booking.updateMany({ where: { id: bookingId, refundStatus: { in: ['none', 'pending', 'failed'] } }, data: { refundStatus: 'failed', refundedAt: null } });
+/**
+ * The refund could not be made. Never downgrades a 'refunded' booking. `reason` is logged only (it can quote provider text).
+ * With `onlyRefundId` (an ASYNCHRONOUS failure event) the row changes only while THAT refund is the booking's current one and still
+ * 'pending': a late or replayed failure of an OLDER refund must not mark the current one failed (and bump the retry counter).
+ */
+export async function markRefundFailed(bookingId: ID, reason?: string, opts: { onlyRefundId?: string } = {}): Promise<{ updated: boolean; booking: Booking | null }> {
+  const where = opts.onlyRefundId
+    ? { id: bookingId, refundStatus: 'pending', stripeRefundId: opts.onlyRefundId }
+    : { id: bookingId, refundStatus: { in: ['none', 'pending', 'failed'] } };
+  const res = await prisma.booking.updateMany({ where, data: { refundStatus: 'failed', refundedAt: null } });
   if (res.count === 1) log.warn('refund.failed', { booking: bookingId, reason: reason ? reason.slice(0, 200) : null });
   return { updated: res.count === 1, booking: await getBooking(bookingId) };
 }

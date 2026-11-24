@@ -580,6 +580,9 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
     const b3 = await paidBooking(biz);
     const pi3 = (await db.getBooking(b3.id))!.stripe_payment_intent_id!;
     await post({ id: eventId(), type: 'refund.failed', data: { object: { id: 're_f', status: 'failed', amount: 5000, payment_intent: pi3 } } });
+    expect((await db.getBooking(b3.id))!.refund_status).toBe('none'); // a failure of a refund this booking never recorded is ignored (R15 H1)
+    await post({ id: eventId(), type: 'refund.updated', data: { object: { id: 're_f', status: 'pending', amount: 5000, payment_intent: pi3 } } });
+    await post({ id: eventId(), type: 'refund.failed', data: { object: { id: 're_f', status: 'failed', amount: 5000, payment_intent: pi3 } } });
     expect((await db.getBooking(b3.id))!.refund_status).toBe('failed');
     await post({ id: eventId(), type: 'refund.failed', data: { object: { id: 're_f2', status: 'failed', amount: 3000, payment_intent: pi } } });
     expect((await db.getBooking(b.id))!.refund_status).toBe('refunded');
@@ -843,6 +846,81 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
         expect(stripe.calls[1].key).toBe(`rc-refund-${b.id}-5000-a1`); // not the first key: Stripe would replay the cached first response for 24 h
       });
     } finally { stripe.restore(); }
+  });
+
+  test('R15 H1: a late failure event for an OLDER refund changes nothing (no failed status, no audit row, no new key, no second live refund)', async () => {
+    const biz = await newBusiness({ owner_phone: '+13055550188', owner_verified: true } as never); const owner = await login(biz.id);
+    const b = await paidBooking(biz);
+    const stripe = fakeStripe({ kind: 'ok', status: 'pending' });
+    try {
+      await withStripe(async () => {
+        expect((await refundReq(b.id, owner, { amount_cents: 2000 })).status).toBe(200);
+        const r0 = (await db.getBooking(b.id))!.stripe_refund_id!;
+        const pi = (await db.getBooking(b.id))!.stripe_payment_intent_id;
+        const failed = (id: string, type = 'refund.failed') => ({ id: eventId(), type, data: { object: { id, status: 'failed', amount: 2000, payment_intent: pi } } });
+        expect((await post(failed(r0))).status).toBe(200);
+        expect((await db.getBooking(b.id))!.refund_status).toBe('failed');
+        expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'booking.refund_failed', target: `booking:${b.id}` } })).toBe(1);
+        // the owner retries: a NEW refund r1 is pending under the second key
+        expect((await refundReq(b.id, owner, { amount_cents: 2000 })).status).toBe(200);
+        expect(stripe.calls[1].key).toBe(`rc-refund-${b.id}-2000-a1`);
+        const r1 = (await db.getBooking(b.id))!.stripe_refund_id!;
+        expect(r1).not.toBe(r0);
+        const texts = await prisma.smsLog.count({ where: { bookingId: b.id } });
+        // the sibling event (refund.updated, failed) and a redelivery of the first one for r0 arrive late
+        for (const ev of [failed(r0, 'refund.updated'), failed(r0)]) expect((await post(ev)).status).toBe(200);
+        expect(await db.getBooking(b.id)).toMatchObject({ refund_status: 'pending', stripe_refund_id: r1 });
+        expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'booking.refund_failed', target: `booking:${b.id}` } })).toBe(1);
+        expect(await prisma.smsLog.count({ where: { bookingId: b.id } })).toBe(texts);
+        // the retry while r1 is pending reuses r1's key: Stripe returns r1, not a third refund
+        expect((await refundReq(b.id, owner, { amount_cents: 2000 })).status).toBe(200);
+        expect(stripe.calls.map((c) => c.key)).toEqual([`rc-refund-${b.id}-2000`, `rc-refund-${b.id}-2000-a1`, `rc-refund-${b.id}-2000-a1`]);
+        // the CURRENT refund failing still works, and an event with no refund id is never matched
+        expect((await post({ id: eventId(), type: 'refund.failed', data: { object: { status: 'failed', amount: 2000, payment_intent: pi } } })).status).toBe(200);
+        expect((await db.getBooking(b.id))!.refund_status).toBe('pending');
+        // (this fake Stripe is not idempotent: the third call returned a new id, which is now the booking's current refund)
+        const current = (await db.getBooking(b.id))!.stripe_refund_id!;
+        expect((await post(failed(current))).status).toBe(200);
+        expect((await db.getBooking(b.id))!.refund_status).toBe('failed');
+        expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'booking.refund_failed', target: `booking:${b.id}` } })).toBe(2);
+      });
+    } finally { stripe.restore(); }
+  });
+
+  test('R15 L2: a second payment link deactivates the first; a cancelled booking gets no new link and a link that raced the cancel is deactivated', async () => {
+    const biz = await newBusiness(); const owner = await login(biz.id);
+    const b = await booking(biz.id, { status: 'confirmed' });
+    const { rememberPaymentLink } = await import('@/lib/payments/link-store');
+    const calls: string[] = [];
+    const saved = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push(`${init?.method ?? 'GET'} ${typeof input === 'string' ? input : (input as Request).url} ${String(init?.body ?? '')}`);
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    try {
+      await withStripe(async () => {
+        await rememberPaymentLink(b.id, 'plink_1AaaaaAAAA111');
+        expect(calls).toEqual([]); // the first link has nothing to replace
+        await rememberPaymentLink(b.id, 'plink_1BbbbbBBBB222'); // e.g. the dashboard after the voice tool
+        expect(calls).toEqual(['POST https://api.stripe.com/v1/payment_links/plink_1AaaaaAAAA111 active=false']);
+        expect(await db.getBookingPaymentLinkId(b.id)).toBe('plink_1BbbbbBBBB222');
+        // the booking is cancelled (the cancel already ran and deactivated what it knew); a link whose creation raced it is deactivated at once
+        await prisma.booking.update({ where: { id: b.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
+        calls.length = 0;
+        await rememberPaymentLink(b.id, 'plink_1CcccCCCC333');
+        expect(calls).toContain('POST https://api.stripe.com/v1/payment_links/plink_1CcccCCCC333 active=false');
+        expect(calls).toContain('POST https://api.stripe.com/v1/payment_links/plink_1BbbbbBBBB222 active=false');
+        // and no new link is created for a cancelled booking (dashboard route and SMS route)
+        calls.length = 0;
+        const createLink = (await import('@/app/api/payments/create-link/route')).POST;
+        const r = await createLink(req('/api/payments/create-link', owner, { business_id: biz.id, booking_id: b.id, amount_cents: 4000 }));
+        expect(r.status).toBe(409);
+        const smsLink = (await import('@/app/api/sms/payment-link/route')).POST;
+        const r2 = await smsLink(req('/api/sms/payment-link', owner, { business_id: biz.id, booking_id: b.id, amount_cents: 4000 }));
+        expect(r2.status).toBe(409);
+        expect(calls.filter((c) => c.includes('payment_links') && !c.includes('active=false'))).toEqual([]); // nothing was created at Stripe
+      });
+    } finally { globalThis.fetch = saved; }
   });
 
   test('R14 L1: cancelling deactivates the deposit link; a payment that still arrives for a cancelled booking alerts the owner and reopens the refund', async () => {

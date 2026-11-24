@@ -1,9 +1,10 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
-import { getBooking, getBusiness, setBookingPaymentLink, updateBooking } from '@/lib/db';
+import { getBooking, getBusiness, updateBooking } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { appUrl, createPaymentLink } from '@/lib/providers/stripe';
 import { checkoutRefundNote } from '@/lib/refunds';
+import { rememberPaymentLink } from '@/lib/payments/link-store';
 import type { PaymentLink } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -42,6 +43,7 @@ export async function POST(req: Request) {
     const found = body.booking_id ? await getBooking(body.booking_id) : null;
     if (body.booking_id && (!found || found.business_id !== business.id)) return fail('booking not found', 404);
 
+    if (found?.status === 'cancelled') return fail('the booking is cancelled; a deposit link cannot be created for it', 409);
     const cents = Math.round(amountCents);
     const link = await createPaymentLink(
       cents,
@@ -50,7 +52,7 @@ export async function POST(req: Request) {
       { bookingId: found?.id ?? null, businessId: business.id, refundNote: checkoutRefundNote(business, appUrl()) },
     );
     if (found && !found.deposit_paid) await updateBooking(found.id, { deposit_amount: cents });
-    if (found && !link.mock) await setBookingPaymentLink(found.id, link.id);
+    if (found && !link.mock) await rememberPaymentLink(found.id, link.id);
 
     return ok<CreateLinkResult>({ ...link, booking_id: found?.id ?? null });
   } catch (err) {

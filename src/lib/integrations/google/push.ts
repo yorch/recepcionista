@@ -19,8 +19,10 @@ import { calPath, gcal } from './api';
 import { GoogleApiError, toApiError } from './http';
 import { prisma } from '@/lib/db/client';
 import { NeedsReauthError } from './tokens';
+import { SyncBusyError, withSyncLease } from './oauth';
 
 const log = logger('gcal.push');
+const PUSH_LEASE_WAIT_MS = 8_000;
 export const BOOKING_PROP = 'rc_booking';
 
 export const eventIdFor = (bookingId: string): string => `rc${crypto.createHash('sha256').update(bookingId).digest('hex').slice(0, 40)}`;
@@ -73,6 +75,16 @@ export type PushOutcome = 'created' | 'updated' | 'deleted' | 'unchanged' | 'ski
 async function pushLocked(bookingId: string): Promise<PushOutcome> {
   const b = await getBooking(bookingId);
   if (!b) return 'skipped';
+  const first = await getCalendarConnection(b.business_id);
+  if (!usable(first)) return 'skipped';
+  // A calendar switch / account change holds the connection's sync lease while it removes the old events and links. A push must not run
+  // across it (it would POST to the OLD calendar or account and store a link after the links were dropped), so it takes the same lease and
+  // re-reads the connection under it. A lease that does not free up in time is a retry (the reconcile job pushes again).
+  return withSyncLease(first.id, () => pushUnderLease(b), PUSH_LEASE_WAIT_MS);
+}
+
+async function pushUnderLease(b: Booking): Promise<PushOutcome> {
+  const bookingId = b.id;
   const conn = await getCalendarConnection(b.business_id);
   const link = await getEventLinkByBooking(bookingId);
   if (!usable(conn)) return 'skipped';
@@ -143,6 +155,7 @@ export async function pushBooking(bookingId: string): Promise<PushOutcome> {
     return 'retry';
   } catch (err) {
     if (err instanceof NeedsReauthError) return 'skipped';
+    if (err instanceof SyncBusyError) return 'retry';
     log.warn('push_failed', { booking: bookingId, reason: err instanceof GoogleApiError ? `${err.status} ${err.reason}` : 'error' });
     return 'retry';
   }

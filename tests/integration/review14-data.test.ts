@@ -198,6 +198,35 @@ integration('review 14: verticals, consent race, agent sync, jobs (postgres)', (
     } finally { fake.restore(); }
   });
 
+  test('R15 L4: the AUTOMATIC re-sync (agent-dirty drain) that recreates a gone agent also binds the phone number and registers the post-call webhook', async () => {
+    const fake = fakeElevenLabs();
+    fake.install();
+    try {
+      await withEnv({ ...ENV, ELEVENLABS_PHONE_NUMBER_ID: 'phnum_test_1' }, async () => {
+        el.clearToolIdCache(); el.resetInitiationCache();
+        const biz = await newBusiness({ agent_id: null });
+        await withKb(biz.id);
+        const first = await el.syncAgent({ business: (await db.getBusiness(biz.id))!, kb: null });
+        const state = flakyAgents(fake);
+        const seen: string[] = [];
+        const inner = globalThis.fetch;
+        globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+          const path = String(input).replace('https://api.elevenlabs.io/v1', '');
+          if (/^\/convai\/phone-numbers\//.test(path) && (init?.method ?? 'GET') === 'PATCH') seen.push(path);
+          return inner(input as never, init as never);
+        }) as typeof fetch;
+        state.patchStatus = 404; // the agent is gone at the provider
+        await agents.markAgentDirty(biz.id);
+        const out = await agents.drainDirtyAgents({ now: new Date(Date.now() + 3600_000) });
+        expect(out.synced).toBeGreaterThanOrEqual(1);
+        expect(state.creates).toBe(1);
+        const created = (await db.getBusiness(biz.id))!.agent_id!;
+        expect(created).not.toBe(first.agent_id);
+        expect(seen).toEqual(['/convai/phone-numbers/phnum_test_1']); // bound to the NEW agent, like provisioning does
+      });
+    } finally { fake.restore(); }
+  }, 30_000);
+
   test('R14 L6: the usage-warning safety net runs every 10 minutes (not every tick), one instance at a time', async () => {
     const jobs = await import('@/lib/jobs');
     const t0 = new Date('2031-03-01T12:00:00Z');

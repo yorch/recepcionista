@@ -449,6 +449,77 @@ suite('migrations (postgres)', () => {
     }
   }, 240_000);
 
+  test('review 15 M1 migration on a populated old-schema database: calls in flight at the phase-1 backfill that finished later are un-settled; the window is anchored to the phase-1 apply time; re-runnable, zero drift', async () => {
+    const PHASE1 = '20261201120000_phase1_calendar_kb_transcript_passkeys_memberships';
+    const R15 = '20261204120000_review15_metered_at_backfill_repair';
+    const name = await newDb('review15');
+    const before = historyUpTo('before-r15-phase1', dirs().filter((d) => d < PHASE1).at(-1)!);
+    expect(prisma(['migrate', 'deploy'], dbUrl(name), before).code).toBe(0);
+    const c = client(name);
+    try {
+      const one = async (sql: string) => (await c.$queryRawUnsafe(sql)) as any[];
+      const settled = async () => one(`SELECT id, metered_at IS NOT NULL AS settled FROM calls ORDER BY id`);
+      // Old-schema data, as it stood when phase 1 was applied: p1 in flight (no end yet), p2 finished and billed by the old code.
+      for (const q of [
+        `INSERT INTO businesses(id,name,status) VALUES ('b1','A','live')`,
+        `INSERT INTO calls(id,business_id,status,started_at,ended_at,duration_sec,conversation_id) VALUES
+           ('p1','b1','in_progress', now() - interval '1 hour', NULL, NULL, 'cp1'),
+           ('p2','b1','completed', now() - interval '1 day', now() - interval '1 day' + interval '5 minutes', 300, 'cp2')`,
+      ]) await c.$executeRawUnsafe(q);
+      // Apply ONLY phase 1: its backfill runs for real (metered_at = COALESCE(ended_at, started_at)).
+      const phase1 = prisma(['migrate', 'deploy'], dbUrl(name), historyUpTo('upto-r15-phase1', PHASE1));
+      expect(phase1.code).toBe(0);
+      expect(await one(`SELECT id, metered_at = started_at AS at_start, metered_at IS NOT NULL AS settled FROM calls WHERE id = 'p1'`)).toEqual([{ id: 'p1', at_start: true, settled: true }]);
+      // The post-call webhook of p1 arrives under the phase-1 code: it stores the end and the duration, but cannot meter (already "settled").
+      await c.$executeRawUnsafe(`UPDATE calls SET ended_at = started_at + interval '4 minutes', duration_sec = 240, status = 'completed' WHERE id = 'p1'`);
+      // Rows shaped like the backfill's output, relative to the REAL phase-1 apply time (applied_utc = _prisma_migrations.finished_at, in UTC):
+      //  w1 in flight 2 days before it, finished later              -> repaired
+      //  w2 in flight 5 days before it (outside the 3-day window)    -> stays
+      //  w3 started 1 minute AFTER it (a now()-3d window would match) -> stays (cannot have been in the backfill)
+      //  w4 no conversation id (nothing to fetch)                    -> stays
+      //  w5 claimed by the new code (metered_at = now())             -> stays
+      //  w6 still open and older than the review-14 repair's window (that one handles open calls)        -> stays
+      const applied = (await one(`SELECT (finished_at AT TIME ZONE 'UTC') AS t FROM _prisma_migrations WHERE migration_name = '${PHASE1}'`))[0].t as Date;
+      // truncated to milliseconds like the timestamp(3) column, so metered_at = started_at holds exactly as the real backfill left it
+      const at = (offset: string) => `date_trunc('milliseconds', (SELECT finished_at AT TIME ZONE 'UTC' FROM _prisma_migrations WHERE migration_name = '${PHASE1}') ${offset})`;
+      expect(applied instanceof Date).toBe(true);
+      for (const [id, start, end, conv, meteredAtStart] of [
+        ['w1', `- interval '2 days'`, true, `'cw1'`, true], ['w2', `- interval '5 days'`, true, `'cw2'`, true], ['w3', `+ interval '1 minute'`, true, `'cw3'`, true],
+        ['w4', `- interval '2 days'`, true, 'NULL', true], ['w5', `- interval '2 days'`, true, `'cw5'`, false], ['w6', `- interval '5 days'`, false, `'cw6'`, true],
+      ] as [string, string, boolean, string, boolean][]) {
+        await c.$executeRawUnsafe(`INSERT INTO calls(id,business_id,status,started_at,ended_at,duration_sec,conversation_id,metered_at)
+          VALUES ('${id}','b1','completed', ${at(start)}, ${end ? `${at(start)} + interval '4 minutes'` : 'NULL'}, ${end ? 240 : 'NULL'}, ${conv}, ${meteredAtStart ? at(start) : 'now()'})`);
+      }
+      const r = prisma(['migrate', 'deploy'], dbUrl(name));
+      expect(r.out).toContain(R15);
+      expect(r.code).toBe(0);
+      expect(await settled()).toEqual([
+        { id: 'p1', settled: false }, // the natural case: in flight at phase 1, finished under phase-1 code, now billable again
+        { id: 'p2', settled: true }, { id: 'w1', settled: false }, { id: 'w2', settled: true }, { id: 'w3', settled: true },
+        { id: 'w4', settled: true }, { id: 'w5', settled: true }, { id: 'w6', settled: true },
+      ]);
+      // re-runnable: applying the file again changes nothing; a call the reconcile job claimed since (metered_at = now()) is never un-settled again
+      await c.$executeRawUnsafe(`UPDATE calls SET metered_at = now() WHERE id = 'p1'`);
+      const rerun = rawPrisma(['db', 'execute', '--file', path.join(MIGRATIONS, R15, 'migration.sql'), '--schema', path.join(ROOT, 'prisma/schema.prisma')], dbUrl(name));
+      expect(rerun.out).toContain('Script executed successfully');
+      expect((await settled()).filter((x) => x.id === 'p1' || x.id === 'w1')).toEqual([{ id: 'p1', settled: true }, { id: 'w1', settled: false }]);
+      // no phase-1 row in _prisma_migrations: nothing matches (no fallback to now())
+      await c.$executeRawUnsafe(`UPDATE calls SET metered_at = started_at WHERE id = 'w1'`);
+      await c.$executeRawUnsafe(`UPDATE _prisma_migrations SET migration_name = migration_name || '_x' WHERE migration_name = '${PHASE1}'`);
+      expect(rawPrisma(['db', 'execute', '--file', path.join(MIGRATIONS, R15, 'migration.sql'), '--schema', path.join(ROOT, 'prisma/schema.prisma')], dbUrl(name)).code).toBe(0);
+      expect((await settled()).find((x) => x.id === 'w1')).toEqual({ id: 'w1', settled: true });
+      await c.$executeRawUnsafe(`UPDATE _prisma_migrations SET migration_name = '${PHASE1}' WHERE migration_name = '${PHASE1}_x'`);
+      // zero drift: this database (all migrations applied) against schema.prisma, and the migration history against a shadow database
+      const drift = rawPrisma(['migrate', 'diff', '--from-url', dbUrl(name), '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--exit-code'], dbUrl(name));
+      expect(drift.code).toBe(0);
+      const shadow = await newDb('review15_shadow');
+      const diff = rawPrisma(['migrate', 'diff', '--from-migrations', MIGRATIONS, '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--shadow-database-url', dbUrl(shadow), '--exit-code'], dbUrl(shadow));
+      expect(diff.code).toBe(0);
+    } finally {
+      await c.$disconnect();
+    }
+  }, 300_000);
+
   test('phase 1 validation step names the violating constraint', async () => {
     const PHASE1 = '20261201120000_phase1_calendar_kb_transcript_passkeys_memberships';
     const name = await newDb('phase1val');

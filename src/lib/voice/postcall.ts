@@ -393,19 +393,28 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
         transferred = o === 'connected' || (o === 'unknown' && c.transfer_status === 'connected');
       }
       if (c.duration_sec && c.duration_sec > 0 && await claimCallMetering(c.id)) {
+        let aiWritten = false;
         try {
           if (transferred) {
             // Only the time AFTER the agent invoked the transfer is forward time; what came before was the AI (AI minutes). When the
             // transfer turn's time is unreadable the whole call stays forward time (documented limit).
+            // Order matters: the AI part goes FIRST. If a write fails after the other one succeeded, the claim must not be given back
+            // (reconcile would bill the whole call as AI on top of what is already recorded), so only a failure with nothing written releases it.
             const at = transferStartSecs(body.transcript);
             const aiSecs = at !== null ? Math.min(c.duration_sec, at) : 0;
-            const forward = await meterForwardedCall(c.call_sid ?? conversationId, c.business_id, c.duration_sec - aiSecs);
-            // meterForwardedCall never throws: a failed write comes back as 'failed'. Give the claim back so the job / a retry can meter it.
-            if (forward === 'failed') throw new Error('forward metering failed');
-            if (aiSecs > 0) await recordCallSeconds(c.business_id, aiSecs);
+            if (aiSecs > 0) { await recordCallSeconds(c.business_id, aiSecs); aiWritten = true; }
+            // meterForwardedCall never throws: a failed write comes back as 'failed' (and is deduplicated per call sid, so one retry is safe).
+            let forward = await meterForwardedCall(c.call_sid ?? conversationId, c.business_id, c.duration_sec - aiSecs);
+            if (forward === 'failed') forward = await meterForwardedCall(c.call_sid ?? conversationId, c.business_id, c.duration_sec - aiSecs);
+            if (forward === 'failed') {
+              if (!aiWritten) throw new Error('forward metering failed'); // nothing written yet: give the claim back so the job can meter it
+              // AI seconds are already recorded: keep the claim (no double count). The dial-status / voicemail callbacks also meter the forwarded
+              // part, once per parent call sid; if none of them does, those forward minutes are the (logged) loss.
+              log.error('usage.forward_part_failed', { call: c.id, business: c.business_id });
+            }
           } else await recordCallSeconds(c.business_id, c.duration_sec);
         } catch (err) {
-          await releaseCallMetering(c.id);
+          if (!aiWritten) await releaseCallMetering(c.id);
           log.warn('usage.record_failed', { call: c.id, business: c.business_id, err });
         }
       }

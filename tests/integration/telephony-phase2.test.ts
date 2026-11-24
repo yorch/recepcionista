@@ -721,7 +721,8 @@ integration('telephony phase 2 (postgres)', () => {
     const u2 = (await db.getUsage(biz2.id))!;
     expect([u2.call_seconds, u2.forward_seconds]).toEqual([100, 0]);
     expect((await prisma.call.findUnique({ where: { id: call2.id } }))!.transferStatus).toBe('attempted');
-    // (c) the forward write fails: meterForwardedCall returns 'failed' (it never throws); the claim must be released for the job / a retry
+    // (c) R15 L3: the AI part is written FIRST. When the forward write then fails (twice: it is retried once), the AI seconds are already
+    // recorded, so the claim is KEPT: giving it back would let the reconcile job bill the whole call as AI on top (a double count).
     const biz3 = await newBusiness({ agent_id: uniq('agent') });
     const call3 = await newCall(biz3, { transferStatus: 'attempted' });
     await db.recordForwardSeconds(biz3.id, 1); // the usage row exists
@@ -729,12 +730,23 @@ integration('telephony phase 2 (postgres)', () => {
     try {
       await postcall.processPostCall(transferred(call3.conversationId!, call3.callSid!, biz3, 40) as never);
     } finally { await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters DROP CONSTRAINT r14_tmp_fail`); }
-    expect((await prisma.call.findUnique({ where: { id: call3.id } }))!.meteredAt).toBeNull();
-    // the retry (a later post-call delivery, or the reconcile job) now meters it
-    await prisma.processedEvent.deleteMany({ where: { id: call3.conversationId! } });
-    await postcall.processPostCall(transferred(call3.conversationId!, call3.callSid!, biz3, 40) as never);
     expect((await prisma.call.findUnique({ where: { id: call3.id } }))!.meteredAt).not.toBeNull();
-    expect((await db.getUsage(biz3.id))!.forward_seconds).toBe(61);
+    const u3 = (await db.getUsage(biz3.id))!;
+    expect([u3.call_seconds, u3.forward_seconds]).toEqual([40, 1]); // AI part recorded once, forward part lost (logged), nothing billed twice
+    // (d) the AI write itself fails: nothing was written, so the claim IS given back and the retry meters both parts
+    const biz4 = await newBusiness({ agent_id: uniq('agent') });
+    const call4 = await newCall(biz4, { transferStatus: 'attempted' });
+    await db.recordForwardSeconds(biz4.id, 1);
+    await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters ADD CONSTRAINT r14_tmp_fail CHECK (call_seconds < 30) NOT VALID`);
+    try {
+      await postcall.processPostCall(transferred(call4.conversationId!, call4.callSid!, biz4, 40) as never);
+    } finally { await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters DROP CONSTRAINT r14_tmp_fail`); }
+    expect((await prisma.call.findUnique({ where: { id: call4.id } }))!.meteredAt).toBeNull();
+    await prisma.processedEvent.deleteMany({ where: { id: call4.conversationId! } });
+    await postcall.processPostCall(transferred(call4.conversationId!, call4.callSid!, biz4, 40) as never);
+    expect((await prisma.call.findUnique({ where: { id: call4.id } }))!.meteredAt).not.toBeNull();
+    const u4 = (await db.getUsage(biz4.id))!;
+    expect([u4.call_seconds, u4.forward_seconds]).toEqual([40, 61]);
   });
 
   test('R14 voice L4: a provider conversation with no duration is retried, never closed with 0 seconds', async () => {

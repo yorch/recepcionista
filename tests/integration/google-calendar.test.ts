@@ -539,6 +539,22 @@ integration('google calendar (postgres, fake google)', () => {
   });
 
   // ---------------------------------------------------------------- review 14 (report 11)
+  test('R15 L1: a push waits for the connection\'s sync lease (a calendar switch / account change holds it), never writes meanwhile, and goes through afterwards', async () => {
+    const { biz, conn } = await setup();
+    await sync.syncConnection(conn.id);
+    const b = await book(biz.id, '10:00');
+    const { acquireLease, releaseLease } = await import('@/lib/db');
+    const lease = (await acquireLease(`gcal-sync:${conn.id}`, 60_000))!; // what changeCalendar / resetForNewAccount hold while they remove the old events
+    try {
+      const started = Date.now();
+      expect(await push.pushBooking(b.id)).toBe('retry'); // the lease did not free up in time: nothing was written to Google, the reconcile job retries
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+      expect(await cal.getEventLinkByBooking(b.id)).toBeNull();
+    } finally { await releaseLease(lease); }
+    expect(await push.pushBooking(b.id)).toBe('created');
+    expect(await cal.getEventLinkByBooking(b.id)).not.toBeNull();
+  }, 30_000);
+
   test('R14 M1: reconnecting the SAME account keeps the chosen calendar; a different account starts on primary and its old events are cleaned up', async () => {
     const { biz, conn } = await setup();
     await sync.syncConnection(conn.id);

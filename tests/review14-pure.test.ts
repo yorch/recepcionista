@@ -179,6 +179,12 @@ describe('R14 owner L4: the confirmation names the call', () => {
       expect(/^[\x20-\x7e]*$/.test(t)).toBe(true);
       expect(t.length).toBeLessThanOrEqual(480);
     }
+    // R15 L6: the longest summary (cut at 150) must keep the NO tail inside the 320-char alert clamp, with room for a business-name prefix
+    for (const lang of ['en', 'es'] as const) {
+      const long = confirmationSms('z'.repeat(400), 'ABC234', lang, '12:34 PM');
+      expect(long.length).toBeLessThanOrEqual(310);
+      expect(long.endsWith('NO ABC234.')).toBe(true);
+    }
     expect(callClock('2026-12-01T20:12:00Z', 'America/New_York')).toBe('3:12 PM');
     expect(callClock('2026-12-01T20:12:00Z', 'Not/AZone')).toBe('');
     expect(confirmationSms('x', 'ABC234')).not.toContain('Requested on a call');

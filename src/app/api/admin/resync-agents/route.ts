@@ -2,8 +2,8 @@ import { ok, fail, readJson } from '@/lib/http';
 import { authenticate } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
 import { prisma, getBusiness, getKnowledgeBase, recordAudit } from '@/lib/db';
-import { bindPhoneNumber, expectedToolNames, hasElevenLabs, resetInitiationCache, syncAgent } from '@/lib/voice/elevenlabs';
-import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
+import { expectedToolNames, hasElevenLabs, resetInitiationCache, syncAgent } from '@/lib/voice/elevenlabs';
+import { finishCreatedAgent } from '@/lib/voice/agent-created';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -87,12 +87,7 @@ export async function POST(req: Request) {
           else if (res.created) {
             // The old agent was gone at the provider (404), so a NEW one was made. It needs what provisioning gives every agent: the phone
             // number binding and the post-call webhook (summaries, transcripts, metering). Flagged for the operator: check the old agent is gone.
-            const notes: string[] = [];
-            try { await bindPhoneNumber(res.agent_id); } catch { notes.push('phone binding failed'); }
-            try {
-              const hook = await ensurePostCallWebhook({ allowCreate: false });
-              if (hook.webhook_id) await registerPostCallWebhookOnAgent(res.agent_id, hook.webhook_id); else notes.push('post-call webhook unavailable');
-            } catch { notes.push('post-call webhook registration failed'); }
+            const notes = await finishCreatedAgent(res.agent_id, r.id);
             items[items.length - 1].detail = `NEW agent created (the previous one was not found at the provider)${notes.length ? `; ${notes.join('; ')}: finish in the runbook` : ''}`;
           }
         } catch (err) {

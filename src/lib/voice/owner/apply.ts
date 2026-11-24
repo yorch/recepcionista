@@ -3,6 +3,7 @@
  * (sms.ts) and the dashboard buttons: audit row, the agent prompt rebuilt from the validated knowledge base (buildSystemPrompt wraps
  * every owner-supplied value as untrusted data), and the ElevenLabs agent re-synced (best effort).
  */
+import { finishCreatedAgent } from '@/lib/voice/agent-created';
 import {
   applyKbChange, getBusiness, getKbChange, getKnowledgeBase, recordAudit, rejectKbChange, revertKbChange, upsertKnowledgeBase,
   type KbChangeResult,
@@ -42,6 +43,7 @@ export async function resyncAfterKbChange(businessId: string): Promise<{ prompt:
     if (!hasElevenLabs() || !business.agent_id) return { prompt: true, agent: 'skipped' };
     try {
       const res = await syncAgent({ business, kb: fresh });
+      if (res.created && !res.mock && !res.error) await finishCreatedAgent(res.agent_id, businessId); // a NEW agent needs its phone binding + post-call webhook
       return { prompt: true, agent: res.mock ? 'failed' : 'synced' };
     } catch (err) {
       log.warn('agent_resync_failed', { business: businessId, err });

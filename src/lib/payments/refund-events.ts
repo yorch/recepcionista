@@ -97,7 +97,10 @@ export async function handleRefundEvent(
     const amount = cents(obj.amount);
     const refundId = str(obj.id);
     if (type === 'refund.failed' || status === 'failed' || status === 'canceled') {
-      updated = (await markRefundFailed(booking.id, `stripe ${status ?? 'failed'}`)).updated;
+      // Only the booking's CURRENT pending refund can fail it. Stripe sends several events per failed refund, unordered and redelivered: a late
+      // one for an older refund must change nothing (no status change, no audit row = no new Idempotency-Key, no second "failed" text).
+      // A failure event that names no refund id cannot be matched to the current refund, so it is ignored too.
+      updated = refundId ? (await markRefundFailed(booking.id, `stripe ${status ?? 'failed'}`, { onlyRefundId: refundId })).updated : false;
       // The app's own retry counter (refund-service: attempt suffix of the Idempotency-Key) counts `booking.refund_failed` rows. A failure that
       // Stripe reports ASYNCHRONOUSLY must count too, or the next retry reuses the first key and Stripe replays the cached first response
       // (the refund that already failed) for 24 h instead of creating a new refund.
