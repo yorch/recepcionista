@@ -3,10 +3,12 @@
  * Logging lives here so "texts sent" on the dashboard is truthful in mock mode
  * too, and so every route reports the same provider status.
  */
-import { getBusiness, isOptedOut, logSms } from '@/lib/db';
-import { phoneKey } from '@/lib/format';
+import { countryForBusiness, getBusiness, isOptedOut, logSms, recordSms, releaseSmsReservation, reserveSms } from '@/lib/db';
+import { toE164 } from '@/lib/phone';
 import { tzOf } from '@/lib/time';
-import { decide, withStopFooter } from '@/lib/messaging/policy';
+import { decide, smsSegments, withStopFooter } from '@/lib/messaging/policy';
+import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
+import { forwardVerificationText, ownerVerificationText, type VerifyPurpose } from '@/lib/messaging/owner-verify';
 import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
@@ -27,11 +29,26 @@ export interface SendAndLogInput {
   now?: Date;
 }
 
+export type BlockedStatus =
+  | 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent' | 'blocked_cap' | 'blocked_owner_unverified';
+
 export interface SendAndLogOutput {
   sms: SmsLog;
   result: SendSmsResult;
   /** Set when compliance policy skipped the send; the skip is logged in sms_log with this status. */
-  blocked?: 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent';
+  blocked?: BlockedStatus;
+}
+
+/**
+ * Count sent SMS SEGMENTS against the plan (pass `smsSegments(text)`; one segment by default); a metering failure must
+ * never turn a delivered text into an error.
+ */
+export async function meterSms(businessId: string, segments = 1): Promise<void> {
+  try {
+    await recordSms(businessId, Math.max(1, Math.floor(segments)));
+  } catch (err) {
+    log.warn('usage.record_failed', { business: businessId, err });
+  }
 }
 
 /** Status from the provider is already one of sent|mock|failed — pass it through. */
@@ -40,18 +57,12 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
   const started = Date.now();
 
   const business = await getBusiness(input.business_id);
-  const ownerKey = phoneKey(business?.owner_phone);
-  const decision = decide({
-    kind: input.kind,
-    isOwnerRecipient: Boolean(ownerKey) && ownerKey === phoneKey(to),
-    optedOut: await isOptedOut(input.business_id, to),
-    consentBasis: input.consent_basis,
-    timezone: tzOf(business),
-    now: input.now ?? new Date(),
-  });
+  const country = countryForBusiness(business);
+  const e164 = toE164(to, country);
+  const isOwnerRecipient = business ? isOwnerNumber(business, to, country) : false;
 
-  if (!decision.allow) {
-    log.info('send.blocked', { business: input.business_id, kind: input.kind, reason: decision.reason });
+  const blockedResult = async (reason: BlockedStatus, basis: string | null): Promise<SendAndLogOutput> => {
+    log.info('send.blocked', { business: input.business_id, kind: input.kind, reason });
     const sms = await logSms({
       business_id: input.business_id,
       to_phone: to,
@@ -59,16 +70,58 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
       kind: input.kind,
       booking_id: input.booking_id ?? null,
       provider_id: null,
-      status: decision.reason,
-      consent_basis: input.consent_basis ?? null,
-    });
-    return { sms, result: { id: '', status: 'failed', error: decision.reason }, blocked: decision.reason };
+      status: reason,
+      consent_basis: basis,
+    }, { country });
+    return { sms, result: { id: '', status: 'failed', error: reason }, blocked: reason };
+  };
+
+  // Owner alerts only ever go to a number the owner proved they control (or, during rollout, a grandfathered one).
+  if (input.kind === 'owner_alert' && isOwnerRecipient && business && ownerAlertStatus(business) !== 'ok') {
+    return blockedResult('blocked_owner_unverified', input.consent_basis ?? null);
   }
 
+  const decision = decide({
+    kind: input.kind,
+    isOwnerRecipient,
+    optedOut: await isOptedOut(input.business_id, to, country),
+    consentBasis: input.consent_basis,
+    timezone: tzOf(business),
+    now: input.now ?? new Date(),
+  });
+
+  if (!decision.allow) return blockedResult(decision.reason, input.consent_basis ?? null);
+
+  // The exact text that goes out (with the STOP footer): its segment count is what is metered and what the cap is checked against.
   const text = decision.footer ? withStopFooter(input.body) : input.body;
-  const result = await sendSms(to, text);
+  const segments = Math.max(1, smsSegments(text));
+
+  // Plan cap: customer-facing texts stop at the cap (a text that would not fit in what is left is blocked). The segments are
+  // RESERVED atomically before sending (concurrent sends can never overshoot the cap) and refunded if the send fails.
+  // Owner alerts are exempt from blocking (but are still counted, after sending; see voice/owner-alert for their own budget).
+  const ownerClass = decision.consent_basis === 'owner_alert';
+  let reservation: { period_start: string } | null = null;
+  if (!ownerClass) {
+    const reserved = await reserveSms(input.business_id, segments, new Date());
+    if (!reserved.ok) {
+      log.warn('send.over_cap', { business: input.business_id, reason: reserved.reason, used: reserved.used, cap: reserved.cap, segments });
+      return blockedResult('blocked_cap', decision.consent_basis);
+    }
+    reservation = { period_start: reserved.period_start as string };
+  }
+  const refund = async () => { if (reservation) await releaseSmsReservation(input.business_id, segments, reservation.period_start); };
+
+  // The country allow-list does not apply to the owner's verified number (proven by possession).
+  let result: SendSmsResult;
+  try {
+    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass });
+  } catch (err) {
+    await refund();
+    throw err;
+  }
 
   if (result.status === 'failed') {
+    await refund();
     log.warn('send.failed', {
       business: input.business_id,
       kind: input.kind,
@@ -85,6 +138,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
       booking: input.booking_id ?? null,
       ms: Date.now() - started,
     });
+    if (!reservation) await meterSms(input.business_id, segments); // owner alerts: counted after the send
   }
 
   const sms = await logSms({
@@ -96,9 +150,38 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     provider_id: result.id || null,
     status: mapStatus(result.status),
     consent_basis: decision.consent_basis,
-  });
+  }, { country });
 
   log.debug('send.logged', { sms: sms.id, status: sms.status });
+  return { sms, result };
+}
+
+/**
+ * The owner-phone verification code. Not subject to the plan cap (a blocked code would lock an owner out of
+ * verifying) but counted; the destination country allow-list DOES apply (the number is not yet proven).
+ * The recipient must be a number that has not opted out of this business's texts.
+ */
+export async function sendOwnerVerificationCode(
+  businessId: string, phoneE164: string, code: string, purpose: VerifyPurpose = 'owner-phone',
+): Promise<SendAndLogOutput> {
+  const business = await getBusiness(businessId);
+  const country = countryForBusiness(business);
+  if (await isOptedOut(businessId, phoneE164, country)) {
+    const sms = await logSms({
+      business_id: businessId, to_phone: phoneE164, body: '[verification code withheld]', kind: 'other',
+      booking_id: null, provider_id: null, status: 'blocked_opt_out', consent_basis: 'owner_verification',
+    }, { country });
+    return { sms, result: { id: '', status: 'failed', error: 'blocked_opt_out' }, blocked: 'blocked_opt_out' };
+  }
+  const verificationText = purpose === 'forward-number' ? forwardVerificationText(code) : ownerVerificationText(code); // fixed template: nothing tenant-controlled
+  const result = await sendSms(phoneE164, verificationText);
+  if (result.status !== 'failed') await meterSms(businessId, smsSegments(verificationText));
+  const sms = await logSms({
+    business_id: businessId, to_phone: phoneE164,
+    // The code itself is not retained in the log.
+    body: purpose === 'forward-number' ? '[forward number verification code]' : '[owner verification code]', kind: 'other', booking_id: null,
+    provider_id: result.id || null, status: mapStatus(result.status), consent_basis: 'owner_verification',
+  }, { country });
   return { sms, result };
 }
 

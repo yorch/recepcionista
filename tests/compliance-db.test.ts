@@ -34,6 +34,8 @@ suite('sendAndLog compliance policy (postgres)', () => {
   test('opt-out blocks customer texts but not owner alerts; STOP footer; quiet hours; logging', async () => {
     const biz = await db.createBusiness({ name: 'Policy Test', owner_phone: '+13055550111' });
     ids.push(biz.id);
+    // owner alerts need a VERIFIED owner phone (see tests/integration/phone-owner-verification.test.ts)
+    await db.prisma.business.update({ where: { id: biz.id }, data: { ownerPhoneVerifiedAt: new Date() } });
     const noon = new Date('2026-07-01T12:00:00-04:00');
     const night = new Date('2026-07-01T22:00:00-04:00');
     const cust = '+13055550222';

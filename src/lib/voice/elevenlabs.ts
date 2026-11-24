@@ -12,6 +12,7 @@ import { TOOL_NAMES, type ToolName } from '@/lib/voice/tools';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { logger } from '@/lib/log';
 import { describeNow, nowVariables } from '@/lib/time';
+import { initiationAgentOverrides, initiationAutoConfig } from '@/lib/voice/initiation-config';
 
 const log = logger('elevenlabs');
 
@@ -113,7 +114,7 @@ export async function resolveAgentIdFor(business: Business): Promise<string> {
   if (!envAgent) return '';
   const owners = await listBusinessesByAgentId(envAgent);
   if (owners.some((b) => b.id !== business.id)) return '';
-  if ((await listBusinesses()).length !== 1) {
+  if ((await listBusinesses({ limit: 2 })).length !== 1) {
     log.warn('agent.env_not_shared', { business: business.id, reason: 'ELEVENLABS_AGENT_ID is only used when exactly one business exists' });
     return '';
   }
@@ -156,13 +157,13 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     description: 'Book the appointment once the caller has agreed to a time. Confirm every detail back before calling.',
     properties: {
       customer_name: { type: 'string', description: "Caller's full name." },
-      customer_phone: { type: 'string', description: 'Callback number. The server texts the number the caller phoned from; this is stored as the callback number.' },
+      customer_phone: { type: 'string', description: 'OPTIONAL. Leave it out: the server uses the number the caller is calling from (caller id) as the contact and for texts. Only pass it when the caller says to use a DIFFERENT callback number. Never ask the caller to read their number out.' },
       service: { type: 'string', description: 'Service being booked (same value you passed to check_availability).' },
       scheduled_at: { type: 'string', description: "Start time as LOCAL wall-clock time in the business's time zone, with NO UTC offset, e.g. 2026-11-15T15:00:00. Never convert to UTC." },
       address: { type: 'string', description: 'Service address.' },
       price_estimate: { type: 'number', description: 'Starting price quoted, in whole dollars (e.g. 189 for $189). The server converts to cents.' },
     },
-    required: ['customer_name', 'customer_phone', 'service', 'scheduled_at'],
+    required: ['customer_name', 'service', 'scheduled_at'],
   },
   send_sms: {
     description: "Send a text message to the caller (default) or the owner. Other numbers are ignored: the server only texts the current caller or the business owner.",
@@ -202,6 +203,7 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     description: 'Transfer the caller to the owner. Use when the caller insists, is upset, or asks about something outside the knowledge base.',
     properties: {
       reason: { type: 'string', description: 'Why the caller needs the owner.' },
+      callback_number: { type: 'string', description: 'ONLY if the caller volunteers a DIFFERENT number to be called back on. Never ask for a number: the one they are calling from is already known.' },
       consent_declined: { type: 'boolean', description: 'Set true ONLY when the caller objected to the call being AI-handled, recorded or transcribed, or told you to stop. Marks the call so no transcript is kept; take a message for a human callback.' },
     },
     required: ['reason'],
@@ -232,11 +234,18 @@ async function findToolByName(wireName: string, url: string): Promise<string | n
 /**
  * Tool request headers. Carries the shared secret the tool route checks
  * (ELEVENLABS_TOOL_SECRET). Without it (development only) tools are open.
+ *
+ * Current API: a header value is a literal string, `{secret_id}` (workspace secret), `{variable_name}`
+ * (dynamic variable) or `{env_var_label}`. A literal is stored in clear in the tool config; set
+ * ELEVENLABS_TOOL_SECRET_ID to the id of a workspace secret holding the SAME value as ELEVENLABS_TOOL_SECRET
+ * to send it as a secret reference instead (the route still verifies against ELEVENLABS_TOOL_SECRET).
  */
-function toolRequestHeaders(): Record<string, string> {
-  const out: Record<string, string> = { 'content-type': 'application/json' };
+export function toolRequestHeaders(): Record<string, string | { secret_id: string }> {
+  const out: Record<string, string | { secret_id: string }> = { 'content-type': 'application/json' };
   const secret = process.env.ELEVENLABS_TOOL_SECRET;
-  if (secret) out[TOOL_SECRET_HEADER] = secret;
+  const secretId = (process.env.ELEVENLABS_TOOL_SECRET_ID || '').trim();
+  if (secret && secretId) out[TOOL_SECRET_HEADER] = { secret_id: secretId };
+  else if (secret) out[TOOL_SECRET_HEADER] = secret;
   else log.warn('tool.no_secret', { reason: 'ELEVENLABS_TOOL_SECRET unset; tools will be unauthenticated outside production' });
   return out;
 }
@@ -312,21 +321,30 @@ async function upsertTool(name: ToolName): Promise<string | null> {
   return json.id ?? null;
 }
 
-/** Created once per process; seven round-trips on every call would be wasteful. */
-const toolIdCache = new Map<ToolName, string>();
+/**
+ * Tool ids are cached per process (seven round-trips on every call would be wasteful) but only for TOOL_ID_TTL_MS: another instance
+ * (or `deleteAgentTools` after the last tenant was released) may delete/recreate the workspace tools, and a stale id here would register
+ * agents against deleted tools. A provider answer that says the ids are bad also flushes the cache (see createOrUpdateAgent).
+ */
+export const TOOL_ID_TTL_MS = 10 * 60_000;
+const toolIdCache = new Map<ToolName, { id: string; at: number }>();
+export const clearToolIdCache = (): void => toolIdCache.clear();
+const cachedToolIds = (): boolean => [...toolIdCache.values()].some((e) => Date.now() - e.at < TOOL_ID_TTL_MS);
 
-async function ensureToolIds(): Promise<string[]> {
+async function ensureToolIds(opts: { fresh?: boolean } = {}): Promise<string[]> {
+  if (opts.fresh) toolIdCache.clear();
   const ids = await Promise.all(TOOL_NAMES.map(async (name) => {
     const cached = toolIdCache.get(name);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.at < TOOL_ID_TTL_MS) return cached.id;
     const id = await upsertTool(name);
-    if (id) toolIdCache.set(name, id);
+    if (id) toolIdCache.set(name, { id, at: Date.now() });
+    else toolIdCache.delete(name);
     return id;
   }));
   return ids.filter((id): id is string => Boolean(id));
 }
 
-async function agentBody(business: Business, kb: KnowledgeBase | null) {
+async function agentBody(business: Business, kb: KnowledgeBase | null, opts: { freshTools?: boolean } = {}) {
   let prompt = kb?.system_prompt?.trim()
     || buildSystemPrompt(business, {
       services: kb?.services ?? [],
@@ -363,7 +381,7 @@ async function agentBody(business: Business, kb: KnowledgeBase | null) {
           llm: 'gpt-4o-mini',
           temperature: 0.4,
           timezone: business.timezone || 'America/New_York',
-          tool_ids: await ensureToolIds(),
+          tool_ids: await ensureToolIds({ fresh: opts.freshTools }),
         },
       },
       tts: {
@@ -383,6 +401,84 @@ async function agentBody(business: Business, kb: KnowledgeBase | null) {
       },
     },
   };
+}
+
+// ------------------------------------------------------- conversation-initiation webhook
+//
+// VERIFIED against the ElevenLabs docs ("Twilio personalization"): the platform POSTs
+// { caller_id, agent_id, called_number, call_sid, conversation_id } to a webhook URL and expects
+// { type: 'conversation_initiation_client_data', dynamic_variables, conversation_config_override }.
+// The docs describe configuring it ONLY in the UI (ElevenAgents settings: webhook URL + secrets sent as headers;
+// agent > Security tab: enable "fetch conversation initiation data" and the overridable fields, first message here).
+// UNVERIFIED (the API reference pages could not be read when this was written): the API equivalents used below,
+//   PATCH /v1/convai/settings                 { conversation_initiation_client_data_webhook: { url, request_headers } }
+//   PATCH /v1/convai/agents/{id}              { platform_settings: { overrides: {
+//        enable_conversation_initiation_client_data_from_webhook: true,
+//        conversation_config_override: { agent: { first_message: true } } } } }
+// Both are best-effort: a rejected call only logs a warning and leaves the manual UI steps in docs/runbook.md.
+
+export const initiationWebhookUrl = (): string => `${appUrl()}/api/voice/initiation`;
+
+/** Off switch: ELEVENLABS_INITIATION_WEBHOOK=off skips automatic configuration (manual UI setup instead). */
+
+let initiationWorkspaceDone = false;
+const initiationAgentsDone = new Set<string>();
+
+/** Headers ElevenLabs sends with the initiation webhook: only the shared secret (same value/reference as the tools). */
+export function initiationRequestHeaders(): Record<string, string | { secret_id: string }> {
+  const { ['content-type']: _ct, ...rest } = toolRequestHeaders();
+  void _ct;
+  return rest;
+}
+
+/** Best-effort: point the workspace's initiation webhook at this app and enable it on the agent. Never throws. */
+export async function ensureInitiationWebhook(agentId: string): Promise<{ ok: boolean; skipped?: string; error?: string }> {
+  if (!initiationAutoConfig()) return { ok: false, skipped: 'ELEVENLABS_INITIATION_WEBHOOK=off' };
+  if (!hasElevenLabs() || !agentId || agentId.startsWith('mock_')) return { ok: false, skipped: 'no API key or agent' };
+  if (!process.env.ELEVENLABS_TOOL_SECRET) {
+    log.warn('initiation.no_secret', { reason: 'ELEVENLABS_TOOL_SECRET unset: not configuring an unauthenticated initiation webhook' });
+    return { ok: false, skipped: 'no tool secret' };
+  }
+  try {
+    if (!initiationWorkspaceDone) {
+      const res = await fetch(`${API}/convai/settings`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({
+          conversation_initiation_client_data_webhook: { url: initiationWebhookUrl(), request_headers: initiationRequestHeaders() },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200);
+        log.warn('initiation.workspace_failed', { status: res.status, detail, action: 'configure the webhook manually (docs/runbook.md)' });
+        return { ok: false, error: `settings ${res.status}` };
+      }
+      initiationWorkspaceDone = true;
+    }
+    if (!initiationAgentsDone.has(agentId)) {
+      const res = await fetch(`${API}/convai/agents/${agentId}`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({
+          platform_settings: {
+            overrides: initiationAgentOverrides(),
+          },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200);
+        log.warn('initiation.agent_failed', { agent: agentId, status: res.status, detail });
+        return { ok: false, error: `agent ${res.status}` };
+      }
+      initiationAgentsDone.add(agentId);
+    }
+    return { ok: true };
+  } catch (err) {
+    log.warn('initiation.error', { agent: agentId, err });
+    return { ok: false, error: (err as Error).message };
+  }
 }
 
 export interface AgentResult {
@@ -415,62 +511,79 @@ export async function createOrUpdateAgent(
   }
 
   const started = Date.now();
-  const body = JSON.stringify(await agentBody(business, kb));
-  try {
-    if (existing && !existing.startsWith('mock_')) {
-      const res = await fetch(`${API}/convai/agents/${existing}`, {
-        method: 'PATCH',
+  // The ids in the cache may be stale (another instance deleted/recreated the workspace tools): the provider then rejects the
+  // body with a 4xx. Retry ONCE with freshly looked-up ids before treating it as a failure.
+  const looksLikeBadToolIds = (status: number) => status === 400 || status === 404 || status === 422;
+  let freshTools = false;
+  for (let attempt = 0; ; attempt++) {
+    const usedCache = !freshTools && cachedToolIds();
+    const body = JSON.stringify(await agentBody(business, kb, { freshTools }));
+    const retryWithFreshTools = (status: number, step: string): boolean => {
+      if (attempt > 0 || !usedCache || !looksLikeBadToolIds(status)) return false;
+      log.warn('agent.stale_tool_ids', { business: business.id, step, status, action: 'flushing the tool-id cache and retrying once' });
+      freshTools = true;
+      return true;
+    };
+    try {
+      if (existing && !existing.startsWith('mock_')) {
+        const res = await fetch(`${API}/convai/agents/${existing}`, {
+          method: 'PATCH',
+          headers: headers(),
+          body,
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res.ok) {
+          await rememberAgent(business.id, existing);
+          // Success was silent before, so the account drifted away from the DB with
+          // no local record of which agent was created, updated or by whom.
+          log.info('agent.updated', {
+            agent: existing,
+            business: business.id,
+            name: business.name,
+            ms: Date.now() - started,
+          });
+          await ensureInitiationWebhook(existing);
+          return { agent_id: existing, mock: false, created: false };
+        }
+        if (retryWithFreshTools(res.status, 'update')) continue;
+        log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
+      }
+
+      const res = await fetch(`${API}/convai/agents/create`, {
+        method: 'POST',
         headers: headers(),
         body,
         signal: AbortSignal.timeout(15_000),
       });
-      if (res.ok) {
-        await rememberAgent(business.id, existing);
-        // Success was silent before, so the account drifted away from the DB with
-        // no local record of which agent was created, updated or by whom.
-        log.info('agent.updated', {
-          agent: existing,
+      if (!res.ok) {
+        if (retryWithFreshTools(res.status, 'create')) continue;
+        const detail = await res.text().catch(() => '');
+        log.error('agent.create_failed', {
           business: business.id,
-          name: business.name,
-          ms: Date.now() - started,
+          status: res.status,
+          detail: detail.slice(0, 200),
         });
-        return { agent_id: existing, mock: false, created: false };
+        return { agent_id: existing || `mock_agent_${business.id}`, mock: true, error: `create ${res.status}` };
       }
-      log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
-    }
-
-    const res = await fetch(`${API}/convai/agents/create`, {
-      method: 'POST',
-      headers: headers(),
-      body,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      log.error('agent.create_failed', {
+      const json = await res.json() as { agent_id?: string };
+      const agentId = json.agent_id || '';
+      if (!agentId) return { agent_id: existing, mock: true, error: 'no agent_id returned' };
+      await rememberAgent(business.id, agentId);
+      log.info('agent.created', {
+        agent: agentId,
         business: business.id,
-        status: res.status,
-        detail: detail.slice(0, 200),
+        name: business.name,
+        ms: Date.now() - started,
       });
-      return { agent_id: existing || `mock_agent_${business.id}`, mock: true, error: `create ${res.status}` };
+      await ensureInitiationWebhook(agentId);
+      return { agent_id: agentId, mock: false, created: true };
+    } catch (err) {
+      return {
+        agent_id: existing || `mock_agent_${business.id}`,
+        mock: true,
+        error: (err as Error).message,
+      };
     }
-    const json = await res.json() as { agent_id?: string };
-    const agentId = json.agent_id || '';
-    if (!agentId) return { agent_id: existing, mock: true, error: 'no agent_id returned' };
-    await rememberAgent(business.id, agentId);
-    log.info('agent.created', {
-      agent: agentId,
-      business: business.id,
-      name: business.name,
-      ms: Date.now() - started,
-    });
-    return { agent_id: agentId, mock: false, created: true };
-  } catch (err) {
-    return {
-      agent_id: existing || `mock_agent_${business.id}`,
-      mock: true,
-      error: (err as Error).message,
-    };
   }
 }
 
@@ -510,8 +623,8 @@ export async function getSignedUrl(agentId: string): Promise<SignedUrlResult> {
 
 /** Bind the single shared ElevenLabs phone number to an agent. */
 export async function bindPhoneNumber(agentId: string): Promise<void> {
-  // Must be the phone_number_id UUID from GET /convai/phone-numbers,
-  // NOT the phone number digits. Example: "abc123def..." not "+12028972767".
+  // Must be the phone_number_id (looks like "phnum_...") from GET /convai/phone-numbers,
+  // NOT the phone number digits. Example: "phnum_abc123..." not "+12028972767".
   const phoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
   if (!phoneNumberId || !hasElevenLabs()) {
     log.warn('phone.bind_skipped', {
@@ -539,5 +652,108 @@ export async function bindPhoneNumber(agentId: string): Promise<void> {
     }
   } catch (err) {
     log.error('phone.bind_error', { phone_number_id: phoneNumberId, agent: agentId, err });
+  }
+}
+
+// ------------------------------------------------------------ release (canceled tenants)
+
+export interface ReleaseCallDeps { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv }
+export interface ReleaseAgentResult {
+  ok: boolean;
+  /** No API key, or a mock agent id: nothing exists at ElevenLabs. Counts as success. */
+  mock?: boolean;
+  /** The agent was already gone (404). Counts as success. */
+  already_deleted?: boolean;
+  /** The shared phone number was detached from this agent first. */
+  unbound?: boolean;
+  error?: string;
+}
+
+/**
+ * Delete an agent. IDEMPOTENT (404 = success), mock-safe (no key or `mock_agent_*` id = success without a call), never
+ * throws. If the shared ElevenLabs phone number (ELEVENLABS_PHONE_NUMBER_ID) is currently assigned to THIS agent it is
+ * detached first (best-effort; the phone-number read/patch shapes are UNVERIFIED like the rest of the phone binding), because
+ * a number can keep an agent alive. The caller must have checked that no other business uses the agent.
+ */
+export async function deleteAgent(agentId: string, deps: ReleaseCallDeps = {}): Promise<ReleaseAgentResult> {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const id = (agentId || '').trim();
+  if (!id) return { ok: true, already_deleted: true };
+  if (id.startsWith('mock_')) return { ok: true, mock: true };
+  if (!env.ELEVENLABS_API_KEY) {
+    // A non-mock id is a REAL agent. Reporting "mock success" here would let the caller drop its reference and orphan it.
+    log.error('agent.delete_unconfigured', { agent: id, reason: 'ELEVENLABS_API_KEY is not set: cannot delete a real agent' });
+    return { ok: false, error: 'ELEVENLABS_API_KEY is not set: the real agent was NOT deleted and the database reference is kept' };
+  }
+  const h = { 'content-type': 'application/json', 'xi-api-key': env.ELEVENLABS_API_KEY };
+  let unbound = false;
+  try {
+    const phoneId = (env.ELEVENLABS_PHONE_NUMBER_ID || '').trim();
+    if (phoneId) {
+      try {
+        const cur = await doFetch(`${API}/convai/phone-numbers/${encodeURIComponent(phoneId)}`, { headers: h, signal: AbortSignal.timeout(10_000) });
+        if (cur.ok) {
+          const j = (await cur.json().catch(() => null)) as { assigned_agent?: { agent_id?: string } | null; agent_id?: string | null } | null;
+          const assigned = j?.assigned_agent?.agent_id ?? j?.agent_id ?? null;
+          if (assigned === id) {
+            const un = await doFetch(`${API}/convai/phone-numbers/${encodeURIComponent(phoneId)}`, {
+              method: 'PATCH', headers: h, body: JSON.stringify({ agent_id: null }), signal: AbortSignal.timeout(15_000),
+            });
+            unbound = un.ok;
+            if (!un.ok) log.warn('agent.unbind_failed', { agent: id, status: un.status });
+          }
+        }
+      } catch (err) {
+        log.warn('agent.unbind_error', { agent: id, error: (err as Error).name });
+      }
+    }
+    const res = await doFetch(`${API}/convai/agents/${encodeURIComponent(id)}`, { method: 'DELETE', headers: h, signal: AbortSignal.timeout(15_000) });
+    if (res.status === 404) return { ok: true, already_deleted: true, unbound };
+    if (!res.ok) {
+      log.warn('agent.delete_failed', { agent: id, status: res.status });
+      return { ok: false, unbound, error: `delete ${res.status}` };
+    }
+    log.info('agent.deleted', { agent: id, unbound });
+    return { ok: true, unbound };
+  } catch (err) {
+    log.error('agent.delete_error', { agent: id, err });
+    return { ok: false, unbound, error: (err as Error).message };
+  }
+}
+
+export interface ReleaseToolsResult { ok: boolean; mock?: boolean; deleted: number; already_deleted: number; error?: string }
+
+/**
+ * Delete the webhook tools this app registered in the ElevenLabs workspace (`<APP_URL>/api/voice/tools/<name>`).
+ * Tools are WORKSPACE-WIDE and shared by every tenant's agent (there are no per-business tools), so the caller must only
+ * run this when no other business still has an agent. Re-provisioning recreates them (upsertTool). Idempotent (404 =
+ * success), mock-safe, never throws; also clears the in-process tool-id cache.
+ */
+export async function deleteAgentTools(deps: ReleaseCallDeps = {}): Promise<ReleaseToolsResult> {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  toolIdCache.clear();
+  if (!env.ELEVENLABS_API_KEY) return { ok: true, mock: true, deleted: 0, already_deleted: 0 };
+  const h = { 'content-type': 'application/json', 'xi-api-key': env.ELEVENLABS_API_KEY };
+  const prefix = `${appUrl()}/api/voice/tools/`;
+  let deleted = 0;
+  let gone = 0;
+  try {
+    const res = await doFetch(`${API}/convai/tools`, { headers: h, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return { ok: false, deleted, already_deleted: gone, error: `list ${res.status}` };
+    const json = (await res.json().catch(() => null)) as { tools?: { id?: string; tool_config?: { type?: string; api_schema?: { url?: string } } }[] } | null;
+    const ours = (json?.tools ?? []).filter((t) => t.id && t.tool_config?.type === 'webhook' && (t.tool_config.api_schema?.url ?? '').startsWith(prefix));
+    let failed = 0;
+    for (const t of ours) {
+      const del = await doFetch(`${API}/convai/tools/${encodeURIComponent(t.id as string)}`, { method: 'DELETE', headers: h, signal: AbortSignal.timeout(15_000) });
+      if (del.status === 404) gone++;
+      else if (del.ok) deleted++;
+      else { failed++; log.warn('tool.delete_failed', { tool: t.id, status: del.status }); }
+    }
+    return failed ? { ok: false, deleted, already_deleted: gone, error: `${failed} tool delete(s) failed` } : { ok: true, deleted, already_deleted: gone };
+  } catch (err) {
+    log.error('tool.delete_error', { err });
+    return { ok: false, deleted, already_deleted: gone, error: (err as Error).message };
   }
 }

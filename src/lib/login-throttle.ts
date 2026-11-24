@@ -62,6 +62,11 @@ export function pairKey(account: string, req: Request): string {
   return `auth/login:pair:${account}:${clientKey(req)}`;
 }
 
+/** Same backoff, separate counters, for the second login step (6-digit codes / recovery codes). */
+export function mfaPairKey(userId: string, req: Request): string {
+  return `auth/mfa:pair:${accountId(userId)}:${clientKey(req)}`;
+}
+
 /** Layer 1. Counts every attempt from this client; call before touching credentials. */
 export async function checkClientAttempts(req: Request): Promise<Verdict> {
   const ip = clientKey(req);
@@ -71,7 +76,7 @@ export async function checkClientAttempts(req: Request): Promise<Verdict> {
   return { ok: false, status: r.error ? 503 : 429, retryAfterS: r.retryAfterS };
 }
 
-interface PairState { failures: number; retryAfterS: number }
+export interface PairState { failures: number; retryAfterS: number }
 
 async function readPair(key: string): Promise<PairState> {
   const rows = await prisma.$queryRaw<{ count: number; age_ms: number }[]>`
@@ -81,6 +86,16 @@ async function readPair(key: string): Promise<PairState> {
   if (!row || row.age_ms > STREAK_RESET_MS) return { failures: 0, retryAfterS: 0 };
   const wait = backoffSeconds(row.count, key.endsWith(':untrusted'));
   return { failures: row.count, retryAfterS: Math.max(0, Math.ceil(wait - row.age_ms / 1000)) };
+}
+
+/** Current failure streak and wait for a key (does not count anything). Zeros when the store is unreachable. */
+export async function peekPair(key: string): Promise<PairState> {
+  try {
+    return await readPair(key);
+  } catch (err) {
+    log.error('store_unavailable', { err });
+    return { failures: 0, retryAfterS: 0 };
+  }
 }
 
 /** Layer 2 gate: is this (account, IP) pair currently backing off? Does not count anything. */

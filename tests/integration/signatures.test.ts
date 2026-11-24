@@ -232,6 +232,16 @@ integration('provider webhook signatures (postgres)', () => {
     expect(await prisma.call.count({ where: { businessId: a.id } })).toBe(1);
   });
 
+  test('tool headers: literal secret by default, workspace secret reference when ELEVENLABS_TOOL_SECRET_ID is set', async () => {
+    const { toolRequestHeaders, TOOL_SECRET_HEADER } = await import('../../src/lib/voice/elevenlabs');
+    await withEnv({ ELEVENLABS_TOOL_SECRET_ID: undefined }, async () => {
+      expect(toolRequestHeaders()[TOOL_SECRET_HEADER]).toBe(SECRETS.toolSecret);
+    });
+    await withEnv({ ELEVENLABS_TOOL_SECRET_ID: 'secret_abc' }, async () => {
+      expect(toolRequestHeaders()[TOOL_SECRET_HEADER]).toEqual({ secret_id: 'secret_abc' });
+    });
+  });
+
   test('post-call: replaying the same conversation id is ignored', async () => {
     const biz = await newBusiness();
     const raw = envelope(biz.agent_id!);

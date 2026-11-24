@@ -4,7 +4,8 @@
  */
 import { prisma } from './client';
 
-const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const PROCESSED_EVENTS_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const RETENTION_MS = PROCESSED_EVENTS_RETENTION_MS;
 const CLEANUP_EVERY_MS = 10 * 60 * 1000;
 let lastCleanup = 0;
 

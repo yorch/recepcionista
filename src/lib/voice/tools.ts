@@ -21,6 +21,12 @@ import { normalizePhone } from '@/lib/providers/twilio';
 import { E164 } from '@/lib/messaging/recipient';
 import { sendAndLog } from '@/lib/messaging';
 import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
+import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
+import { isOwnerNumber } from '@/lib/messaging/owner';
+import { countryForBusiness } from '@/lib/db';
+import { TOOL_NAMES, type ToolName } from '@/lib/kb';
+import { CAPACITY_EXEMPT_TOOLS, pausedToolMessage } from '@/lib/voice/capacity';
+import { resolveCallRoute } from '@/lib/voice/call-mode';
 
 export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
@@ -223,31 +229,7 @@ function allowUnverifiedBookingSms(): boolean {
   return process.env.ALLOW_UNVERIFIED_BOOKING_SMS === 'true';
 }
 
-export interface OwnerAlert {
-  /** True ONLY if the SMS really went out (or demo mode mock). Never claim the owner was told otherwise. */
-  notified: boolean;
-  reason: 'sent' | 'no_owner_phone' | 'sms_failed' | 'sms_error';
-  sms: SmsLog | null;
-}
-
-async function alertOwner(business: Business, body: string): Promise<OwnerAlert> {
-  if (!business.owner_phone) {
-    log.error('owner_alert.no_owner_phone', { business: business.id });
-    return { notified: false, reason: 'no_owner_phone', sms: null };
-  }
-  try {
-    const { sms, result: sent } = await sendAndLog({
-      business_id: business.id, to: business.owner_phone, body, kind: 'owner_alert',
-    });
-    // 'mock' means no Twilio configured: only counts as delivered in explicit demo mode.
-    const delivered = sent.status === 'sent' || (sent.status === 'mock' && process.env.DEMO_MODE === 'true');
-    if (!delivered) log.error('owner_alert.not_delivered', { business: business.id, status: sent.status, error: sent.error ?? null });
-    return { notified: delivered, reason: delivered ? 'sent' : 'sms_failed', sms };
-  } catch (err) {
-    log.error('owner_alert.error', { business: business.id, err });
-    return { notified: false, reason: 'sms_error', sms: null };
-  }
-}
+export type { OwnerAlert };
 
 /** What to tell a caller when we could NOT reach the owner. */
 function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolean): { message: string; data: Record<string, unknown> } {
@@ -367,6 +349,18 @@ export interface CreateBookingArgs extends BaseArgs {
 
 const MAX_PRICE_CENTS = 10_000_000; // $100k sanity cap
 
+/** Ask only for what is actually missing; a phone number only when caller id is withheld (otherwise it is already known). */
+export function missingBookingFields(lang: ToolLanguage, m: { name: boolean; phone: boolean; service: boolean; scheduled_at: boolean }): string {
+  const en: string[] = [];
+  const es: string[] = [];
+  if (m.name) { en.push('your name'); es.push('su nombre'); }
+  if (m.phone) { en.push('a number to reach you on (I cannot see the number you are calling from)'); es.push('un número para llamarle (no veo el número desde el que llama)'); }
+  if (m.service) { en.push('which service you need'); es.push('qué servicio necesita'); }
+  if (m.scheduled_at) { en.push('which day and time works'); es.push('qué día y hora le queda bien'); }
+  const join = (xs: string[], and: string) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} ${and} ${xs[xs.length - 1]}`);
+  return say(lang, `I just need ${join(en, 'and')}.`, `Solo necesito ${join(es, 'y')}.`);
+}
+
 export async function createBooking(args: CreateBookingArgs): Promise<ToolResult> {
   const lang = langOf(args.language);
   try {
@@ -387,9 +381,7 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     if (!name || !phone || !service || !scheduledAt) {
       return {
         ok: false,
-        message: say(lang,
-          'I just need your name, a callback number, and which service you need.',
-          'Solo necesito su nombre, un número para llamarle y qué servicio necesita.'),
+        message: missingBookingFields(lang, { name: !name, phone: !phone, service: !service, scheduled_at: !scheduledAt }),
         data: { missing: { name: !name, phone: !phone, service: !service, scheduled_at: !scheduledAt } },
       };
     }
@@ -470,9 +462,12 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
     // operator policy explicitly allows texting an unverified one (ALLOW_UNVERIFIED_BOOKING_SMS).
     const textTo = verified ?? (allowUnverifiedBookingSms() ? booking.customer_phone : null);
     let sms: unknown | null = null;
+    let smsDelivered = false;
     if (textTo) {
       try {
-        sms = await sendConfirmation(booking.id, lang, { to: textTo });
+        const confirmation = await sendConfirmation(booking.id, lang, { to: textTo });
+        sms = confirmation;
+        smsDelivered = confirmation.sms.status === 'sent' || confirmation.sms.status === 'mock';
       } catch (err) {
         log.warn('confirmation.failed', { booking: booking.id, err });
       }
@@ -480,14 +475,14 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
 
     return {
       ok: true,
-      message: textTo
+      message: smsDelivered
         ? say(lang,
           `You're all set for ${whenPhrase(iso, lang, tz)}. I'm sending your confirmation text now.`,
           `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}. Le mando el texto de confirmación ahora.`)
         : say(lang,
           `You're all set for ${whenPhrase(iso, lang, tz)}.`,
           `Listo, quedó agendado para ${whenPhrase(iso, lang, tz)}.`),
-      data: { booking, sms_sent: sms != null },
+      data: { booking, sms_sent: smsDelivered, sms_blocked: sms != null && !smsDelivered },
     };
   } catch (err) {
     return toolFailure('create_booking', err, lang, say(lang,
@@ -548,10 +543,10 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
     // (`to` merely selects between those two.)
     const call = await resolveCall(business, args);
     const callerPhone = verifiedCaller(call, args) ?? '';
-    const key = (p: string) => p.replace(/\D/g, '').slice(-10);
+    const country = countryForBusiness(business);
     const wanted = str(args.to);
     const to = wanted && business.owner_phone
-      && (wanted.toLowerCase() === 'owner' || key(wanted) === key(business.owner_phone))
+      && (wanted.toLowerCase() === 'owner' || isOwnerNumber(business, wanted, country))
       ? business.owner_phone
       : callerPhone;
     if (!to) {
@@ -563,7 +558,7 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
       };
     }
 
-    const toOwner = Boolean(business.owner_phone) && key(to) === key(business.owner_phone as string);
+    const toOwner = Boolean(business.owner_phone) && isOwnerNumber(business, to, country);
     const { sms: log, result: sent, blocked } = await sendAndLog({
       business_id: business.id, to, body, kind: toOwner ? 'owner_alert' : 'other',
     });
@@ -574,6 +569,16 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
         message: say(lang,
           'This number has opted out of texts, so I cannot send one — let me read you the details instead.',
           'Este número pidió no recibir textos, así que no puedo mandarlo — mejor se los leo por teléfono.'),
+        data: { sms: log, blocked },
+      };
+    }
+
+    if (blocked === 'blocked_cap' || blocked === 'blocked_owner_unverified') {
+      return {
+        ok: false,
+        message: say(lang,
+          'I cannot send a text from here right now — let me read you the details instead.',
+          'No puedo mandar un texto desde aquí en este momento — mejor se los leo por teléfono.'),
         data: { sms: log, blocked },
       };
     }
@@ -656,7 +661,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     }
 
     // One call, one link: the library creates the link, records the deposit (cents) and texts it.
-    let sms: unknown | null = null;
+    let sms: SmsLog | null = null;
     let link: { id: string; url: string; amount_cents: number; mock: boolean } | null = null;
     try {
       const sent = await createAndSendPaymentLink({
@@ -671,6 +676,16 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     }
 
     const spoken = formatCents(amountCents);
+    if (sms && sms.status !== 'sent' && sms.status !== 'mock') {
+      // The link exists but the text was blocked (opt-out, plan cap, ...): never claim it is on its way.
+      return {
+        ok: false,
+        message: say(lang,
+          'I could not text that link from here — let me have the owner call you to take the deposit.',
+          'No pude mandar ese enlace por texto — voy a pedirle al dueño que le llame para el depósito.'),
+        data: { amount_cents: amountCents, sms_sent: false, blocked: sms.status },
+      };
+    }
     return {
       ok: true,
       message: say(lang,
@@ -704,7 +719,7 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
-    const reason = str(args.reason) || 'Emergency reported on call';
+    const reason = alertField(str(args.reason), 300) || 'Emergency reported on call';
     const callerName = str(args.customer_name);
     const callerPhone = str(args.customer_phone);
     const address = str(args.address);
@@ -727,15 +742,16 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       // call.caller_phone is only ever set from the platform caller id; the relayed number appears in the alert text only.
     });
 
+    // Caller-controlled text is clamped field by field (the whole alert is also capped at 320 GSM-safe characters by alertOwner).
     const alertBody = [
-      `EMERGENCY — ${business.name}`,
-      callerName ? `Caller: ${callerName}` : '',
-      callerPhone ? `Phone: ${normalizePhone(callerPhone)}` : call.caller_phone ? `Phone: ${call.caller_phone}` : '',
-      address ? `Address: ${address}` : '',
-      `Reason: ${reason}`,
+      `EMERGENCY - ${alertField(business.name, 50)}`,
+      callerName ? `Caller: ${alertField(callerName, 50)}` : '',
+      callerPhone ? `Phone: ${alertField(normalizePhone(callerPhone), 20)}` : call.caller_phone ? `Phone: ${call.caller_phone}` : '',
+      address ? `Address: ${alertField(address, 100)}` : '',
+      `Reason: ${alertField(reason, 140)}`,
       'Call them back now.',
     ].filter(Boolean).join('\n');
-    const alert = await alertOwner(business, alertBody);
+    const alert = await alertOwner(business, alertBody, { class: 'emergency', callId: call.id });
 
     if (alert.notified) {
       return {
@@ -879,6 +895,8 @@ export async function getPricing(args: GetPricingArgs): Promise<ToolResult> {
 
 export interface HandoffArgs extends BaseArgs {
   reason?: string;
+  /** A DIFFERENT number the caller asked to be called back on. Relayed by the model, so it is passed to the owner as "caller said", never used for texting. */
+  callback_number?: string;
   /** True when the caller objected to the AI / recording: mark consent declined and take a message. */
   consent_declined?: boolean | string;
 }
@@ -889,7 +907,7 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
-    const reason = str(args.reason) || 'Caller asked for a human';
+    const reason = alertField(str(args.reason), 300) || 'Caller asked for a human';
     let call = await resolveCall(business, args);
     if (!call) call = await createCall({ business_id: business.id, caller_phone: platformCaller(args), status: 'in_progress' });
 
@@ -901,14 +919,22 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
       ...(declined ? { consent_status: 'declined' as const } : {}),
     });
 
+    // The number the call came from is already known (platform caller id): confirm it instead of asking for it again.
+    // Only a number the caller VOLUNTEERED as an alternative is relayed (labelled as such), and only when it is a real number.
+    const verified = verifiedCaller(updated ?? call, args);
+    const alt = cleanPhone(args.callback_number);
+    const altDiffers = Boolean(alt && alt !== verified);
+    const callbackLast4 = altDiffers ? alt!.slice(-4) : verified ? verified.slice(-4) : null;
+
     const alertBody = [
-      `HANDOFF — ${business.name}`,
-      call.caller_name ? `Caller: ${call.caller_name}` : '',
-      call.caller_phone ? `Phone: ${call.caller_phone}` : '',
-      `Reason: ${reason}`,
+      `HANDOFF - ${alertField(business.name, 50)}`,
+      call.caller_name ? `Caller: ${alertField(call.caller_name, 50)}` : '',
+      call.caller_phone ? `Phone: ${call.caller_phone}` : verified ? `Phone: ${verified}` : '',
+      altDiffers ? `Asked to be called back on: ${alt} (said by the caller)` : '',
+      `Reason: ${alertField(reason, 140)}`,
       'Please call them back.',
     ].filter(Boolean).join('\n');
-    const alert = await alertOwner(business, alertBody);
+    const alert = await alertOwner(business, alertBody, { class: 'handoff', callId: call.id });
 
     if (alert.notified) {
       // This does NOT transfer the line: the owner was texted and will call back.
@@ -917,10 +943,15 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
         message: declined ? say(lang,
           "Understood — we won't keep a transcript of this call. I've sent the owner a message and they will call you back.",
           'Entendido — no guardaremos una transcripción de esta llamada. Le envié un mensaje al dueño y le devolverá la llamada.')
-        : say(lang,
-          "I've sent the owner an urgent message and they will call you back shortly. Is this the best number to reach you?",
-          'Le envié un mensaje urgente al dueño y le devolverá la llamada pronto. ¿Es este el mejor número para localizarle?'),
-        data: { call: updated, owner_sms: alert.sms, owner_notified: true, transferred: false },
+        : callbackLast4
+          ? say(lang,
+            `I've sent the owner an urgent message and they will call you back shortly on the number ${altDiffers ? 'you gave me' : "you're calling from"}, ending in ${callbackLast4}. If a different number is better, tell me and I'll pass it on.`,
+            `Le envié un mensaje urgente al dueño y le devolverá la llamada pronto al número ${altDiffers ? 'que me dio' : 'desde el que llama'}, que termina en ${callbackLast4}. Si le queda mejor otro número, dígamelo y se lo paso.`)
+          // Caller id withheld: only then is asking for a number necessary.
+          : say(lang,
+            "I've sent the owner an urgent message and they will call you back shortly. I can't see your number: what is the best number to reach you?",
+            'Le envié un mensaje urgente al dueño y le devolverá la llamada pronto. No veo su número: ¿cuál es el mejor número para localizarle?'),
+        data: { call: updated, owner_sms: alert.sms, owner_notified: true, transferred: false, callback_number_known: Boolean(callbackLast4) },
       };
     }
 
@@ -943,17 +974,7 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
 
 // --------------------------------------------------------------- dispatcher
 
-export const TOOL_NAMES = [
-  'check_availability',
-  'create_booking',
-  'send_sms',
-  'create_payment_link',
-  'flag_emergency',
-  'get_pricing',
-  'handoff_to_human',
-] as const;
-
-export type ToolName = typeof TOOL_NAMES[number];
+export { TOOL_NAMES, type ToolName };
 
 /** ElevenLabs may send "Check Availability", "checkAvailability", etc. */
 function canonicalTool(raw: string): ToolName | null {
@@ -962,6 +983,22 @@ function canonicalTool(raw: string): ToolName | null {
   if (direct) return direct;
   const compact = key.replace(/_/g, '');
   return TOOL_NAMES.find((t) => t.replace(/_/g, '') === compact) ?? null;
+}
+
+/**
+ * Call handling gate: while calls are PAUSED (or a 'forward' is due on this AI line, where it can only be the paused script) the agent
+ * must not book, quote, text or take payment: every tool except the message-taking ones (CAPACITY_EXEMPT_TOOLS: handoff_to_human,
+ * flag_emergency) is refused with an honest spoken line. The decision is the same resolveCallRoute the initiation webhook uses, on the
+ * 'native' line (a tool call IS an AI conversation), so the script the caller hears and what the tools allow can never disagree; an
+ * after-hours schedule (forward only during business hours) therefore leaves the AI fully working outside those hours.
+ */
+async function callHandlingRefusal(businessId: unknown, lang: ToolLanguage): Promise<ToolResult | null> {
+  if (typeof businessId !== 'string' || !businessId) return null;
+  const business = await getBusiness(businessId);
+  if (!business) return null; // each tool reports an unknown business itself
+  const route = resolveCallRoute(business, new Date(), 'native');
+  if (route.action === 'ai') return null;
+  return { ok: false, message: pausedToolMessage(lang), data: { reason: 'calls_paused', route: route.action } };
 }
 
 /** Single entry point for the HTTP route. Never throws. */
@@ -987,6 +1024,10 @@ export async function runTool(
   const a = (args ?? {}) as Record<string, never>; // NOTE: loosely typed LLM args; each tool validates its own fields
   try {
     const result = await (async (): Promise<ToolResult> => {
+      if (!CAPACITY_EXEMPT_TOOLS.has(tool)) {
+        const refused = await callHandlingRefusal((a as Record<string, unknown>).business_id, lang);
+        if (refused) return refused;
+      }
       switch (tool) {
         case 'check_availability': return await checkAvailability(a);
         case 'create_booking': return await createBooking(a);

@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { go } from '@/components/auth/auth-ui';
 import { safeNextPath } from '@/lib/safe-redirect';
 
 const inputCls =
@@ -12,6 +13,12 @@ export default function LoginPage() {
   const [token, setToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [notice] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const q = new URLSearchParams(window.location.search);
+    if (q.get('reset') === '1') return 'Your password was changed. Sign in with the new one.';
+    return null;
+  });
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -29,7 +36,12 @@ export default function LoginPage() {
         return;
       }
       const next = new URLSearchParams(window.location.search).get('next');
-      window.location.assign(safeNextPath(next));
+      const json = await res.json().catch(() => null);
+      if (json?.data?.mfa_required) {
+        go(`/login/mfa${next ? `?next=${encodeURIComponent(safeNextPath(next))}` : ''}`);
+        return;
+      }
+      go(safeNextPath(next));
     } catch {
       setError('Network error');
     } finally {
@@ -87,6 +99,7 @@ export default function LoginPage() {
           </>
         )}
 
+        <p role="status" suppressHydrationWarning className="mt-2 text-[12px] text-[#8fe3b4]">{error ? '' : notice}</p>
         {error && <p role="alert" className="mt-2 text-[12px] text-[#ff7b7b]">{error}</p>}
         <button
           type="submit"
@@ -102,6 +115,12 @@ export default function LoginPage() {
         >
           {adminMode ? 'Sign in with email instead' : 'Use admin token'}
         </button>
+        {!adminMode && (
+          <p className="mt-4 flex justify-between text-[12px] text-[#8b98ab]">
+            <a href="/forgot-password" className="hover:text-white">Forgot password?</a>
+            <a href="/signup" className="hover:text-white">Create an account</a>
+          </p>
+        )}
       </form>
     </main>
   );

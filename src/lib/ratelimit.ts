@@ -21,7 +21,7 @@ import { logger } from '@/lib/log';
 const log = logger('ratelimit');
 
 const CLEANUP_EVERY_MS = 60_000;
-const CLEANUP_HORIZON_MS = 3 * 60 * 60 * 1000;
+export const CLEANUP_HORIZON_MS = 3 * 60 * 60 * 1000;
 export const MAX_WINDOW_MS = 60 * 60 * 1000;
 let lastCleanup = 0;
 
@@ -30,6 +30,8 @@ export interface RateLimitResult {
   retryAfterS: number;
   /** True when the store was unreachable (the decision came from the failure policy). */
   error?: boolean;
+  /** The sliding-window estimate AFTER counting this call (absent when the store failed). Lets callers see how full a budget is. */
+  estimate?: number;
 }
 
 export interface RateLimitOptions {
@@ -52,6 +54,17 @@ async function cleanupExpired(): Promise<void> {
     await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: new Date(now - CLEANUP_HORIZON_MS) } } });
   } catch (err) {
     log.warn('cleanup_failed', { err });
+  }
+}
+
+/** Delete rate-limit buckets whose window ended long ago (the scheduled cleanup job). Never throws; returns the count. */
+export async function cleanupRateLimitBuckets(now: Date = new Date()): Promise<number> {
+  try {
+    const res = await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: new Date(now.getTime() - CLEANUP_HORIZON_MS) } } });
+    return res.count;
+  } catch (err) {
+    log.warn('cleanup_failed', { err });
+    return 0;
   }
 }
 
@@ -84,14 +97,42 @@ export async function rateLimit(
     const frac = Math.min(1, Math.max(0, elapsed_ms / w));
     const estimate = cur + prev * (1 - frac);
     void cleanupExpired();
-    if (estimate <= limit) return { allowed: true, retryAfterS: 0 };
+    if (estimate <= limit) return { allowed: true, retryAfterS: 0, estimate };
     // Conservative: wait for the next window boundary (the estimate only decays then).
-    return { allowed: false, retryAfterS: Math.max(1, Math.ceil((w - elapsed_ms) / 1000)) };
+    return { allowed: false, retryAfterS: Math.max(1, Math.ceil((w - elapsed_ms) / 1000)), estimate };
   } catch (err) {
     log.error('store_unavailable', { key, fail_closed: Boolean(opts.failClosed), err });
     return opts.failClosed
       ? { allowed: false, retryAfterS: 5, error: true }
       : { allowed: true, retryAfterS: 0, error: true };
+  }
+}
+
+/**
+ * Read-only version of `rateLimit`: the current sliding-window estimate for `key` WITHOUT counting this call.
+ * For "reserve capacity / check first, count only on success" flows. Returns 0 when the store is unreachable
+ * (callers that must fail closed should also use `rateLimit`).
+ */
+export async function peekRateLimit(key: string, windowMs: number): Promise<number> {
+  const w = Math.min(MAX_WINDOW_MS, Math.max(1000, Math.floor(windowMs)));
+  try {
+    const rows = await prisma.$queryRaw<{ cur: number; prev: number; elapsed_ms: number }[]>`
+      WITH t AS (
+        SELECT clock_timestamp() AS now,
+               to_timestamp(floor(extract(epoch FROM clock_timestamp()) * 1000 / ${w}::float8) * ${w}::float8 / 1000.0) AS ws
+      )
+      SELECT COALESCE((SELECT c."count" FROM "rate_limit_buckets" c WHERE c."key" = ${key} AND c."window_start" = t.ws), 0)::int AS cur,
+             COALESCE((SELECT p."count" FROM "rate_limit_buckets" p
+                        WHERE p."key" = ${key}
+                          AND p."window_start" >= t.ws - (${w}::float8 * 1.5 * interval '1 millisecond')
+                          AND p."window_start" <  t.ws - (${w}::float8 * 0.5 * interval '1 millisecond')), 0)::int AS prev,
+             (extract(epoch FROM (t.now - t.ws)) * 1000)::float8 AS elapsed_ms
+        FROM t`;
+    const { cur, prev, elapsed_ms } = rows[0];
+    return cur + prev * (1 - Math.min(1, Math.max(0, elapsed_ms / w)));
+  } catch (err) {
+    log.error('peek_failed', { key, err });
+    return 0;
   }
 }
 

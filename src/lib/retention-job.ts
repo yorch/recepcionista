@@ -7,6 +7,9 @@
  * (Dashboard > Settings). While it is off, boot logs a loud warning with the counts a purge WOULD remove, and an
  * admin can inspect or run it by hand: POST /api/admin/retention { "dry_run": true | false }.
  *
+ * The schedule (daily, first pass shortly after boot) is driven by the shared job runner (src/lib/jobs); this file keeps the purge,
+ * the lease and the OFF-by-default switch. An unset JOBS leaves the purge working on its own in development; JOBS=off disables it too.
+ *
  * Safe with several instances: the purge runs under a DB lease (only one runs at a time) and purgeExpiredData
  * is idempotent, so a second instance running later does nothing new.
  */
@@ -17,9 +20,6 @@ import { logger } from '@/lib/log';
 const log = logger('retention');
 
 export const RETENTION_LEASE_KEY = 'job:retention-purge';
-const DAY_MS = 24 * 60 * 60 * 1000;
-const FIRST_RUN_DELAY_MS = 2 * 60 * 1000;
-const PREVIEW_DELAY_MS = 15 * 1000;
 const LEASE_TTL_MS = 5 * 60 * 1000;
 
 /** Only the exact value `on` enables the automatic purge (unset, off, 1, true, typos: all stay off). */
@@ -61,24 +61,4 @@ export async function logRetentionPreview(): Promise<void> {
   } catch (err) {
     log.error('preview_failed', { err });
   }
-}
-
-let started = false;
-
-export function startRetentionJob(): void {
-  if (started) return;
-  started = true;
-  if (!retentionJobEnabled()) {
-    const t = setTimeout(() => { void logRetentionPreview(); }, PREVIEW_DELAY_MS);
-    t.unref?.();
-    log.warn('off_by_default', { hint: 'set RETENTION_JOB=on to delete data past each business\'s retention window; counts that would be purged are logged shortly after boot' });
-    return;
-  }
-  const first = setTimeout(() => {
-    void runRetentionPurge();
-    const daily = setInterval(() => { void runRetentionPurge(); }, DAY_MS);
-    daily.unref?.();
-  }, FIRST_RUN_DELAY_MS);
-  first.unref?.();
-  log.info('scheduled', { every_hours: 24 });
 }

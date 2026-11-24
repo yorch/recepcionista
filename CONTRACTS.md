@@ -123,3 +123,21 @@ owner Jorge `+13055550199`.
   (primary|ghost|outline|danger), `VoicePlayer`.
 - Formatters in `@/lib/format`:
   `timeET, dayET, whenET, money, seconds, relative, initials, firstName`.
+
+## Added: calendar and call handling routes
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/bookings?view=week|day|month&date=YYYY-MM-DD[&ws=0|1]` | staff+; `{view,date,days,from,to,timezone,week_start,items,truncated}` for the visible range in the business zone |
+| `GET /api/bookings?agenda=upcoming|past&cursor&limit` | staff+; `{items,next_cursor}` |
+| `GET /api/bookings/[id]` | staff+; `{booking, call}` (call summary = notes) |
+| `PATCH /api/bookings/[id]` | owner+; `{status:'cancelled'|'completed'}` -> `{booking,changed,deposit_refund_needed}`; audited |
+| `POST /api/bookings/[id]/resend-confirmation` | owner+; goes through `sendAndLog` (opt-out, caps) -> `{sms,deduped,status}` |
+| `GET /api/calls?cursor&limit[&voicemail=1]`, `GET /api/briefings?cursor&limit` | staff+; `{items,next_cursor}`; calls carry `has_voicemail`, never `recording_url` |
+| `GET/PATCH /api/businesses/[id]/call-mode` | GET staff+ (view now also `forward_supported`, `forward_blocked`), PATCH owner+ `{mode?, forward_during_hours?}` (at least one; 403 `reauth_required` when switching into paused/forward without recent authentication; 422 on a line that cannot forward) |
+| `POST /api/auth/reauth` | session; `{password}` or `{code}` -> stamps the session `sudo_at` (valid 5 min) |
+| `PUT/DELETE /api/businesses/[id]/forward-number` | owner+; `{use_owner_phone:true}` (needs recent authentication and an allowed number) / clear |
+| `POST /api/businesses/[id]/forward-number/verify/{start,confirm}` | owner+, verified email; SMS-code verification |
+| `POST /api/voice/voicemail` | Twilio signature; forwarded-call result (meters minutes) and voicemail recording |
+| `POST /api/voice/dial-status` | Twilio signature; per-leg status callback of a forwarded call (meters bridged seconds once per call) |
+| `GET /api/calls/[id]/voicemail` | staff+, tenant scoped; streams the voicemail audio (audio/mpeg, no-store); 404 for other tenants |

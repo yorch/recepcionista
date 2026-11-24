@@ -104,13 +104,37 @@ Every one of these must use the public origin from `APP_URL`:
 | Twilio (voice webhook on the number) | `POST /api/voice/incoming` |
 | ElevenLabs (post-call webhook) | `POST /api/voice/webhook` |
 | ElevenLabs (agent tools) | `POST /api/voice/tools/<tool>` |
-| Stripe (webhook) | `POST /api/payments/webhook` |
+| Stripe (deposit webhook, `STRIPE_WEBHOOK_SECRET`) | `POST /api/payments/webhook` |
+| Stripe (subscription webhook, `STRIPE_BILLING_WEBHOOK_SECRET`; needed when `BILLING_ENFORCED=true`) | `POST /api/billing/webhook` |
+| ElevenLabs (conversation-initiation webhook, header `x-recepcionista-tool-secret`) | `POST /api/voice/initiation` |
 | Twilio (inbound SMS: STOP/START/HELP and 1-5 gratitude replies) | `POST /api/sms/inbound` (the number has ONE inbound URL; `/api/sms/gratitude-reply` still honours STOP but is legacy) |
+
+**Required `.env` values.** Besides the database, `DOMAIN`/`APP_URL` and the provider secrets above, `deploy.sh` refuses to run without
+`APP_SECRET_KEY` (32 random bytes, base64), `EMAIL_PROVIDER` = `resend`|`smtp` with `EMAIL_FROM` and its key (signup verification,
+password reset and invitations send mail; `log` is refused in production), the Turnstile site/secret pair (REQUIRED for open signup in production; the only alternative is the explicit, loud `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true`, otherwise signup answers `503 signup_disabled` and deploy.sh fails), and
+`BILLING_ENFORCED` set explicitly (`true`, or deliberately `false`, which prints a loud banner: production **fails closed**, so unset/invalid is refused here and in
+`compose.production.yaml`), with `BILLING_ENFORCED=true` also `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and `STRIPE_BILLING_WEBHOOK_SECRET`, and
+`OWNER_PHONE_GRANDFATHER=true` only together with `OWNER_PHONE_GRANDFATHER_ACK=i-understand`. It also refuses
+`DEMO_MODE`, `ALLOW_INSECURE_DEV` or `STRIPE_ALLOW_UNSIGNED` set to `true`. The full table is `docs/env-vars.md`.
+`NEXT_PUBLIC_*` values are build arguments (compose passes them), so changing them needs a re-run of `./deploy.sh`.
+
+**Existing customers and `BILLING_ENFORCED`.** Signup is public, so billing is enforced from the first deploy; comp the tenants that already exist (vetted, created before the cutoff you pass):
+`docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/grandfather-existing.ts --force-i-know --before <deploy time ISO>`
+(a dry run that prints the eligible and skipped lists; read them, then add `--apply`; it never verifies an owner phone and skips self-signup and unverified-email/phone businesses; the `seed` service is only a one-shot tools container, nothing is seeded). Details and the `OWNER_PHONE_GRANDFATHER` alternative: `docs/billing.md`.
 
 **Retention is off until you turn it on.** `RETENTION_JOB` defaults to off: nothing is auto-deleted after an
 upgrade (existing businesses have a 365-day window, which would otherwise purge older data on first boot). Boot
 logs the counts that *would* be purged. Review each business's window (Dashboard > Settings), check with
 `POST /api/admin/retention {"dry_run":true}` (admin token), then set `RETENTION_JOB=on` in `.env`. See `docs/compliance.md`.
+
+**Background jobs are on by default in production** (`JOBS`, unset = on): the 6 PM briefing per business time zone, the hourly gratitude sweep and the hourly
+cleanup of expired sessions/tokens/events/rate-limit rows run inside the `app` container (no extra service, no cron needed), fenced by Postgres leases so scaling the
+app to several containers is safe. `JOBS=off` stops all of them (deploy.sh prints a warning). Tick length: `JOBS_TICK_SECONDS` (default 60). Check them with
+`GET /api/admin/jobs` (admin token); run one by hand with `POST /api/admin/jobs/run` (dry run unless `"dry_run":false`). `docs/runbook.md` has the details.
+
+**Twilio must be complete in production** (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`): provisioning refuses to hand out a mock number there
+(503 `phone_provider_not_configured`; a failed purchase is a 502 and the retry reuses any number already bought). deploy.sh warns when they are missing.
+Trial businesses get lower caps (`TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP`; docs/billing.md).
 
 **Set `STRIPE_WEBHOOK_SECRET` in production.** Without it,
 `/api/payments/webhook` would accept *unsigned* payloads, and anyone who finds
@@ -214,8 +238,8 @@ The owner dashboard and the JSON API are protected by `ADMIN_TOKEN`: sign in at
 with their own signatures. See the Authentication section of the README.
 
 Before you point a provider at the host, confirm on the deployed build that
-these return 401 without a token: `/dashboard`, `/api/businesses`,
-`/api/sms/send`, and `/api/extract`. Also confirm that `/api/demo/*` is not
+these return 401 without a credential: `/dashboard`, `/api/businesses`,
+`/api/sms/send`, and `/api/extract` (owners may call `/api/extract` and `/api/businesses/<id>/provision` for their own business only, with a verified email and, when enforced, a paid plan). Also confirm that `/api/demo/*` is not
 reachable (`DEMO_MODE` unset). The full pre-launch list is in the README
 security checklist.
 

@@ -2,36 +2,50 @@
  * Shared-secret admin auth. Edge/Node safe (Web Crypto only) because it is
  * used from src/proxy.ts as well as route handlers.
  *
- * The raw ADMIN_TOKEN never lands in a cookie: the session cookie holds an
- * HMAC-SHA256 derived from it, so a leaked cookie cannot be replayed as the
- * Bearer token and rotating ADMIN_TOKEN invalidates every session.
+ * The raw ADMIN_TOKEN never lands in a cookie. Logging in with it creates a server-side
+ * `admin_token` session (src/lib/db/users.ts createAdminSession, 12 h, revocable) whose random opaque
+ * token is the cookie value; the proxy here only checks the cookie's SHAPE (the database validates it
+ * in Node, src/lib/session.ts). There is no signed/derived admin cookie any more.
  */
 
+/** Break-glass admin session cookie: a random opaque token (DB stores only its sha256). */
 export const SESSION_COOKIE = 'rc_session';
-export const SESSION_MAX_AGE_S = 60 * 60 * 24 * 7;
+export const SESSION_MAX_AGE_S = 60 * 60 * 12;
 /** Per-user session cookie: holds the raw opaque token; the DB stores only its sha256. */
 export const USER_SESSION_COOKIE = 'rc_user_session';
 /** Admin-only UI preference (selected business). Not a credential; always re-checked server-side. */
 export const BUSINESS_COOKIE = 'rc_business';
-
-const SESSION_CONTEXT = 'recepcionista-admin-session-v1';
 
 /** Paths reachable without admin auth (provider webhooks verify their own signatures). */
 const PUBLIC_API_EXACT = new Set([
   '/api/health',
   '/api/auth/login',
   '/api/auth/logout',
+  // Account lifecycle (each handler rate limits, validates and never reveals whether an email exists).
+  '/api/auth/signup',
+  '/api/auth/verify-email',
+  '/api/auth/resend-verification',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
+  '/api/auth/accept-invite',
+  '/api/auth/mfa', // second login step: authenticates its own (MFA-pending) session cookie
   '/api/voice/webhook',
   '/api/voice/post-call',
   '/api/voice/incoming',
+  '/api/voice/dial-status', // Twilio per-leg status callback of a forwarded call (meters minutes): verifies the Twilio signature itself
+  '/api/voice/voicemail', // Twilio callback for paused/forwarded calls: verifies the Twilio signature itself
+  '/api/voice/initiation', // ElevenLabs conversation-initiation webhook: authenticated by the shared tool secret header
   '/api/payments/webhook',
+  '/api/billing/webhook',
   // Public checkout page's "Pay" button. The route itself 404s unless DEMO_MODE=true and reads the amount from the DB.
   '/api/pay/mock-complete',
   '/api/sms/gratitude-reply',
   '/api/sms/inbound',
 ]);
 const PUBLIC_API_PREFIX = ['/api/voice/tools/'];
-const PUBLIC_PAGE_EXACT = new Set(['/', '/login']);
+const PUBLIC_PAGE_EXACT = new Set([
+  '/robots.txt', '/sitemap.xml', '/', '/login', '/login/mfa', '/signup', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite',
+]);
 const PUBLIC_PAGE_PREFIX = ['/pay/'];
 
 /** Static assets that are really served from public/ or Next internals. */
@@ -113,11 +127,6 @@ export function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** Value stored in the session cookie. */
-export async function sessionValue(token: string): Promise<string> {
-  return hmacHex(token, SESSION_CONTEXT);
-}
-
 /** Compare two secrets without leaking content/length: compare HMAC digests. */
 export async function tokensMatch(candidate: string, token: string): Promise<boolean> {
   const [a, b] = await Promise.all([hmacHex(token, `cmp:${candidate}`), hmacHex(token, `cmp:${token}`)]);
@@ -133,7 +142,7 @@ export function readCookie(header: string | null, name: string): string | null {
   return null;
 }
 
-/** Cheap shape check for a user-session token (proxy gating only; the DB validates it in Node handlers). */
+/** Cheap shape check for a session token (proxy gating only; the DB validates it in Node handlers). */
 export function looksLikeUserSessionToken(v: string | null | undefined): v is string {
   return typeof v === 'string' && /^[A-Za-z0-9_-]{20,200}$/.test(v);
 }
@@ -144,14 +153,22 @@ export function userSessionTokenFrom(headers: Headers): string | null {
   return looksLikeUserSessionToken(v) ? v : null;
 }
 
-/** True when the request carries the break-glass ADMIN_TOKEN (Bearer) or the admin session cookie. Edge safe. */
+/** The break-glass admin-session token from a request's Cookie header, if it has the right shape. */
+export function adminSessionTokenFrom(headers: Headers): string | null {
+  const v = readCookie(headers.get('cookie'), SESSION_COOKIE);
+  return looksLikeUserSessionToken(v) ? v : null;
+}
+
+/**
+ * Cheap proxy check: the request carries the break-glass ADMIN_TOKEN (Bearer, verified) or a well-formed
+ * admin-session cookie (shape only; the database validates it in Node). Edge safe.
+ */
 export async function hasAdminCredentials(headers: Headers): Promise<boolean> {
   const cfg = authConfig();
   if (cfg.mode !== 'enforce') return false;
   const authz = headers.get('authorization');
   if (authz && /^bearer /i.test(authz) && (await tokensMatch(authz.slice(7).trim(), cfg.token))) return true;
-  const cookie = readCookie(headers.get('cookie'), SESSION_COOKIE);
-  return Boolean(cookie) && timingSafeEqual(cookie as string, await sessionValue(cfg.token));
+  return adminSessionTokenFrom(headers) !== null;
 }
 
 /** True when the request carries one of our session cookies (so cookie CSRF rules apply). */
@@ -198,36 +215,6 @@ export function checkSameOrigin(headers: Headers, opts: { requirePresent?: boole
     } catch { /* ignore malformed config */ }
   }
   return hosts.has(originHost.toLowerCase());
-}
-
-/** True when the request carries a valid session cookie or Bearer token. */
-export async function isAuthenticated(req: Request): Promise<boolean> {
-  const cfg = authConfig();
-  if (cfg.mode === 'open') return true;
-  if (cfg.mode === 'misconfigured') return false;
-
-  const authz = req.headers.get('authorization');
-  if (authz && /^bearer /i.test(authz)) {
-    if (await tokensMatch(authz.slice(7).trim(), cfg.token)) return true;
-  }
-  const cookie = readCookie(req.headers.get('cookie'), SESSION_COOKIE);
-  if (cookie) {
-    return timingSafeEqual(cookie, await sessionValue(cfg.token));
-  }
-  return false;
-}
-
-/**
- * Defense in depth for route handlers (the proxy already gates /api/**).
- * Returns a Response to send when unauthenticated, otherwise null.
- */
-export async function requireAdmin(req: Request): Promise<Response | null> {
-  if (await isAuthenticated(req)) return null;
-  const misconfigured = authConfig().mode === 'misconfigured';
-  return Response.json(
-    { ok: false, error: misconfigured ? 'server auth not configured' : 'unauthorized' },
-    { status: misconfigured ? 503 : 401 },
-  );
 }
 
 /** Headers for server-to-server calls to this app's own protected /api routes. */

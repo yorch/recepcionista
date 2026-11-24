@@ -38,7 +38,7 @@ const HTML = `<!doctype html><html><head>
 let pass = 0, failN = 0;
 const check = (label: string, cond: boolean) => {
   console.log(`${cond ? 'PASS' : 'FAIL'} — ${label}`);
-  cond ? pass++ : failN++;
+  if (cond) pass++; else failN++;
 };
 
 const server = Bun.serve({ port: 0, fetch: () => new Response(HTML, { headers: { 'content-type': 'text/html' } }) });

@@ -72,6 +72,126 @@ if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -z "${TWILIO_AUTH_TOKEN:-}" ]]; then
   die "TWILIO_AUTH_TOKEN is unset in .env but TWILIO_ACCOUNT_SID is set."
 fi
 
+# Account lifecycle (docs/env-vars.md). Without these the deploy "works" and then every signup, password reset and 2FA enrolment
+# fails closed in production, so refuse here instead.
+if [[ -z "${APP_SECRET_KEY:-}" ]]; then
+  die "APP_SECRET_KEY is unset in .env. Required in production (encrypts 2FA secrets): openssl rand -base64 32"
+fi
+[[ "$(printf '%s' "$APP_SECRET_KEY" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" == "32" ]] \
+  || die "APP_SECRET_KEY must be 32 random bytes, base64 encoded (openssl rand -base64 32)"
+case "${EMAIL_PROVIDER:-}" in
+  resend)
+    [[ -n "${RESEND_API_KEY:-}" ]] || die "EMAIL_PROVIDER=resend but RESEND_API_KEY is unset in .env" ;;
+  smtp)
+    [[ -n "${SMTP_URL:-}" || -n "${SMTP_HOST:-}" ]] || die "EMAIL_PROVIDER=smtp but neither SMTP_URL nor SMTP_HOST is set in .env" ;;
+  *)
+    die "EMAIL_PROVIDER must be 'resend' or 'smtp' in production (got '${EMAIL_PROVIDER:-}'); 'log' is refused. Verification and reset emails depend on it." ;;
+esac
+[[ -n "${EMAIL_FROM:-}" ]] || die "EMAIL_FROM is unset in .env (e.g. 'Recepcionista <no-reply@${DOMAIN}>')"
+# Signup abuse control: the Turnstile site key (public, build time) and secret (server) only work as a pair.
+if [[ -n "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" && -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
+  die "NEXT_PUBLIC_TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET_KEY is not: the widget would render but nothing would verify it."
+fi
+if [[ -n "${TURNSTILE_SECRET_KEY:-}" && -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]]; then
+  die "TURNSTILE_SECRET_KEY is set but NEXT_PUBLIC_TURNSTILE_SITE_KEY is not: every signup would fail closed (no token). Set the site key before building."
+fi
+# Open signup REQUIRES a captcha in production (owner decision): the full Turnstile pair, or the explicit, loud opt-out
+# SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Without either the app refuses public signup (503 signup_disabled; invites still work),
+# so a deploy that would silently ship a dead /signup is refused here instead.
+if [[ -z "${TURNSTILE_SECRET_KEY:-}" || -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]]; then
+  case "${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" in
+    true) ;;
+    *) die "Open signup needs Turnstile in production: set TURNSTILE_SECRET_KEY and NEXT_PUBLIC_TURNSTILE_SITE_KEY, or (not recommended) SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Without either, /api/auth/signup answers 503 signup_disabled and /signup is invite-only (docs/auth.md)." ;;
+  esac
+fi
+# Dev/demo switches must never reach production.
+for v in DEMO_MODE ALLOW_INSECURE_DEV STRIPE_ALLOW_UNSIGNED; do
+  [[ "${!v:-}" != "true" ]] || die "${v}=true in .env: never enable it on a production host (docs/runbook.md)."
+done
+
+# Subscription billing (docs/billing.md). FAIL CLOSED: in production billing is enforced unless BILLING_ENFORCED=false is
+# set explicitly, because signup is public and anything else would hand every stranger a free number, agent and texts.
+# So the operator must DECIDE: the variable must be present (true or false); an unset/typo value is refused here.
+case "${BILLING_ENFORCED:-}" in
+  true)
+    for v in STRIPE_SECRET_KEY STRIPE_PRICE_ID STRIPE_BILLING_WEBHOOK_SECRET; do
+      [[ -n "${!v:-}" ]] || die "${v} is unset in .env but BILLING_ENFORCED=true. See docs/billing.md."
+    done
+    echo "NOTE: BILLING_ENFORCED=true. Existing tenants must be comped first (bun scripts/grandfather-existing.ts --before <deploy time>, docs/billing.md step 5)."
+    ;;
+  false)
+    echo "################################################################################" >&2
+    echo "# WARNING: BILLING_ENFORCED=false. Texts and calls are NOT capped and tenants    #" >&2
+    echo "# need no plan for them. Non-admin provisioning (number + agent) still requires  #" >&2
+    echo "# an active plan. Do not run like this with open signup (docs/billing.md).       #" >&2
+    echo "################################################################################" >&2
+    ;;
+  *)
+    die "BILLING_ENFORCED is '${BILLING_ENFORCED:-}' (unset or invalid) in .env. Production fails closed: set BILLING_ENFORCED=true (with the Stripe keys; docs/billing.md) or, deliberately, BILLING_ENFORCED=false." ;;
+esac
+# Owner-phone grandfathering bypasses opt-outs and the country allow-list for unverified numbers: it needs an explicit acknowledgement.
+if [[ "${OWNER_PHONE_GRANDFATHER:-}" == "true" ]]; then
+  [[ "${OWNER_PHONE_GRANDFATHER_ACK:-}" == "i-understand" ]] \
+    || die "OWNER_PHONE_GRANDFATHER=true needs OWNER_PHONE_GRANDFATHER_ACK=i-understand (and, strongly, OWNER_PHONE_GRANDFATHER_UNTIL / _BEFORE). Without the ack the app ignores it. See docs/runbook.md section 6."
+  echo "WARNING: OWNER_PHONE_GRANDFATHER=true: unverified owner phones receive alerts that bypass opt-outs and the country allow-list. Turn it off once owners verified." >&2
+fi
+# Background jobs (docs/runbook.md "Background jobs"): JOBS takes the same values the app accepts (on/true/1/yes, off/false/0/no, or
+# empty = on in production); anything else is refused instead of silently running the default. Off is allowed but loud: no daily
+# briefing, no gratitude sweep, no cleanup, no retention purge.
+jobs_value="$(printf '%s' "${JOBS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "${jobs_value}" in
+  ""|on|true|1|yes|off|false|0|no) ;;
+  *) die "JOBS is '${JOBS}' in .env: use on or off (also accepted: true/false, 1/0, yes/no; empty = on in production)." ;;
+esac
+case "${jobs_value}" in
+  off|false|0|no)
+    echo "WARNING: JOBS=${JOBS}. The 6 PM daily briefing, the hourly gratitude sweep, the expired-row cleanup and the retention purge will NOT run (docs/runbook.md)." >&2 ;;
+esac
+for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP OWNER_ALERT_HOURLY_LIMIT FORWARD_MAX_CALL_SECONDS FORWARD_CALLS_PER_HOUR VOICEMAIL_PER_HOUR \
+  VOICEMAIL_MINUTES_CAP FORWARD_MINUTES_CAP TRIAL_FORWARD_MINUTES_CAP FORWARD_MAX_CONCURRENT FORWARD_PER_CALLER_PER_HOUR VOICEMAIL_PER_CALLER_PER_HOUR \
+  FORWARD_WITHHELD_PER_HOUR VOICEMAIL_WITHHELD_PER_HOUR CALLER_UNKNOWN_SHARE_PCT FORWARD_MIN_ANSWERED_SECONDS FORWARD_RING_SECONDS; do
+  [[ -z "${!v:-}" || "${!v}" =~ ^[0-9]+$ ]] || die "${v} is '${!v}' in .env: it must be a whole number (docs/env-vars.md)."
+done
+# Call handling (docs/runbook.md section 8): the line kind decides whether Forward exists at all; the deny list is 3-digit NANP area codes.
+case "${VOICE_LINE_KIND:-}" in
+  ""|native|webhook) ;;
+  *) die "VOICE_LINE_KIND is '${VOICE_LINE_KIND}' in .env: use native (number imported into ElevenLabs) or webhook (Voice URL is /api/voice/incoming), or leave it empty." ;;
+esac
+# Round 6 L5: webhook against a native ElevenLabs number would only make the dashboard promise forwarding that never happens. The app
+# treats the line as native (the safe reading) and logs/diagnoses it; say so here too.
+if [[ "${VOICE_LINE_KIND:-}" == "webhook" && -n "${ELEVENLABS_API_KEY:-}" && -n "${ELEVENLABS_PHONE_NUMBER_ID:-}" ]]; then
+  echo "WARNING: VOICE_LINE_KIND=webhook, but ELEVENLABS_PHONE_NUMBER_ID is set: that number is answered by ElevenLabs, which can never forward a call. The app will treat the line as NATIVE (forwarding NOT available). Unset VOICE_LINE_KIND, or remove the ElevenLabs phone number settings if this deployment really answers on a Twilio Voice URL (docs/runbook.md section 8)." >&2
+fi
+# Round 6: percentages and the ring time have a range (the app falls back to the default outside it; failing here is kinder than a silent default).
+if [[ -n "${CALLER_UNKNOWN_SHARE_PCT:-}" ]] && (( CALLER_UNKNOWN_SHARE_PCT < 1 || CALLER_UNKNOWN_SHARE_PCT > 100 )); then
+  die "CALLER_UNKNOWN_SHARE_PCT is '${CALLER_UNKNOWN_SHARE_PCT}' in .env: use a whole number from 1 to 100 (docs/env-vars.md)."
+fi
+if [[ -n "${FORWARD_RING_SECONDS:-}" ]] && (( FORWARD_RING_SECONDS < 10 || FORWARD_RING_SECONDS > 40 )); then
+  die "FORWARD_RING_SECONDS is '${FORWARD_RING_SECONDS}' in .env: use a whole number from 10 to 40 (docs/env-vars.md)."
+fi
+if [[ -n "${FORWARD_DENY_AREA_CODES:-}" ]]; then
+  IFS=',' read -ra _deny_codes <<< "${FORWARD_DENY_AREA_CODES}"
+  for c in "${_deny_codes[@]}"; do
+    c="${c//[[:space:]]/}"
+    [[ "${c}" =~ ^[2-9][0-9]{2}$ ]] || die "FORWARD_DENY_AREA_CODES has '${c}' in .env: use comma separated 3-digit NANP area codes such as 305,212 (docs/env-vars.md)."
+  done
+fi
+# Default area code for newly bought numbers (a business's own owner-phone area code wins): three digits, first 2-9.
+[[ -z "${TWILIO_AREA_CODE:-}" || "${TWILIO_AREA_CODE}" =~ ^[2-9][0-9]{2}$ ]] \
+  || die "TWILIO_AREA_CODE is '${TWILIO_AREA_CODE}' in .env: it must be a 3-digit US/Canada area code such as 305 (docs/env-vars.md). Unset it to use 305."
+# Phone numbers: in production a failed purchase FAILS provisioning (no fake number is ever issued), so Twilio must be complete.
+if [[ -z "${TWILIO_ACCOUNT_SID:-}" || -z "${TWILIO_AUTH_TOKEN:-}" || -z "${TWILIO_PHONE_NUMBER:-}" ]]; then
+  echo "WARNING: Twilio is not fully configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER). Provisioning a business will answer 503 phone_provider_not_configured: production never hands out a mock number (docs/runbook.md)." >&2
+fi
+# Signup abuse control: the captcha waiver is allowed but loud.
+if [[ "${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" == "true" && ( -z "${TURNSTILE_SECRET_KEY:-}" || -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ) ]]; then
+  echo "################################################################################" >&2
+  echo "# WARNING: SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Open signup has NO captcha: only   #" >&2
+  echo "# rate limits and the platform cap stand between it and a bot farm. Configure    #" >&2
+  echo "# Turnstile (TURNSTILE_SECRET_KEY + NEXT_PUBLIC_TURNSTILE_SITE_KEY) instead.     #" >&2
+  echo "################################################################################" >&2
+fi
+
 # The proxy's network is host-level infrastructure, not something this stack
 # owns. Create it once rather than failing on a fresh host.
 if ! docker network inspect traefik >/dev/null 2>&1; then

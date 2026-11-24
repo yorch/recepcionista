@@ -1,52 +1,45 @@
-import { listBriefings } from '@/lib/db';
+import type { Metadata } from 'next';
+import { listBriefingsPage } from '@/lib/db';
 import { hasRole } from '@/lib/session';
 import { getDashboardContext } from '@/lib/dashboard-context';
-import { Card } from '@/components/ui/card';
-import { VoicePlayer } from '@/components/ui/audio';
+import { EmptyState } from '@/components/ui/empty';
+import { PageHeader } from '@/components/ui/page-header';
+import { BriefingsList } from '@/components/dashboard/briefings-list';
 import { BriefingActions } from '@/components/dashboard/briefing-actions';
-import { money } from '@/lib/format';
+
+export const metadata: Metadata = { title: 'Briefings' };
 
 export const dynamic = 'force-dynamic';
 
 export default async function BriefingsPage() {
   const ctx = await getDashboardContext();
   const biz = ctx.business;
-  const briefings = await listBriefings(biz.id);
+  const page = await listBriefingsPage(biz.id, { limit: 14 });
+  const briefings = page.items;
+  const isOwner = hasRole(ctx.principal, 'owner');
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-6 py-8">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-[24px] font-semibold tracking-[-0.02em]">Briefings</h1>
-          <p className="mt-1 text-[13px] text-[#8b98ab]">Forty-five seconds. Then you know your day.</p>
-        </div>
-        {hasRole(ctx.principal, 'owner') ? <BriefingActions businessId={biz.id} /> : null}
-      </header>
+    <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
+      <PageHeader
+        title="Briefings"
+        subtitle="Forty-five seconds. Then you know your day."
+        right={isOwner ? <BriefingActions businessId={biz.id} /> : null}
+      />
 
-      <div className="mt-6 flex flex-col gap-4">
-        {briefings.map((b) => (
-          <Card key={b.id} className="p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <p className="text-[12px] font-medium text-[#cbd7e6]">{b.date}</p>
-              <div className="flex gap-3 text-[10.5px] text-[#6b7b91]">
-                <span>{b.stats.calls} calls</span>
-                <span>{b.stats.bookings} booked</span>
-                <span>{money(b.stats.revenue)}</span>
-                {b.stats.flags ? <span className="text-[#f2c86b]">{b.stats.flags} flagged</span> : null}
-              </div>
-            </div>
-            <VoicePlayer src={b.audio_url} label={`Evening note · ${b.date}`} />
-            <p className="mt-3 rounded-xl bg-[#080b10] p-3.5 text-[12.5px] leading-relaxed text-[#9fb0c5]">
-              {b.transcript}
-            </p>
-          </Card>
-        ))}
-        {briefings.length === 0 ? (
-          <Card className="p-10 text-center text-[13px] text-[#5a6b80]">
-            No briefings yet. Tap “Generate now”.
-          </Card>
-        ) : null}
-      </div>
+      <BriefingsList businessId={biz.id} initial={page} />
+      {briefings.length === 0 ? (
+        <div className="mt-6">
+          <EmptyState
+            title="No briefings yet"
+            body={isOwner
+              ? 'A briefing is a short voice note about your day: calls, bookings, money, and anything that needs you. Generate one now to hear how it sounds.'
+              : 'Briefings are short voice notes about the day. The account owner can generate them.'}
+            secondary={{ href: '/dashboard/calls', label: 'See calls' }}
+          >
+            {isOwner ? <BriefingActions businessId={biz.id} /> : null}
+          </EmptyState>
+        </div>
+      ) : null}
     </main>
   );
 }

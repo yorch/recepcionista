@@ -2,6 +2,7 @@ import { runTool } from '@/lib/voice/tools';
 import type { ToolResult } from '@/lib/voice/tools';
 import { verifyToolSecret } from '@/lib/voice/elevenlabs';
 import { getBusinessByAgentId, getCall } from '@/lib/db';
+import { callGate, CAPACITY_EXEMPT_TOOLS, outOfServiceToolMessage } from '@/lib/voice/capacity';
 import { logger } from '@/lib/log';
 
 const log = logger('voice/tools');
@@ -110,9 +111,21 @@ export async function POST(
   let result: ToolResult;
   try {
     const args = await bindTenant(normalize(await readBody(req)), Boolean(auth.skipped));
-    result = args
-      ? await runTool(tool, args)
-      : { ok: false, message: 'Let me get the owner for that.' };
+    if (!args) {
+      result = { ok: false, message: 'Let me get the owner for that.' };
+    } else {
+      const toolName = tool.trim().toLowerCase().replace(/[\s-]+/g, '_');
+      const gate = CAPACITY_EXEMPT_TOOLS.has(toolName) || typeof args.business_id !== 'string'
+        ? null
+        : await callGate(args.business_id);
+      result = gate && !gate.ok
+        ? {
+          ok: false,
+          message: outOfServiceToolMessage(typeof args.language === 'string' && args.language.toLowerCase().startsWith('es') ? 'es' : 'en'),
+          data: { reason: gate.reason ?? 'out_of_service' },
+        }
+        : await runTool(tool, args);
+    }
   } catch {
     result = { ok: false, message: 'Let me get the owner for that.' };
   }

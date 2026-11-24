@@ -3,20 +3,37 @@
 # Dependabot immediately regardless of this schedule.
 version: 2
 updates:
-  # Base images in the Dockerfile. Dependabot's docker ecosystem only reads
-  # Dockerfiles and compose files with the standard names, so the image refs in
-  # compose.*.yaml are not covered and need a manual bump.
+  # Base images in the Dockerfile.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Image refs (e.g. the postgres digest) in compose.production.yaml and
+  # compose.dev.yaml. The docker ecosystem above does not read these files.
+  # Dependabot matches compose files by name, so confirm the PRs appear
+  # after the first run; if they do not, pin them manually.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
 
   # package.json and bun.lock. Dependabot reads the lockfile for resolution.
   - package-ecosystem: "npm"
@@ -24,3 +41,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]

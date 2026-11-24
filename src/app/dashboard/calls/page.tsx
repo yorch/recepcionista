@@ -1,84 +1,84 @@
-import { listCalls } from '@/lib/db';
+import type { Metadata } from 'next';
+import { countCalls, getCall, listCallsPage } from '@/lib/db';
 import { getDashboardContext } from '@/lib/dashboard-context';
-import { Badge } from '@/components/ui/badge';
-import { Card } from '@/components/ui/card';
-import { relative, seconds } from '@/lib/format';
+import { hasRole } from '@/lib/session';
+import { EmptyState } from '@/components/ui/empty';
+import { PageHeader } from '@/components/ui/page-header';
+import { CallsList } from '@/components/dashboard/calls-list';
+import { VoicemailList } from '@/components/dashboard/voicemail-list';
+import { publicCall } from '@/lib/voice/voicemail';
+import { cn } from '@/components/ui/cn';
+import Link from 'next/link';
+
+export const metadata: Metadata = { title: 'Calls' };
 
 export const dynamic = 'force-dynamic';
 
-const LANG_LABEL: Record<string, string> = { en: 'English', es: 'Español', mixed: 'Spanglish' };
-const LANG_TONE: Record<string, string> = { en: 'neutral', es: 'brand', mixed: 'sky' };
-
-export default async function CallsPage() {
+export default async function CallsPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const ctx = await getDashboardContext();
   const biz = ctx.business;
-  const calls = await listCalls(biz.id);
+  const q = await searchParams;
+  const callId = Array.isArray(q.call) ? q.call[0] : q.call;
+  const tab = (Array.isArray(q.tab) ? q.tab[0] : q.tab) === 'voicemails' ? 'voicemails' : 'calls';
+  const [page, total, linked, voicemails] = await Promise.all([
+    listCallsPage(biz.id, { limit: 25 }),
+    countCalls(biz.id),
+    // A call opened from a booking: only ever one of THIS business's calls.
+    callId ? getCall(callId) : Promise.resolve(null),
+    // Voicemails left on a paused / forwarded line (audio plays through /api/calls/:id/voicemail, never from a provider URL).
+    listCallsPage(biz.id, { limit: 25, voicemailOnly: true }),
+  ]);
+  const focus = linked && linked.business_id === biz.id ? publicCall(linked) : null;
+  const isOwner = hasRole(ctx.principal, 'owner');
+  const nowMs = new Date().getTime();
+  const tabs = [
+    { key: 'calls', label: 'All calls', href: '/dashboard/calls' },
+    { key: 'voicemails', label: voicemails.items.length > 0 ? `Voicemails (${voicemails.next_cursor ? `${voicemails.items.length}+` : voicemails.items.length})` : 'Voicemails', href: '/dashboard/calls?tab=voicemails' },
+  ] as const;
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-6 py-8">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="text-[24px] font-semibold tracking-[-0.02em]">Calls</h1>
-          <p className="mt-1 text-[13px] text-[#8b98ab]">Every conversation, transcribed and triaged.</p>
-        </div>
-        <span className="text-[11px] text-[#6b7b91]">{calls.length} total</span>
-      </header>
+    <main className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
+      <PageHeader title="Calls" subtitle="Every conversation, transcribed and triaged." right={<span className="text-xs text-dim">{total} total</span>} />
 
-      <div className="mt-6 flex flex-col gap-3">
-        {calls.map((c) => (
-          <Card key={c.id} className="p-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#161e29] text-[12px] font-medium text-[#9fb0c5]">
-                  {(c.caller_name ?? c.caller_phone ?? '?').slice(0, 2).toUpperCase()}
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <p className="text-[13.5px] font-medium text-white">{c.caller_name ?? 'Unknown caller'}</p>
-                    <Badge tone={LANG_TONE[c.language ?? 'en']}>{LANG_LABEL[c.language ?? 'en']}</Badge>
-                    {c.urgency !== 'routine' ? <Badge tone={c.urgency}>{c.urgency}</Badge> : null}
-                  </div>
-                  <p className="mt-0.5 font-mono text-[11px] text-[#5a6b80]">
-                    {c.caller_phone} · {relative(c.started_at)} · {seconds(c.duration_sec)}
-                  </p>
-                </div>
-              </div>
-              {c.flagged_reason ? (
-                <span className="rounded-lg border border-[#473817] bg-[#2e2410] px-2.5 py-1 text-[10.5px] text-[#f2c86b]">
-                  needs you
-                </span>
-              ) : (
-                <span className="rounded-lg border border-[#1c4635] bg-[#10291f] px-2.5 py-1 text-[10.5px] text-[#6ee7b0]">
-                  handled
-                </span>
-              )}
-            </div>
-
-            {c.summary ? (
-              <p className="mt-3 text-[12.5px] leading-relaxed text-[#9fb0c5]">{c.summary}</p>
-            ) : null}
-
-            {c.flagged_reason ? (
-              <p className="mt-2 rounded-lg bg-[#1a1208] px-3 py-2 text-[11.5px] text-[#f2c86b]">{c.flagged_reason}</p>
-            ) : null}
-
-            {c.transcript ? (
-              <details className="group mt-3">
-                <summary className="cursor-pointer list-none text-[11px] text-[#6b7b91] transition-colors hover:text-[#ff8f5e]">
-                  <span className="group-open:hidden">Show transcript ▾</span>
-                  <span className="hidden group-open:inline">Hide transcript ▴</span>
-                </summary>
-                <p className="mt-2 max-h-48 overflow-y-auto rounded-lg bg-[#080b10] p-3.5 text-[12px] leading-relaxed text-[#8b98ab]">
-                  {c.transcript}
-                </p>
-              </details>
-            ) : null}
-          </Card>
+      <nav aria-label="Calls views" className="mt-5 flex gap-1 border-b border-line-2">
+        {tabs.map((t) => (
+          <Link
+            key={t.key} href={t.href} aria-current={tab === t.key ? 'page' : undefined}
+            className={cn('inline-flex min-h-11 items-center border-b-2 px-3.5 text-[13px] font-medium transition-colors', tab === t.key ? 'border-brand text-white' : 'border-transparent text-mute hover:text-soft')}
+          >
+            {t.label}
+          </Link>
         ))}
-        {calls.length === 0 ? (
-          <Card className="p-10 text-center text-[13px] text-[#5a6b80]">No calls yet.</Card>
-        ) : null}
-      </div>
+      </nav>
+
+      {tab === 'voicemails' ? (
+        voicemails.items.length > 0 ? (
+          <VoicemailList businessId={biz.id} initial={{ items: voicemails.items.map(publicCall), next_cursor: voicemails.next_cursor }} nowMs={nowMs} retentionDays={biz.retention_days ?? 365} />
+        ) : (
+          <div className="mt-6">
+            <EmptyState
+              title="No voicemails"
+              body="When calls are paused, or a forwarded call is not answered, callers can leave a message here. You will see who called, when, and can play it back and call them."
+              cta={isOwner ? { href: '/dashboard/settings#call-handling', label: 'Call handling settings' } : undefined}
+            />
+          </div>
+        )
+      ) : (
+        <CallsList businessId={biz.id} initial={{ items: page.items.map(publicCall), next_cursor: page.next_cursor }} nowMs={nowMs} focus={focus} />
+      )}
+
+      {tab === 'calls' && page.items.length === 0 && !focus ? (
+        <div className="mt-6">
+          <EmptyState
+            title="No calls yet"
+            body={biz.phone
+              ? `Call ${biz.phone} from another phone to hear her answer. Real calls show up here with a transcript, summary and urgency.`
+              : 'Your receptionist needs a phone number before she can take calls.'}
+            cta={isOwner ? { href: '/onboarding', label: biz.phone ? 'Test call and call forwarding' : 'Finish setup' } : undefined}
+            secondary={{ href: '/dashboard/knowledge', label: 'Review what she knows' }}
+          />
+        </div>
+      ) : null}
     </main>
   );
 }

@@ -4,6 +4,7 @@
  */
 import type { Business, ExtractionResult, FAQ, KnowledgeBase, Service } from '@/lib/types';
 
+/** The ONE list of voice tool names (voice/tools.ts and voice/elevenlabs.ts re-export / import it). */
 export const TOOL_NAMES = [
   'check_availability',
   'create_booking',
@@ -14,13 +15,12 @@ export const TOOL_NAMES = [
   'handoff_to_human',
 ] as const;
 
+export type ToolName = typeof TOOL_NAMES[number];
+
 const DAY_KEYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
 
-/** The seven voice tools the agent must be told about, by exact name. */
-export const REQUIRED_TOOLS = [
-  'check_availability', 'create_booking', 'send_sms', 'create_payment_link',
-  'flag_emergency', 'get_pricing', 'handoff_to_human',
-] as const;
+/** The voice tools the agent must be told about, by exact name (the same list). */
+export const REQUIRED_TOOLS = TOOL_NAMES;
 
 /** Marker heading of the compliance block; lets stale stored prompts be detected and healed. */
 export const COMPLIANCE_MARKER = '## DISCLOSURE, CONSENT AND LIFE SAFETY';
@@ -162,7 +162,7 @@ If the caller insists on a human, the request is outside your knowledge, the cal
 
 ## CALL FLOW (5 steps)
 1. GREET: warm greeting, e.g. "Thank you for calling ${business.name}, how can I help you today?" / "¡Gracias por llamar a ${business.name}, ¿cómo le puedo ayudar?"
-2. IDENTIFY THE NEED: ask what's going on, get the address/zip and a callback number. Listen for the specific symptoms.
+2. IDENTIFY THE NEED: ask what's going on and get the address/zip. Listen for the specific symptoms. CALLBACK NUMBER: the number the caller is dialling from is already known to the system (caller id) and every tool uses it. Do NOT ask the caller to read out a phone number. Say "I'll use the number you're calling from" and only ask for a number if the caller says it is not the right one or the number is withheld (then pass it as customer_phone / callback_number).
 3. TRIAGE FOR EMERGENCY: ask the emergency questions (water leaking? anyone vulnerable at home? burning smell? total failure in extreme heat?). If yes, jump to the emergency procedure above.
 4. BOOK OR ESCALATE: for routine calls, use check_availability to offer 2–3 time slots and create_booking to book. If nothing fits or it's complex, handoff_to_human.
 5. CONFIRM AND SEND SMS: repeat the booking details back (service, date, time, address, starting price), then send_sms so the customer has it in writing. Mention the deposit link if one applies.
@@ -201,8 +201,8 @@ export function buildCallScript(kb: Pick<KnowledgeBase, 'services'>): string {
   If YES → treat as emergency: reassure, flag it, and get the owner on the line.
 
 3) BOOKING
-  EN: "I can get a technician out to you. I have [slot 1] or [slot 2] — which works better? And what's the best callback number and the service address?"
-  ES: "Puedo mandarle un técnico. Tengo [opción 1] u [opción 2] — ¿cuál le queda mejor? ¿Y me deja su número y la dirección del servicio?"
+  EN: "I can get a technician out to you. I have [slot 1] or [slot 2] — which works better? And what's the service address? I'll use the number you're calling from, unless you'd like me to use a different one."
+  ES: "Puedo mandarle un técnico. Tengo [opción 1] u [opción 2] — ¿cuál le queda mejor? ¿Y la dirección del servicio? Usaré el número desde el que llama, a menos que prefiera darme otro."
   Mention the starting price for the service and that the tech confirms the final price on site.
 
 4) CLOSE

@@ -2,6 +2,13 @@ import { ok, fail } from '@/lib/http';
 import { getBusinessByPhone, listBusinesses, createCall, getCallBySid, updateCall } from '@/lib/db';
 import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
+import { allowMissedCallAlert, callGate, outOfServiceFirstMessage, pausedFirstMessage } from '@/lib/voice/capacity';
+import { resolveCallRoute } from '@/lib/voice/call-mode';
+import { markForwarded, markPaused, markUnavailable } from '@/lib/voice/non-ai';
+import { forwardAllowance, voicemailAllowance } from '@/lib/voice/forward-metering';
+import { vetForwardNumber } from '@/lib/voice/forward-vet';
+import { forwardRingSeconds, forwardTwiml, pausedTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
+import { alertOwner } from '@/lib/voice/owner-alert';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
 
@@ -55,7 +62,7 @@ export async function POST(req: Request) {
     // A number that is not ours routes to the only business of a single-tenant/demo install, never to
     // "the first of several" (that would hand one tenant another tenant's caller).
     const matched = to ? await getBusinessByPhone(to) : null;
-    const all = matched ? [] : await listBusinesses();
+    const all = matched ? [] : await listBusinesses({ limit: 2 });
     const business: Business | null = matched ?? (all.length === 1 ? all[0] : null);
     if (!business) {
       log.error('no_business', { to: to || null, from: from || null });
@@ -82,6 +89,110 @@ export async function POST(req: Request) {
       recording_disclosed: false,
       consent_status: 'unknown',
     });
+
+    // Plan gate: over the call-minutes cap (or no active plan while billing is enforced) the caller hears an honest
+    // out-of-service line, the call is handed off (the owner is told when their phone is verified) and no agent is used.
+    const gate = await callGate(business.id);
+    let allowedSeconds: number | undefined;
+
+    // Call handling mode (paused / forward). A lapsed PLAN stops these too (we do not place or take calls for an inactive account).
+    // This is the 'webhook' line (a signed Twilio form POST answered with TwiML), the only kind that can dial a human.
+    let route = resolveCallRoute(business, new Date(), 'webhook');
+    if (route.action === 'ai' && (business.call_mode ?? 'ai') === 'forward') {
+      log.warn('forward_not_applied', { business: business.id, why: route.why });
+    }
+    const isJson = (req.headers.get('content-type') ?? '').includes('application/json');
+    let refusal: string | null = null;
+    // The CALLER is the reason a forward was refused (their own hourly budget): the owner is not texted about it.
+    let callerLimited = false;
+    let knownCaller = false;
+    if (route.action === 'ai' && route.why === 'forward_number_rejected') {
+      log.error('forward_number_rejected', { business: business.id, call: call.id, reason: 'stored number no longer passes the forward rules' });
+      refusal = 'Forwarding was refused: the forwarding number is not allowed';
+    }
+    if (route.action === 'forward') {
+      // DIAL-TIME checks (never trust what was stored earlier): the target must still pass every forward-number rule and must not be
+      // one of the platform's own lines, and the plan must still allow the minutes (the <Dial> is capped to what is left).
+      const vet = await vetForwardNumber(business, route.to);
+      if (!vet.ok) {
+        log.error('forward_number_rejected', { business: business.id, call: call.id, reason: vet.error });
+        refusal = 'Forwarding was refused: the forwarding number is not allowed';
+        route = { action: 'ai', why: 'forward_number_rejected' };
+      } else if (!(gate.ok || gate.reason !== 'no_plan')) {
+        // plan lapsed: handled by the out-of-service branch below
+      } else {
+        const allowance = await forwardAllowance(business.id, process.env, { business, callSid: callSid || null, from });
+        knownCaller = allowance.known ?? false;
+        if (!allowance.ok) {
+          if (allowance.why !== 'no_plan') {
+            log.warn('forward_refused', { business: business.id, call: call.id, why: allowance.why });
+            callerLimited = allowance.why === 'caller_limited';
+            refusal = allowance.why === 'cap_reached'
+              ? 'Forwarding was not used: this month\'s forwarded-call minutes are used up'
+              : allowance.why === 'rate_limited' ? 'Forwarding was not used: too many forwarded calls this hour'
+                : allowance.why === 'caller_limited' ? 'Forwarding was not used: too many calls from this number this hour'
+                  : allowance.why === 'concurrent_limit' ? 'Forwarding was not used: too many forwarded calls at the same time' : 'Forwarding was not used: the minutes check failed';
+            route = { action: 'paused' };
+          }
+        } else {
+          allowedSeconds = allowance.timeLimit;
+        }
+      }
+    }
+    // A forward that cannot be dialled never leaves a signed Twilio caller with JSON: they get the voicemail instead.
+    if (refusal && route.action === 'ai' && !isJson) route = { action: 'paused' };
+    if (route.action !== 'ai' && (gate.ok || gate.reason !== 'no_plan')) {
+      if (route.action === 'forward') {
+        await markForwarded(call, route.to);
+        log.info('forwarded', { business: business.id, call: call.id, time_limit_s: allowedSeconds });
+        if (isJson) return ok({ business_id: business.id, call_id: call.id, call_mode: 'forward', forwarded: true, ws_url: null, mock: true });
+        return twimlResponse(forwardTwiml(route.to, {
+          callerId: business.phone_e164 ?? null, action: '/api/voice/voicemail', timeLimit: allowedSeconds, statusCallback: '/api/voice/dial-status',
+          ringSeconds: forwardRingSeconds(),
+        }));
+      }
+      if (!isJson) {
+        const vm = await voicemailAllowance(business.id, process.env, { business, callSid: callSid || null, from });
+        if (!vm.ok) {
+          // Over their own limit (or the stranger share): the cheap path, nothing is recorded, and the owner is not texted for it.
+          log.warn('voicemail_refused', { business: business.id, call: call.id, why: vm.why });
+          const callerCaused = vm.why === 'caller_limited' || vm.why === 'unknown_reserved';
+          await markUnavailable(business, call, from, vm.why === 'cap_reached' ? 'the voicemail minutes of this month are used up' : callerCaused ? 'too many calls from this number' : 'too many voicemails this hour', {
+            notify: !callerCaused, known: vm.known,
+          });
+          return twimlResponse(unavailableTwiml());
+        }
+      }
+      await markPaused(business, call, from, refusal, { notify: !callerLimited, known: knownCaller });
+      if (isJson) {
+        return ok({
+          agent_id: '', business_id: business.id, call_id: call.id, business_name: business.name, caller_phone: from || null,
+          ws_url: null, mock: true, call_mode: 'paused', paused: true, fallback_script: pausedFirstMessage(business),
+        });
+      }
+      return twimlResponse(pausedTwiml(business, '/api/voice/voicemail'));
+    }
+
+    if (!gate.ok) {
+      if (call.status !== 'handed_off') {
+        await updateCall(call.id, { status: 'handed_off', flagged_reason: `out_of_service:${gate.reason ?? 'capacity'}` });
+        const alert = (await allowMissedCallAlert(business.id))
+          ? await alertOwner(business, `MISSED CALL — ${business.name}\nA call${from ? ` from ${from}` : ''} was not taken by the assistant (${gate.reason === 'no_plan' ? 'plan inactive' : 'monthly call minutes used up'}). Please call back.`)
+          : null;
+        log.warn('handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert?.notified ?? false, alert_suppressed: alert === null });
+      }
+      return ok({
+        agent_id: '',
+        business_id: business.id,
+        call_id: call.id,
+        business_name: business.name,
+        caller_phone: from || null,
+        ws_url: null,
+        mock: true,
+        out_of_service: true,
+        fallback_script: outOfServiceFirstMessage(business),
+      });
+    }
 
     // Best-effort: a failed agent refresh must not drop the call.
     let agentId = '';

@@ -40,6 +40,14 @@ export function normalizeInbound(body: string | null | undefined): string {
     .trim();
 }
 
+/** Whole-message affirmative answers that grant follow-up consent (the customer's own, explicit text to the business number). */
+const POSITIVE = new Set(['YES', 'Y', 'SI', 'START']);
+
+/** True when the ENTIRE message is YES / Y / SI / START (case, accents, punctuation folded). */
+export function isPositiveKeyword(body: string | null | undefined): boolean {
+  return POSITIVE.has(normalizeInbound(body));
+}
+
 export function parseKeyword(body: string | null | undefined): SmsKeyword {
   const text = normalizeInbound(body);
   if (!text) return null;
@@ -67,6 +75,10 @@ export function stopReply(businessName: string): string {
 
 export function startReply(businessName: string): string {
   return `${businessName}: You are resubscribed to texts about your appointments. Reply STOP to opt out.`;
+}
+
+export function consentReply(businessName: string): string {
+  return `${businessName}: Thanks! We may text you after your visit to ask how it went. Reply STOP to opt out.`;
 }
 
 export function helpReply(businessName: string, phone?: string | null): string {

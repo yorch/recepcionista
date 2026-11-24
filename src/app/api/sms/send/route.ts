@@ -1,16 +1,13 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { sendAndLog } from '@/lib/messaging';
-import { getBusiness, listBookings, listCalls } from '@/lib/db';
+import { getBusiness, isKnownContact } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
-import { normalizePhone } from '@/lib/providers/twilio';
 import { validateRecipient } from '@/lib/messaging/recipient';
 
 export const dynamic = 'force-dynamic';
 
 const MAX_BODY_CHARS = 480;
-
-const digits = (p?: string | null) => (p ?? '').replace(/\D/g, '');
 
 /**
  * Owner free text to a known contact of THEIR business, still logged. The caller picks only `to` and `body`:
@@ -37,7 +34,6 @@ export async function POST(req: Request) {
     const check = validateRecipient(body.to);
     if (!check.ok) return fail(check.error, 422);
     const to = check.to;
-    const d = digits(to);
 
     const businessId = scopeBusinessId(auth.principal, body.business_id);
     if (!businessId) return fail('business_id is required', 422);
@@ -45,12 +41,8 @@ export async function POST(req: Request) {
     const business = await getBusiness(businessId);
     if (!business) return fail('business not found', 404);
 
-    // Only known contacts: the owner, a booking customer, or a past caller.
-    const known = new Set<string>();
-    if (business.owner_phone) known.add(digits(normalizePhone(business.owner_phone)));
-    for (const b of await listBookings(business.id)) if (b.customer_phone) known.add(digits(normalizePhone(b.customer_phone)));
-    for (const c of await listCalls(business.id)) if (c.caller_phone) known.add(digits(normalizePhone(c.caller_phone)));
-    if (!known.has(d)) return fail('recipient is not a known contact of this business', 403);
+    // Only known contacts: the owner, a booking customer, or a past caller (indexed E.164 lookups, not a scan of the history).
+    if (!(await isKnownContact(business.id, to))) return fail('recipient is not a known contact of this business', 403);
 
     const { sms } = await sendAndLog({ business_id: business.id, to, body: body.body, kind: 'manual' });
     return ok(sms);

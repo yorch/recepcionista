@@ -19,4 +19,6 @@ if (url) {
     throw new Error('TEST_DATABASE_URL must name a database containing "test" or "scratch"');
   }
   process.env.DATABASE_URL = url;
+  // Lets tests count the SQL statements a code path runs (src/lib/db/client.ts recordQueries). Never set in production.
+  process.env.PRISMA_QUERY_EVENTS = '1';
 }

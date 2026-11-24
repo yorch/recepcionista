@@ -191,7 +191,7 @@ suite('postgres-backed shared state', () => {
     await db.prisma.smsLog.create({ data: { businessId: b.id, toPhone: '+13055550188', body: 'hello', kind: 'other' } });
 
     const counts = await db.eraseCustomerData(b.id, '+13055550199');
-    expect(counts).toEqual({ calls: 1, sms_logs: 1, bookings_anonymized: 1, briefings: 0, audio_files: 0 });
+    expect(counts).toEqual({ calls: 1, sms_logs: 1, bookings_anonymized: 1, briefings: 0, audio_files: 0, recordings: 0, recordings_pending: 0, recording_deletion: 'complete' });
     expect(await db.getCall(call.id)).toBeNull();
     expect(await db.getCall(keep.id)).not.toBeNull();
     expect(await db.getCall(theirs.id)).not.toBeNull();

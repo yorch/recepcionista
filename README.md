@@ -15,6 +15,22 @@ with a 45-second voice note.
 **[Read the PRD →](PRD.md)** — problem framing, data model, agent design and the
 parallel work plan.
 
+## Documentation index
+
+| Doc | What it covers |
+| --- | --- |
+| [docs/auth.md](docs/auth.md) | principals, roles, sessions, signup/verify/reset/invite flows, 2FA, CSRF, threat notes |
+| [docs/billing.md](docs/billing.md) | Stripe subscriptions, trials, plan caps, grandfathering, releasing canceled tenants |
+| [docs/compliance.md](docs/compliance.md) | recording/AI disclosure, SMS consent and opt-out, retention and erasure, operator duties |
+| [docs/env-vars.md](docs/env-vars.md) | every environment variable: required, default, secret |
+| [docs/runbook.md](docs/runbook.md) | pre-deploy checklist, live test call, `verify:deploy`, rollback, provider checklist, release of canceled tenants |
+| [docs/security-headers.md](docs/security-headers.md) | nonce-based CSP, other response headers, rollout switches |
+| [docs/testing.md](docs/testing.md) | what runs where, the scratch database, destructive scripts |
+| [docs/dependencies.md](docs/dependencies.md) | dependency audit, licenses, advisories, pins |
+| [docs/known-limitations.md](docs/known-limitations.md) | honest list of what is not covered or needs the operator |
+
+See also [DEPLOY.md](DEPLOY.md).
+
 ## Screenshots
 
 Onboarding — paste a website URL, get a knowledge base, a voice agent and a
@@ -101,8 +117,9 @@ designed for a server that already runs Traefik. See [DEPLOY.md](DEPLOY.md); the
 short version:
 
 ```sh
-cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN,
-                        # STRIPE_WEBHOOK_SECRET, provider keys
+cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN, APP_SECRET_KEY,
+                        # EMAIL_PROVIDER + EMAIL_FROM + its key, STRIPE_WEBHOOK_SECRET, provider keys
+                        # (every variable: docs/env-vars.md; deploy.sh refuses to run without the required ones)
 ./deploy.sh             # build, back up the DB, migrate, start
 ./deploy.sh --seed --i-know-this-wipes-data   # …plus the demo dataset (wipes data)
 ```
@@ -149,6 +166,17 @@ until then nothing is auto-deleted and boot logs what a purge would remove. Insp
 `POST /api/admin/retention {"dry_run":true}`. Twilio's inbound-SMS webhook must be `POST /api/sms/inbound`
 (see DEPLOY.md and `docs/compliance.md`).
 
+**Background jobs run by themselves in production.** A small runner inside the app (Postgres leases, safe with several instances) generates each
+live business's end-of-day briefing at 18:00 in that business's own time zone (and texts the verified owner a link), runs the gratitude sweep hourly
+and cleans expired sessions/tokens/events. `JOBS=on|off` (default on in production, off in development), `JOBS_TICK_SECONDS` (default 60).
+`GET /api/admin/jobs` shows last run / next due; `POST /api/admin/jobs/run` runs one by hand (dry run by default). See `docs/runbook.md` "Background jobs".
+
+**Phone numbers never fake it in production.** If the carrier purchase fails, provisioning answers 502 (503 without Twilio credentials) and the business
+stays `onboarding`; a retry reuses a number that was already bought. The `+1<area>555xxxx` demo number exists only outside production with no Twilio credentials.
+
+**Texts are metered in SMS segments** (an emoji or accented character makes each segment shorter), a text that would exceed the cap is not sent, and trials get lower caps
+(`TRIAL_SMS_CAP` 50, `TRIAL_CALL_MINUTES_CAP` 30). See `docs/billing.md`.
+
 ## Security checklist before going live
 
 Work through this before pointing a real phone number or a real Stripe account
@@ -159,6 +187,13 @@ at a public host. Each item is a check, not a promise that the code does it.
 - [ ] `STRIPE_WEBHOOK_SECRET` is set, and `STRIPE_ALLOW_UNSIGNED` is unset.
 - [ ] `ELEVENLABS_WEBHOOK_SECRET` is set. Unsigned voice webhook calls are rejected.
 - [ ] `DEMO_MODE` is unset. `POST /api/demo/reset` is not reachable from the internet.
+- [ ] `APP_SECRET_KEY` (32 random bytes, base64) and a real `EMAIL_PROVIDER` (`resend`/`smtp`) are set: signup verification,
+      password reset and 2FA depend on them. `BILLING_ENFORCED` is set explicitly (production fails closed: unset = enforced, and
+      deploy.sh refuses it unset); with `true`: `STRIPE_PRICE_ID`, `STRIPE_BILLING_WEBHOOK_SECRET`, and existing tenants comped first
+      (`bun scripts/grandfather-existing.ts --before <deploy time>`, docs/billing.md). `OWNER_PHONE_GRANDFATHER` stays off.
+- [ ] Open signup has a captcha: `TURNSTILE_SECRET_KEY` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY` set (or the explicit, not recommended
+      `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true`). Without either, production refuses public signup (503 `signup_disabled`, `/signup` is invite-only) and deploy.sh fails.
+- [ ] Pages carry a nonce-based `Content-Security-Policy` (docs/security-headers.md); `bun run verify:deploy` passes.
 - [ ] Without a token, `/dashboard`, `/api/businesses` and `/api/sms/send` return
       401. Check this with `curl` against the public URL.
 - [ ] `STRIPE_SECRET_KEY` is a test key (`sk_test_…`) until the payment flow has
@@ -252,6 +287,7 @@ src/lib/db/               Prisma client + async data layer (single import point)
 src/lib/providers/        llm · twilio · stripe — real-or-mock adapters
 src/lib/voice/            the seven tools + ElevenLabs agent client
 src/lib/briefing/         Spanglish script generation + TTS
+src/lib/jobs/             background job runner: 6 PM briefing per time zone, gratitude sweep, cleanup, retention
 src/lib/messaging/        bilingual SMS templates
 src/app/api/              all route handlers
 src/app/dashboard/        owner UI

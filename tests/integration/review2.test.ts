@@ -385,7 +385,7 @@ integration('review round 2 regressions (postgres)', () => {
 
     const res = await privacyErase(adminReq('/api/privacy/erase', { business_id: biz.id, phone: target }));
     expect(res.status).toBe(200);
-    expect(((await res.json()) as any).data).toEqual({ calls: 1, sms_logs: 3, bookings_anonymized: 1, briefings: 1, audio_files: 1 });
+    expect(((await res.json()) as any).data).toEqual({ calls: 1, sms_logs: 3, bookings_anonymized: 1, briefings: 1, audio_files: 1, recordings: 0, recordings_pending: 0, recording_deletion: 'complete' });
     expect(await prisma.smsLog.findMany({ where: { businessId: biz.id } }).then((r) => r.map((x) => x.id))).toEqual([keepSms.id]);
     expect(await prisma.briefing.findMany({ where: { businessId: biz.id } }).then((r) => r.map((x) => x.id))).toEqual([keepBriefing.id]);
     expect(fs.existsSync(path.join(audioDir, `briefing-${biz.id}-${day}.mp3`))).toBe(false);

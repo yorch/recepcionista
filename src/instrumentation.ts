@@ -9,6 +9,9 @@
  */
 import type { Instrumentation } from 'next';
 import { logger, serializeError } from '@/lib/log';
+import { ownerPhoneGrandfatherProblem } from '@/lib/messaging/owner';
+import { signupAvailability, signupConfigWarning } from '@/lib/signup-config';
+import { lineKindMismatch } from '@/lib/voice/line';
 
 const boot = logger('boot');
 let booted = false;
@@ -49,6 +52,25 @@ function providerSummary() {
   };
 }
 
+/** Loud, one-time configuration warnings (billing fail-open, owner-phone grandfathering). */
+function startupWarnings(): void {
+  if (process.env.NEXT_PHASE === 'phase-production-build') return;
+  if (process.env.NODE_ENV === 'production') {
+    const v = (process.env.BILLING_ENFORCED ?? '').trim();
+    if (v === 'false') {
+      boot.warn('billing.not_enforced', { banner: '!!! BILLING_ENFORCED=false: texts and calls are NOT capped and plans are not required for existing tenants. Non-admin provisioning still needs an active plan. Do not run like this with open signup.' });
+    } else if (v !== 'true') {
+      boot.info('billing.enforced_by_default', { note: 'BILLING_ENFORCED is not set to true: production enforces billing by default (set BILLING_ENFORCED=false only to opt out explicitly)' });
+    }
+  }
+  const sw = signupConfigWarning();
+  if (sw) boot.warn(signupAvailability().open ? 'signup.without_captcha' : 'signup.disabled', { banner: sw });
+  const lm = lineKindMismatch();
+  if (lm) boot.error('voice_line_kind_mismatch', { banner: `!!! ${lm}` });
+  const og = ownerPhoneGrandfatherProblem();
+  if (og) boot.warn('owner_phone_grandfather', { warning: og });
+}
+
 export async function register() {
   // Edge runtime gets its own instance of this module; only Node knows about
   // Postgres sockets, so the boot banner is Node-only and logged once.
@@ -65,10 +87,13 @@ export async function register() {
     ...providerSummary(),
   });
 
-  // Daily PII retention purge (not during `next build`, not in tests).
+  startupWarnings();
+
+  // Background jobs (daily briefing, gratitude sweep, cleanup, retention purge): not during `next build`, not in tests.
+  // JOBS=on|off (default on in production), JOBS_TICK_SECONDS; see src/lib/jobs.
   if (process.env.NEXT_PHASE !== 'phase-production-build' && process.env.DATABASE_URL) {
-    const { startRetentionJob } = await import('@/lib/retention-job');
-    startRetentionJob();
+    const { startJobRunner } = await import('@/lib/jobs');
+    startJobRunner();
   }
 }
 

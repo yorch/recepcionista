@@ -18,7 +18,12 @@ export function countryAllowed(e164: string, codes: string[] = allowedCountryCod
 export type RecipientCheck = { ok: true; to: string } | { ok: false; error: string };
 
 /** Normalize loosely (10/11-digit US forms) then require strict E.164 and an allowed country. */
-export function validateRecipient(raw: string, codes: string[] = allowedCountryCodes()): RecipientCheck {
+export function validateRecipient(
+  raw: string,
+  codes: string[] = allowedCountryCodes(),
+  /** Skip the country allow-list (still requires strict E.164). Only for the owner's VERIFIED alert number. */
+  opts: { anyCountry?: boolean } = {},
+): RecipientCheck {
   const digits = (raw ?? '').replace(/\D/g, '');
   let to = (raw ?? '').trim();
   if (digits.length === 10) to = `+1${digits}`;
@@ -26,6 +31,6 @@ export function validateRecipient(raw: string, codes: string[] = allowedCountryC
   else if (/^\+/.test(to)) to = `+${digits}`;
   else if (digits.length > 11) to = `+${digits}`;
   if (!E164.test(to)) return { ok: false, error: 'recipient must be an E.164 number like +13055550123' };
-  if (!countryAllowed(to, codes)) return { ok: false, error: 'destination country is not allowed' };
+  if (!opts.anyCountry && !countryAllowed(to, codes)) return { ok: false, error: 'destination country is not allowed' };
   return { ok: true, to };
 }

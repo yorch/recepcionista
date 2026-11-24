@@ -1,12 +1,18 @@
 import { NextResponse } from 'next/server';
 import {
-  authConfig, checkSameOrigin, sessionValue, tokensMatch, SESSION_COOKIE, SESSION_MAX_AGE_S, USER_SESSION_COOKIE,
+  adminSessionTokenFrom, authConfig, checkSameOrigin, tokensMatch, SESSION_COOKIE, SESSION_MAX_AGE_S, USER_SESSION_COOKIE,
+  userSessionTokenFrom,
 } from '@/lib/auth';
+import { afterResponse, auditIp, userAgentOf } from '@/lib/account-flows';
+import { clearSessionCookie, setSessionCookie } from '@/lib/auth-cookies';
 import {
   ADMIN_TOKEN_ACCOUNT, accountId, checkClientAttempts, checkPair, clearFailures, pairKey, recordFailure, verdictResponse,
 } from '@/lib/login-throttle';
-import { createSession, getUserByEmail, normalizeEmail, SESSION_TTL_MS } from '@/lib/db/users';
-import { verifyPasswordOrDummy } from '@/lib/password';
+import {
+  createAdminSession, createSession, deleteSession, getUserByEmail, normalizeEmail, recordAudit, SESSION_TTL_MS, upgradePasswordHash,
+} from '@/lib/db';
+import { MFA_PENDING_TTL_MS } from '@/lib/mfa';
+import { hashPassword, needsRehash, verifyPasswordOrDummy } from '@/lib/password';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -15,20 +21,23 @@ export const runtime = 'nodejs';
 const log = logger('auth/login');
 const INVALID = 'invalid credentials';
 
-const cookieBase = () => ({
-  httpOnly: true,
-  sameSite: 'lax' as const,
-  secure: process.env.NODE_ENV === 'production',
-  path: '/',
-});
-
 const fail = (status: number, error: string, headers?: Record<string, string>) =>
   NextResponse.json({ ok: false, error }, { status, headers });
 
+/** A new login replaces whatever session the browser still held (no fixation, no orphan rows). */
+async function dropPreviousSessions(req: Request): Promise<void> {
+  for (const t of [userSessionTokenFrom(req.headers), adminSessionTokenFrom(req.headers)]) {
+    if (t) await deleteSession(t).catch(() => false);
+  }
+}
+
 /**
  * Two ways in, one endpoint:
- *   { email, password }  -> per-user session (cookie `rc_user_session`, opaque token, hash stored in the DB)
- *   { token }            -> break-glass ADMIN_TOKEN (cookie `rc_session`)
+ *   { email, password }  -> per-user session (cookie `rc_user_session`, opaque token, hash stored in the DB).
+ *                           With 2FA on, the session is MFA-pending (10 min, confined to /api/auth/mfa) and
+ *                           the response says `mfa_required`.
+ *   { token }            -> break-glass ADMIN_TOKEN: a server-side `admin_token` session (12 h, revocable),
+ *                           cookie `rc_session` with a random opaque value.
  * Failure responses are identical for unknown email, wrong password and disabled account.
  */
 export async function POST(req: Request) {
@@ -42,6 +51,7 @@ export async function POST(req: Request) {
   if (!checkSameOrigin(req.headers)) return fail(403, 'cross-site request refused');
 
   const body = (await req.json().catch(() => ({}))) as { token?: unknown; email?: unknown; password?: unknown };
+  const ip = auditIp(req);
 
   // --- break-glass admin token -------------------------------------------------------------
   if (typeof body.token === 'string' && typeof body.email !== 'string') {
@@ -50,15 +60,24 @@ export async function POST(req: Request) {
     if (!gate.ok) return verdictResponse(gate);
     if (cfg.mode === 'enforce' && !(await tokensMatch(body.token, cfg.token))) {
       await recordFailure(tokenKey, ADMIN_TOKEN_ACCOUNT);
+      log.warn('admin_token_failed', {});
       return fail(401, INVALID);
     }
     await clearFailures(tokenKey);
-    const res = NextResponse.json({ ok: true, data: { authenticated: true, kind: 'admin' } });
-    if (cfg.mode === 'enforce') {
-      res.cookies.set(SESSION_COOKIE, await sessionValue(cfg.token), { ...cookieBase(), maxAge: SESSION_MAX_AGE_S });
+    try {
+      const res = NextResponse.json({ ok: true, data: { authenticated: true, kind: 'admin' } });
+      if (cfg.mode === 'enforce') {
+        await dropPreviousSessions(req);
+        const { token } = await createAdminSession({ ip, userAgent: userAgentOf(req) });
+        setSessionCookie(res, SESSION_COOKIE, token, SESSION_MAX_AGE_S);
+        await recordAudit({ actor_kind: 'admin_token', action: 'auth.admin_login', target: 'admin_token', ip });
+      }
+      clearSessionCookie(res, USER_SESSION_COOKIE);
+      return res;
+    } catch (err) {
+      log.error('error', { err });
+      return fail(503, 'service temporarily unavailable');
     }
-    res.cookies.set(USER_SESSION_COOKIE, '', { ...cookieBase(), maxAge: 0 });
-    return res;
   }
 
   // --- email + password ----------------------------------------------------------------------
@@ -81,18 +100,49 @@ export async function POST(req: Request) {
     if (!user || !valid || user.disabled_at) {
       log.warn('failed', { acct: account.slice(0, 8) });
       await recordFailure(key, account);
+      // Only known accounts are audited (unknown addresses would let junk traffic fill the table); written after
+      // the response so known and unknown addresses answer in the same time.
+      if (user) {
+        await afterResponse('audit.login_failed', () => recordAudit({
+          actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.login_failed',
+          target: `user:${user.id}`, ip, meta: { reason: user.disabled_at ? 'disabled' : 'bad_password' },
+        }));
+      }
       return fail(401, INVALID);
     }
     await clearFailures(key);
-    const { token } = await createSession(user.id);
+
+    // Transparent hash upgrade (stronger scrypt parameters). Does NOT touch sessions; never blocks the login.
+    if (needsRehash(user.password_hash)) {
+      try {
+        await upgradePasswordHash(user.id, user.password_hash, await hashPassword(body.password));
+      } catch (err) {
+        log.warn('rehash_failed', { err });
+      }
+    }
+
+    await dropPreviousSessions(req);
+    const mfaPending = user.totp_enabled;
+    const { token } = await createSession(user.id, {
+      ip, userAgent: userAgentOf(req), ...(mfaPending ? { ttlMs: MFA_PENDING_TTL_MS } : {}),
+    });
     const res = NextResponse.json({
       ok: true,
-      data: { authenticated: true, kind: 'user', email: user.email, role: user.role, business_id: user.business_id },
+      data: mfaPending
+        ? { authenticated: false, mfa_required: true }
+        : {
+            authenticated: true, kind: 'user', email: user.email, role: user.role, business_id: user.business_id,
+            email_verified: user.email_verified_at !== null,
+          },
     });
-    res.cookies.set(USER_SESSION_COOKIE, token, { ...cookieBase(), maxAge: Math.floor(SESSION_TTL_MS / 1000) });
+    setSessionCookie(res, USER_SESSION_COOKIE, token, Math.floor((mfaPending ? MFA_PENDING_TTL_MS : SESSION_TTL_MS) / 1000));
     // The admin cookie outranks a user session: drop it so the account just signed in is the one acting.
-    res.cookies.set(SESSION_COOKIE, '', { ...cookieBase(), maxAge: 0 });
-    log.info('ok', { user: user.id, role: user.role });
+    clearSessionCookie(res, SESSION_COOKIE);
+    await recordAudit({
+      actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id,
+      action: mfaPending ? 'auth.login_password_ok' : 'auth.login', target: `user:${user.id}`, ip,
+    });
+    log.info('ok', { user: user.id, role: user.role, mfa_pending: mfaPending });
     return res;
   } catch (err) {
     log.error('error', { err });

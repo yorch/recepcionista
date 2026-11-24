@@ -48,7 +48,9 @@ check('system_prompt mentions all 7 tools', TOOL_NAMES.every((t) => kb.system_pr
 check('system_prompt has Spanglish rule', kb.system_prompt.includes('Spanglish') && kb.system_prompt.includes('el AC'));
 check('system_prompt has deposit + emergency rules', kb.system_prompt.includes('$500') && kb.system_prompt.includes('burning smell'));
 
-const { phone } = await provisionNumber('305');
+const provisioned = await provisionNumber('305');
+if (!provisioned.ok) throw new Error(`provisionNumber failed: ${provisioned.error}`);
+const { phone } = provisioned;
 const updatedBiz = await updateBusiness(biz.id, { phone, status: 'live' });
 check('provision sets phone + live', !!updatedBiz?.phone && updatedBiz.status === 'live' && phone.startsWith('+1'));
 
