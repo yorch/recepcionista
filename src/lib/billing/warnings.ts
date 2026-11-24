@@ -14,6 +14,9 @@ import type { UsageWarnings, WarnKind, WarnLevel } from '@/lib/db/usage';
 import { sendEmail } from '@/lib/email';
 import { escapeHtml } from '@/lib/email/templates';
 import { inQuietHours } from '@/lib/jobs/schedule';
+import { makeT } from '@/lib/i18n';
+import type { Locale } from '@/lib/i18n/core';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { logger } from '@/lib/log';
 import { ownerAlertStatus } from '@/lib/messaging/owner';
 import { returnBaseUrl } from '@/lib/providers/stripe-billing';
@@ -60,17 +63,17 @@ export function dueWarnings(lines: UsageLine[], sent: UsageWarnings | null): Pen
   return out;
 }
 
-export function warningMessage(w: Pick<PendingWarning, 'kind' | 'level' | 'used' | 'cap' | 'unit'>, businessName: string): { sms: string; subject: string; text: string } {
-  const what = LABEL[w.kind].en;
-  const amount = `${w.used} of ${w.cap} ${w.unit === 'texts' ? 'texts' : 'minutes'}`;
-  const tail = w.level === 100
-    ? (w.kind === 'forward' ? 'Forwarded calls now go to voicemail until the next period.' : w.kind === 'ai' ? 'The assistant cannot take more calls until the next period or a plan change.' : 'Customer texts are paused until the next period or a plan change.')
-    : 'Nothing stops yet; at 100% the limit applies.';
-  const head = w.level === 100 ? `You have used all of your ${what}` : `You have used 80% of your ${what}`;
+export function warningMessage(w: Pick<PendingWarning, 'kind' | 'level' | 'used' | 'cap' | 'unit'>, businessName: string, locale: Locale = 'en'): { sms: string; subject: string; text: string } {
+  const t = makeT(locale);
+  const label = t(`mail.usage.label.${w.kind}` as const);
+  const amount = t('mail.usage.amount', { used: w.used, cap: w.cap, unit: t(w.unit === 'texts' ? 'mail.usage.unit.texts' : 'mail.usage.unit.minutes') });
+  const tail = w.level === 100 ? t(`mail.usage.tail.${w.kind}` as const) : t('mail.usage.tail80');
+  const head = w.level === 100 ? t('mail.usage.head100', { label }) : t('mail.usage.head80', { label });
+  const url = `${returnBaseUrl()}/dashboard/billing`;
   return {
-    sms: `${businessName}: ${head} this month (${amount}). ${tail} Billing: ${returnBaseUrl()}/dashboard/billing`,
-    subject: w.level === 100 ? `Limit reached: ${what} (${businessName})` : `80% of your ${what} used (${businessName})`,
-    text: `${head} this month for ${businessName} (${amount}).\n\n${tail}\n\nSee usage and plans: ${returnBaseUrl()}/dashboard/billing\n`,
+    sms: t('mail.usage.sms', { business: businessName, head, amount, tail, url }),
+    subject: w.level === 100 ? t('mail.usage.subject100', { label, business: businessName }) : t('mail.usage.subject80', { label, business: businessName }),
+    text: t('mail.usage.text', { head, business: businessName, amount, tail, url }),
   };
 }
 
@@ -79,9 +82,12 @@ export interface WarningDeps {
   sendEmail?: (to: string, subject: string, text: string, html: string) => Promise<void>;
   sendSms?: (business: Business, body: string) => Promise<boolean>;
   ownerEmails?: (businessId: string) => Promise<string[]>;
+  /** The language of each owner email and of the alert text (default: the owner's users.locale, else the business default). */
+  ownerLocale?: (business: Business) => Promise<Locale>;
 }
 
 const defaultDeps: Required<Omit<WarningDeps, 'now'>> = {
+  ownerLocale: (b) => ownerLocaleFor(b),
   sendEmail: async (to, subject, text, html) => { await sendEmail({ to, subject, text, html }); },
   sendSms: async (b, body) => (await alertOwner(b, body)).notified,
   ownerEmails: async (id) => (await listBusinessUsers(id)).filter((u) => u.role === 'owner' && !u.disabled_at).map((u) => u.email),
@@ -108,7 +114,7 @@ export async function checkUsageWarnings(businessId: string, deps: WarningDeps =
       const quiet = inQuietHours(now, business.timezone);
       if (quiet && ownerAlertStatus(business) === 'ok') { results.push({ kind: w.kind, level: w.level, outcome: 'deferred_quiet_hours', email: 0, sms: false }); continue; }
       if (!(await markWarned(businessId, w.kind, w.level, now))) { results.push({ kind: w.kind, level: w.level, outcome: 'already_sent', email: 0, sms: false }); continue; }
-      const msg = warningMessage(w, business.name);
+      const msg = warningMessage(w, business.name, await d.ownerLocale(business));
       let emails = 0;
       let sms = false;
       try {

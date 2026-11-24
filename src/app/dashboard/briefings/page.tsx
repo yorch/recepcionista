@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { listBriefingsPage } from '@/lib/db';
+import { getT } from '@/lib/i18n/server';
 import { hasRole } from '@/lib/session';
 import { getDashboardContext } from '@/lib/dashboard-context';
 import { EmptyState } from '@/components/ui/empty';
@@ -7,11 +8,14 @@ import { PageHeader } from '@/components/ui/page-header';
 import { BriefingsList } from '@/components/dashboard/briefings-list';
 import { BriefingActions } from '@/components/dashboard/briefing-actions';
 
-export const metadata: Metadata = { title: 'Briefings' };
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: (await getT())('briefings.title') };
+}
 
 export const dynamic = 'force-dynamic';
 
 export default async function BriefingsPage() {
+  const t = await getT();
   const ctx = await getDashboardContext();
   const biz = ctx.business;
   const page = await listBriefingsPage(biz.id, { limit: 14 });
@@ -21,8 +25,8 @@ export default async function BriefingsPage() {
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
       <PageHeader
-        title="Briefings"
-        subtitle="Forty-five seconds. Then you know your day."
+        title={t('briefings.title')}
+        subtitle={t('briefings.subtitle')}
         right={isOwner ? <BriefingActions businessId={biz.id} /> : null}
       />
 
@@ -30,11 +34,9 @@ export default async function BriefingsPage() {
       {briefings.length === 0 ? (
         <div className="mt-6">
           <EmptyState
-            title="No briefings yet"
-            body={isOwner
-              ? 'A briefing is a short voice note about your day: calls, bookings, money, and anything that needs you. Generate one now to hear how it sounds.'
-              : 'Briefings are short voice notes about the day. The account owner can generate them.'}
-            secondary={{ href: '/dashboard/calls', label: 'See calls' }}
+            title={t('briefings.emptyTitle')}
+            body={isOwner ? t('briefings.emptyOwner') : t('briefings.emptyStaff')}
+            secondary={{ href: '/dashboard/calls', label: t('briefings.seeCalls') }}
           >
             {isOwner ? <BriefingActions businessId={biz.id} /> : null}
           </EmptyState>

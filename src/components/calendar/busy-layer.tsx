@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { apiRequest } from '@/hooks/use-api';
+import { useT } from '@/lib/i18n/client';
 import { dayRange } from '@/lib/time';
 import type { Axis } from '@/lib/calendar';
 import { partsInTz } from '@/lib/time';
@@ -28,6 +29,7 @@ const minutesOfDay = (iso: string, tz: string) => { const p = partsInTz(iso, tz)
 
 /** Absolutely-positioned stripes inside one day column (the column must be `relative`). */
 export function BusyLayer({ blocks, day, tz, axis }: { blocks: Block[]; day: string; tz: string; axis: Axis }) {
+  const t = useT();
   const { gte, lt } = dayRange(day, tz);
   const span = axis.endMin - axis.startMin;
   return (
@@ -40,7 +42,7 @@ export function BusyLayer({ blocks, day, tz, axis }: { blocks: Block[]; day: str
         if (bottom <= top) return null;
         return (
           <div
-            key={`${b.starts_at}-${i}`} aria-hidden="true" title="Busy on your Google Calendar"
+            key={`${b.starts_at}-${i}`} aria-hidden="true" title={t('cal.busyTitle')}
             className="pointer-events-none absolute inset-x-0 z-[1] border-y border-line-3/60"
             style={{ top: `${top}%`, height: `${bottom - top}%`, backgroundImage: 'repeating-linear-gradient(135deg, rgba(139,152,171,.28) 0 4px, transparent 4px 9px)' }}
           />

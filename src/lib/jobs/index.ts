@@ -36,6 +36,8 @@ import { smsSegments } from '@/lib/messaging/policy';
 import { CLEANUP_HORIZON_MS, cleanupRateLimitBuckets } from '@/lib/ratelimit';
 import { retentionJobEnabled, logRetentionPreview, runRetentionNow } from '@/lib/retention-job';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { runReconcileJob, runUsageWarningsJob } from './reconcile';
 import { POLL_EVERY_MS as GOOGLE_POLL_EVERY_MS, runGoogleCalendarWork } from './calendar';
 import { drainRecordingDeletions } from '@/lib/voice/recording-deletion';
@@ -184,7 +186,7 @@ export async function notifyOwnerOfBriefing(business: Business, briefing: Briefi
     if (status === 'no_owner_phone') return 'skipped_no_owner_phone';
     if (status === 'unverified') return 'skipped_owner_unverified';
     if (inQuietHours(now, business.timezone)) return 'skipped_quiet_hours';
-    const body = `Your end-of-day briefing for ${briefing.date} is ready: ${appBaseUrl()}/dashboard/briefings`;
+    const body = makeT(await ownerLocaleFor(business))('alert.briefing', { date: briefing.date, url: `${appBaseUrl()}/dashboard/briefings` });
     const allowed = await checkSmsAllowed(business.id, now, smsSegments(body));
     if (!allowed.ok) return 'skipped_cap';
     const res = await alertOwner(business, body);

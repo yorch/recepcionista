@@ -43,7 +43,7 @@ export async function POST(req: Request) {
       actor_kind: 'user', actor_user_id: user.id, business_id: auditBusinessOf(auth.principal), action: 'auth.passkey_added', target: `passkey:${passkey.id}`,
       ip: auditIp(req), meta: { device_type: passkey.device_type, backed_up: passkey.backed_up },
     });
-    await afterResponse('passkey.added_notice', () => sendPasskeyNotice(user.email, 'added', passkey.name));
+    await afterResponse('passkey.added_notice', () => sendPasskeyNotice(user.email, 'added', passkey.name, user.locale));
     const { user_id: _u, ...safe } = passkey;
     void _u;
     return NextResponse.json({ ok: true, data: { passkey: safe } }, { status: 201 });

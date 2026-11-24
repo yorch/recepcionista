@@ -37,6 +37,6 @@ export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }
   const mine = id.length <= 64 ? (await listPasskeys(user.id)).find((p) => p.id === id) : undefined;
   if (!mine || !(await deletePasskey(user.id, id))) return pkFail(404, 'passkey not found');
   await recordAudit({ actor_kind: 'user', actor_user_id: user.id, business_id: auditBusinessOf(auth.principal), action: 'auth.passkey_removed', target: `passkey:${id}`, ip: auditIp(req) });
-  await afterResponse('passkey.removed_notice', () => sendPasskeyNotice(user.email, 'removed', mine.name));
+  await afterResponse('passkey.removed_notice', () => sendPasskeyNotice(user.email, 'removed', mine.name, user.locale));
   return NextResponse.json({ ok: true, data: { removed: true } });
 }

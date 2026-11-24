@@ -1,11 +1,12 @@
 'use client';
 import { useId } from 'react';
+import { useT } from '@/lib/i18n/client';
 import { VERTICALS, type Vertical } from '@/lib/types';
 import { packOf, tx } from '@/lib/verticals';
 
 /** The trade choice (onboarding and settings). A native select: keyboard and screen-reader friendly, the blurb is tied to it with aria-describedby. */
 export function VerticalPicker({
-  value, onChange, disabled, lang = 'en', label = 'What kind of business is it?',
+  value, onChange, disabled, lang = 'en', label,
 }: {
   value: Vertical;
   onChange: (v: Vertical) => void;
@@ -13,11 +14,12 @@ export function VerticalPicker({
   lang?: 'en' | 'es';
   label?: string;
 }) {
+  const t = useT();
   const id = useId();
   const pack = packOf(value);
   return (
     <div>
-      <label htmlFor={id} className="block text-xs font-medium uppercase tracking-wider text-dim">{label}</label>
+      <label htmlFor={id} className="block text-xs font-medium uppercase tracking-wider text-dim">{label ?? t('kb.picker.label')}</label>
       <select
         id={id} value={value} disabled={disabled} aria-describedby={`${id}-hint`}
         onChange={(e) => onChange(e.target.value as Vertical)}

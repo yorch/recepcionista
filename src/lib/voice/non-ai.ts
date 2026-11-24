@@ -12,6 +12,8 @@ import { allowMissedCallAlert } from '@/lib/voice/capacity';
 import { maskNumber } from '@/lib/voice/call-mode';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { logger } from '@/lib/log';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import type { Business, Call } from '@/lib/types';
 
 const log = logger('voice/non-ai');
@@ -19,12 +21,17 @@ const log = logger('voice/non-ai');
 export const PAUSED_FLAG = 'Paused: the assistant did not answer; the caller was asked to leave a message';
 export const FORWARD_UNANSWERED_FLAG = 'Forwarded call was not answered; the caller was asked to leave a message';
 
+/** The owner-language text of a missed-call alert (`why` is shown as given: callers pass a short reason). */
+export async function missedCallText(business: Business, from: string | null | undefined, why: string): Promise<string> {
+  const t = makeT(await ownerLocaleFor(business));
+  return t('alert.missed', { business: business.name, who: from ? t('alert.missed.from', { from }) : '', why });
+}
+
 /** Tell a verified owner about a call nobody took (rate limited: 1 / 10 min, 6 / hour; never throws). */
 export async function notifyMissedCall(business: Business, from: string | null | undefined, why: string, opts: { known?: boolean } = {}): Promise<boolean> {
   try {
     if (!(await allowMissedCallAlert(business.id, opts))) return false;
-    const who = from ? ` from ${from}` : '';
-    return (await alertOwner(business, `MISSED CALL — ${business.name}\nA call${who} was not taken by the assistant (${why}). Please call back.`)).notified;
+    return (await alertOwner(business, await missedCallText(business, from, why))).notified;
   } catch (err) {
     log.error('missed_call_alert.failed', { business: business.id, err });
     return false;

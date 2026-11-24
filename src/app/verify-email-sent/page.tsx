@@ -1,17 +1,21 @@
 import type { Metadata } from 'next';
 import { AuthLink, AuthShell } from '@/components/auth/auth-ui';
 import { ResendVerificationForm } from '@/components/auth/resend-form';
+import { getT } from '@/lib/i18n/server';
 
-export const metadata: Metadata = { title: 'Check your email' };
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: (await getT())('auth.meta.verifySent') };
+}
 
-export default function VerifyEmailSentPage() {
+export default async function VerifyEmailSentPage() {
+  const t = await getT();
   return (
     <AuthShell
-      title="Check your email"
-      subtitle="If the address can be used, a confirmation link is on its way. It works once and expires in 24 hours."
-      footer={<>Already confirmed? <AuthLink href="/login?next=/onboarding">Sign in</AuthLink></>}
+      title={t('auth.verifySent.title')}
+      subtitle={t('auth.verifySent.subtitle')}
+      footer={<>{t('auth.verifySent.already')} <AuthLink href="/login?next=/onboarding">{t('auth.signup.signIn')}</AuthLink></>}
     >
-      <p className="text-[13px] text-body">Nothing arrived after a few minutes? Check your spam folder, or ask for a new link:</p>
+      <p className="text-[13px] text-body">{t('auth.verifySent.hint')}</p>
       <div className="mt-3"><ResendVerificationForm /></div>
     </AuthShell>
   );

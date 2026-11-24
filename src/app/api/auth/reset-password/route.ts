@@ -52,12 +52,12 @@ export async function POST(req: Request) {
         actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.2fa_cleared_on_reset', target: `user:${user.id}`, ip: auditIp(req),
         meta: { reason: 'enrolled_before_email_verified' },
       });
-      await afterResponse('reset.2fa_notice', () => sendTwoFactorNotice(user.email, false));
+      await afterResponse('reset.2fa_notice', () => sendTwoFactorNotice(user.email, false, user.locale));
     }
     await recordAudit({
       actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.password_reset', target: `user:${user.id}`, ip: auditIp(req),
     });
-    await afterResponse('reset.notice', () => sendPasswordChangedNotice(user.email));
+    await afterResponse('reset.notice', () => sendPasswordChangedNotice(user.email, user.locale));
     return NextResponse.json({ ok: true, data: { reset: true } });
   } catch (err) {
     log.error('error', { err });

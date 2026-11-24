@@ -7,6 +7,7 @@ import { listBusinessUsers } from '@/lib/db/users';
 import { sendEmail } from '@/lib/email';
 import { appBase, clientCredentials, GOOGLE_TOKEN_URL } from './config';
 import { GoogleApiError, googleFetch, toApiError } from './http';
+import { makeT } from '@/lib/i18n';
 import { logger } from '@/lib/log';
 
 const log = logger('gcal');
@@ -43,10 +44,11 @@ export async function markNeedsReauth(connectionId: string, reason: string): Pro
     const owners = users.filter((u) => u.role === 'owner' && u.email);
     for (const o of owners) {
       try {
+        const t = makeT(o.locale ?? 'en');
         await sendEmail({
           to: o.email,
-          subject: 'Reconnect your Google Calendar',
-          text: `Google Calendar access for ${biz?.name ?? 'your business'} stopped working (${reason}). Until you reconnect, your calendar no longer blocks time for the receptionist and new bookings are not added to it.\n\nReconnect: ${appBase()}/dashboard/settings#google-calendar`,
+          subject: t('mail.gcal.subject'),
+          text: t('mail.gcal.body', { business: biz?.name ?? t('mail.gcal.fallbackBusiness'), reason, url: `${appBase()}/dashboard/settings#google-calendar` }),
         });
       } catch (err) { log.warn('reauth_email_failed', { connection: connectionId, err }); }
     }

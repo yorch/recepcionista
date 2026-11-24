@@ -2,6 +2,8 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardHead } from '@/components/ui/card';
 import { TextAreaField, TextField } from '@/components/ui/field';
+import { useLocale, useT } from '@/lib/i18n/client';
+import { weekdayName } from '@/lib/calendar';
 import { DAYS, LIMITS, nextUid, type DraftErrors, type KnowledgeDraft } from './model';
 import { packOf, tx } from '@/lib/verticals';
 import type { Vertical } from '@/lib/types';
@@ -23,7 +25,10 @@ export function KnowledgeForm({
   /** The business's trade: only changes the example in the service-name placeholder. */
   vertical?: Vertical | null;
 }) {
-  const servicePlaceholder = tx(packOf(vertical).hints.servicePlaceholder);
+  const t = useT();
+  const locale = useLocale();
+  const servicePlaceholder = tx(packOf(vertical).hints.servicePlaceholder, locale);
+  const dayName = (key: string) => weekdayName(({ sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 } as Record<string, number>)[key] ?? 0, locale);
   const set = <K extends keyof KnowledgeDraft>(k: K, v: KnowledgeDraft[K]) => onChange({ ...draft, [k]: v });
 
   return (
@@ -32,21 +37,21 @@ export function KnowledgeForm({
 
       {showBusiness ? (
         <Card>
-          <CardHead title="Your business" subtitle="How she introduces you" />
+          <CardHead title={t('kb.form.business')} subtitle={t('kb.form.businessSub')} />
           <div className="grid gap-4 p-5 sm:grid-cols-2">
-            <TextField label="Business name" value={draft.name} maxLength={LIMITS.name} autoComplete="organization"
+            <TextField label={t('kb.form.name')} value={draft.name} maxLength={LIMITS.name} autoComplete="organization"
               onChange={(e) => set('name', e.target.value)} error={errors.name} />
-            <TextField label="Owner name" value={draft.ownerName} maxLength={LIMITS.name} autoComplete="name"
+            <TextField label={t('kb.form.ownerName')} value={draft.ownerName} maxLength={LIMITS.name} autoComplete="name"
               onChange={(e) => set('ownerName', e.target.value)} error={errors.ownerName}
-              hint="She says this when she hands a call to you." />
+              hint={t('kb.form.ownerHint')} />
           </div>
         </Card>
       ) : null}
 
       <Card>
         <CardHead
-          title="Services and prices"
-          subtitle="She quotes these as starting prices, never more"
+          title={t('kb.form.services')}
+          subtitle={t('kb.form.servicesSub')}
           right={<span className="text-xs text-dim">{draft.services.length}/{LIMITS.services}</span>}
         />
         <ul className="divide-y divide-[#171f2a]">
@@ -57,40 +62,40 @@ export function KnowledgeForm({
             return (
               <li key={s.uid} className="p-4 sm:p-5">
                 <div className="grid gap-3 sm:grid-cols-[1fr_120px_110px]">
-                  <TextField label={`Service ${i + 1} name`} srOnlyLabel value={s.name} placeholder={servicePlaceholder}
+                  <TextField label={t('kb.form.serviceName', { n: i + 1 })} srOnlyLabel value={s.name} placeholder={servicePlaceholder}
                     maxLength={LIMITS.serviceName} onChange={(ev) => update({ name: ev.target.value })} error={e.name} />
-                  <TextField label={`Service ${i + 1} starting price in dollars`} srOnlyLabel value={s.price} inputMode="decimal"
-                    placeholder="Price $ (blank = quote)" onChange={(ev) => update({ price: ev.target.value })} error={e.price} />
-                  <TextField label={`Service ${i + 1} duration in minutes`} srOnlyLabel value={s.duration} inputMode="numeric"
-                    placeholder="Minutes" onChange={(ev) => update({ duration: ev.target.value })} error={e.duration} />
+                  <TextField label={t('kb.form.servicePrice', { n: i + 1 })} srOnlyLabel value={s.price} inputMode="decimal"
+                    placeholder={t('kb.form.pricePlaceholder')} onChange={(ev) => update({ price: ev.target.value })} error={e.price} />
+                  <TextField label={t('kb.form.serviceDuration', { n: i + 1 })} srOnlyLabel value={s.duration} inputMode="numeric"
+                    placeholder={t('kb.form.minutesPlaceholder')} onChange={(ev) => update({ duration: ev.target.value })} error={e.duration} />
                 </div>
-                <TextField label={`Service ${i + 1} description`} srOnlyLabel className="mt-3" value={s.description}
-                  placeholder="Short description (optional)" maxLength={LIMITS.description + 20}
+                <TextField label={t('kb.form.serviceDescription', { n: i + 1 })} srOnlyLabel className="mt-3" value={s.description}
+                  placeholder={t('kb.form.descPlaceholder')} maxLength={LIMITS.description + 20}
                   onChange={(ev) => update({ description: ev.target.value })} error={e.description} />
                 <Button variant="ghost" className="mt-2 text-xs text-dim"
-                  aria-label={`Remove service ${i + 1}${s.name ? `: ${s.name}` : ''}`}
+                  aria-label={s.name ? t('kb.form.removeServiceNamed', { n: i + 1, name: s.name }) : t('kb.form.removeService', { n: i + 1 })}
                   onClick={() => set('services', draft.services.filter((x) => x.uid !== s.uid))}>
-                  Remove
+                  {t('common.remove')}
                 </Button>
               </li>
             );
           })}
           {draft.services.length === 0 ? (
-            <li className="px-5 py-6 text-center text-[13px] text-dim">No services yet. Add the jobs customers call about.</li>
+            <li className="px-5 py-6 text-center text-[13px] text-dim">{t('kb.form.noServices')}</li>
           ) : null}
         </ul>
         <div className="border-t border-line p-4">
           <Button variant="outline" disabled={draft.services.length >= LIMITS.services}
             onClick={() => set('services', [...draft.services, { uid: nextUid(), name: '', description: '', price: '', duration: '' }])}>
-            Add a service
+            {t('kb.form.addService')}
           </Button>
         </div>
       </Card>
 
       <Card>
-        <CardHead title="Hours" subtitle="When she can book jobs. Outside these hours she takes a message." />
+        <CardHead title={t('kb.form.hours')} subtitle={t('kb.form.hoursSub')} />
         <fieldset className="divide-y divide-[#171f2a]">
-          <legend className="sr-only">Opening hours by day</legend>
+          <legend className="sr-only">{t('kb.form.hoursLegend')}</legend>
           {DAYS.map((day) => {
             const h = draft.hours[day.key];
             const err = errors.hours[day.key];
@@ -100,20 +105,20 @@ export function KnowledgeForm({
                 <label className="flex min-h-11 w-32 items-center gap-2.5 text-[13px] text-soft">
                   <input type="checkbox" checked={h.open} onChange={(e) => update({ open: e.target.checked })}
                     className="h-5 w-5 accent-brand" />
-                  {day.label}
+                  {dayName(day.key)}
                 </label>
                 {h.open ? (
                   <div className="flex items-center gap-2">
-                    <input type="time" aria-label={`${day.label} opens`} value={h.from} onChange={(e) => update({ from: e.target.value })}
+                    <input type="time" aria-label={t('kb.form.opens', { day: dayName(day.key) })} value={h.from} onChange={(e) => update({ from: e.target.value })}
                       aria-invalid={err ? true : undefined} className={timeInput} />
-                    <span aria-hidden="true" className="text-dim">to</span>
-                    <input type="time" aria-label={`${day.label} closes`} value={h.to} onChange={(e) => update({ to: e.target.value })}
+                    <span aria-hidden="true" className="text-dim">{t('kb.form.to')}</span>
+                    <input type="time" aria-label={t('kb.form.closes', { day: dayName(day.key) })} value={h.to} onChange={(e) => update({ to: e.target.value })}
                       aria-invalid={err ? true : undefined} className={timeInput} />
                   </div>
                 ) : (
-                  <span className="text-[13px] text-dim">Closed</span>
+                  <span className="text-[13px] text-dim">{t('kb.form.closed')}</span>
                 )}
-                {err ? <p role="alert" className="w-full text-xs text-danger">{day.label}: {err}</p> : null}
+                {err ? <p role="alert" className="w-full text-xs text-danger">{dayName(day.key)}: {err}</p> : null}
               </div>
             );
           })}
@@ -121,16 +126,16 @@ export function KnowledgeForm({
       </Card>
 
       <Card>
-        <CardHead title="Where you work" />
+        <CardHead title={t('kb.form.where')} />
         <div className="p-5">
-          <TextAreaField label="Service area" rows={2} value={draft.serviceArea} onChange={(e) => set('serviceArea', e.target.value)}
-            placeholder="Miami-Dade County, Broward County" error={errors.serviceArea}
-            hint="Cities, counties or ZIP codes, separated by commas. She tells callers outside this area you will check." />
+          <TextAreaField label={t('kb.form.serviceArea')} rows={2} value={draft.serviceArea} onChange={(e) => set('serviceArea', e.target.value)}
+            placeholder={t('kb.form.areaPlaceholder')} error={errors.serviceArea}
+            hint={t('kb.form.areaHint')} />
         </div>
       </Card>
 
       <Card>
-        <CardHead title="Answers she has memorized" subtitle="Common questions callers ask"
+        <CardHead title={t('kb.form.faqs')} subtitle={t('kb.form.faqsSub')}
           right={<span className="text-xs text-dim">{draft.faqs.length}/{LIMITS.faqs}</span>} />
         <ul className="divide-y divide-[#171f2a]">
           {draft.faqs.map((f, i) => {
@@ -138,34 +143,34 @@ export function KnowledgeForm({
             const update = (patch: Partial<typeof f>) => set('faqs', draft.faqs.map((x) => (x.uid === f.uid ? { ...x, ...patch } : x)));
             return (
               <li key={f.uid} className="p-4 sm:p-5">
-                <TextField label={`Question ${i + 1}`} value={f.question} onChange={(ev) => update({ question: ev.target.value })} error={e.question} />
-                <TextAreaField label={`Answer ${i + 1}`} className="mt-3" rows={2} value={f.answer}
+                <TextField label={t('kb.form.question', { n: i + 1 })} value={f.question} onChange={(ev) => update({ question: ev.target.value })} error={e.question} />
+                <TextAreaField label={t('kb.form.answer', { n: i + 1 })} className="mt-3" rows={2} value={f.answer}
                   onChange={(ev) => update({ answer: ev.target.value })} error={e.answer} />
-                <Button variant="ghost" className="mt-2 text-xs text-dim" aria-label={`Remove question ${i + 1}`}
+                <Button variant="ghost" className="mt-2 text-xs text-dim" aria-label={t('kb.form.removeQuestion', { n: i + 1 })}
                   onClick={() => set('faqs', draft.faqs.filter((x) => x.uid !== f.uid))}>
-                  Remove
+                  {t('common.remove')}
                 </Button>
               </li>
             );
           })}
           {draft.faqs.length === 0 ? (
-            <li className="px-5 py-6 text-center text-[13px] text-dim">No questions yet. Add things like warranty, payment methods or service call fees.</li>
+            <li className="px-5 py-6 text-center text-[13px] text-dim">{t('kb.form.noFaqs')}</li>
           ) : null}
         </ul>
         <div className="border-t border-line p-4">
           <Button variant="outline" disabled={draft.faqs.length >= LIMITS.faqs}
             onClick={() => set('faqs', [...draft.faqs, { uid: nextUid(), question: '', answer: '' }])}>
-            Add a question
+            {t('kb.form.addFaq')}
           </Button>
         </div>
       </Card>
 
       <Card>
-        <CardHead title="Pricing notes" subtitle="Extra rules she follows when talking about price" />
+        <CardHead title={t('kb.form.pricing')} subtitle={t('kb.form.pricingSub')} />
         <div className="p-5">
-          <TextAreaField label="Pricing notes" optional rows={3} value={draft.pricingNotes} maxLength={LIMITS.notes + 50}
+          <TextAreaField label={t('kb.form.pricing')} optional rows={3} value={draft.pricingNotes} maxLength={LIMITS.notes + 50}
             onChange={(e) => set('pricingNotes', e.target.value)} error={errors.pricingNotes}
-            hint="For example: service call fee is waived if you book the repair." />
+            hint={t('kb.form.pricingHint')} />
         </div>
       </Card>
     </div>

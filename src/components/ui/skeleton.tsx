@@ -1,3 +1,5 @@
+'use client';
+import { useT } from '@/lib/i18n/client';
 import { cn } from './cn';
 
 /** Decorative placeholder block; the surrounding region announces loading via PageSkeleton. */
@@ -5,10 +7,11 @@ export function Skeleton({ className }: { className?: string }) {
   return <div aria-hidden="true" className={cn('skeleton', className)} />;
 }
 
-export function PageSkeleton({ rows = 4, label = 'Loading' }: { rows?: number; label?: string }) {
+export function PageSkeleton({ rows = 4, label }: { rows?: number; label?: string }) {
+  const t = useT();
   return (
     <main className="mx-auto w-full max-w-4xl px-4 py-8 sm:px-6" aria-busy="true" aria-live="polite">
-      <span className="sr-only">{label}…</span>
+      <span className="sr-only">{label ?? t('common.loading')}</span>
       <Skeleton className="h-7 w-48" />
       <Skeleton className="mt-3 h-4 w-72 max-w-full" />
       <div className="mt-6 grid gap-3 sm:grid-cols-4">

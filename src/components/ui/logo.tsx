@@ -1,4 +1,6 @@
+'use client';
 import Link from 'next/link';
+import { useT } from '@/lib/i18n/client';
 import { cn } from './cn';
 
 /** The brand mark. Single source for the landing page, login, onboarding, dashboard and pay page. */
@@ -14,6 +16,7 @@ export function LogoMark({ className, letter = 'R' }: { className?: string; lett
 }
 
 export function Logo({ href = '/', className, label = 'Recepcionista' }: { href?: string | null; className?: string; label?: string }) {
+  const t = useT();
   const inner = (
     <>
       <LogoMark />
@@ -22,7 +25,7 @@ export function Logo({ href = '/', className, label = 'Recepcionista' }: { href?
   );
   const cls = cn('inline-flex min-h-11 items-center gap-2.5', className);
   return href ? (
-    <Link href={href} className={cls} aria-label={`${label} home`}>
+    <Link href={href} className={cls} aria-label={t('logo.home', { name: label })}>
       {inner}
     </Link>
   ) : (

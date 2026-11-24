@@ -9,6 +9,9 @@ import { forwardAllowance, voicemailAllowance } from '@/lib/voice/forward-meteri
 import { vetForwardNumber } from '@/lib/voice/forward-vet';
 import { forwardRingSeconds, forwardTwiml, pausedTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { missedCallText } from '@/lib/voice/non-ai';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { setCallTrust } from '@/lib/db';
 import { enterOwnerMode } from '@/lib/voice/owner/session';
 import { logger } from '@/lib/log';
@@ -206,7 +209,7 @@ export async function POST(req: Request) {
       if (call.status !== 'handed_off') {
         await updateCall(call.id, { status: 'handed_off', flagged_reason: `out_of_service:${gate.reason ?? 'capacity'}` });
         const alert = (await allowMissedCallAlert(business.id))
-          ? await alertOwner(business, `MISSED CALL — ${business.name}\nA call${from ? ` from ${from}` : ''} was not taken by the assistant (${gate.reason === 'no_plan' ? 'plan inactive' : 'monthly call minutes used up'}). Please call back.`)
+          ? await alertOwner(business, await missedCallText(business, from, makeT(await ownerLocaleFor(business))(gate.reason === 'no_plan' ? 'alert.missed.noPlan' : 'alert.missed.noMinutes')))
           : null;
         log.warn('handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert?.notified ?? false, alert_suppressed: alert === null });
       }

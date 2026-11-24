@@ -24,6 +24,8 @@ import { sendAndLog } from '@/lib/messaging';
 import { SERVICE_ALIASES } from '@/lib/verticals/aliases';
 import { CALL_911_EN, CALL_911_ES, call911For, call911Hazards } from '@/lib/voice/emergency';
 import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { isOwnerNumber } from '@/lib/messaging/owner';
 import { countryForBusiness } from '@/lib/db';
 import { TOOL_NAMES, type ToolName } from '@/lib/kb';
@@ -753,13 +755,14 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     });
 
     // Caller-controlled text is clamped field by field (the whole alert is also capped at 320 GSM-safe characters by alertOwner).
+    const ot = makeT(await ownerLocaleFor(business));
     const alertBody = [
-      `EMERGENCY - ${alertField(business.name, 50)}`,
-      callerName ? `Caller: ${alertField(callerName, 50)}` : '',
-      callerPhone ? `Phone: ${alertField(normalizePhone(callerPhone), 20)}` : call.caller_phone ? `Phone: ${call.caller_phone}` : '',
-      address ? `Address: ${alertField(address, 100)}` : '',
-      `Reason: ${alertField(reason, 140)}`,
-      'Call them back now.',
+      ot('alert.emergency.title', { business: alertField(business.name, 50) }),
+      callerName ? ot('alert.caller', { name: alertField(callerName, 50) }) : '',
+      callerPhone ? ot('alert.phone', { phone: alertField(normalizePhone(callerPhone), 20) }) : call.caller_phone ? ot('alert.phone', { phone: call.caller_phone }) : '',
+      address ? ot('alert.address', { address: alertField(address, 100) }) : '',
+      ot('alert.reason', { reason: alertField(reason, 140) }),
+      ot('alert.callbackNow'),
     ].filter(Boolean).join('\n');
     const alert = await alertOwner(business, alertBody, { class: 'emergency', callId: call.id });
 
@@ -926,13 +929,14 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     const altDiffers = Boolean(alt && alt !== verified);
     const callbackLast4 = altDiffers ? alt!.slice(-4) : verified ? verified.slice(-4) : null;
 
+    const ot = makeT(await ownerLocaleFor(business));
     const alertBody = [
-      `HANDOFF - ${alertField(business.name, 50)}`,
-      call.caller_name ? `Caller: ${alertField(call.caller_name, 50)}` : '',
-      call.caller_phone ? `Phone: ${call.caller_phone}` : verified ? `Phone: ${verified}` : '',
-      altDiffers ? `Asked to be called back on: ${alt} (said by the caller)` : '',
-      `Reason: ${alertField(reason, 140)}`,
-      'Please call them back.',
+      ot('alert.handoff.title', { business: alertField(business.name, 50) }),
+      call.caller_name ? ot('alert.caller', { name: alertField(call.caller_name, 50) }) : '',
+      call.caller_phone ? ot('alert.phone', { phone: call.caller_phone }) : verified ? ot('alert.phone', { phone: verified }) : '',
+      altDiffers ? ot('alert.callbackOn', { phone: alt ?? '' }) : '',
+      ot('alert.reason', { reason: alertField(reason, 140) }),
+      ot('alert.callbackPlease'),
     ].filter(Boolean).join('\n');
     const alert = await alertOwner(business, alertBody, { class: 'handoff', callId: call.id });
 

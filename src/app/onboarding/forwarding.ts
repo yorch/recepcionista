@@ -5,6 +5,8 @@
  * conditional) and the common US landline/Verizon star codes. Carriers differ: the UI says so.
  */
 
+import type { TFunction } from '@/lib/i18n/core';
+
 export type CarrierId = 'att' | 'tmobile' | 'verizon' | 'gsm' | 'landline' | 'voip';
 
 export interface DialStep {
@@ -32,6 +34,11 @@ export const CARRIERS: { id: CarrierId; name: string }[] = [
   { id: 'voip', name: 'Office phone system / VoIP' },
 ];
 
+/** The carrier's display name in the viewer's language (the English names above are the fallback). */
+export function carrierName(id: CarrierId, t: TFunction): string {
+  return t(`cn.carrier.${id}` as const);
+}
+
 /** Seconds of ringing before a no-answer forward kicks in (GSM allows 5 to 30 in steps of 5). */
 export const DEFAULT_RING_SECONDS = 20;
 
@@ -58,82 +65,73 @@ export function e164Of(phone: string): string {
   return phone.trim().startsWith('+') || d.length > 10 ? `+${d}` : `+1${d}`;
 }
 
-const GSM_NOTES = [
-  'If a code is rejected, call your carrier and ask for "conditional call forwarding for no answer and busy" to this number. It is a free feature on most plans.',
-  'You will hear a confirmation tone or see a message on screen. Then test it (next step).',
-];
-
-function gsmGuide(id: CarrierId, name: string, ringSeconds: number, num: string): ForwardingGuide {
+function gsmGuide(id: CarrierId, ringSeconds: number, num: string, t: TFunction): ForwardingGuide {
   const e = e164Of(num);
   return {
-    id, name,
-    intro: 'Dial these on the phone whose number customers call, then press call. Your phone still rings first; she answers only if you do not.',
+    id, name: carrierName(id, t),
+    intro: t('fwd.gsm.intro'),
     setup: [
-      { label: 'When you do not answer', dial: `**61*${e}**${ringSeconds}#`, note: `Rings ${ringSeconds} seconds (about ${Math.round(ringSeconds / 5)} rings), then she picks up.` },
-      { label: 'When your line is busy', dial: `**67*${e}#` },
-      { label: 'When your phone is off or has no signal', dial: `**62*${e}#` },
-      { label: 'Or set all three at once', dial: `**004*${e}#`, note: 'Quickest option on most carriers. Skip the three codes above if you use this.' },
+      { label: t('fwd.gsm.noAnswer'), dial: `**61*${e}**${ringSeconds}#`, note: t('fwd.gsm.noAnswerNote', { seconds: ringSeconds, rings: Math.round(ringSeconds / 5) }) },
+      { label: t('fwd.gsm.busy'), dial: `**67*${e}#` },
+      { label: t('fwd.gsm.off'), dial: `**62*${e}#` },
+      { label: t('fwd.gsm.all'), dial: `**004*${e}#`, note: t('fwd.gsm.allNote') },
     ],
     cancel: [
-      { label: 'Turn off all conditional forwarding', dial: '##004#' },
-      { label: 'Turn off just "no answer"', dial: '##61#' },
+      { label: t('fwd.gsm.cancelAll'), dial: '##004#' },
+      { label: t('fwd.gsm.cancelNoAnswer'), dial: '##61#' },
     ],
-    notes: GSM_NOTES,
+    notes: [t('fwd.gsm.note1'), t('fwd.gsm.note2')],
   };
 }
 
-export function forwardingGuide(id: CarrierId, aiNumber: string, ringSeconds = DEFAULT_RING_SECONDS): ForwardingGuide {
+export function forwardingGuide(id: CarrierId, aiNumber: string, t: TFunction, ringSeconds: number = DEFAULT_RING_SECONDS): ForwardingGuide {
   const ten = tenDigits(aiNumber);
   switch (id) {
     case 'att':
-      return gsmGuide('att', 'AT&T', ringSeconds, aiNumber);
     case 'tmobile':
-      return gsmGuide('tmobile', 'T-Mobile / Metro', ringSeconds, aiNumber);
     case 'gsm':
-      return gsmGuide('gsm', 'Other mobile carrier', ringSeconds, aiNumber);
+      return gsmGuide(id, ringSeconds, aiNumber, t);
     case 'verizon':
       return {
-        id, name: 'Verizon',
-        intro: 'Dial the code from the phone whose number customers call. Wait for the confirmation tone, then hang up.',
+        id, name: carrierName(id, t),
+        intro: t('fwd.vz.intro'),
         setup: [
-          { label: 'When you do not answer or are busy', dial: `*71${ten}`, note: 'Rings about 4 times (roughly 20 seconds), then she picks up.' },
-          { label: 'Or send every call to her (no ringing)', dial: `*72${ten}`, note: 'Use only when you want her to answer everything.' },
+          { label: t('fwd.vz.noAnswer'), dial: `*71${ten}`, note: t('fwd.vz.noAnswerNote') },
+          { label: t('fwd.vz.all'), dial: `*72${ten}`, note: t('fwd.vz.allNote') },
         ],
-        cancel: [{ label: 'Turn forwarding off', dial: '*73' }],
-        notes: ['Verizon Wireless star codes. For Fios or business lines, use the "no answer / busy" forwarding setting in your online account instead.'],
+        cancel: [{ label: t('fwd.vz.off'), dial: '*73' }],
+        notes: [t('fwd.vz.note')],
       };
     case 'landline':
       return {
-        id, name: 'Landline',
-        intro: 'Dial the code from the landline itself. Wait for the confirmation tone, then hang up.',
+        id, name: carrierName(id, t),
+        intro: t('fwd.ll.intro'),
         setup: [
-          { label: 'When you do not answer', dial: `*92${ten}`, note: 'Most US landlines. Rings 4 to 6 times first.' },
-          { label: 'When your line is busy', dial: `*90${ten}` },
-          { label: 'Or send every call to her (no ringing)', dial: `*72${ten}` },
+          { label: t('fwd.ll.noAnswer'), dial: `*92${ten}`, note: t('fwd.ll.noAnswerNote') },
+          { label: t('fwd.ll.busy'), dial: `*90${ten}` },
+          { label: t('fwd.ll.all'), dial: `*72${ten}` },
         ],
         cancel: [
-          { label: 'Turn off all forwarding', dial: '*73' },
-          { label: 'Turn off no-answer forwarding', dial: '*93' },
-          { label: 'Turn off busy forwarding', dial: '*91' },
+          { label: t('fwd.ll.offAll'), dial: '*73' },
+          { label: t('fwd.ll.offNoAnswer'), dial: '*93' },
+          { label: t('fwd.ll.offBusy'), dial: '*91' },
         ],
-        notes: [
-          'Star codes differ by provider (some use *61 for no answer and *67 for busy). If one does not work, try the other, or call your phone company and ask for call forwarding on no answer and busy.',
-        ],
+        notes: [t('fwd.ll.note')],
       };
     case 'voip':
       return {
-        id, name: 'Office phone system / VoIP',
-        intro: 'Open your phone system admin page (RingCentral, Vonage, Grasshopper, Google Voice, 8x8, a PBX) and add a forwarding rule.',
+        id, name: carrierName(id, t),
+        intro: t('fwd.voip.intro'),
         setup: [
-          { label: 'Forward calls to', dial: e164Of(aiNumber) },
-          { label: 'Rule', note: 'No answer after 15 to 20 seconds, and when busy or offline. Keep your own phones ringing first.' },
+          { label: t('fwd.voip.forwardTo'), dial: e164Of(aiNumber) },
+          { label: t('fwd.voip.rule'), note: t('fwd.voip.ruleNote') },
         ],
-        cancel: [{ label: 'Delete or disable the forwarding rule in the same admin page.' }],
-        notes: ['Your provider may call this "call handling", "failover", "find me follow me" or "after-hours routing".'],
+        cancel: [{ label: t('fwd.voip.cancel') }],
+        notes: [t('fwd.voip.note')],
       };
   }
 }
 
-export function ringExplanation(ringSeconds = DEFAULT_RING_SECONDS): string {
-  return `Callers hear your phone ring for about ${ringSeconds} seconds. If you pick up, nothing changes. If you do not, the call moves to her, and she greets them in English or Spanish.`;
+export function ringExplanation(t: TFunction, ringSeconds: number = DEFAULT_RING_SECONDS): string {
+  return t('fwd.ring', { seconds: ringSeconds });
 }

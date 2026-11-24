@@ -87,6 +87,22 @@ export function resolveCallRoute(b: ModeFields, now: Date = new Date(), line: Li
 }
 
 /** Short status line for the dashboard toggle, e.g. "AI is answering calls". */
+export type CallModeLabelCode = 'forward_unavailable' | 'paused' | 'forwarding' | 'ai_after_hours' | 'ai_rejected' | 'ai_unverified' | 'ai';
+
+/** Same decision as callModeLabel, as a code the dashboard localizes (`callmode.label.<code>`). */
+export function callModeLabelCode(b: ModeFields, now: Date = new Date(), line: LineKind = lineKind()): CallModeLabelCode {
+  const r = resolveCallRoute(b, now, line);
+  if (r.action === 'paused') return r.why === 'forward_unavailable_on_line' ? 'forward_unavailable' : 'paused';
+  if (r.action === 'forward') return 'forwarding';
+  if ((b.call_mode ?? 'ai') === 'forward') {
+    if (r.why === 'forward_outside_hours') return 'ai_after_hours';
+    if (r.why === 'forward_number_rejected') return 'ai_rejected';
+    return 'ai_unverified';
+  }
+  return 'ai';
+}
+
+/** Short English status line for the dashboard toggle, e.g. "AI is answering calls" (the UI localizes it from `callModeLabelCode`). */
 export function callModeLabel(b: ModeFields, now: Date = new Date(), line: LineKind = lineKind()): { text: string; tone: 'ok' | 'warn' | 'info' } {
   const r = resolveCallRoute(b, now, line);
   if (r.action === 'paused') {
@@ -125,6 +141,8 @@ export interface CallModeView {
   /** Why a stored, verified number is NOT dialled (e.g. a premium or territory number, or a country no longer enabled), else null. */
   forward_blocked: string | null;
   label: string;
+  /** The label as a code: the dashboard shows `callmode.label.<code>` in the viewer's language (`label` stays English for API clients). */
+  label_code: CallModeLabelCode;
   tone: 'ok' | 'warn' | 'info';
 }
 
@@ -143,6 +161,7 @@ export function callModeView(b: ModeFields & { forward_number?: string | null },
     forward_supported: forwardingSupported(line),
     forward_blocked: !target.ok && target.why === 'rejected' ? (target.error ?? 'this number cannot be used for forwarding') : null,
     label: label.text,
+    label_code: callModeLabelCode(b, now, line),
     tone: label.tone,
   };
 }

@@ -156,6 +156,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Live human transfer | Shipped behind `NATIVE_TRANSFER` (default off, live behaviour unverified: docs/known-limitations.md); `handoff_to_human` still texts the owner. | `src/lib/voice/transfer.ts`, `src/lib/voice/elevenlabs.ts` (`transferToolConfig`) |
 | Owner correction of the knowledge base by voice | Shipped as owner call-in (SMS-confirmed, undoable; hours, closed dates, service area, services, FAQs). Owner voice REPLY stays not built (owner decision). | `docs/owner-call-in.md`, `src/lib/voice/owner/` |
 | Live transcript during a call | Shipped (SSE + polling fallback, consent-gated; provider field UNVERIFIED) | `src/lib/voice/live-transcript.ts`, `src/app/api/calls/[id]/live/route.ts` |
+| Dashboard, onboarding, auth, public pages, emails and owner texts in English and Spanish; per-user language, business default | Shipped (Spanish copy not natively reviewed; model/caller-written content stays as written) | `docs/i18n.md`, `src/lib/i18n/` |
 | Bilingual conversation (English and Spanish) | Partial. Driven by the prompt and the model. No language detection in code, and quality is not measured. | `src/lib/voice/elevenlabs.ts`, `src/lib/kb/index.ts` |
 
 ### 5.5 Messaging and consent

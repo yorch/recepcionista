@@ -1,10 +1,12 @@
 'use client';
 import { useRef, useState } from 'react';
+import { useT } from '@/lib/i18n/client';
 import { cn } from './cn';
 
 export function VoicePlayer({
-  src, label, className, bars = 42, preload, idleLabel = 'voice note',
+  src, label, className, bars = 42, preload, idleLabel,
 }: { src?: string | null; label: string; className?: string; bars?: number; preload?: 'none' | 'metadata' | 'auto'; idleLabel?: string }) {
+  const t = useT();
   const ref = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -27,7 +29,7 @@ export function VoicePlayer({
           type="button"
           onClick={toggle}
           disabled={missing}
-          aria-label={`${playing ? 'Pause' : 'Play'}: ${label}`}
+          aria-label={`${playing ? t('audio.pause') : t('audio.play')}: ${label}`}
           aria-pressed={playing}
           className={cn(
             'grid h-11 w-11 shrink-0 place-items-center rounded-full transition',
@@ -52,12 +54,12 @@ export function VoicePlayer({
           <div className="flex items-baseline justify-between gap-3">
             <p className="truncate text-xs font-medium text-soft">{label}</p>
             <span className="shrink-0 text-xs tabular-nums text-dim">
-              {!src ? 'audio pending' : missing ? 'audio unavailable' : playing ? 'playing' : idleLabel}
+              {!src ? t('audio.pending') : missing ? t('audio.unavailable') : playing ? t('audio.playing') : (idleLabel ?? t('audio.voiceNote'))}
             </span>
           </div>
           <div
             role="progressbar"
-            aria-label={`Playback progress, ${label}`}
+            aria-label={`${t('audio.progress')}, ${label}`}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={Math.round(progress * 100)}

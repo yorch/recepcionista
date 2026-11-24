@@ -33,5 +33,5 @@ export async function handleClonedPasskey(req: Request, user: User, passkey: Pas
     actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.passkey_clone_suspected', target: `user:${user.id}`,
     ip: auditIp(req), meta: { passkey_id: passkey.id, sessions_revoked: true },
   });
-  await afterResponse('passkey.clone_notice', () => sendPasskeyCloneNotice(user.email, passkey.name));
+  await afterResponse('passkey.clone_notice', () => sendPasskeyCloneNotice(user.email, passkey.name, user.locale));
 }

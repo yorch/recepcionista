@@ -6,6 +6,12 @@ import { Checkout } from './checkout';
 import { policySentence } from '@/lib/refunds';
 import type { Business } from '@/lib/types';
 import { PaymentReceived } from './received';
+import { LocaleSwitcher } from '@/components/ui/locale-switcher';
+import { I18nProvider } from '@/lib/i18n/client';
+import { MESSAGES, makeT } from '@/lib/i18n';
+import { getCustomerLocale, getT } from '@/lib/i18n/server';
+import { getCall } from '@/lib/db';
+import type { Locale } from '@/lib/i18n/core';
 
 /**
  * The page a customer lands on in mock mode. The amount, description and business name
@@ -15,30 +21,29 @@ import { PaymentReceived } from './received';
  *
  * Booking resolution: `/pay/<bookingId>` or `/pay/mock_x?booking=<bookingId>`.
  */
-export const metadata: Metadata = {
-  title: 'Secure payment',
-  robots: { index: false, follow: false },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: (await getT())('pay.metaTitle'), robots: { index: false, follow: false } };
+}
 
 export const dynamic = 'force-dynamic';
 
 const DEFAULT_AMOUNT_CENTS = 18_900; // $189 — demo-only fallback
 const MIN_DEMO_CENTS = 100;
 const MAX_DEMO_CENTS = 50_000; // the $500 deposit cap
-const DEFAULT_LABEL = 'Emergency service deposit';
 const DEFAULT_BUSINESS = 'Miami Cool Air Conditioning';
 
 type Params = Promise<{ id: string }>;
 type Search = Promise<Record<string, string | string[] | undefined>>;
 
 /** The business's refund policy, in plain text (the free text is rendered as text, never as markup). */
-function PolicyNote({ business }: { business: Business | null }) {
+function PolicyNote({ business, locale }: { business: Business | null; locale: Locale }) {
   if (!business) return null;
+  const t = makeT(locale);
   return (
-    <aside aria-label="Refund policy" className="mx-auto mt-4 w-full max-w-md px-4 pb-8 text-xs leading-relaxed text-dim">
-      <p><strong className="text-soft">Refund policy.</strong> {policySentence(business.refund_policy)}</p>
+    <aside aria-label={t('pay.policyRegion')} className="mx-auto mt-4 w-full max-w-md px-4 pb-8 text-xs leading-relaxed text-dim">
+      <p><strong className="text-soft">{t('pay.policyTitle')}</strong> {policySentence(business.refund_policy, locale)}</p>
       {business.refund_policy_text ? <p className="mt-1.5 whitespace-pre-line text-mute">{business.refund_policy_text}</p> : null}
-      <p className="mt-1.5"><Link href="/refunds" className="underline underline-offset-2 hover:text-soft">How deposits and refunds work</Link></p>
+      <p className="mt-1.5"><Link href="/refunds" className="underline underline-offset-2 hover:text-soft">{t('pay.howItWorks')}</Link></p>
     </aside>
   );
 }
@@ -72,12 +77,25 @@ export default async function PayPage({
   let label: string;
   let businessName: string;
   let policyBusiness: Business | null = null;
+  // The customer's language: their own choice first, then the language of the call that booked the job, then the business default.
+  const callLanguage = booking?.call_id ? (await getCall(booking.call_id).catch(() => null))?.language ?? null : null;
+  const biz = booking ? await getBusiness(booking.business_id) : null;
+  const locale = await getCustomerLocale({ callLanguage, business: biz?.locale_default });
+  const t = makeT(locale);
+  const scoped = (node: React.ReactNode) => (
+    <I18nProvider locale={locale} messages={MESSAGES[locale]}>
+      <div lang={locale} className="min-h-dvh">
+        {node}
+        <div className="mx-auto flex w-full max-w-md justify-center px-4 pb-8"><LocaleSwitcher compact /></div>
+      </div>
+    </I18nProvider>
+  );
 
   if (booking) {
-    const business = await getBusiness(booking.business_id);
+    const business = biz;
     policyBusiness = business;
-    businessName = business?.name ?? 'Your service provider';
-    label = `${booking.service} deposit`;
+    businessName = business?.name ?? t('pay.defaultProvider');
+    label = t('pay.depositFor', { service: booking.service });
     if (booking.deposit_amount && booking.deposit_amount > 0) {
       amountCents = booking.deposit_amount;
     } else if (!isProd && isMockId) {
@@ -86,30 +104,32 @@ export default async function PayPage({
       notFound();
     }
     if (booking.deposit_paid) {
-      return (
-        <div className="min-h-dvh">
+      return scoped(
+        <>
           <PaymentReceived
             reference={id}
             amountCents={amountCents}
             label={label}
             businessName={businessName}
             last4="----"
+            t={t}
+            locale={locale}
           />
-          <PolicyNote business={policyBusiness} />
-        </div>
+          <PolicyNote business={policyBusiness} locale={locale} />
+        </>,
       );
     }
   } else if (isMockId && !isProd) {
     // Local demo only: a bare mock link with no booking. Values are clamped and cosmetic.
     amountCents = demoAmount(first(query.amount));
-    label = (first(query.for)?.trim() || DEFAULT_LABEL).slice(0, 80);
+    label = (first(query.for)?.trim() || t('pay.defaultLabel')).slice(0, 80);
     businessName = (first(query.business)?.trim() || DEFAULT_BUSINESS).slice(0, 60);
   } else {
     notFound();
   }
 
-  return (
-    <div className="min-h-dvh">
+  return scoped(
+    <>
       <Checkout
         reference={id}
         amountCents={amountCents}
@@ -117,7 +137,7 @@ export default async function PayPage({
         businessName={businessName}
         bookingId={booking?.id}
       />
-      <PolicyNote business={policyBusiness} />
-    </div>
+      <PolicyNote business={policyBusiness} locale={locale} />
+    </>,
   );
 }

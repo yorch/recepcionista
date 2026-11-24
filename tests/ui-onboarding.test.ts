@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { makeT } from '../src/lib/i18n';
 import { forwardingGuide, prettyPhone, tenDigits } from '../src/app/onboarding/forwarding';
 import { maxStepFor, resolveStep } from '../src/app/onboarding/steps';
 import type { OnboardingStatus } from '../src/app/api/businesses/[id]/onboarding-status/status';
@@ -18,14 +19,14 @@ const ex: ExtractionResult = {
 
 describe('forwarding guide', () => {
   test('GSM codes embed the E.164 number', () => {
-    const g = forwardingGuide('att', '+13055550142');
+    const g = forwardingGuide('att', '+13055550142', makeT('en'));
     expect(g.setup[0].dial).toBe('**61*+13055550142**20#');
     expect(g.setup.map((s) => s.dial)).toContain('**004*+13055550142#');
     expect(g.cancel[0].dial).toBe('##004#');
   });
   test('Verizon and landline use 10 digits', () => {
-    expect(forwardingGuide('verizon', '+13055550142').setup[0].dial).toBe('*713055550142');
-    expect(forwardingGuide('landline', '+13055550142').cancel.map((c) => c.dial)).toContain('*73');
+    expect(forwardingGuide('verizon', '+13055550142', makeT('en')).setup[0].dial).toBe('*713055550142');
+    expect(forwardingGuide('landline', '+13055550142', makeT('en')).cancel.map((c) => c.dial)).toContain('*73');
   });
   test('formatting helpers', () => {
     expect(tenDigits('+1 (305) 555-0142')).toBe('3055550142');

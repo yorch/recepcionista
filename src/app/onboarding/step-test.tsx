@@ -5,6 +5,7 @@ import { Button, buttonClass } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { apiRequest } from '@/hooks/use-api';
 import { useCopy } from '@/hooks/use-copy';
+import { useT } from '@/lib/i18n/client';
 import type { OnboardingStatus } from '@/app/api/businesses/[id]/onboarding-status/status';
 import { prettyPhone } from './forwarding';
 import type { StepProps } from './flow';
@@ -13,6 +14,7 @@ import { packOf, tx } from '@/lib/verticals';
 const POLL_MS = 4000;
 
 export function TestStep({ businessId, status: initial, isAdmin, go }: StepProps) {
+  const t = useT();
   const [status, setStatus] = useState<OnboardingStatus>(initial);
   const [pollError, setPollError] = useState(false);
   const [alreadyHeard] = useState(() => Boolean(initial.first_call_at));
@@ -48,23 +50,23 @@ export function TestStep({ businessId, status: initial, isAdmin, go }: StepProps
 
   return (
     <section aria-labelledby="test-title">
-      <h2 id="test-title" className="text-[28px] font-semibold tracking-[-0.02em] text-white">Make a test call</h2>
-      <p className="mt-2 text-sm text-mute">Hear her for yourself before real customers do.</p>
+      <h2 id="test-title" className="text-[28px] font-semibold tracking-[-0.02em] text-white">{t('ts.title')}</h2>
+      <p className="mt-2 text-sm text-mute">{t('ts.lead')}</p>
 
       <Card className="mt-6 p-5">
         <ol className="space-y-3 text-[13px] leading-relaxed text-soft">
-          <li><span className="font-medium text-white">1.</span> From a different phone, call <a href={`tel:${phone}`} className="font-mono text-white underline underline-offset-2">{prettyPhone(phone)}</a>.</li>
-          <li><span className="font-medium text-white">2.</span> Say something a customer would, like “{tx(packOf(status.vertical).hints.testPhrase, status.locale)}” Switch between English and Spanish to hear her follow you.</li>
-          <li><span className="font-medium text-white">3.</span> Forwarding set up? Also call your business line and let it ring. After about 20 seconds she should answer.</li>
+          <li><span className="font-medium text-white">1.</span> {t('ts.step1', { phone: prettyPhone(phone) })}</li>
+          <li><span className="font-medium text-white">2.</span> {t('ts.step2', { phrase: tx(packOf(status.vertical).hints.testPhrase, status.locale) })}</li>
+          <li><span className="font-medium text-white">3.</span> {t('ts.step3')}</li>
         </ol>
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <Button variant="outline" onClick={() => void copy(phone)}>{copied ? 'Copied' : 'Copy her number'}</Button>
-          <span role="status" className="sr-only">{copied ? 'Number copied' : ''}</span>
+          <Button variant="outline" onClick={() => void copy(phone)}>{copied ? t('cn.copied') : t('ts.copyNumber')}</Button>
+          <span role="status" className="sr-only">{copied ? t('ts.numberCopied') : ''}</span>
         </div>
         {status.phone_mock ? (
           <p role="note" className="mt-4 rounded-xl border border-warn-line bg-warn-bg px-3.5 py-2.5 text-[13px] text-warn">
-            This is a demo number, so a real call will not connect.
-            {isAdmin ? <> Use the <Link href="/dashboard/demo" className="font-semibold underline">demo console</Link> to simulate a call.</> : null}
+            {t('ts.mockNote')}
+            {isAdmin ? <> <Link href="/dashboard/demo" className="font-semibold underline">{t('ts.useDemo')}</Link></> : null}
           </p>
         ) : null}
       </Card>
@@ -73,31 +75,31 @@ export function TestStep({ businessId, status: initial, isAdmin, go }: StepProps
         {heard ? (
           <Card className="border-mint-line bg-mint-bg p-6 text-center">
             <div aria-hidden="true" className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-mint/15 text-2xl text-mint">✓</div>
-            <h3 className="mt-4 text-[22px] font-semibold text-white">{alreadyHeard ? 'She has already taken a call' : 'We heard you!'}</h3>
+            <h3 className="mt-4 text-[22px] font-semibold text-white">{alreadyHeard ? t('ts.heardAlready') : t('ts.heard')}</h3>
             <p className="mt-1.5 text-[13px] text-mint-text">
               {call
-                ? `She answered a ${call.language === 'es' ? 'Spanish' : call.language === 'mixed' ? 'Spanglish' : 'English'} call${call.duration_sec ? ` (${call.duration_sec}s)` : ''}. It is in your dashboard with a transcript.`
-                : 'Your first call is in your dashboard.'}
-              {status.first_booking_at ? ' She even booked a job.' : ''}
+                ? t('ts.answered', { lang: t(call.language === 'es' ? 'callLang.es' : call.language === 'mixed' ? 'callLang.mixed' : 'callLang.en'), duration: call.duration_sec ? t('ts.duration', { n: call.duration_sec }) : '' })
+                : t('ts.firstCall')}
+              {status.first_booking_at ? t('ts.booked') : ''}
             </p>
             <div className="mt-5 flex flex-wrap justify-center gap-3">
-              <Link href="/dashboard" className={buttonClass('primary')}>Open my dashboard →</Link>
-              <Link href="/dashboard/calls" className={buttonClass('outline')}>See the call</Link>
+              <Link href="/dashboard" className={buttonClass('primary')}>{t('ts.openDash')}</Link>
+              <Link href="/dashboard/calls" className={buttonClass('outline')}>{t('ts.seeCall')}</Link>
             </div>
           </Card>
         ) : (
           <Card className="flex items-center gap-3 p-5" aria-busy="true">
             <span aria-hidden="true" className="h-2.5 w-2.5 shrink-0 rounded-full bg-brand live-dot" />
             <p role="status" className="text-[13px] text-body">
-              {pollError ? 'Having trouble checking for your call. Retrying…' : 'Listening for your first call… this page updates by itself.'}
+              {pollError ? t('ts.troubleCheck') : t('ts.listening')}
             </p>
           </Card>
         )}
       </div>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        {!heard ? <Link href="/dashboard" className={buttonClass('outline')}>Skip, take me to the dashboard</Link> : null}
-        <Button variant="ghost" onClick={() => go('connect')}>Back to forwarding</Button>
+        {!heard ? <Link href="/dashboard" className={buttonClass('outline')}>{t('ts.skip')}</Link> : null}
+        <Button variant="ghost" onClick={() => go('connect')}>{t('ts.backFwd')}</Button>
       </div>
     </section>
   );

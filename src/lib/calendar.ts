@@ -276,11 +276,18 @@ export function allowedActions(status: BookingStatus, startsAtMs: number, nowMs:
   return { cancel: live, complete: live && startsAtMs <= nowMs, resend: status !== 'cancelled' && status !== 'completed' };
 }
 
-/** "9 AM", "12 PM", "11 PM" for a wall-clock minute count (axis labels). */
-export function hourLabel(min: number): string {
+/** "9 AM", "12 PM", "11 PM" (es: "9 a. m.", "12 p. m.") for a wall-clock minute count (axis labels). */
+export function hourLabel(min: number, locale: 'en' | 'es' = 'en'): string {
   const h = Math.floor(min / 60) % 24;
+  if (locale === 'es') return new Intl.DateTimeFormat('es-US', { hour: 'numeric', hour12: true, timeZone: 'UTC' }).format(new Date(Date.UTC(2024, 0, 1, h)));
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12} ${h < 12 ? 'AM' : 'PM'}`;
 }
 
 export const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
+
+/** Weekday name for 0 = Sunday ... 6 = Saturday in the given locale (Intl; WEEKDAY_NAMES is the English fallback). */
+export function weekdayName(index: number, locale: 'en' | 'es' = 'en', style: 'long' | 'short' = 'long'): string {
+  // 2024-01-07 is a Sunday.
+  return new Intl.DateTimeFormat(locale === 'es' ? 'es-US' : 'en-US', { weekday: style, timeZone: 'UTC' }).format(new Date(Date.UTC(2024, 0, 7 + (index % 7))));
+}

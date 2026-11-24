@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { getT } from '@/lib/i18n/server';
 import { getCall, listTranscriptEventsAfter } from '@/lib/db';
 import { getDashboardContext } from '@/lib/dashboard-context';
 import { PageHeader } from '@/components/ui/page-header';
@@ -9,10 +10,13 @@ import { isLive } from '@/lib/voice/live-transcript';
 import { RecordingPlayer } from '@/components/dashboard/recording-player';
 import { callHasRecording } from '@/lib/voice/recording-audio';
 
-export const metadata: Metadata = { title: 'Live call' };
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: (await getT())('live.metaTitle') };
+}
 export const dynamic = 'force-dynamic';
 
 export default async function CallPage({ params }: { params: Promise<{ id: string }> }) {
+  const t = await getT();
   const ctx = await getDashboardContext();
   const { id } = await params;
   const call = await getCall(id);
@@ -23,16 +27,16 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
-      <Link href="/dashboard/calls" className="inline-flex min-h-11 items-center text-[13px] text-mute hover:text-soft">← All calls</Link>
-      <PageHeader title={live ? 'Live call' : 'Call'} subtitle={live ? 'The conversation as it happens. Lines appear a few seconds late and are replaced by the saved transcript afterwards.' : undefined} />
-      {!live && callHasRecording(call) ? <RecordingPlayer callId={call.id} label={call.caller_name ?? call.caller_phone ?? 'caller'} /> : null}
+      <Link href="/dashboard/calls" className="inline-flex min-h-11 items-center text-[13px] text-mute hover:text-soft">{t('live.back')}</Link>
+      <PageHeader title={live ? t('live.title') : t('live.titleEnded')} subtitle={live ? t('live.subtitle') : undefined} />
+      {!live && callHasRecording(call) ? <RecordingPlayer callId={call.id} label={call.caller_name ?? call.caller_phone ?? t('calls.callerFallback')} /> : null}
       <div className="mt-5">
         {call.consent_status === 'declined' ? (
-          <p className="rounded-lg bg-warn-bg px-3 py-2 text-[13px] text-warn">The caller asked not to be recorded or transcribed, so there is no transcript for this call.</p>
+          <p className="rounded-lg bg-warn-bg px-3 py-2 text-[13px] text-warn">{t('live.declinedPage')}</p>
         ) : !consented && isLive(call) ? (
-          <p className="rounded-lg bg-raised px-3 py-2 text-[13px] text-mute">A live transcript is only shown once it is confirmed the caller heard the recording notice. This call has not confirmed it yet.</p>
+          <p className="rounded-lg bg-raised px-3 py-2 text-[13px] text-mute">{t('live.notConfirmed')}</p>
         ) : (
-          <LiveCall callId={call.id} callerLabel={call.caller_name ?? call.caller_phone ?? 'Unknown caller'} initialEvents={events} initiallyLive={live} />
+          <LiveCall callId={call.id} callerLabel={call.caller_name ?? call.caller_phone ?? t('calls.unknownCaller')} initialEvents={events} initiallyLive={live} />
         )}
       </div>
     </main>

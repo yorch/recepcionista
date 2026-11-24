@@ -10,6 +10,7 @@ import { hashPassword } from '@/lib/password';
 import { rateLimit } from '@/lib/ratelimit';
 import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, captchaRequired, signupAvailability, verifyTurnstile } from '@/lib/signup';
 import { logger } from '@/lib/log';
+import { localeOfRequest } from '@/lib/i18n/core';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -71,12 +72,12 @@ export async function POST(req: Request) {
 
   try {
     const passwordHash = await hashPassword(input.password); // always: same CPU cost for new and existing addresses
-    const created = await createSignupAccount({ email: input.email, passwordHash, businessName: input.businessName });
+    const created = await createSignupAccount({ email: input.email, passwordHash, businessName: input.businessName, locale: localeOfRequest(req.headers) });
     if (!created) {
       // Existing address: no account is touched. One notice per hour at most.
       const may = await rateLimit(`auth/signup:notice:${accountId(input.email)}`, 1, 60 * 60_000);
       await afterResponse('signup.exists_notice', async () => {
-        if (may.allowed) await sendSignupExistsNotice(input.email);
+        if (may.allowed) await sendSignupExistsNotice(input.email, localeOfRequest(req.headers));
       });
       return accepted();
     }

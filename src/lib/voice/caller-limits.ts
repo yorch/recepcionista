@@ -21,6 +21,8 @@ import { claimEvent, completeEvent, releaseEvent } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
 import { peekRateLimit, rateLimit } from '@/lib/ratelimit';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { logger } from '@/lib/log';
 import { attestationLevel, type Attestation } from '@/lib/stir';
 import type { Business } from '@/lib/types';
@@ -197,10 +199,11 @@ export async function reportPressure(
       business: business.id, kind, used_pct: pct, limit, strangers_only: strangersOnly, share_pct: unknownSharePct(env),
       action: 'unusually many calls this hour; known customers keep their reserved share (docs/runbook.md, call flood)',
     });
-    const what = kind === 'forward' ? 'forwarded calls' : 'voicemails';
+    const t = makeT(await ownerLocaleFor(business));
+    const what = t(kind === 'forward' ? 'alert.pressure.kind.forward' : 'alert.pressure.kind.voicemail');
     const body = strangersOnly
-      ? `HEADS UP — ${business.name}: unusually many ${what} from unknown numbers this hour. Their share is used up; known customers still get through. If this is not expected, switch calls back to the assistant.`
-      : `HEADS UP — ${business.name}: ${pct}% of this hour's ${what} allowance is used. Known customers keep a reserved share. If this is not expected, check Calls.`;
+      ? t('alert.pressure.strangers', { business: business.name, what })
+      : t('alert.pressure.pct', { business: business.name, what, pct });
     return (await alertOwner(business, body)).notified;
   } catch (err) {
     log.error('pressure_notice_failed', { business: business.id, err });

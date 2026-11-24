@@ -1,11 +1,14 @@
 'use client';
 import { useEffect } from 'react';
+import { useT } from '@/lib/i18n/client';
 
 /**
  * Warn before losing unsaved edits: browser unload/refresh/close and in-app link clicks.
  * (The App Router has no route-change veto, so internal <a> clicks are intercepted in the capture phase.)
  */
-export function useUnsavedGuard(dirty: boolean, message = 'You have unsaved changes. Leave without saving?') {
+export function useUnsavedGuard(dirty: boolean, customMessage?: string) {
+  const t = useT();
+  const message = customMessage ?? t('common.unsavedLeave');
   useEffect(() => {
     if (!dirty) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {

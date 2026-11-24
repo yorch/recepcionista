@@ -1,7 +1,9 @@
 'use client';
+import { useT } from '@/lib/i18n/client';
 
 /** "Skip to content": focuses the page's <main> landmark (works on every page without needing ids). */
 export function SkipLink() {
+  const t = useT();
   return (
     <a
       href="#main-content"
@@ -15,7 +17,7 @@ export function SkipLink() {
         main.scrollIntoView({ block: 'start' });
       }}
     >
-      Skip to main content
+      {t('skip.toContent')}
     </a>
   );
 }

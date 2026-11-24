@@ -4,6 +4,7 @@ import { useSyncExternalStore } from 'react';
 import { browserSupportsWebAuthn, startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import type { PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON } from '@simplewebauthn/browser';
 import { apiRequest } from '@/hooks/use-api';
+import type { TFunction } from '@/lib/i18n/core';
 
 export { browserSupportsWebAuthn };
 
@@ -15,14 +16,14 @@ export function useWebAuthnSupport(): boolean | null {
 }
 
 /** A person-readable message for a failed or cancelled browser ceremony (the browser's own errors are cryptic). */
-export function passkeyErrorMessage(err: unknown): string {
+export function passkeyErrorMessage(err: unknown, t: TFunction): string {
   const name = (err as { name?: string } | null)?.name;
   const code = (err as { code?: string } | null)?.code;
-  if (name === 'NotAllowedError' || name === 'AbortError' || code === 'ERROR_CEREMONY_ABORTED') return 'The passkey prompt was closed or timed out. Try again.';
-  if (name === 'InvalidStateError' || code === 'ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED') return 'This device already has a passkey for your account.';
-  if (name === 'SecurityError') return 'Passkeys cannot be used on this address.';
+  if (name === 'NotAllowedError' || name === 'AbortError' || code === 'ERROR_CEREMONY_ABORTED') return t('auth.passkey.closed');
+  if (name === 'InvalidStateError' || code === 'ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED') return t('auth.passkey.duplicate');
+  if (name === 'SecurityError') return t('auth.passkey.insecure');
   if (err instanceof Error && err.message) return err.message;
-  return 'Something went wrong with the passkey. Try again.';
+  return t('auth.passkey.generic');
 }
 
 /** Step-up with a passkey: stamps the session as freshly re-authenticated (valid for 5 minutes). Throws ApiError / browser errors. */

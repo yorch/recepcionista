@@ -3,6 +3,7 @@ import { authenticate, authErrorResponse } from '@/lib/session';
 import { getBusiness, listBusinesses, createBusiness } from '@/lib/db';
 import { VERTICALS, type Business } from '@/lib/types';
 import { isVertical } from '@/lib/verticals';
+import { isLocale } from '@/lib/i18n/core';
 
 /** Dashboard-safe projection: no owner contact details or voice-agent ids. */
 function publicBusiness(b: Business): Business {
@@ -31,13 +32,15 @@ export async function POST(req: Request): Promise<ReturnType<typeof ok<Business>
   const auth = await authenticate(req, { role: 'admin' }); // creating tenants is admin-only
   if (!auth.ok) return auth.response;
   try {
-    const body = await readJson<{ name?: string; url?: string; owner_phone?: string; owner_name?: string; vertical?: unknown }>(req);
+    const body = await readJson<{ name?: string; url?: string; owner_phone?: string; owner_name?: string; vertical?: unknown; locale_default?: unknown }>(req);
     if (!body.name || typeof body.name !== 'string' || !body.name.trim()) {
       return fail('missing "name" in body');
     }
     if (body.vertical !== undefined && !isVertical(body.vertical)) return fail(`vertical must be one of: ${VERTICALS.join(', ')}`, 422);
+    if (body.locale_default !== undefined && !isLocale(body.locale_default)) return fail('locale_default must be "en" or "es"', 422);
     const business = await createBusiness({
       ...(body.vertical !== undefined ? { vertical: body.vertical } : {}),
+      ...(body.locale_default !== undefined ? { locale_default: body.locale_default as 'en' | 'es' } : {}),
       name: body.name.trim(),
       url: body.url?.trim() || null,
       owner_phone: body.owner_phone?.trim() || null,

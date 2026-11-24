@@ -1,12 +1,13 @@
 import Link from 'next/link';
+import { getT } from '@/lib/i18n/server';
 import { prisma } from '@/lib/db';
 import { getCalendarConnection } from '@/lib/db/calendar';
 import type { Business } from '@/lib/types';
 
-const CHANGE_TEXT: Record<string, string> = {
-  deleted_in_google: 'was deleted in your Google Calendar',
-  edited_in_google_before_push: 'was edited in your Google Calendar',
-};
+const CHANGE_KEY = {
+  deleted_in_google: 'gcalnotice.deleted',
+  edited_in_google_before_push: 'gcalnotice.edited',
+} as const;
 
 /**
  * Server component for the Today page. Renders nothing unless Google Calendar needs attention:
@@ -30,25 +31,26 @@ async function load(businessId: string): Promise<{ reauth: boolean; changes: { t
 }
 
 export async function CalendarNotice({ business, canManage }: { business: Business; canManage: boolean }) {
+  const t = await getT();
   const state = await load(business.id);
   if (!state) return null;
   const { reauth, changes } = state;
   return (
-    <section aria-label="Google Calendar" className="mt-6 space-y-2 rounded-2xl border border-[#473817] bg-[#2e2410] p-4 text-[#f7dc9b]">
+    <section aria-label={t('gcalnotice.region')} className="mt-6 space-y-2 rounded-2xl border border-[#473817] bg-[#2e2410] p-4 text-[#f7dc9b]">
       {reauth ? (
         <p className="text-[13px] leading-relaxed">
-          <strong className="font-semibold">Google Calendar needs to be reconnected.</strong> Until then your calendar is NOT blocking time, so she may offer times you are busy.{' '}
-          {canManage ? <Link href="/dashboard/settings" className="underline underline-offset-2">Reconnect it in Settings</Link> : 'Ask the owner to reconnect it in Settings.'}
+          <strong className="font-semibold">{t('gcalnotice.reconnectTitle')}</strong> {t('gcalnotice.reconnectBody')}{' '}
+          {canManage ? <Link href="/dashboard/settings" className="underline underline-offset-2">{t('gcalnotice.reconnectLink')}</Link> : t('gcalnotice.askOwner')}
         </p>
       ) : null}
       {changes.length > 0 ? (
         <div className="text-[13px] leading-relaxed">
-          <p><strong className="font-semibold">Changed in Google Calendar:</strong> {changes.length === 1 ? 'a booking' : `${changes.length} bookings`} no longer match{changes.length === 1 ? 'es' : ''} your calendar.</p>
+          <p><strong className="font-semibold">{t('gcalnotice.changedTitle')}</strong> {t('gcalnotice.changed', { count: changes.length })}</p>
           <ul className="mt-1 list-disc pl-5">
             {changes.map((c) => (
               <li key={c.target}>
-                <Link href="/dashboard/bookings?tab=agenda" className="underline underline-offset-2">A job</Link>{' '}
-                {CHANGE_TEXT[String((c.meta as { change?: unknown } | null)?.change ?? '')] ?? 'was changed in your Google Calendar'}
+                <Link href="/dashboard/bookings?tab=agenda" className="underline underline-offset-2">{t('gcalnotice.aJob')}</Link>{' '}
+                {t(CHANGE_KEY[String((c.meta as { change?: unknown } | null)?.change ?? '') as keyof typeof CHANGE_KEY] ?? 'gcalnotice.changedGeneric')}
               </li>
             ))}
           </ul>

@@ -20,7 +20,7 @@ export const MFA_ACCOUNT_NOTICE_AFTER = 4;
 /** Per-ACCOUNT throttle key for the second factor: independent of the client IP, so a botnet cannot fan out. */
 export const mfaAccountKey = (userId: string): string => `auth/mfa:acct:${accountId(userId)}`;
 
-export interface MfaAccountContext { email: string; businessId: string | null; ip: string | null }
+export interface MfaAccountContext { email: string; businessId: string | null; ip: string | null; locale?: 'en' | 'es' }
 
 /**
  * Verify a TOTP code (replay-guarded: the matched 30 s step is claimed atomically, so a code works once)
@@ -57,7 +57,7 @@ async function onAccountFailure(userId: string, account?: MfaAccountContext): Pr
     });
   }
   if (account?.email && (await rateLimit(`auth/mfa:notice:${accountId(userId)}`, 1, 60 * 60_000)).allowed) {
-    await afterResponse('mfa.failures_notice', () => sendMfaFailuresNotice(account.email));
+    await afterResponse('mfa.failures_notice', () => sendMfaFailuresNotice(account.email, account.locale));
   }
 }
 

@@ -2,12 +2,16 @@
 import { useState } from 'react';
 import { go } from '@/components/auth/auth-ui';
 import { PasskeyLogin } from '@/components/auth/passkey-login';
+import { LocaleSwitcher } from '@/components/ui/locale-switcher';
+import { apiErrorMessage } from '@/lib/i18n/api-errors';
+import { useT } from '@/lib/i18n/client';
 import { safeNextPath } from '@/lib/safe-redirect';
 
 const inputCls =
   'mt-1 w-full rounded-lg border border-[#1b2430] bg-[#080b10] px-3 py-2 text-[14px] text-white outline-none focus:border-[#ff6b35]';
 
 export default function LoginPage() {
+  const t = useT();
   const [adminMode, setAdminMode] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -17,7 +21,7 @@ export default function LoginPage() {
   const [notice] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
     const q = new URLSearchParams(window.location.search);
-    if (q.get('reset') === '1') return 'Your password was changed. Sign in with the new one.';
+    if (q.get('reset') === '1') return 'reset';
     return null;
   });
 
@@ -33,7 +37,7 @@ export default function LoginPage() {
       });
       if (!res.ok) {
         const json = await res.json().catch(() => null);
-        setError(json?.error ?? 'Login failed');
+        setError(json?.error ? apiErrorMessage(t, json.error) : t('auth.login.failed'));
         return;
       }
       const next = new URLSearchParams(window.location.search).get('next');
@@ -44,7 +48,7 @@ export default function LoginPage() {
       }
       go(safeNextPath(next));
     } catch {
-      setError('Network error');
+      setError(t('err.network'));
     } finally {
       setBusy(false);
     }
@@ -57,12 +61,12 @@ export default function LoginPage() {
       <form onSubmit={submit} className="w-full max-w-sm rounded-xl border border-[#1b2430] bg-[#0b1017] p-6">
         <h1 className="text-lg font-semibold text-white">Recepcionista</h1>
         <p className="mt-1 text-[13px] text-[#8b98ab]">
-          {adminMode ? 'Enter the admin token to continue.' : 'Sign in to your business dashboard.'}
+          {adminMode ? t('auth.login.subtitleAdmin') : t('auth.login.subtitleUser')}
         </p>
 
         {adminMode ? (
           <>
-            <label htmlFor="token" className="mt-5 block text-[12px] text-[#8b98ab]">Admin token</label>
+            <label htmlFor="token" className="mt-5 block text-[12px] text-[#8b98ab]">{t('auth.login.adminToken')}</label>
             <input
               id="token"
               type="password"
@@ -76,7 +80,7 @@ export default function LoginPage() {
           </>
         ) : (
           <>
-            <label htmlFor="email" className="mt-5 block text-[12px] text-[#8b98ab]">Email</label>
+            <label htmlFor="email" className="mt-5 block text-[12px] text-[#8b98ab]">{t('auth.login.email')}</label>
             <input
               id="email"
               type="email"
@@ -87,7 +91,7 @@ export default function LoginPage() {
               onChange={(e) => setEmail(e.target.value)}
               className={inputCls}
             />
-            <label htmlFor="password" className="mt-3 block text-[12px] text-[#8b98ab]">Password</label>
+            <label htmlFor="password" className="mt-3 block text-[12px] text-[#8b98ab]">{t('auth.login.password')}</label>
             <input
               id="password"
               type="password"
@@ -100,14 +104,14 @@ export default function LoginPage() {
           </>
         )}
 
-        <p role="status" suppressHydrationWarning className="mt-2 text-[12px] text-[#8fe3b4]">{error ? '' : notice}</p>
+        <p role="status" suppressHydrationWarning className="mt-2 text-[12px] text-[#8fe3b4]">{error ? '' : notice === 'reset' ? t('auth.login.resetDone') : notice}</p>
         {error && <p role="alert" className="mt-2 text-[12px] text-[#ff7b7b]">{error}</p>}
         <button
           type="submit"
           disabled={busy || !ready}
           className="mt-4 w-full rounded-lg bg-[#ff6b35] px-3 py-2 text-[14px] font-semibold text-[#150800] disabled:opacity-50"
         >
-          {busy ? 'Signing in...' : 'Sign in'}
+          {busy ? t('auth.login.signingIn') : t('auth.login.signIn')}
         </button>
         {!adminMode && <PasskeyLogin disabled={busy} />}
         <button
@@ -115,14 +119,15 @@ export default function LoginPage() {
           onClick={() => { setAdminMode((v) => !v); setError(null); }}
           className="mt-3 w-full text-center text-[12px] text-[#6b7b91] hover:text-[#cbd7e6]"
         >
-          {adminMode ? 'Sign in with email instead' : 'Use admin token'}
+          {adminMode ? t('auth.login.useEmail') : t('auth.login.useAdmin')}
         </button>
         {!adminMode && (
           <p className="mt-4 flex justify-between text-[12px] text-[#8b98ab]">
-            <a href="/forgot-password" className="hover:text-white">Forgot password?</a>
-            <a href="/signup" className="hover:text-white">Create an account</a>
+            <a href="/forgot-password" className="hover:text-white">{t('auth.login.forgot')}</a>
+            <a href="/signup" className="hover:text-white">{t('auth.login.create')}</a>
           </p>
         )}
+        <div className="mt-5 flex justify-center border-t border-[#1b2430] pt-4"><LocaleSwitcher /></div>
       </form>
     </main>
   );

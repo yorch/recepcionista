@@ -5,22 +5,26 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { TextField } from '@/components/ui/field';
 import { ApiError, useApi } from '@/hooks/use-api';
+import { errorText } from '@/lib/i18n/api-errors';
+import { useT } from '@/lib/i18n/client';
+import type { TFunction } from '@/lib/i18n/core';
 import { toE164 } from '@/lib/phone';
 import { prettyPhone } from './forwarding';
 import type { StepProps } from './flow';
 
 const RESEND_SECONDS = 30;
 
-function friendly(err: ApiError, what: 'send' | 'confirm'): string {
-  if (err.status === 403 && /email_not_verified/i.test(err.message)) return 'Confirm your email address first (check your inbox for our message), then come back and text yourself a code.';
-  if (err.status === 429) return 'Too many attempts. Wait a few minutes, then try again.';
-  if (err.status === 404 || err.status === 501) return 'Phone verification is not available yet. Please contact support.';
-  if (err.status === 503) return 'We could not send a text right now. Try again in a minute.';
-  if (what === 'confirm' && (err.status === 400 || err.status === 401 || err.status === 422)) return err.message || 'That code is not right. Check the text and try again.';
-  return err.message;
+function friendly(t: TFunction, err: ApiError, what: 'send' | 'confirm'): string {
+  if (err.status === 403 && /email_not_verified/i.test(err.message)) return t('vf.emailFirst');
+  if (err.status === 429) return t('vf.tooMany');
+  if (err.status === 404 || err.status === 501) return t('vf.unavailable');
+  if (err.status === 503) return t('vf.cantSend');
+  if (what === 'confirm' && (err.status === 400 || err.status === 401 || err.status === 422)) return err.message ? errorText(t, err) : t('vf.badCode');
+  return errorText(t, err);
 }
 
 export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
+  const t = useT();
   const { busy, request } = useApi();
   const initial = status.owner_phone ?? '';
   const [name, setName] = useState(status.owner_name ?? '');
@@ -45,7 +49,7 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
 
   async function sendCode() {
     setCodeError(null);
-    if (!e164) { setPhoneError('Enter a mobile number with area code, like 305 555 0142.'); return; }
+    if (!e164) { setPhoneError(t('vf.enterPhone')); return; }
     setPhoneError(null);
     try {
       if (e164 !== toE164(status.owner_phone) || name.trim() !== (status.owner_name ?? '')) {
@@ -57,9 +61,9 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
       setChallenge(started.challenge);
       setSentTo(e164);
       setCooldown(RESEND_SECONDS);
-      toast.success(`Code sent to ${prettyPhone(e164)}`);
+      toast.success(t('vf.codeSent', { phone: prettyPhone(e164) }));
     } catch (err) {
-      setPhoneError(friendly(err as ApiError, 'send'));
+      setPhoneError(friendly(t, err as ApiError, 'send'));
     }
   }
 
@@ -67,26 +71,26 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
     e.preventDefault();
     setCodeError(null);
     const digits = code.replace(/\D/g, '');
-    if (digits.length < 4) { setCodeError('Enter the code from the text message.'); return; }
-    if (!challenge || !sentTo) { setCodeError('Request a new code first.'); return; }
+    if (digits.length < 4) { setCodeError(t('vf.enterCode')); return; }
+    if (!challenge || !sentTo) { setCodeError(t('vf.newCode')); return; }
     try {
       await request(`/api/businesses/${businessId}/owner-phone/verify/confirm`, { method: 'POST', body: { phone: sentTo, code: digits, challenge } });
-      toast.success('Phone verified');
+      toast.success(t('vf.verifiedToast'));
       setChanging(false);
       setSentTo(null);
       setChallenge(null);
       setCode('');
       await refresh();
     } catch (err) {
-      setCodeError(friendly(err as ApiError, 'confirm'));
+      setCodeError(friendly(t, err as ApiError, 'confirm'));
     }
   }
 
   return (
     <section aria-labelledby="verify-title">
-      <h2 id="verify-title" className="text-[28px] font-semibold tracking-[-0.02em] text-white">Where should she reach you?</h2>
+      <h2 id="verify-title" className="text-[28px] font-semibold tracking-[-0.02em] text-white">{t('vf.title')}</h2>
       <p className="mt-2 text-sm text-mute">
-        She texts this number when there is an emergency or a caller needs you, and sends your evening briefing here. We confirm it is yours with a text code.
+        {t('vf.lead')}
       </p>
 
       <Card className="mt-6 p-5">
@@ -94,35 +98,35 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
           <div role="status" className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-[15px] text-white">
               <span aria-hidden="true" className="mr-2 text-mint">✓</span>
-              {prettyPhone(e164!)} is verified
+              {t('vf.isVerified', { phone: prettyPhone(e164!) })}
             </p>
-            <Button variant="outline" onClick={() => { setChanging(true); setSentTo(null); }}>Change number</Button>
+            <Button variant="outline" onClick={() => { setChanging(true); setSentTo(null); }}>{t('vf.change')}</Button>
           </div>
         ) : (
           <>
             <TextField
-              label="Your name" value={name} autoComplete="name" placeholder="Jorge Rivera"
-              onChange={(e) => setName(e.target.value)} hint="So she can say who she is handing the call to."
+              label={t('vf.name')} value={name} autoComplete="name" placeholder={t('vf.namePlaceholder')}
+              onChange={(e) => setName(e.target.value)} hint={t('vf.nameHint')}
             />
             <TextField
-              className="mt-4" label="Your mobile number" type="tel" inputMode="tel" autoComplete="tel" mono
+              className="mt-4" label={t('vf.mobile')} type="tel" inputMode="tel" autoComplete="tel" mono
               value={phone} placeholder="305 555 0142" error={phoneError}
               onChange={(e) => { setPhone(e.target.value); setPhoneError(null); if (sentTo && toE164(e.target.value) !== sentTo) setSentTo(null); }}
-              hint="Message and data rates may apply. Reply STOP to any text to stop."
+              hint={t('vf.mobileHint')}
             />
             {!sentTo ? (
-              <Button className="mt-4 w-full sm:w-auto" onClick={sendCode} disabled={busy}>{busy ? 'Sending…' : 'Text me a code'}</Button>
+              <Button className="mt-4 w-full sm:w-auto" onClick={sendCode} disabled={busy}>{busy ? t('common.sending') : t('vf.sendCode')}</Button>
             ) : (
               <form onSubmit={confirm} className="mt-5 border-t border-line pt-5" noValidate>
                 <TextField
-                  label={`Code sent to ${prettyPhone(sentTo)}`} value={code} inputMode="numeric" autoComplete="one-time-code"
+                  label={t('vf.codeLabel', { phone: prettyPhone(sentTo) })} value={code} inputMode="numeric" autoComplete="one-time-code"
                   maxLength={10} mono autoFocus placeholder="123456" error={codeError}
                   onChange={(e) => { setCode(e.target.value); setCodeError(null); }}
                 />
                 <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <Button type="submit" disabled={busy}>{busy ? 'Checking…' : 'Verify'}</Button>
+                  <Button type="submit" disabled={busy}>{busy ? t('common.checking') : t('vf.verify')}</Button>
                   <Button variant="ghost" onClick={sendCode} disabled={busy || cooldown > 0}>
-                    {cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend code'}
+                    {cooldown > 0 ? t('vf.resendIn', { n: cooldown }) : t('vf.resend')}
                   </Button>
                 </div>
               </form>
@@ -132,8 +136,8 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
       </Card>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button onClick={() => go('plan')} disabled={!status.owner_phone_verified || !verifiedSame} className="flex-1 sm:flex-none sm:px-8">Continue →</Button>
-        <Button variant="ghost" onClick={() => go('review')}>Back</Button>
+        <Button onClick={() => go('plan')} disabled={!status.owner_phone_verified || !verifiedSame} className="flex-1 sm:flex-none sm:px-8">{t('plan.continue')}</Button>
+        <Button variant="ghost" onClick={() => go('review')}>{t('common.back')}</Button>
       </div>
     </section>
   );

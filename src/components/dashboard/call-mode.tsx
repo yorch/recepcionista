@@ -7,8 +7,10 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/components/ui/cn';
 import { TextField } from '@/components/ui/field';
 import { ApiError, apiRequest } from '@/hooks/use-api';
+import { apiErrorMessage, errorText } from '@/lib/i18n/api-errors';
+import { useT } from '@/lib/i18n/client';
+import type { TFunction } from '@/lib/i18n/core';
 import { useReauth } from '@/components/dashboard/reauth';
-import { FORWARD_UNAVAILABLE } from '@/lib/voice/line';
 import type { CallModeView } from '@/lib/voice/call-mode';
 import type { CallMode } from '@/lib/types';
 
@@ -24,7 +26,7 @@ const ICON: Record<CallMode, string> = {
   forward: 'M5 12h12m-4-5 5 5-5 5',
 };
 
-const friendly = (err: unknown): string => (err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+const friendly = (t: TFunction, err: unknown): string => errorText(t, err);
 
 /**
  * The call-handling switch: a status pill (always visible, for everyone) and, for the owner, three choices: the AI answers,
@@ -34,19 +36,20 @@ const friendly = (err: unknown): string => (err instanceof ApiError ? err.messag
 export function CallModeSwitch({
   businessId, initial, canManage, compact = false,
 }: { businessId: string; initial: CallModeView; canManage: boolean; compact?: boolean }) {
+  const t = useT();
   const router = useRouter();
   const [view, setView] = useState(initial);
   const [busy, setBusy] = useState<CallMode | null>(null);
   const [open, setOpen] = useState(false);
   const buttons = useRef<Partial<Record<CallMode, HTMLButtonElement | null>>>({});
-  const { guard, panel } = useReauth((err) => toast.error(friendly(err)));
+  const { guard, panel } = useReauth((err) => toast.error(friendly(t, err)));
 
   async function apply(mode: CallMode) {
     setBusy(mode);
     try {
       const next = await apiRequest<CallModeView>(`/api/businesses/${businessId}/call-mode`, { method: 'PATCH', body: { mode } });
       setView(next);
-      toast.success(mode === 'ai' ? 'The assistant is answering calls again' : mode === 'paused' ? 'Calls are paused: callers are asked to leave a message' : 'Calls now forward to your number');
+      toast.success(t(`callmode.toast.${mode}` as const));
       router.refresh();
     } finally {
       setBusy(null);
@@ -60,7 +63,7 @@ export function CallModeSwitch({
     try {
       await guard(() => apply(mode));
     } catch (err) {
-      toast.error(friendly(err));
+      toast.error(friendly(t, err));
     }
   }
 
@@ -71,7 +74,7 @@ export function CallModeSwitch({
       className={cn('inline-flex min-h-11 items-center gap-2 rounded-full border px-4 py-1.5 text-[13px] font-medium', TONE[view.tone])}
     >
       <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={ICON[view.route_now === 'ai' ? 'ai' : view.route_now]} /></svg>
-      {view.label}
+      {t(`callmode.label.${view.label_code}` as const, { number: view.forward_number_masked ?? '' })}
     </p>
   );
 
@@ -88,16 +91,16 @@ export function CallModeSwitch({
           onClick={() => setOpen((o) => !o)}
           className="min-h-11 rounded-xl px-3 text-[13px] font-medium text-brand-soft hover:underline"
         >
-          {open ? 'Done' : 'Change'}
+          {open ? t('callmode.done') : t('callmode.change')}
         </button>
       </div>
       {open || !compact ? (
         <div id={`call-mode-${businessId}`} className="flex flex-col gap-2">
-          <div role="group" aria-label="Call handling" className="inline-flex overflow-hidden rounded-xl border border-line-3">
+          <div role="group" aria-label={t('callmode.group')} className="inline-flex overflow-hidden rounded-xl border border-line-3">
             {([
-              ['ai', 'AI answers'],
-              ['paused', 'Pause'],
-              ['forward', 'Forward'],
+              ['ai', 'callmode.btn.ai'],
+              ['paused', 'callmode.btn.paused'],
+              ['forward', 'callmode.btn.forward'],
             ] as const).map(([mode, label]) => {
               const unavailable = mode === 'forward' && (!view.forward_supported || !view.forward_verified);
               return (
@@ -112,17 +115,17 @@ export function CallModeSwitch({
                   className={cn('flex min-h-11 items-center gap-1.5 px-3.5 text-[13px] font-medium transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-50', view.call_mode === mode ? 'bg-raised text-white' : 'text-mute hover:bg-hover hover:text-soft')}
                 >
                   <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={ICON[mode]} /></svg>
-                  {busy === mode ? 'Saving…' : label}
+                  {busy === mode ? t('common.saving') : t(label)}
                 </button>
               );
             })}
           </div>
           {!view.forward_supported ? (
-            <p id={`call-mode-note-${businessId}`} className="max-w-md text-xs text-dim">{FORWARD_UNAVAILABLE}.</p>
+            <p id={`call-mode-note-${businessId}`} className="max-w-md text-xs text-dim">{t('callmode.unavailable')}.</p>
           ) : !view.forward_verified ? (
             <p id={`call-mode-note-${businessId}`} className="max-w-md text-xs text-dim">
-              {view.forward_blocked ? `The saved number cannot be used: ${view.forward_blocked}. ` : 'To forward calls, add and verify a number in '}
-              <Link href="/dashboard/settings#call-handling" className="text-brand-soft hover:underline">Settings</Link>.
+              {view.forward_blocked ? `${t('callmode.blocked', { reason: apiErrorMessage(t, view.forward_blocked) })} ` : `${t('callmode.toAdd')} `}
+              <Link href="/dashboard/settings#call-handling" className="text-brand-soft hover:underline">{t('callmode.settingsLink')}</Link>.
             </p>
           ) : null}
           {panel}
@@ -136,6 +139,7 @@ export function CallModeSwitch({
 export function CallHandlingSettings({
   businessId, initial, ownerPhoneVerified, ownerPhone,
 }: { businessId: string; initial: CallModeView; ownerPhoneVerified: boolean; ownerPhone: string | null }) {
+  const t = useT();
   const router = useRouter();
   const [view, setView] = useState(initial);
   const [phone, setPhone] = useState('');
@@ -145,7 +149,7 @@ export function CallHandlingSettings({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const { guard, panel } = useReauth((err) => setError(friendly(err)));
+  const { guard, panel } = useReauth((err) => setError(friendly(t, err)));
 
   // Setting the forwarding number is a sensitive change: the server may ask for the password first (`guard` shows the panel and retries).
   const run = async <T,>(key: string, fn: () => Promise<T>): Promise<T | undefined> => {
@@ -155,34 +159,34 @@ export function CallHandlingSettings({
       let out: T | undefined;
       await guard(async () => { out = await fn(); });
       return out;
-    } catch (err) { setError(friendly(err)); return undefined; } finally { setBusy(null); }
+    } catch (err) { setError(friendly(t, err)); return undefined; } finally { setBusy(null); }
   };
 
   const sendCode = () => run('send', async () => {
     const r = await apiRequest<{ challenge: string }>(`/api/businesses/${businessId}/forward-number/verify/start`, { method: 'POST', body: { phone } });
     setChallenge(r.challenge);
     setSentTo(phone);
-    toast.success('Code sent');
+    toast.success(t('callmode.codeSent'));
     router.refresh();
   });
 
   const confirm = (e: React.FormEvent) => {
     e.preventDefault();
     return run('confirm', async () => {
-      if (!challenge || !sentTo) throw new ApiError('Request a new code first.', 422);
+      if (!challenge || !sentTo) throw new ApiError(t('callmode.needNewCode'), 422);
       const r = await apiRequest<{ state: CallModeView }>(`/api/businesses/${businessId}/forward-number/verify/confirm`, {
         method: 'POST', body: { phone: sentTo, code: code.replace(/\D/g, ''), challenge },
       });
       setView(r.state);
       setChallenge(null); setSentTo(null); setCode(''); setPhone('');
-      toast.success('Number verified');
+      toast.success(t('callmode.verified'));
       router.refresh();
     });
   };
 
   const useOwner = () => run('owner', async () => {
     setView(await apiRequest<CallModeView>(`/api/businesses/${businessId}/forward-number`, { method: 'PUT', body: { use_owner_phone: true } }));
-    toast.success('Forwarding number set to your verified phone');
+    toast.success(t('callmode.ownerSet'));
     router.refresh();
   });
 
@@ -203,48 +207,48 @@ export function CallHandlingSettings({
       <CallModeSwitch key={`${view.forward_number_masked}:${view.forward_verified}:${view.forward_blocked}`} businessId={businessId} initial={view} canManage />
 
       <div className="rounded-xl border border-line-2 bg-sunken p-4 text-[13px] leading-relaxed text-body">
-        <p><strong className="text-soft">AI answers</strong>: the receptionist takes the call (default).</p>
-        <p className="mt-1"><strong className="text-soft">Pause</strong>: the receptionist does not answer, book, text or take payments. Callers are told that, and can leave a message: on the AI voice line she takes their name and number; on a forwarding line they leave a recorded voicemail (they are told it is recorded). Voicemails show in Calls.</p>
+        <p><strong className="text-soft">{t('callmode.exp.ai')}</strong>{t('callmode.exp.aiBody')}</p>
+        <p className="mt-1"><strong className="text-soft">{t('callmode.exp.pause')}</strong>{t('callmode.exp.pauseBody')}</p>
         {view.forward_supported ? (
-          <p className="mt-1"><strong className="text-soft">Forward</strong>: calls ring your verified number and are not recorded. If nobody answers, the caller can leave a voicemail. Forwarded minutes count toward your plan and a call is cut off when they run out.</p>
+          <p className="mt-1"><strong className="text-soft">{t('callmode.exp.forward')}</strong>{t('callmode.exp.forwardBody')}</p>
         ) : (
-          <p className="mt-1" role="note"><strong className="text-soft">Forward</strong>: {FORWARD_UNAVAILABLE}. Use your phone carrier&apos;s call forwarding to ring your own phone, or pause to take messages instead.</p>
+          <p className="mt-1" role="note"><strong className="text-soft">{t('callmode.exp.forward')}</strong>{t('callmode.exp.forwardUnavailable', { reason: t('callmode.unavailable') })}</p>
         )}
       </div>
 
       {view.forward_supported ? (
       <div>
-        <h3 className="text-sm font-semibold text-white">Forwarding number</h3>
+        <h3 className="text-sm font-semibold text-white">{t('callmode.fn.title')}</h3>
         {view.forward_number_masked ? (
           <p className="mt-1.5 text-[13px] text-soft">
             <span className="font-mono">{view.forward_number ?? view.forward_number_masked}</span>{' '}
             {view.forward_verified
-              ? <span className="text-mint-text">(verified{view.forward_is_owner_phone ? ': your alert phone' : ''})</span>
-              : <span className="text-warn">({view.forward_blocked ? `not allowed: ${view.forward_blocked}` : 'not verified: calls are not forwarded to it'})</span>}
+              ? <span className="text-mint-text">({t('callmode.fn.verified', { owner: view.forward_is_owner_phone ? t('callmode.fn.ownerSuffix') : '' })})</span>
+              : <span className="text-warn">({view.forward_blocked ? t('callmode.fn.blocked', { reason: apiErrorMessage(t, view.forward_blocked) }) : t('callmode.fn.unverified')})</span>}
           </p>
-        ) : <p className="mt-1.5 text-[13px] text-dim">No forwarding number yet.</p>}
+        ) : <p className="mt-1.5 text-[13px] text-dim">{t('callmode.fn.none')}</p>}
 
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <TextField
-            label="Number to forward to" className="min-w-[220px] flex-1" type="tel" inputMode="tel" autoComplete="tel"
-            value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="305 555 0142"
-            hint="We text it a 6-digit code to prove it is a phone you control. Premium-rate, short-code and unsupported-country numbers are refused."
+            label={t('callmode.fn.label')} className="min-w-[220px] flex-1" type="tel" inputMode="tel" autoComplete="tel"
+            value={phone} onChange={(e) => setPhone(e.target.value)} placeholder={t('callmode.fn.placeholder')}
+            hint={t('callmode.fn.hint')}
           />
-          <Button variant="outline" onClick={sendCode} disabled={busy !== null || !phone.trim()}>{busy === 'send' ? 'Sending…' : 'Text me a code'}</Button>
+          <Button variant="outline" onClick={sendCode} disabled={busy !== null || !phone.trim()}>{busy === 'send' ? t('common.sending') : t('callmode.fn.sendCode')}</Button>
         </div>
 
         {challenge ? (
           <form onSubmit={confirm} className="mt-3 flex flex-wrap items-end gap-3">
-            <TextField label="6-digit code" className="w-40" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={(e) => setCode(e.target.value)} mono />
-            <Button type="submit" disabled={busy !== null || code.replace(/\D/g, '').length < 4}>{busy === 'confirm' ? 'Checking…' : 'Verify number'}</Button>
+            <TextField label={t('callmode.fn.codeLabel')} className="w-40" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={(e) => setCode(e.target.value)} mono />
+            <Button type="submit" disabled={busy !== null || code.replace(/\D/g, '').length < 4}>{busy === 'confirm' ? t('common.checking') : t('callmode.fn.verify')}</Button>
           </form>
         ) : null}
 
         <div className="mt-3 flex flex-wrap gap-2">
           {ownerPhoneVerified && ownerPhone ? (
-            <Button variant="outline" onClick={useOwner} disabled={busy !== null}>{busy === 'owner' ? 'Saving…' : `Use my verified alert phone (${ownerPhone})`}</Button>
+            <Button variant="outline" onClick={useOwner} disabled={busy !== null}>{busy === 'owner' ? t('common.saving') : t('callmode.fn.useOwner', { phone: ownerPhone })}</Button>
           ) : null}
-          {view.forward_number_masked ? <Button variant="ghost" onClick={remove} disabled={busy !== null}>Remove number</Button> : null}
+          {view.forward_number_masked ? <Button variant="ghost" onClick={remove} disabled={busy !== null}>{t('callmode.fn.remove')}</Button> : null}
         </div>
         {panel}
         {error ? <p role="alert" className="mt-3 text-[13px] text-danger">{error}</p> : null}
@@ -259,8 +263,8 @@ export function CallHandlingSettings({
           onChange={(e) => void setHours(e.target.checked)}
         />
         <span>
-          Forward only during business hours
-          <span className="block text-xs text-dim">Inside your opening hours calls ring your number; after hours the AI answers. Works with the Forward mode.</span>
+          {t('callmode.hoursOnly')}
+          <span className="block text-xs text-dim">{t('callmode.hoursOnlyHint')}</span>
         </span>
       </label>
       ) : null}

@@ -10,6 +10,7 @@ import { authenticate } from '@/lib/session';
 import { hashPassword } from '@/lib/password';
 import { validateStrongPassword } from '@/lib/user-policy';
 import { logger } from '@/lib/log';
+import { localeOfRequest } from '@/lib/i18n/core';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -64,7 +65,8 @@ export async function POST(req: Request) {
     const token = typeof body.token === 'string' ? body.token : '';
     const peek = await peekEmailToken('invite', token);
     if (!peek || !peek.business_id || !peek.role) return fail(400, BAD_LINK);
-    if (!(await getBusiness(peek.business_id))) return fail(400, BAD_LINK);
+    const inviteBusiness = await getBusiness(peek.business_id);
+    if (!inviteBusiness) return fail(400, BAD_LINK);
     if (await getUserByEmail(peek.email)) return acceptForExistingAccount(req, token, peek);
     const pwErr = validateStrongPassword(body.password, peek.email);
     if (pwErr) return fail(422, pwErr);
@@ -78,6 +80,7 @@ export async function POST(req: Request) {
         if (!consumed || !consumed.business_id || !consumed.role) throw new BadLinkError();
         const created = await createUser({
           email: consumed.email, password_hash: passwordHash, role: consumed.role, business_id: consumed.business_id, email_verified: true,
+          locale: localeOfRequest(req.headers, inviteBusiness?.locale_default),
         }, tx);
         return { rec: consumed, user: created };
       }));

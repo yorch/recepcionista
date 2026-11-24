@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { getLocale, getT } from '@/lib/i18n/server';
 import { getUsage, callMinutesCapFor, smsCapFor } from '@/lib/db';
 import { bannerFor, type BannerTone } from '@/lib/billing/banner-state';
 import { usageWarningsFor } from '@/lib/billing/warnings';
@@ -21,6 +22,8 @@ const tones: Record<BannerTone, string> = {
  * (the message tells them to ask the owner). Usage for the over-cap case is loaded here.
  */
 export async function BillingBanner({ business, canManage }: { business: Business; canManage: boolean }) {
+  const t = await getT();
+  const locale = await getLocale();
   let usage = null;
   const status = business.billing_status ?? 'none';
   if (status === 'trialing' || status === 'active') {
@@ -31,17 +34,18 @@ export async function BillingBanner({ business, canManage }: { business: Busines
       usage = null; // a usage lookup failure must never break the dashboard
     }
   }
-  let banner = bannerFor(business, usage, canManage);
+  let banner = bannerFor(business, usage, canManage, new Date(), process.env, locale);
   if (!banner && (status === 'trialing' || status === 'active')) {
     // No billing problem: say when a monthly allowance is nearly or fully used (the owner was also emailed / texted once).
     const warnings = await usageWarningsFor(business.id);
     const worst = warnings.sort((a, b) => b.percent - a.percent)[0];
     if (worst) {
+      const label = t(`banner.usage.label.${worst.kind}` as const);
       banner = {
         kind: 'over_cap', tone: worst.level === 100 ? 'danger' : 'warning',
-        title: worst.level === 100 ? `You have used all your ${worst.label}` : `${worst.percent}% of your ${worst.label} used`,
-        message: `${worst.used} of ${worst.cap} ${worst.unit} this month.${worst.level === 100 ? ' The limit now applies until next month or a plan change.' : ''}`,
-        cta: canManage ? 'See plans and usage' : null,
+        title: worst.level === 100 ? t('banner.usage.allUsed', { label }) : t('banner.usage.percentUsed', { percent: worst.percent, label }),
+        message: t('banner.usage.of', { used: worst.used, cap: worst.cap, unit: t(worst.unit === 'texts' ? 'banner.usage.unit.texts' : 'banner.usage.unit.minutes') }) + (worst.level === 100 ? t('banner.usage.limitApplies') : ''),
+        cta: canManage ? t('banner.usage.cta') : null,
       };
     }
   }

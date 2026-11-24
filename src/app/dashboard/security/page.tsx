@@ -1,18 +1,22 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { SecurityPanel, type SessionView } from '@/components/auth/security-panel';
+import { getT } from '@/lib/i18n/server';
 import { countUnusedRecoveryCodes, listAdminSessions, listPasskeys, listUserSessions } from '@/lib/db';
 import { getServerResolution, require2faForAdmins } from '@/lib/session';
 import type { UserSession } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
-export const metadata: Metadata = { title: 'Security' };
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: (await getT())('sec.page.title') };
+}
 
 const view = (s: UserSession, current: string | null): SessionView => ({
   id: s.id, created_at: s.created_at, last_used_at: s.last_used_at, expires_at: s.expires_at, ip: s.ip, user_agent: s.user_agent, current: s.id === current,
 });
 
 export default async function SecurityPage() {
+  const t = await getT();
   const res = await getServerResolution();
   if (!res) redirect('/login');
   const { principal, sessionId } = res;
@@ -26,8 +30,8 @@ export default async function SecurityPage() {
   return (
     <main className="mx-auto w-full max-w-3xl px-6 py-8">
       <header>
-        <h1 className="text-[24px] font-semibold tracking-[-0.02em]">Security</h1>
-        <p className="mt-1 text-[13px] text-[#8b98ab]">Your email, passkeys, two-step verification and signed-in devices.</p>
+        <h1 className="text-[24px] font-semibold tracking-[-0.02em]">{t('sec.page.title')}</h1>
+        <p className="mt-1 text-[13px] text-[#8b98ab]">{t('sec.page.subtitle')}</p>
       </header>
       <SecurityPanel
         email={user?.email ?? null}

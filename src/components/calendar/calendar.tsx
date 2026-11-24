@@ -8,24 +8,24 @@ import { TimeGrid } from './time-grid';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/components/ui/cn';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ApiError, apiRequest } from '@/hooks/use-api';
+import { apiRequest } from '@/hooks/use-api';
+import { errorText } from '@/lib/i18n/api-errors';
+import { useLocale, useT } from '@/lib/i18n/client';
+import { intlTag, type Locale } from '@/lib/i18n/core';
 import { groupByDay, monthGrid, nextDate, previousDate, rangeFor, type CalendarView, type WeekStart } from '@/lib/calendar';
 import { addDaysToDateKey, isDateKey } from '@/lib/time';
 import type { BookingsRangeResult } from '@/app/api/bookings/route';
 import type { Booking, Hours } from '@/lib/types';
 
-const VIEWS: { id: CalendarView; label: string }[] = [{ id: 'week', label: 'Week' }, { id: 'day', label: 'Day' }, { id: 'month', label: 'Month' }];
-const dateLabel = (key: string, opts: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat('en-US', { ...opts, timeZone: 'UTC' }).format(new Date(`${key}T12:00:00Z`));
+const VIEWS: CalendarView[] = ['week', 'day', 'month'];
+const dateLabelIn = (locale: Locale, key: string, opts: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat(intlTag(locale), { ...opts, timeZone: 'UTC' }).format(new Date(`${key}T12:00:00Z`));
 
-function titleFor(view: CalendarView, date: string, days: string[]): string {
-  if (view === 'day') return dateLabel(date, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-  if (view === 'month') return dateLabel(date, { month: 'long', year: 'numeric' });
-  const a = days[0];
-  const b = days[days.length - 1];
-  const start = dateLabel(a, { month: 'short', day: 'numeric' });
-  if (a.slice(0, 4) !== b.slice(0, 4)) return `${start}, ${a.slice(0, 4)} to ${dateLabel(b, { month: 'short', day: 'numeric' })}, ${b.slice(0, 4)}`;
-  const end = a.slice(0, 7) === b.slice(0, 7) ? String(Number(b.slice(8))) : dateLabel(b, { month: 'short', day: 'numeric' });
-  return `${start} to ${end}, ${b.slice(0, 4)}`;
+function titleFor(locale: Locale, view: CalendarView, date: string, days: string[]): string {
+  if (view === 'day') return dateLabelIn(locale, date, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  if (view === 'month') return dateLabelIn(locale, date, { month: 'long', year: 'numeric' });
+  // A week is one range: Intl formats it per language ("Nov 23 – 29, 2026" / "23-29 nov 2026").
+  return new Intl.DateTimeFormat(intlTag(locale), { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+    .formatRange(new Date(`${days[0]}T12:00:00Z`), new Date(`${days[days.length - 1]}T12:00:00Z`));
 }
 
 export interface CalendarProps {
@@ -38,6 +38,9 @@ export interface CalendarProps {
 }
 
 export function Calendar({ businessId, canManage, hours, todayKey, initial }: CalendarProps) {
+  const t = useT();
+  const locale = useLocale();
+  const dateLabel = (key: string, opts: Intl.DateTimeFormatOptions) => dateLabelIn(locale, key, opts);
   const tz = initial.timezone;
   const [view, setView] = useState<CalendarView>(initial.view);
   const [date, setDate] = useState(initial.date);
@@ -54,19 +57,19 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
   useEffect(() => {
     const tick = () => setNow(Date.now());
     const t0 = setTimeout(tick, 0); // after mount, from a callback: the server render never reads the clock
-    const t = setInterval(tick, 60_000);
-    return () => { clearTimeout(t0); clearInterval(t); };
+    const iv = setInterval(tick, 60_000);
+    return () => { clearTimeout(t0); clearInterval(iv); };
   }, []);
 
   // Remember a viewer's week-start choice (a per-viewer convenience only: the server default is the business's country).
   useEffect(() => {
-    const t = setTimeout(() => {
+    const t1 = setTimeout(() => {
       try {
         const saved = window.localStorage.getItem('rc_week_start');
         if ((saved === '0' || saved === '1') && Number(saved) !== initial.week_start && !new URL(window.location.href).searchParams.has('ws')) setWs(Number(saved) as WeekStart);
       } catch { /* storage unavailable: keep the default */ }
     }, 0);
-    return () => clearTimeout(t);
+    return () => clearTimeout(t1);
   }, [initial.week_start]);
 
   const local = useMemo(() => rangeFor(view, date, tz, ws), [view, date, tz, ws]);
@@ -81,11 +84,11 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
       setData(r);
     } catch (err) {
       if (signal.aborted) return;
-      setError(err instanceof ApiError ? err.message : 'Could not load the calendar.');
+      setError(errorText(t, err, 'cal.loadFailed'));
     } finally {
       if (!signal.aborted) setLoading(false);
     }
-  }, [view, date, ws, businessId]);
+  }, [view, date, ws, businessId, t]);
 
   const [retry, setRetry] = useState(0);
   useEffect(() => {
@@ -135,38 +138,38 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
 
   const nav = 'min-h-11 min-w-11';
   return (
-    <section aria-label="Booking calendar">
+    <section aria-label={t('cal.region')}>
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1.5">
-          <Button variant="outline" className={nav} aria-label={`Previous ${view}`} onClick={() => go(view, previousDate(view, date))}>
+          <Button variant="outline" className={nav} aria-label={t('cal.previous', { view: t(`cal.viewName.${view}` as const) })} onClick={() => go(view, previousDate(view, date))}>
             <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M15 6l-6 6 6 6" /></svg>
           </Button>
-          <Button variant="outline" onClick={() => go(view, todayKey)} disabled={local.days.includes(todayKey) && (view !== 'month' || date.slice(0, 7) === todayKey.slice(0, 7)) && date === todayKey}>Today</Button>
-          <Button variant="outline" className={nav} aria-label={`Next ${view}`} onClick={() => go(view, nextDate(view, date))}>
+          <Button variant="outline" onClick={() => go(view, todayKey)} disabled={local.days.includes(todayKey) && (view !== 'month' || date.slice(0, 7) === todayKey.slice(0, 7)) && date === todayKey}>{t('cal.today')}</Button>
+          <Button variant="outline" className={nav} aria-label={t('cal.next', { view: t(`cal.viewName.${view}` as const) })} onClick={() => go(view, nextDate(view, date))}>
             <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 6l6 6-6 6" /></svg>
           </Button>
         </div>
-        <h2 aria-live="polite" className="min-w-0 flex-1 basis-48 text-[16px] font-semibold tracking-tight text-white">{titleFor(view, date, local.days)}</h2>
+        <h2 aria-live="polite" className="min-w-0 flex-1 basis-48 text-[16px] font-semibold tracking-tight text-white">{titleFor(locale, view, date, local.days)}</h2>
         <label className="flex items-center gap-2 text-xs text-mute">
-          <span className="sr-only sm:not-sr-only">Go to</span>
+          <span className="sr-only sm:not-sr-only">{t('cal.goTo')}</span>
           <input
             type="date"
             value={date}
             onChange={(e) => { if (isDateKey(e.target.value)) go(view, e.target.value); }}
-            aria-label="Go to date"
+            aria-label={t('cal.goToDate')}
             className="min-h-11 rounded-xl border border-line-3 bg-sunken px-2.5 text-[13px] text-soft [color-scheme:dark]"
           />
         </label>
-        <div role="group" aria-label="Calendar view" className="inline-flex overflow-hidden rounded-xl border border-line-3">
+        <div role="group" aria-label={t('cal.viewGroup')} className="inline-flex overflow-hidden rounded-xl border border-line-3">
           {VIEWS.map((v) => (
             <button
-              key={v.id}
+              key={v}
               type="button"
-              aria-pressed={view === v.id}
-              onClick={() => go(v.id, date)}
-              className={cn('min-h-11 px-3.5 text-[13px] font-medium transition-colors', view === v.id ? 'bg-raised text-white' : 'text-mute hover:bg-hover hover:text-soft')}
+              aria-pressed={view === v}
+              onClick={() => go(v, date)}
+              className={cn('min-h-11 px-3.5 text-[13px] font-medium transition-colors', view === v ? 'bg-raised text-white' : 'text-mute hover:bg-hover hover:text-soft')}
             >
-              {v.label}
+              {t(`cal.view.${v}` as const)}
             </button>
           ))}
         </div>
@@ -176,7 +179,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
         <StatusLegend />
         <div className="flex items-center gap-3 text-xs text-dim">
           <label className="flex items-center gap-1.5">
-            Week starts
+            {t('cal.weekStarts')}
             <select
               value={ws}
               onChange={(e) => {
@@ -186,21 +189,21 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
               }}
               className="min-h-9 rounded-lg border border-line-3 bg-sunken px-1.5 text-[12px] text-soft"
             >
-              <option value={0}>Sunday</option>
-              <option value={1}>Monday</option>
+              <option value={0}>{t('cal.sunday')}</option>
+              <option value={1}>{t('cal.monday')}</option>
             </select>
           </label>
-          <span>Times in {tz.replace('_', ' ')}</span>
+          <span>{t('cal.timesIn', { tz: tz.replace('_', ' ') })}</span>
         </div>
       </div>
 
       {error ? (
         <div role="alert" className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-danger-line bg-danger-bg px-4 py-3 text-[13px] text-danger">
           <span>{error}</span>
-          <Button variant="outline" onClick={() => setRetry((n) => n + 1)}>Try again</Button>
+          <Button variant="outline" onClick={() => setRetry((n) => n + 1)}>{t('common.retry')}</Button>
         </div>
       ) : null}
-      {data.truncated ? <p role="status" className="mt-3 text-xs text-warn">This view has more jobs than can be shown. Switch to a shorter range to see them all.</p> : null}
+      {data.truncated ? <p role="status" className="mt-3 text-xs text-warn">{t('cal.truncated')}</p> : null}
 
       <div className="mt-4">
         {loading && !error && data.items.length === 0 ? <Skeleton className="h-72 w-full" /> : null}
@@ -219,7 +222,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
             </div>
             <div className="md:hidden">
               {view === 'week' ? (
-                <div role="group" aria-label="Day of the week" className="mb-3 grid grid-cols-7 gap-1">
+                <div role="group" aria-label={t('cal.dayOfWeek')} className="mb-3 grid grid-cols-7 gap-1">
                   {mobileDays.map((d) => {
                     const n = byDay.get(d)?.length ?? 0;
                     const sel = d === mobileDay;
@@ -228,7 +231,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
                         key={d}
                         type="button"
                         aria-pressed={sel}
-                        aria-label={`${dateLabel(d, { weekday: 'long', month: 'long', day: 'numeric' })}, ${n} ${n === 1 ? 'job' : 'jobs'}`}
+                        aria-label={t('cal.dayJobs', { label: dateLabel(d, { weekday: 'long', month: 'long', day: 'numeric' }), count: n })}
                         onClick={() => setMobileDay(d)}
                         className={cn('flex min-h-14 flex-col items-center justify-center rounded-xl border text-xs', sel ? 'border-brand bg-brand-bg text-white' : 'border-line text-mute', d === todayKey && !sel && 'border-brand-line')}
                       >
@@ -240,12 +243,12 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
                   })}
                 </div>
               ) : null}
-              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-dim">{dateLabel(mobileDay, { weekday: 'long', month: 'long', day: 'numeric' })}{mobileDay === todayKey ? ' (today)' : ''}</p>
+              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-dim">{dateLabel(mobileDay, { weekday: 'long', month: 'long', day: 'numeric' })}{mobileDay === todayKey ? ` ${t('cal.todayParen')}` : ''}</p>
               <DayList items={byDay.get(mobileDay) ?? []} tz={tz} selectedId={selected?.id ?? null} loading={loading} onOpen={open} />
               {view === 'day' ? (
                 <div className="mt-3 flex gap-2">
-                  <Button variant="outline" className="flex-1" onClick={() => go('day', addDaysToDateKey(date, -1))}>Previous day</Button>
-                  <Button variant="outline" className="flex-1" onClick={() => go('day', addDaysToDateKey(date, 1))}>Next day</Button>
+                  <Button variant="outline" className="flex-1" onClick={() => go('day', addDaysToDateKey(date, -1))}>{t('cal.prevDay')}</Button>
+                  <Button variant="outline" className="flex-1" onClick={() => go('day', addDaysToDateKey(date, 1))}>{t('cal.nextDay')}</Button>
                 </div>
               ) : null}
             </div>
@@ -255,7 +258,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
 
       {empty ? (
         <p className="mt-4 rounded-2xl border border-line bg-panel/60 px-5 py-6 text-center text-[13px] leading-relaxed text-mute">
-          Nothing booked {view === 'month' ? 'this month' : view === 'week' ? 'this week' : 'this day'}. Jobs the receptionist books show up here on your business hours.
+          {view === 'month' ? t('cal.emptyMonth') : view === 'week' ? t('cal.emptyWeek') : t('cal.emptyDay')}
         </p>
       ) : null}
 

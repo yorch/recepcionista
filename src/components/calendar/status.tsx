@@ -1,4 +1,6 @@
+'use client';
 import { STATUS_META, STATUS_ORDER } from '@/lib/calendar';
+import { useT } from '@/lib/i18n/client';
 import { cn } from '@/components/ui/cn';
 import type { BookingStatus } from '@/lib/types';
 
@@ -12,22 +14,24 @@ export function StatusIcon({ status, className }: { status: BookingStatus; class
 }
 
 export function StatusBadge({ status, className }: { status: BookingStatus; className?: string }) {
+  const t = useT();
   const meta = STATUS_META[status];
   // `line-through` belongs to the calendar block; the badge keeps the label readable.
   const tone = meta.tone.replace('line-through', '');
   return (
     <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium', tone, className)}>
       <StatusIcon status={status} />
-      {meta.label}
+      {t(`booking.status.${status}` as const)}
     </span>
   );
 }
 
 export function StatusLegend({ className }: { className?: string }) {
+  const t = useT();
   return (
-    <ul aria-label="Status legend" className={cn('flex flex-wrap items-center gap-x-3 gap-y-1.5', className)}>
+    <ul aria-label={t('booking.legend')} className={cn('flex flex-wrap items-center gap-x-3 gap-y-1.5', className)}>
       {STATUS_ORDER.map((s) => (
-        <li key={s} title={STATUS_META[s].hint}><StatusBadge status={s} /></li>
+        <li key={s} title={t(`booking.statusHint.${s}` as const)}><StatusBadge status={s} /></li>
       ))}
     </ul>
   );

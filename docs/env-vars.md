@@ -58,6 +58,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | prod (with the secret) | none | Turnstile widget (build time) | no |
 | `SIGNUP_ALLOW_WITHOUT_CAPTCHA` | no | unset | exactly `true` lets production run open signup with no captcha (startup logs a loud warning, deploy.sh prints a banner). NOT recommended; without it and without the Turnstile pair deploy.sh fails | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | price text on the plan step (build time) | no |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES` | no | falls back to the English text | Spanish price texts for the landing page, onboarding and billing (build time) | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | no | none | annual plan price text on the Billing page's plan choice (build time; shown only when the annual plan is configured) | no |
 | `CREATE_USER_PASSWORD` | no | none | `scripts/create-user.ts` non-interactive password (the script refuses `--password`) | yes |
 

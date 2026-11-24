@@ -1,6 +1,8 @@
 'use client';
 import { useCallback, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { errorText } from '@/lib/i18n/api-errors';
+import { useT } from '@/lib/i18n/client';
 
 /** Error from the API client; keeps the HTTP status so callers can react to 401/402/409/429. */
 export class ApiError extends Error {
@@ -76,6 +78,7 @@ export interface CallOptions {
  * Pass `{ throws: true }` semantics via `request` when you want to handle ApiError yourself.
  */
 export function useApi() {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const inflight = useRef(0);
 
@@ -107,12 +110,12 @@ export function useApi() {
         if (opts.toastError === false) {
           if (id !== undefined) toast.dismiss(id);
         } else {
-          toast.error((err as Error).message, id !== undefined ? { id } : undefined);
+          toast.error(errorText(t, err), id !== undefined ? { id } : undefined);
         }
         return undefined;
       }
     },
-    [track],
+    [track, t],
   );
 
   /** Like `call` but rethrows (no toasts): for flows that branch on ApiError.status. */

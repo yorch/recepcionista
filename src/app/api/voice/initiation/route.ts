@@ -19,6 +19,9 @@ import { allowMissedCallAlert, callGate, outOfServiceOverride, pausedOverride } 
 import { resolveCallRoute } from '@/lib/voice/call-mode';
 import { markPausedNative } from '@/lib/voice/non-ai';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { missedCallText } from '@/lib/voice/non-ai';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { decideTransfer, forwardFirstMessage, NO_TRANSFER, transferTargetNow, type TransferVariables } from '@/lib/voice/transfer';
 import { enterOwnerMode } from '@/lib/voice/owner/session';
 import { nowVariables } from '@/lib/time';
@@ -153,7 +156,7 @@ export async function POST(req: Request): Promise<Response> {
         const who = callerId ? ` from ${callerId}` : '';
         // Rate limited per business (1 / 10 min, 6 / hour): a lapsed tenant must not be a free SMS pump.
         const alert = (await allowMissedCallAlert(business.id))
-          ? await alertOwner(business, `MISSED CALL — ${business.name}\nA call${who} was not taken by the assistant (${gate.reason === 'no_plan' ? 'plan inactive' : 'monthly call minutes used up'}). Please call back.`)
+          ? await alertOwner(business, await missedCallText(business, who.replace(/^ from /, '') || null, makeT(await ownerLocaleFor(business))(gate.reason === 'no_plan' ? 'alert.missed.noPlan' : 'alert.missed.noMinutes')))
           : null;
         log.warn('call.handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert?.notified ?? false, alert_suppressed: alert === null });
       }

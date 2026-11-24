@@ -4,11 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { useT } from '@/lib/i18n/client';
 import type { TranscriptEvent } from '@/lib/types';
 
 type Phase = 'connecting' | 'live' | 'polling' | 'ended' | 'declined' | 'signed_out';
 
-const ROLE_LABEL: Record<string, string> = { caller: 'Caller', agent: 'Assistant', system: 'System' };
+const ROLE_KEY = { caller: 'live.role.caller', agent: 'live.role.agent', system: 'live.role.system' } as const;
 const POLL_MS = 3000;
 
 /**
@@ -19,6 +20,7 @@ const POLL_MS = 3000;
 export function LiveCall({ callId, callerLabel, initialEvents, initiallyLive }: {
   callId: string; callerLabel: string; initialEvents: TranscriptEvent[]; initiallyLive: boolean;
 }) {
+  const t = useT();
   const [events, setEvents] = useState<TranscriptEvent[]>(initialEvents);
   const [phase, setPhase] = useState<Phase>(initiallyLive ? 'connecting' : 'ended');
   const [paused, setPaused] = useState(false);
@@ -96,9 +98,9 @@ export function LiveCall({ callId, callerLabel, initialEvents, initiallyLive }: 
     if (away !== pausedRef.current) setPaused(away);
   };
 
-  const chip = phase === 'live' ? { text: 'Live', tone: 'routine' } : phase === 'polling' ? { text: 'Live (refreshing)', tone: 'sky' }
-    : phase === 'connecting' ? { text: 'Connecting', tone: 'unsure' } : phase === 'ended' ? { text: 'Call ended', tone: 'neutral' }
-      : phase === 'declined' ? { text: 'Not transcribed', tone: 'unsure' } : { text: 'Signed out', tone: 'emergency' };
+  const chip = phase === 'live' ? { text: t('live.chip.live'), tone: 'routine' } : phase === 'polling' ? { text: t('live.chip.polling'), tone: 'sky' }
+    : phase === 'connecting' ? { text: t('live.chip.connecting'), tone: 'unsure' } : phase === 'ended' ? { text: t('live.chip.ended'), tone: 'neutral' }
+      : phase === 'declined' ? { text: t('live.chip.declined'), tone: 'unsure' } : { text: t('live.chip.signedOut'), tone: 'emergency' };
 
   return (
     <Card className="p-4 sm:p-5">
@@ -109,23 +111,23 @@ export function LiveCall({ callId, callerLabel, initialEvents, initiallyLive }: 
         </div>
         {(phase === 'live' || phase === 'polling') ? (
           <Button variant="outline" className="min-h-11" onClick={() => { setPaused((p) => { const n = !p; if (!n && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; return n; }); }} aria-pressed={paused}>
-            {paused ? 'Resume scrolling' : 'Pause scrolling'}
+            {paused ? t('live.resume') : t('live.pause')}
           </Button>
         ) : null}
       </div>
 
       {phase === 'declined' ? (
-        <p className="mt-4 rounded-lg bg-warn-bg px-3 py-2 text-[13px] text-warn">The caller asked not to be recorded or transcribed. Nothing from this call is shown or kept.</p>
+        <p className="mt-4 rounded-lg bg-warn-bg px-3 py-2 text-[13px] text-warn">{t('live.declined')}</p>
       ) : (
         <div
-          ref={logRef} onScroll={onScroll} role="log" aria-live="polite" aria-relevant="additions" aria-label="Live call transcript" tabIndex={0}
+          ref={logRef} onScroll={onScroll} role="log" aria-live="polite" aria-relevant="additions" aria-label={t('live.logLabel')} tabIndex={0}
           className="mt-4 max-h-[60vh] min-h-48 overflow-y-auto rounded-lg bg-sunken p-3 text-[13px] leading-relaxed"
         >
-          {events.length === 0 ? <p className="text-dim">{phase === 'ended' ? 'No transcript was captured live for this call.' : 'Waiting for the first words…'}</p> : (
+          {events.length === 0 ? <p className="text-dim">{phase === 'ended' ? t('live.noTranscript') : t('live.waiting')}</p> : (
             <ol className="space-y-2">
               {events.map((e) => (
                 <li key={e.seq} className="flex gap-2">
-                  <span className="w-[4.5rem] shrink-0 text-xs font-medium uppercase tracking-wide text-dim">{ROLE_LABEL[e.role] ?? e.role}</span>
+                  <span className="w-[4.5rem] shrink-0 text-xs font-medium uppercase tracking-wide text-dim">{e.role in ROLE_KEY ? t(ROLE_KEY[e.role as keyof typeof ROLE_KEY]) : e.role}</span>
                   <span className={e.role === 'agent' ? 'text-soft' : 'text-white'}>{e.text}</span>
                 </li>
               ))}
@@ -136,11 +138,11 @@ export function LiveCall({ callId, callerLabel, initialEvents, initiallyLive }: 
 
       {phase === 'ended' ? (
         <p className="mt-3 text-[13px] text-mute">
-          This call has ended. The saved transcript and summary replace the live lines once they are processed.{' '}
-          <Link href={`/dashboard/calls?call=${encodeURIComponent(callId)}`} className="inline-flex min-h-11 items-center text-brand-soft hover:underline">Open the saved call</Link>
+          {t('live.ended')}{' '}
+          <Link href={`/dashboard/calls?call=${encodeURIComponent(callId)}`} className="inline-flex min-h-11 items-center text-brand-soft hover:underline">{t('live.openSaved')}</Link>
         </p>
       ) : null}
-      {phase === 'signed_out' ? <p className="mt-3 text-[13px] text-warn">Your session ended. <Link href="/login" className="text-brand-soft hover:underline">Sign in again</Link></p> : null}
+      {phase === 'signed_out' ? <p className="mt-3 text-[13px] text-warn">{t('live.signedOut')} <Link href="/login" className="text-brand-soft hover:underline">{t('live.signInAgain')}</Link></p> : null}
     </Card>
   );
 }

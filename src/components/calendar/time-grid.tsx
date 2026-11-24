@@ -5,15 +5,17 @@ import { BusyLayer, useBusyBlocks } from './busy-layer';
 import { cn } from '@/components/ui/cn';
 import { axisFor, blockBox, groupByDay, hourLabel, layoutLanes, nowLine, STATUS_META, type Axis } from '@/lib/calendar';
 import { timeET } from '@/lib/format';
+import { useLocale, useT } from '@/lib/i18n/client';
+import { intlTag, type Locale } from '@/lib/i18n/core';
 import type { Booking, Hours } from '@/lib/types';
 
 const PX_PER_HOUR = 64;
 
-const dayHeading = (key: string) => {
+const dayHeading = (key: string, locale: Locale) => {
   const d = new Date(`${key}T12:00:00Z`);
   return {
-    weekday: new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'UTC' }).format(d),
-    long: new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' }).format(d),
+    weekday: new Intl.DateTimeFormat(intlTag(locale), { weekday: 'short', timeZone: 'UTC' }).format(d),
+    long: new Intl.DateTimeFormat(intlTag(locale), { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' }).format(d),
     num: d.getUTCDate(),
   };
 };
@@ -34,6 +36,8 @@ export interface TimeGridProps {
 
 /** Week / day time grid (md and up): hour rows on the business's open hours, blocks sized by duration. */
 export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, selectedId, onOpen, onOpenDay }: TimeGridProps) {
+  const t = useT();
+  const locale = useLocale();
   const rootRef = useRef<HTMLDivElement>(null);
   const busyBlocks = useBusyBlocks(days, tz);
   const grouped = useMemo(() => groupByDay(bookings, days, tz), [bookings, days, tz]);
@@ -80,7 +84,7 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
       ref={rootRef}
       onKeyDown={onKeyDown}
       role="group"
-      aria-label="Calendar"
+      aria-label={t('cal.grid')}
       aria-busy={loading}
       className={cn('overflow-x-auto rounded-2xl border border-line bg-panel/80', loading && 'opacity-70')}
     >
@@ -88,7 +92,7 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
         <div className="sticky top-0 z-10 grid border-b border-line bg-panel" style={{ gridTemplateColumns: cols }}>
           <div aria-hidden="true" />
           {days.map((d) => {
-            const h = dayHeading(d);
+            const h = dayHeading(d, locale);
             const isToday = d === todayKey;
             return (
               <button
@@ -97,7 +101,7 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
                 data-nav="day"
                 data-day={d}
                 onClick={() => onOpenDay(d)}
-                aria-label={`${h.long}${isToday ? ' (today)' : ''}: open day view`}
+                aria-label={t('cal.openDay', { long: h.long, today: isToday ? ` ${t('cal.todayParen')}` : '' })}
                 aria-current={isToday ? 'date' : undefined}
                 className="flex min-h-14 flex-col items-center justify-center gap-0.5 border-l border-line py-2 text-xs text-mute hover:bg-hover"
               >
@@ -112,7 +116,7 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
           <div aria-hidden="true" className="relative">
             {hourMarks.map((m) => (
               <span key={m} className={cn('absolute right-2 text-[11px] text-dim', m === axis.startMin ? 'translate-y-0.5' : '-translate-y-1/2')} style={{ top: `${((m - axis.startMin) / (axis.endMin - axis.startMin)) * 100}%` }}>
-                {hourLabel(m)}
+                {hourLabel(m, locale)}
               </span>
             ))}
           </div>
@@ -132,7 +136,8 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
                   const lane = lanes.get(b.id) ?? { lane: 0, lanes: 1 };
                   const meta = STATUS_META[b.status];
                   const compact = (box.height / 100) * height < 44;
-                  const label = `${b.customer_name}, ${b.service}, ${timeET(b.scheduled_at, tz)}, ${meta.label}`;
+                  const statusLabel = t(`booking.status.${b.status}` as const);
+                  const label = `${b.customer_name}, ${b.service}, ${timeET(b.scheduled_at, tz, locale)}, ${statusLabel}`;
                   return (
                     <button
                       key={b.id}
@@ -155,8 +160,8 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
                         <StatusIcon status={b.status} className="h-3 w-3" />
                         <span className="truncate">{b.customer_name}</span>
                       </span>
-                      {!compact ? <span className="truncate opacity-90">{timeET(b.scheduled_at, tz)} · {b.service}</span> : null}
-                      {!compact && height * (box.height / 100) > 70 ? <span className="mt-auto truncate text-[10.5px] opacity-80">{meta.label}</span> : null}
+                      {!compact ? <span className="truncate opacity-90">{timeET(b.scheduled_at, tz, locale)} · {b.service}</span> : null}
+                      {!compact && height * (box.height / 100) > 70 ? <span className="mt-auto truncate text-[10.5px] opacity-80">{statusLabel}</span> : null}
                     </button>
                   );
                 })}
@@ -166,7 +171,7 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
         </div>
       </div>
       {totalJobs === 0 && !loading ? (
-        <p className="border-t border-line px-4 py-3 text-center text-[13px] text-dim">Nothing booked in this {days.length === 1 ? 'day' : 'week'}.</p>
+        <p className="border-t border-line px-4 py-3 text-center text-[13px] text-dim">{days.length === 1 ? t('cal.nothingInDay') : t('cal.nothingInWeek')}</p>
       ) : null}
     </div>
   );

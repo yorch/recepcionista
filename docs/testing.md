@@ -64,3 +64,5 @@ default dev database from `.env.example` is `recepcionista_dev`, which passes. A
 the rename still holds a database called `recepcionista`; see "Renaming the dev database" in the README.
 
 New suites: `tests/calendar.test.ts`, `tests/call-mode.test.ts`, `tests/hardening-pure.test.ts` (pure); `tests/integration/calendar.test.ts`, `tests/integration/call-mode.test.ts` (database); the migration test covers `20261127120000_call_mode_forwarding`.
+
+Language suites: `tests/i18n-parity.test.ts`, `tests/i18n-core.test.ts`, `tests/i18n-emails.test.ts`, `tests/i18n-scan.test.ts` (pure); `tests/db/locale.test.ts` (database). See docs/i18n.md.

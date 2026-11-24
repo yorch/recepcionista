@@ -14,6 +14,9 @@ import { rateLimit } from '@/lib/ratelimit';
 import { auditActorOf, type Principal } from '@/lib/session';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { logger } from '@/lib/log';
+import { makeT } from '@/lib/i18n';
+import type { Locale } from '@/lib/i18n/core';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import type { Business } from '@/lib/types';
 
 const log = logger('voice/call-handling');
@@ -29,21 +32,25 @@ export function actorOf(auth: { principal: Principal }): ChangeActor {
   return { actor_kind: a.actor_kind, actor_user_id: a.actor_user_id, email: auth.principal.user?.email ?? null, meta: a.meta };
 }
 
-const MODE_WORD = { ai: 'AI answers', paused: 'paused', forward: 'forwarding' } as const;
+const MODE_WORD = { en: { ai: 'AI answers', paused: 'paused', forward: 'forwarding' }, es: { ai: 'contesta la IA', paused: 'en pausa', forward: 'desvío' } } as const;
 const last4 = (n: string | null): string => (n ? n.slice(-4) : '');
 
 /** The plain-text facts of a change, for the email and the text. Pure. */
-export function changeSummary(change: CallModeChange, reason: string): { modeChanged: boolean; targetChanged: boolean; line: string } {
+export function changeSummary(change: CallModeChange, reason: string, locale: Locale = 'en'): { modeChanged: boolean; targetChanged: boolean; line: string } {
+  const es = locale === 'es';
+  const W = MODE_WORD[locale];
   const { before, after } = change;
   const modeChanged = before.call_mode !== after.call_mode;
   const targetChanged = before.forward_number_e164 !== after.forward_number_e164
     || (before.forward_number_verified_at === null) !== (after.forward_number_verified_at === null);
   const parts: string[] = [];
-  if (modeChanged) parts.push(`call handling changed from ${MODE_WORD[before.call_mode]} to ${MODE_WORD[after.call_mode]}`);
+  if (modeChanged) parts.push(es ? `el manejo de llamadas cambió de ${W[before.call_mode]} a ${W[after.call_mode]}` : `call handling changed from ${W[before.call_mode]} to ${W[after.call_mode]}`);
   if (targetChanged) {
     parts.push(after.forward_number_e164
-      ? `forwarding number ${after.forward_number_verified_at ? 'set to' : 'changed (not yet verified) to'} the number ending ${last4(after.forward_number_e164)}`
-      : 'forwarding number removed');
+      ? (es
+        ? `el número de desvío ${after.forward_number_verified_at ? 'se estableció en' : 'cambió (aún sin verificar) a'} el número que termina en ${last4(after.forward_number_e164)}`
+        : `forwarding number ${after.forward_number_verified_at ? 'set to' : 'changed (not yet verified) to'} the number ending ${last4(after.forward_number_e164)}`)
+      : (es ? 'se quitó el número de desvío' : 'forwarding number removed'));
   }
   return { modeChanged, targetChanged, line: `${parts.join('; ')} (${reason})` };
 }
@@ -60,7 +67,7 @@ export async function announceCallHandlingChange(opts: {
   reason: string;
 }): Promise<{ audited: boolean; email: number; sms: boolean; suppressed: boolean }> {
   const { business, actor, ip, change, reason } = opts;
-  const sum = changeSummary(change, reason);
+  const sum = changeSummary(change, reason, 'en');
   const out = { audited: false, email: 0, sms: false, suppressed: false };
   if (sum.modeChanged) {
     out.audited = await recordAudit({
@@ -72,7 +79,7 @@ export async function announceCallHandlingChange(opts: {
   if (!sum.modeChanged && !sum.targetChanged) return out;
 
   try {
-    const who = actor.email ? ` by ${actor.email.replace(/[^\w.+@-]/g, '').slice(0, 60)}` : '';
+    const actorName = actor.email ? actor.email.replace(/[^\w.+@-]/g, '').slice(0, 60) : '';
     const ownerEmails = (await listBusinessUsers(business.id)).filter((u) => u.role === 'owner' && !u.disabled_at);
     const emailOk = (await rateLimit(`callmode-notice:email:${business.id}`, CHANGE_NOTICES_PER_HOUR, 60 * 60_000)).allowed;
     const smsOk = (await rateLimit(`callmode-notice:sms:${business.id}`, CHANGE_NOTICES_PER_HOUR, 60 * 60_000)).allowed;
@@ -80,19 +87,23 @@ export async function announceCallHandlingChange(opts: {
 
     if (emailOk) {
       const link = `${appBaseUrl()}/dashboard/settings#call-handling`;
-      const lines = [
-        `The call handling for ${safeDisplayName(business.name)} just changed${who}: ${sum.line}.`,
-        'If you did not make this change, open the link below, switch calls back and change your password. Anyone who can sign in can redirect your business phone line.',
-      ];
-      const text = `${lines.join('\n\n')}\n\n${link}\n`;
-      const html = `<!doctype html><html><body style="font-family:system-ui,sans-serif;color:#111;line-height:1.5">${lines.map((t) => `<p style="margin:0 0 12px">${escapeHtml(t)}</p>`).join('')}`
-        + `<p style="margin:16px 0"><a href="${escapeHtml(link)}">Review call handling</a></p></body></html>`;
       for (const o of ownerEmails) {
-        try { await sendEmail({ to: o.email, subject: 'Your call handling was changed', text, html }); out.email++; } catch (err) { log.warn('change_email_failed', { business: business.id, error: (err as Error).name }); }
+        // Each owner reads it in their own language.
+        const t = makeT(o.locale ?? 'en');
+        const lines = [
+          t('mail.callChange.l1', { business: safeDisplayName(business.name, 60, o.locale ?? 'en'), who: actorName ? t('mail.callChange.who', { who: actorName }) : '', line: changeSummary(change, reason, o.locale ?? 'en').line }),
+          t('mail.callChange.l2'),
+        ];
+        const text = `${lines.join('\n\n')}\n\n${link}\n`;
+        const html = `<!doctype html><html><body style="font-family:system-ui,sans-serif;color:#111;line-height:1.5">${lines.map((x) => `<p style="margin:0 0 12px">${escapeHtml(x)}</p>`).join('')}`
+          + `<p style="margin:16px 0"><a href="${escapeHtml(link)}">${escapeHtml(t('mail.callChange.cta'))}</a></p></body></html>`;
+        try { await sendEmail({ to: o.email, subject: t('mail.callChange.subject'), text, html }); out.email++; } catch (err) { log.warn('change_email_failed', { business: business.id, error: (err as Error).name }); }
       }
     }
     if (smsOk) {
-      const res = await alertOwner(business, `${safeDisplayName(business.name, 30)}: ${sum.line}${who ? ` ${who.trim()}` : ''}. Not you? Open Settings > Call handling and switch calls back.`);
+      const locale = await ownerLocaleFor(business);
+      const t = makeT(locale);
+      const res = await alertOwner(business, t('mail.callChange.sms', { business: safeDisplayName(business.name, 30, locale), line: changeSummary(change, reason, locale).line, who: actorName ? ` ${t('mail.callChange.who', { who: actorName }).trim()}` : '' }));
       out.sms = res.notified;
     }
   } catch (err) {

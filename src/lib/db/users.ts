@@ -77,6 +77,8 @@ export async function createUser(input: {
   email_verified?: boolean;
   /** E.164 (see toE164) or null. */
   phone?: string | null;
+  /** UI / text language of the user (default 'en'). */
+  locale?: Locale;
 }, db: DbClient = prisma): Promise<User> {
   const email = normalizeEmail(input.email);
   if (!email || !email.includes('@')) throw new Error('createUser: invalid email');
@@ -91,6 +93,7 @@ export async function createUser(input: {
         email, passwordHash: input.password_hash, role: input.role, businessId,
         emailVerifiedAt: input.email_verified ? new Date() : null,
         phone: input.phone ?? null,
+        ...(input.locale && LOCALES.includes(input.locale) ? { locale: input.locale } : {}),
       },
     });
     return toUser(row);
