@@ -278,3 +278,64 @@ export const checkForwardAllowed = (businessId: string, now: Date = new Date()):
 
 /** May this business take another voicemail this period (its own voicemail-minutes cap, not the AI minutes)? SECONDS. */
 export const checkVoicemailAllowed = (businessId: string, now: Date = new Date()): Promise<AllowResult> => decide(businessId, 'voicemail', now);
+
+// ── "80% / 100% of your plan used" warnings ─────────────────────────────────────
+
+/** Which allowance a warning is about: SMS segments, AI call seconds, forwarded-call seconds. */
+export type WarnKind = 'sms' | 'ai' | 'forward';
+export type WarnLevel = 80 | 100;
+
+const WARN_COLUMN: Record<WarnKind, Record<WarnLevel, string>> = {
+  sms: { 80: 'sms_warned_80_at', 100: 'sms_warned_100_at' },
+  ai: { 80: 'ai_warned_80_at', 100: 'ai_warned_100_at' },
+  forward: { 80: 'forward_warned_80_at', 100: 'forward_warned_100_at' },
+};
+
+/**
+ * Atomically claim the right to send ONE warning of this kind and level for the current period (business time zone month).
+ * True only for the first caller (a single `UPDATE .. WHERE col IS NULL RETURNING`), so concurrent workers / instances send exactly
+ * one text per period. False when it was already claimed, when there is no usage row for the period yet, or the business is unknown.
+ * A new month is a new counter row, so the warning re-arms by itself. If the send then fails, give the claim back with `unmarkWarned`.
+ */
+export async function markWarned(businessId: string, kind: WarnKind, level: WarnLevel, now: Date = new Date()): Promise<boolean> {
+  const col = WARN_COLUMN[kind]?.[level];
+  if (!col) throw new Error('markWarned: invalid kind or level');
+  const rows = await prisma.$queryRawUnsafe<{ id: string }[]>(
+    `UPDATE "usage_counters" u SET "${col}" = clock_timestamp()
+       FROM "businesses" b
+      WHERE u."business_id" = b."id" AND b."id" = $1
+        AND u."period_start" = date_trunc('month', timezone(b."timezone", $2::timestamptz))::date
+        AND u."${col}" IS NULL
+      RETURNING u."id"`, businessId, now);
+  return rows.length === 1;
+}
+
+/** Release a claim made by markWarned (the warning could not be delivered), so the next pass tries again. */
+export async function unmarkWarned(businessId: string, kind: WarnKind, level: WarnLevel, now: Date = new Date()): Promise<void> {
+  const col = WARN_COLUMN[kind]?.[level];
+  if (!col) throw new Error('unmarkWarned: invalid kind or level');
+  await prisma.$executeRawUnsafe(
+    `UPDATE "usage_counters" u SET "${col}" = NULL FROM "businesses" b
+      WHERE u."business_id" = b."id" AND b."id" = $1
+        AND u."period_start" = date_trunc('month', timezone(b."timezone", $2::timestamptz))::date`, businessId, now);
+}
+
+export type UsageWarnings = Record<`${WarnKind}_${WarnLevel}`, string | null>;
+
+/** Which warnings were already sent this period (ISO time or null). Null when the business does not exist. */
+export async function getUsageWarnings(businessId: string, now: Date = new Date()): Promise<UsageWarnings | null> {
+  const rows = await prisma.$queryRaw<{ s80: Date | null; s100: Date | null; a80: Date | null; a100: Date | null; f80: Date | null; f100: Date | null }[]>`
+    SELECT u."sms_warned_80_at" AS s80, u."sms_warned_100_at" AS s100, u."ai_warned_80_at" AS a80, u."ai_warned_100_at" AS a100,
+           u."forward_warned_80_at" AS f80, u."forward_warned_100_at" AS f100
+      FROM "businesses" b
+      LEFT JOIN "usage_counters" u ON u."business_id" = b."id"
+       AND u."period_start" = date_trunc('month', timezone(b."timezone", ${now}::timestamptz))::date
+     WHERE b."id" = ${businessId}`;
+  const r = rows[0];
+  if (!r) return null;
+  const t = (d: Date | null) => (d ? d.toISOString() : null);
+  return { sms_80: t(r.s80), sms_100: t(r.s100), ai_80: t(r.a80), ai_100: t(r.a100), forward_80: t(r.f80), forward_100: t(r.f100) };
+}
+
+/** The integer percent of `cap` that `used` represents (0 when there is no cap); the jobs runner compares it with 80 / 100. */
+export const usagePercent = (used: number, cap: number): number => (cap > 0 ? Math.floor((used * 100) / cap) : used > 0 ? 100 : 0);

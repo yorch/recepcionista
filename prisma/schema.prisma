@@ -69,6 +69,19 @@ model Business {
   /// 'forward' only during business hours; outside them the AI answers.
   forwardDuringHours      Boolean   @default(false) @map("forward_during_hours")
 
+  /// Default language of the dashboard/texts for this business: 'en' | 'es' (CHECK in the migration).
+  localeDefault    String  @default("en") @map("locale_default")
+  /// Trade the default prompt/templates are written for: hvac | plumbing | electrical | cleaning | landscaping | dental | general (CHECK).
+  vertical         String  @default("hvac")
+  /// Chosen ElevenLabs voice (id and a display name); NULL = the platform default voice.
+  voiceId          String? @map("voice_id")
+  voiceName        String? @map("voice_name")
+  /// Deposit refund policy on cancellation: 'none' | 'full_24h' | 'full_48h' | 'full_always' (CHECK), plus optional free text (<= 2000 chars).
+  refundPolicy     String  @default("full_24h") @map("refund_policy")
+  refundPolicyText String? @map("refund_policy_text")
+  /// Subscription billing cadence: 'month' | 'year' (CHECK).
+  billingInterval  String  @default("month") @map("billing_interval")
+
   knowledgeBase KnowledgeBase?
   calls         Call[]
   bookings      Booking[]
@@ -78,6 +91,12 @@ model Business {
   users         User[]
   usageCounters UsageCounter[]
   emailTokens   EmailToken[]
+
+  memberships         Membership[]
+  activeSessions      UserSession[]
+  calendarConnections CalendarConnection[]
+  calendarBusyBlocks  CalendarBusyBlock[]
+  ownerKbChanges      OwnerKbChange[]
 
   @@index([phoneKey])
   @@index([phoneE164])
@@ -129,12 +148,27 @@ model Call {
   recordingDisclosed Boolean   @default(false) @map("recording_disclosed")
   /// 'unknown' | 'disclosed' | 'declined' (CHECK constraint in the migration).
   consentStatus      String    @default("unknown") @map("consent_status")
+  /// 'customer' (a caller of the business) | 'owner' (the owner phoned in to update the knowledge base). CHECK in the migration.
+  kind               String    @default("customer")
+  /// Live transfer to a human: 'none' | 'attempted' | 'connected' | 'failed' | 'declined'. CHECK in the migration.
+  transferStatus     String    @default("none") @map("transfer_status")
+  /// Twilio `StirStatus` (verstat) as received, e.g. 'TN-Validation-Passed-A'. See attestationLevel() in src/lib/stir.ts.
+  stirStatus         String?   @map("stir_status")
+  /// True when STIR/SHAKEN fully verified the caller number (attestation A). NULL = not evaluated (legacy / no verstat).
+  callerVerified     Boolean?  @map("caller_verified")
+  /// Set once this call's usage was added to the counters (claimCallMetering). Rows from before the column are backfilled as settled.
+  meteredAt          DateTime? @map("metered_at") @db.Timestamptz(6)
+  /// How many times the reconcile job tried to fetch this call's final data from the provider.
+  reconcileAttempts  Int       @default(0) @map("reconcile_attempts")
 
-  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  bookings Booking[]
+  business         Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  bookings         Booking[]
+  transcriptEvents CallTranscriptEvent[]
+  ownerKbChanges   OwnerKbChange[]
 
   @@index([businessId, startedAt])
   @@index([businessId, callerE164])
+  @@index([meteredAt, startedAt])
   @@map("calls")
 }
 
@@ -165,12 +199,35 @@ model Booking {
   followupConsentAt     DateTime? @map("followup_consent_at")
   followupConsentSource String?   @map("followup_consent_source")
 
-  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  call     Call?    @relation(fields: [callId], references: [id], onDelete: SetNull)
-  smsLog   SmsLog[]
+  /// Rebook lineage: the booking this one replaced (self FK, SET NULL). Moving a booking in place (rescheduleBooking) keeps the row.
+  rescheduledFromId       String?   @map("rescheduled_from_id")
+  /// How many times this booking was moved with rescheduleBooking.
+  rescheduleCount         Int       @default(0) @map("reschedule_count")
+  cancelledAt             DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  cancelReason            String?   @map("cancel_reason")
+  /// When the customer was last told about a change (cancel / reschedule). NULL = not notified yet.
+  customerNotifiedAt      DateTime? @map("customer_notified_at") @db.Timestamptz(6)
+  stripePaymentIntentId   String?   @map("stripe_payment_intent_id")
+  stripeCheckoutSessionId String?   @map("stripe_checkout_session_id")
+  /// 'none' | 'pending' | 'refunded' | 'failed' | 'not_applicable' (CHECK in the migration).
+  refundStatus            String    @default("none") @map("refund_status")
+  /// INTEGER CENTS actually refunded.
+  refundAmountCents       Int?      @map("refund_amount_cents")
+  stripeRefundId          String?   @map("stripe_refund_id")
+  refundedAt              DateTime? @map("refunded_at") @db.Timestamptz(6)
+
+  business        Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  call            Call?              @relation(fields: [callId], references: [id], onDelete: SetNull)
+  rescheduledFrom Booking?           @relation("BookingReschedule", fields: [rescheduledFromId], references: [id], onDelete: SetNull)
+  rescheduledTo   Booking[]          @relation("BookingReschedule")
+  smsLog          SmsLog[]
+  calendarLink    CalendarEventLink?
 
   @@index([businessId, scheduledAt])
   @@index([businessId, phoneE164])
+  @@index([stripePaymentIntentId])
+  @@index([stripeCheckoutSessionId])
+  @@index([rescheduledFromId])
   @@map("bookings")
 }
 
@@ -205,7 +262,7 @@ model SmsLog {
   createdAt    DateTime @default(now()) @map("created_at")
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  booking  Booking?  @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  booking  Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
 
   @@index([businessId, createdAt])
   @@index([businessId, toE164])
@@ -275,9 +332,10 @@ model User {
   /// Always stored lowercased (CHECK constraint); lookups lowercase too.
   email        String    @unique
   passwordHash String    @map("password_hash")
-  /// Null only for role 'admin' (CHECK constraint).
+  /// LEGACY "primary" business (kept for compatibility; DB triggers mirror it into `memberships`). Null only for role 'admin' (CHECK constraint).
+  /// The source of truth for who belongs to which business is `memberships`.
   businessId   String?   @map("business_id")
-  /// 'owner' | 'staff' | 'admin'
+  /// 'owner' | 'staff' | 'admin' (for owner/staff: the role in the primary business; see `memberships` for the others)
   role         String
   createdAt    DateTime  @default(now()) @map("created_at")
   disabledAt   DateTime? @map("disabled_at")
@@ -291,39 +349,50 @@ model User {
   totpEnabledAt    DateTime? @map("totp_enabled_at") @db.Timestamptz(6)
   /// Last accepted 30s time step (replay protection): a code is accepted only for a strictly greater step.
   totpLastUsedStep Int?      @map("totp_last_used_step")
+  /// UI/text language of this user: 'en' | 'es' (CHECK in the migration).
+  locale           String    @default("en")
 
-  business      Business?      @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  sessions      UserSession[]
-  recoveryCodes RecoveryCode[]
-  emailTokens   EmailToken[]   @relation("TokenUser")
-  invitedTokens EmailToken[]   @relation("TokenInviter")
+  business           Business?            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  sessions           UserSession[]
+  recoveryCodes      RecoveryCode[]
+  emailTokens        EmailToken[]         @relation("TokenUser")
+  invitedTokens      EmailToken[]         @relation("TokenInviter")
+  memberships        Membership[]
+  passkeys           PasskeyCredential[]
+  webauthnChallenges WebauthnChallenge[]
+  connectedCalendars CalendarConnection[]
 
   @@index([businessId])
   @@map("users")
 }
 
 model UserSession {
-  id            String    @id @default(uuid())
+  id               String    @id @default(uuid())
   /// NULL only for kind 'admin_token' (break-glass ADMIN_TOKEN login); CHECK constraint.
-  userId        String?   @map("user_id")
+  userId           String?   @map("user_id")
   /// 'user' | 'admin_token'
-  kind          String    @default("user")
+  kind             String    @default("user")
   /// sha256 hex of the raw token; the raw token is never stored.
-  tokenHash     String    @unique @map("token_hash")
-  expiresAt     DateTime  @map("expires_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  lastUsedAt    DateTime  @default(now()) @map("last_used_at")
+  tokenHash        String    @unique @map("token_hash")
+  expiresAt        DateTime  @map("expires_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  lastUsedAt       DateTime  @default(now()) @map("last_used_at")
   /// Set when the second factor was satisfied for this session (NULL = password only / no MFA).
-  mfaVerifiedAt DateTime? @map("mfa_verified_at") @db.Timestamptz(6)
+  mfaVerifiedAt    DateTime? @map("mfa_verified_at") @db.Timestamptz(6)
   /// Last time the holder proved who they are (set at login, and by POST /api/auth/reauth). Sensitive changes (call forwarding)
   /// need it within the last 5 minutes. NULL on rows from before the column existed = not recent.
-  sudoAt        DateTime? @map("sudo_at") @db.Timestamptz(6)
-  ip            String?
-  userAgent     String?   @map("user_agent")
+  sudoAt           DateTime? @map("sudo_at") @db.Timestamptz(6)
+  ip               String?
+  userAgent        String?   @map("user_agent")
+  /// The business this session is currently working in (multi-business accounts). NULL = the primary / only one.
+  /// Set only through setSessionActiveBusiness, which verifies an active membership in the same statement.
+  activeBusinessId String?   @map("active_business_id")
 
-  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeBusiness Business? @relation(fields: [activeBusinessId], references: [id], onDelete: SetNull)
 
   @@index([userId])
+  @@index([activeBusinessId])
   @@index([expiresAt])
   @@map("user_sessions")
 }
@@ -391,18 +460,25 @@ model AuditEvent {
 
 /// Monthly (business-timezone calendar month) usage for plan caps. Updated only by atomic upserts (src/lib/db/usage.ts).
 model UsageCounter {
-  id          String   @id @default(uuid())
-  businessId  String   @map("business_id")
+  id                 String    @id @default(uuid())
+  businessId         String    @map("business_id")
   /// First day of the month in the business's timezone.
-  periodStart DateTime @map("period_start") @db.Date
-  smsCount    Int      @default(0) @map("sms_count")
+  periodStart        DateTime  @map("period_start") @db.Date
+  smsCount           Int       @default(0) @map("sms_count")
   /// AI conversation seconds ONLY (the plan's call-minutes cap gates on this alone).
-  callSeconds Int      @default(0) @map("call_seconds")
+  callSeconds        Int       @default(0) @map("call_seconds")
   /// Voicemail recording seconds (own cap, VOICEMAIL_MINUTES_CAP): never counted against the AI minutes.
-  voicemailSeconds Int @default(0) @map("voicemail_seconds")
+  voicemailSeconds   Int       @default(0) @map("voicemail_seconds")
   /// Bridged seconds of forwarded calls (own cap, FORWARD_MINUTES_CAP): never counted against the AI minutes.
-  forwardSeconds   Int @default(0) @map("forward_seconds")
-  updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  forwardSeconds     Int       @default(0) @map("forward_seconds")
+  /// "80% / 100% of the cap used" warnings already sent this period, per kind (markWarned claims each exactly once).
+  smsWarned80At      DateTime? @map("sms_warned_80_at") @db.Timestamptz(6)
+  smsWarned100At     DateTime? @map("sms_warned_100_at") @db.Timestamptz(6)
+  aiWarned80At       DateTime? @map("ai_warned_80_at") @db.Timestamptz(6)
+  aiWarned100At      DateTime? @map("ai_warned_100_at") @db.Timestamptz(6)
+  forwardWarned80At  DateTime? @map("forward_warned_80_at") @db.Timestamptz(6)
+  forwardWarned100At DateTime? @map("forward_warned_100_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
@@ -459,4 +535,187 @@ model TrialFingerprint {
 
   @@unique([kind, fingerprint])
   @@map("trial_fingerprints")
+}
+
+/// One row per (business, provider): the Google Calendar a business connected. Tokens exist ONLY as AES-GCM envelopes
+/// (src/lib/totp.ts encryptSecret, aad = this row's id). Public helpers never return them except getDecryptedTokens.
+model CalendarConnection {
+  id                String    @id @default(uuid())
+  businessId        String    @map("business_id")
+  connectedByUserId String?   @map("connected_by_user_id")
+  /// 'google'
+  provider          String    @default("google")
+  accountEmail      String    @map("account_email")
+  calendarId        String    @default("primary") @map("calendar_id")
+  accessTokenEnc    String?   @map("access_token_enc")
+  refreshTokenEnc   String?   @map("refresh_token_enc")
+  tokenExpiresAt    DateTime? @map("token_expires_at") @db.Timestamptz(6)
+  scopes            String    @default("")
+  /// Google incremental-sync token (events.list nextSyncToken).
+  syncToken         String?   @map("sync_token")
+  watchChannelId    String?   @map("watch_channel_id")
+  watchResourceId   String?   @map("watch_resource_id")
+  watchExpiresAt    DateTime? @map("watch_expires_at") @db.Timestamptz(6)
+  /// 'active' | 'needs_reauth' | 'revoked' | 'error' (CHECK in the migration)
+  status            String    @default("active")
+  lastSyncAt        DateTime? @map("last_sync_at") @db.Timestamptz(6)
+  lastError         String?   @map("last_error")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  business    Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  connectedBy User?               @relation(fields: [connectedByUserId], references: [id], onDelete: SetNull)
+  links       CalendarEventLink[]
+  busyBlocks  CalendarBusyBlock[]
+
+  @@unique([businessId, provider])
+  @@index([status])
+  @@index([watchExpiresAt])
+  @@index([watchChannelId])
+  @@map("calendar_connections")
+}
+
+/// A booking pushed to Google as an event (two-way sync bookkeeping).
+model CalendarEventLink {
+  id             String   @id @default(uuid())
+  bookingId      String   @unique @map("booking_id")
+  connectionId   String   @map("connection_id")
+  googleEventId  String   @map("google_event_id")
+  etag           String?
+  lastSyncedAt   DateTime @default(now()) @map("last_synced_at") @db.Timestamptz(6)
+  /// Hash of the booking fields last pushed, so an unchanged booking is not pushed again.
+  lastPushedHash String?  @map("last_pushed_hash")
+
+  booking    Booking            @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  connection CalendarConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, googleEventId])
+  @@map("calendar_event_links")
+}
+
+/// Busy time mirrored from the business's Google Calendar. Times ONLY: titles, descriptions and attendees are never stored.
+model CalendarBusyBlock {
+  id              String   @id @default(uuid())
+  connectionId    String   @map("connection_id")
+  businessId      String   @map("business_id")
+  googleEventId   String   @map("google_event_id")
+  startsAt        DateTime @map("starts_at") @db.Timestamptz(6)
+  endsAt          DateTime @map("ends_at") @db.Timestamptz(6)
+  allDay          Boolean  @default(false) @map("all_day")
+  /// Google `transparency`: 'opaque' (blocks time) | 'transparent' (shown as free).
+  transparency    String   @default("opaque")
+  /// Always true: the summary was dropped before storing (kept as a column so a reader can see the redaction was applied).
+  summaryRedacted Boolean  @default(true) @map("summary_redacted")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  connection CalendarConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  business   Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, googleEventId])
+  @@index([businessId, startsAt, endsAt])
+  @@map("calendar_busy_blocks")
+}
+
+/// A knowledge-base edit proposed by the owner (phone call, SMS or dashboard). `patch` holds the new values of the touched KB
+/// fields; `previous` the values they replaced (captured when applied) so the change can be reverted.
+model OwnerKbChange {
+  id         String    @id @default(uuid())
+  businessId String    @map("business_id")
+  callId     String?   @map("call_id")
+  /// 'owner_voice' | 'owner_sms' | 'dashboard' (CHECK)
+  source     String
+  /// 'proposed' | 'applied' | 'reverted' | 'rejected' (CHECK)
+  status     String    @default("proposed")
+  summary    String
+  patch      Json      @default("{}")
+  previous   Json?
+  appliedAt  DateTime? @map("applied_at") @db.Timestamptz(6)
+  revertedAt DateTime? @map("reverted_at") @db.Timestamptz(6)
+  createdBy  String?   @map("created_by")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  call     Call?    @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+  @@index([callId])
+  @@map("owner_kb_changes")
+}
+
+/// Live transcript of a call, one row per utterance. Deleted with the call (cascade); never stored for calls whose consent is 'declined'.
+model CallTranscriptEvent {
+  id      String   @id @default(uuid())
+  callId  String   @map("call_id")
+  seq     Int
+  /// 'agent' | 'caller' | 'system' (CHECK)
+  role    String
+  text    String
+  at      DateTime @db.Timestamptz(6)
+  /// False while the utterance is still being transcribed (an interim row is replaced by the final one with the same seq).
+  isFinal Boolean  @default(true) @map("is_final")
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@unique([callId, seq])
+  @@map("call_transcript_events")
+}
+
+/// A WebAuthn credential (passkey) of a user.
+model PasskeyCredential {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  /// base64url credential id, as sent by the browser.
+  credentialId String    @unique @map("credential_id")
+  /// COSE public key bytes.
+  publicKey    Bytes     @map("public_key")
+  counter      BigInt    @default(0)
+  transports   String[]
+  /// 'singleDevice' | 'multiDevice'
+  deviceType   String    @default("singleDevice") @map("device_type")
+  backedUp     Boolean   @default(false) @map("backed_up")
+  name         String    @default("Passkey")
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt   DateTime? @map("last_used_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("passkey_credentials")
+}
+
+/// Single-use WebAuthn challenge. Only the sha256 of the challenge is stored; consume is one atomic UPDATE.
+model WebauthnChallenge {
+  id            String    @id @default(uuid())
+  /// Set for 'register' and 'reauth'; NULL for a discoverable-credential 'login' (the user is learned from the assertion).
+  userId        String?   @map("user_id")
+  /// 'register' | 'login' | 'reauth' (CHECK)
+  purpose       String
+  challengeHash String    @unique @map("challenge_hash")
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt        DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([userId])
+  @@map("webauthn_challenges")
+}
+
+/// Who belongs to which business, with which role. Source of truth for access; users.business_id/role stay as the legacy primary
+/// (DB triggers mirror legacy writes into this table). Roles here are only 'owner' | 'staff' (admins have no memberships).
+model Membership {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  businessId String    @map("business_id")
+  role       String
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  disabledAt DateTime? @map("disabled_at") @db.Timestamptz(6)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, businessId])
+  @@index([businessId])
+  @@map("memberships")
 }

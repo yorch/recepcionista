@@ -6,7 +6,8 @@
  */
 import crypto from 'node:crypto';
 import { prisma, type DbClient } from './client';
-import type { SessionKind, User, UserRole, UserSession } from '@/lib/types';
+import type { Locale, SessionKind, User, UserRole, UserSession } from '@/lib/types';
+import { LOCALES } from '@/lib/types';
 
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Break-glass (ADMIN_TOKEN) server-side sessions are short lived. */
@@ -28,11 +29,11 @@ export const hashSessionToken = (token: string): string => crypto.createHash('sh
 
 type UserRow = {
   id: string; email: string; passwordHash: string; businessId: string | null; role: string; createdAt: Date; disabledAt: Date | null;
-  emailVerifiedAt: Date | null; phone: string | null; totpEnabledAt: Date | null;
+  emailVerifiedAt: Date | null; phone: string | null; totpEnabledAt: Date | null; locale?: string;
 };
 type SessionRow = {
   id: string; userId: string | null; kind: string; expiresAt: Date; createdAt: Date; lastUsedAt: Date;
-  mfaVerifiedAt: Date | null; sudoAt: Date | null; ip: string | null; userAgent: string | null;
+  mfaVerifiedAt: Date | null; sudoAt: Date | null; ip: string | null; userAgent: string | null; activeBusinessId?: string | null;
 };
 
 function toUser(row: UserRow): User {
@@ -46,6 +47,7 @@ function toUser(row: UserRow): User {
     email_verified_at: row.emailVerifiedAt ? row.emailVerifiedAt.toISOString() : null,
     phone: row.phone ?? null,
     totp_enabled: row.totpEnabledAt !== null && row.totpEnabledAt !== undefined,
+    locale: row.locale === 'es' ? 'es' : 'en',
   };
 }
 const toSession = (r: SessionRow): UserSession => ({
@@ -59,6 +61,7 @@ const toSession = (r: SessionRow): UserSession => ({
   sudo_at: r.sudoAt ? r.sudoAt.toISOString() : null,
   ip: r.ip ?? null,
   user_agent: r.userAgent ?? null,
+  active_business_id: r.activeBusinessId ?? null,
 });
 
 /**
@@ -135,6 +138,12 @@ export const setUserPasswordHash = changePassword;
 /** Mark the user's email address as proven (idempotent; the first timestamp wins). */
 export async function markEmailVerified(userId: string, now: Date = new Date()): Promise<void> {
   await prisma.user.updateMany({ where: { id: userId, emailVerifiedAt: null }, data: { emailVerifiedAt: now } });
+}
+
+/** The user's UI/text language. Anything but 'en' | 'es' is rejected. */
+export async function setUserLocale(userId: string, locale: Locale): Promise<void> {
+  if (!LOCALES.includes(locale)) throw new Error('setUserLocale: locale must be en or es');
+  await prisma.user.update({ where: { id: userId }, data: { locale } });
 }
 
 /** Set or clear (null) the user's phone. Pass E.164 from toE164(); anything else is rejected. */
@@ -409,8 +418,15 @@ export async function countUnusedRecoveryCodes(userId: string): Promise<number> 
   return prisma.recoveryCode.count({ where: { userId, usedAt: null } });
 }
 
-/** Users of one business (owner/staff), oldest first. Never includes password hashes. */
+/**
+ * Members of one business (owner/staff), oldest membership first, as `User` objects whose `role` is the role IN THIS business and whose
+ * `business_id` is this business (an account of several businesses appears in each). `disabled_at` is the account's, else the membership's.
+ * Never includes password hashes. For richer rows use listBusinessMembers.
+ */
 export async function listBusinessUsers(businessId: string): Promise<User[]> {
-  const rows = await prisma.user.findMany({ where: { businessId }, orderBy: { createdAt: 'asc' } });
-  return rows.map(toUser);
+  const rows = await prisma.membership.findMany({ where: { businessId }, include: { user: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+  return rows.map((m) => ({
+    ...toUser(m.user), business_id: businessId, role: m.role as UserRole,
+    disabled_at: m.user.disabledAt ? m.user.disabledAt.toISOString() : m.disabledAt ? m.disabledAt.toISOString() : null,
+  }));
 }

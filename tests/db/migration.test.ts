@@ -87,6 +87,7 @@ suite('migrations (postgres)', () => {
     try {
       const tables = (await c.$queryRawUnsafe(`SELECT table_name FROM information_schema.tables WHERE table_schema='public'`)).map((x: any) => x.table_name);
       for (const t of ['recovery_codes', 'email_tokens', 'audit_events', 'usage_counters']) expect(tables).toContain(t);
+      for (const t of ['calendar_connections', 'calendar_event_links', 'calendar_busy_blocks', 'owner_kb_changes', 'call_transcript_events', 'passkey_credentials', 'webauthn_challenges', 'memberships']) expect(tables).toContain(t);
       const notValid = await c.$queryRawUnsafe(`SELECT conname FROM pg_constraint WHERE contype='c' AND NOT convalidated`);
       expect(notValid).toEqual([]);
       // the validation step is idempotent: running the migration's last block again is a no-op
@@ -281,6 +282,127 @@ suite('migrations (postgres)', () => {
       await c.$disconnect();
     }
   }, 180_000);
+
+  test('phase 1 migration on an old-schema database with data: memberships backfilled, usage history settled, defaults, constraints and triggers hold, re-runnable', async () => {
+    const PHASE1 = '20261201120000_phase1_calendar_kb_transcript_passkeys_memberships';
+    const name = await newDb('phase1');
+    const before = historyUpTo('before-phase1', dirs().filter((d) => d < PHASE1).at(-1)!);
+    expect(prisma(['migrate', 'deploy'], dbUrl(name), before).code).toBe(0);
+    const c = client(name);
+    try {
+      for (const q of [
+        `INSERT INTO businesses(id,name,status) VALUES ('b1','A','live'),('b2','B','live')`,
+        `INSERT INTO users(id,email,password_hash,business_id,role,disabled_at) VALUES
+           ('u1','o1@x.com','h','b1','owner',NULL),('u2','s1@x.com','h','b1','staff',now()),('u3','o2@x.com','h','b2','owner',NULL),('root','root@x.com','h',NULL,'admin',NULL)`,
+        `INSERT INTO calls(id,business_id,status,started_at,ended_at,conversation_id) VALUES
+           ('c1','b1','completed','2027-01-01 10:00','2027-01-01 10:05','conv1'),('c2','b1','in_progress','2027-01-02 10:00',NULL,'conv2')`,
+        `INSERT INTO bookings(id,business_id,customer_name,customer_phone,service,scheduled_at,duration_minutes,status) VALUES
+           ('k1','b1','x','1','s','2027-02-01 10:00',60,'confirmed'),('k2','b1','y','2','s','2027-02-01 10:00',60,'cancelled')`,
+        `INSERT INTO usage_counters(id,business_id,period_start,sms_count) VALUES ('uc1','b1','2027-01-01',5)`,
+        `INSERT INTO user_sessions(id,user_id,token_hash,expires_at) VALUES ('ss1','u1','th1',now()+interval '1 day')`,
+        `INSERT INTO email_tokens(id,email,purpose,token_hash,business_id,role,expires_at) VALUES ('t1','new@x.com','invite','tt1','b1','staff',now()+interval '1 day')`,
+      ]) await c.$executeRawUnsafe(q);
+
+      const r = prisma(['migrate', 'deploy'], dbUrl(name));
+      expect(r.out).toContain(PHASE1);
+      expect(r.code).toBe(0);
+      const one = async (sql: string) => (await c.$queryRawUnsafe(sql)) as any[];
+
+      // memberships: one per non-admin user, same role, admin none; existing legacy columns untouched
+      expect(await one(`SELECT user_id, business_id, role, disabled_at IS NULL AS enabled FROM memberships ORDER BY user_id`)).toEqual([
+        { user_id: 'u1', business_id: 'b1', role: 'owner', enabled: true },
+        { user_id: 'u2', business_id: 'b1', role: 'staff', enabled: true },
+        { user_id: 'u3', business_id: 'b2', role: 'owner', enabled: true },
+      ]);
+      expect(await one(`SELECT id, business_id, role, locale FROM users ORDER BY id`)).toEqual([
+        { id: 'root', business_id: null, role: 'admin', locale: 'en' }, { id: 'u1', business_id: 'b1', role: 'owner', locale: 'en' },
+        { id: 'u2', business_id: 'b1', role: 'staff', locale: 'en' }, { id: 'u3', business_id: 'b2', role: 'owner', locale: 'en' },
+      ]);
+      // history counts as settled (the reconcile job must not meter it again); the rest of the new columns take their defaults
+      expect(await one(`SELECT id, metered_at IS NOT NULL AS settled, kind, transfer_status, stir_status, caller_verified, reconcile_attempts FROM calls ORDER BY id`)).toEqual([
+        { id: 'c1', settled: true, kind: 'customer', transfer_status: 'none', stir_status: null, caller_verified: null, reconcile_attempts: 0 },
+        { id: 'c2', settled: true, kind: 'customer', transfer_status: 'none', stir_status: null, caller_verified: null, reconcile_attempts: 0 },
+      ]);
+      expect((await one(`SELECT metered_at AT TIME ZONE 'UTC' AS t FROM calls WHERE id = 'c1'`))[0].t.toISOString()).toBe('2027-01-01T10:05:00.000Z');
+      expect(await one(`SELECT locale_default, vertical, voice_id, refund_policy, refund_policy_text, billing_interval FROM businesses WHERE id = 'b1'`)).toEqual([
+        { locale_default: 'en', vertical: 'hvac', voice_id: null, refund_policy: 'full_24h', refund_policy_text: null, billing_interval: 'month' },
+      ]);
+      expect(await one(`SELECT refund_status, reschedule_count, refund_amount_cents, rescheduled_from_id FROM bookings WHERE id = 'k1'`)).toEqual([
+        { refund_status: 'none', reschedule_count: 0, refund_amount_cents: null, rescheduled_from_id: null },
+      ]);
+      expect(await one(`SELECT sms_count, sms_warned_80_at, forward_warned_100_at FROM usage_counters`)).toEqual([{ sms_count: 5, sms_warned_80_at: null, forward_warned_100_at: null }]);
+      expect(await one(`SELECT active_business_id FROM user_sessions`)).toEqual([{ active_business_id: null }]);
+      expect(await one(`SELECT user_id FROM email_tokens WHERE id = 't1'`)).toEqual([{ user_id: null }]); // invites of unknown addresses are unchanged
+      expect(await one(`SELECT 1 FROM pg_constraint WHERE contype='c' AND NOT convalidated`)).toEqual([]);
+      expect(await one(`SELECT count(*)::int n FROM _prisma_migrations WHERE migration_name = '${PHASE1}' AND finished_at IS NOT NULL`)).toEqual([{ n: 1 }]);
+
+      const bad = async (sql: string) => { try { await c.$executeRawUnsafe(sql); return 'accepted'; } catch { return 'rejected'; } };
+      // the booking exclusion constraint survived untouched
+      expect(await bad(`INSERT INTO bookings(id,business_id,customer_name,customer_phone,service,scheduled_at,duration_minutes) VALUES ('k3','b1','z','3','s','2027-02-01 10:30',60)`)).toBe('rejected');
+      expect(await bad(`UPDATE bookings SET status = 'confirmed' WHERE id = 'k2'`)).toBe('rejected'); // k2 would overlap k1 once un-cancelled
+      // the new CHECKs
+      for (const q of [
+        `UPDATE businesses SET locale_default = 'fr' WHERE id = 'b1'`, `UPDATE businesses SET vertical = 'bakery' WHERE id = 'b1'`,
+        `UPDATE businesses SET refund_policy = 'x' WHERE id = 'b1'`, `UPDATE businesses SET billing_interval = 'week' WHERE id = 'b1'`,
+        `UPDATE businesses SET refund_policy_text = repeat('x', 2001) WHERE id = 'b1'`, `UPDATE users SET locale = 'de' WHERE id = 'u1'`,
+        `UPDATE calls SET kind = 'robot' WHERE id = 'c1'`, `UPDATE calls SET transfer_status = 'x' WHERE id = 'c1'`,
+        `UPDATE bookings SET refund_status = 'x' WHERE id = 'k1'`, `UPDATE bookings SET refund_status = 'refunded' WHERE id = 'k1'`,
+        `INSERT INTO memberships(id,user_id,business_id,role) VALUES ('mx','u3','b1','admin')`,
+      ]) expect(await bad(q)).toBe('rejected');
+      // triggers: legacy writes are mirrored, a deleted business keeps people who belong elsewhere
+      expect(await bad(`INSERT INTO users(id,email,password_hash,business_id,role) VALUES ('u4','n@x.com','h','b2','staff')`)).toBe('accepted');
+      expect(await one(`SELECT business_id, role FROM memberships WHERE user_id = 'u4'`)).toEqual([{ business_id: 'b2', role: 'staff' }]);
+      await c.$executeRawUnsafe(`UPDATE users SET role = 'owner' WHERE id = 'u4'`);
+      expect(await one(`SELECT role FROM memberships WHERE user_id = 'u4'`)).toEqual([{ role: 'owner' }]);
+      await c.$executeRawUnsafe(`INSERT INTO memberships(id,user_id,business_id,role) VALUES ('m-extra','u1','b2','staff')`);
+      await c.$executeRawUnsafe(`DELETE FROM businesses WHERE id = 'b1'`);
+      expect(await one(`SELECT id, business_id, role FROM users ORDER BY id`)).toEqual([
+        { id: 'root', business_id: null, role: 'admin' }, { id: 'u1', business_id: 'b2', role: 'staff' }, { id: 'u3', business_id: 'b2', role: 'owner' }, { id: 'u4', business_id: 'b2', role: 'owner' },
+      ]); // u2 (only in b1) went with it; u1 moved to b2
+      expect(await one(`SELECT user_id, business_id FROM memberships ORDER BY user_id`)).toEqual([
+        { user_id: 'u1', business_id: 'b2' }, { user_id: 'u3', business_id: 'b2' }, { user_id: 'u4', business_id: 'b2' },
+      ]);
+
+      // privacy trigger: no transcript rows for a declined call
+      await c.$executeRawUnsafe(`INSERT INTO calls(id,business_id,consent_status) VALUES ('cd','b2','declined'),('cu','b2','unknown')`);
+      await c.$executeRawUnsafe(`INSERT INTO call_transcript_events(id,call_id,seq,role,text,at) VALUES ('e1','cd',0,'caller','x',now()),('e2','cu',0,'caller','y',now())`);
+      expect(await one(`SELECT call_id FROM call_transcript_events`)).toEqual([{ call_id: 'cu' }]);
+      await c.$executeRawUnsafe(`UPDATE calls SET consent_status = 'declined' WHERE id = 'cu'`);
+      expect(await one(`SELECT 1 FROM call_transcript_events`)).toEqual([]);
+
+      // the whole migration can be applied again (IF NOT EXISTS / guarded / OR REPLACE), and the validation block is a no-op
+      const rerun = rawPrisma(['db', 'execute', '--file', path.join(MIGRATIONS, PHASE1, 'migration.sql'), '--schema', path.join(ROOT, 'prisma/schema.prisma')], dbUrl(name));
+      expect(rerun.out).toContain('Script executed successfully');
+      expect(rerun.code).toBe(0);
+      const validate = sqlOf(PHASE1).match(/DO \$\$[\s\S]*?END \$\$;/g)!.at(-1)!;
+      await c.$executeRawUnsafe(validate);
+      expect(await one(`SELECT 1 FROM pg_constraint WHERE contype='c' AND NOT convalidated`)).toEqual([]);
+    } finally {
+      await c.$disconnect();
+    }
+  }, 240_000);
+
+  test('phase 1 validation step names the violating constraint', async () => {
+    const PHASE1 = '20261201120000_phase1_calendar_kb_transcript_passkeys_memberships';
+    const name = await newDb('phase1val');
+    expect(prisma(['migrate', 'deploy'], dbUrl(name)).code).toBe(0);
+    const c = client(name);
+    try {
+      await c.$executeRawUnsafe(`INSERT INTO businesses(id,name) VALUES ('vb','v')`);
+      await c.$executeRawUnsafe(`ALTER TABLE businesses DROP CONSTRAINT businesses_vertical_check`);
+      await c.$executeRawUnsafe(`UPDATE businesses SET vertical = 'bakery'`);
+      await c.$executeRawUnsafe(`ALTER TABLE businesses ADD CONSTRAINT businesses_vertical_check CHECK (vertical IN ('hvac','plumbing','electrical','cleaning','landscaping','dental','general')) NOT VALID`);
+      const validate = sqlOf(PHASE1).match(/DO \$\$[\s\S]*?END \$\$;/g)!.at(-1)!;
+      let msg = '';
+      try { await c.$executeRawUnsafe(validate); } catch (e) { msg = String((e as Error).message); }
+      expect(msg).toContain('businesses_vertical_check');
+      expect(msg).toContain('1 row(s)');
+      await c.$executeRawUnsafe(`UPDATE businesses SET vertical = 'general'`);
+      await c.$executeRawUnsafe(validate);
+    } finally {
+      await c.$disconnect();
+    }
+  }, 120_000);
 
   test('no drift between prisma/migrations and schema.prisma', async () => {
     const shadow = await newDb('shadow');
