@@ -7,8 +7,8 @@ import { PageHeader } from '@/components/ui/page-header';
 import { Calendar } from '@/components/calendar/calendar';
 import { Agenda } from '@/components/calendar/agenda';
 import { cn } from '@/components/ui/cn';
-import { defaultWeekStart, isCalendarView, parseWeekStart, rangeFor } from '@/lib/calendar';
-import { isDateKey, localDateKey, tzOf } from '@/lib/time';
+import { defaultWeekStart, isCalendarDateKey, isCalendarView, parseWeekStart, rangeFor } from '@/lib/calendar';
+import { localDateKey, tzOf } from '@/lib/time';
 import type { BookingsRangeResult } from '@/app/api/bookings/route';
 
 export const metadata: Metadata = { title: 'Calendar' };
@@ -35,7 +35,7 @@ export default async function BookingsPage({ searchParams }: { searchParams: Pro
   } else {
     const view = isCalendarView(one(q.view)) ? (one(q.view) as 'week' | 'day' | 'month') : 'week';
     const rawDate = one(q.date);
-    const date = rawDate && isDateKey(rawDate) ? rawDate : todayKey;
+    const date = rawDate && isCalendarDateKey(rawDate) ? rawDate : todayKey;
     const ws = parseWeekStart(one(q.ws), defaultWeekStart({ country: countryForBusiness(biz), timezone: tz }));
     const range = rangeFor(view, date, tz, ws);
     const { items, truncated } = await listAllBookingsInRange(biz.id, range.from, range.to);

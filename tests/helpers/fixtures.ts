@@ -13,7 +13,8 @@ export const uniq = (prefix: string) => `${prefix}-${run}-${++seq}`;
 
 /** Unique, valid North-American mobile number (+1 305 555-01xx style, 7 random digits). */
 export function phone(): string {
-  const n = String(2_000_000 + Math.floor(Math.random() * 7_999_999)); // exchange 2xx-9xx: a valid NANP number
+  let n = String(2_000_000 + Math.floor(Math.random() * 7_999_999)); // exchange 2xx-9xx: a valid NANP number
+  if (n.startsWith('976')) n = `977${n.slice(3)}`; // NXX 976 is a legacy premium exchange the forward-number rules refuse
   return `+1305${n}`;
 }
 

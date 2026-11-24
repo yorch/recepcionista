@@ -1,4 +1,5 @@
 'use client';
+import Link from 'next/link';
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -6,12 +7,12 @@ import { Card } from '@/components/ui/card';
 import { ApiError, apiRequest } from '@/hooks/use-api';
 import { relative, seconds } from '@/lib/format';
 import type { Page } from '@/lib/db/paging';
-import type { Call } from '@/lib/types';
+import type { PublicCall } from '@/lib/voice/voicemail';
 
 const LANG_LABEL: Record<string, string> = { en: 'English', es: 'Español', mixed: 'Spanglish' };
 const LANG_TONE: Record<string, string> = { en: 'neutral', es: 'brand', mixed: 'sky' };
 
-function CallCard({ c, nowMs, highlight }: { c: Call; nowMs: number; highlight?: boolean }) {
+function CallCard({ c, nowMs, highlight }: { c: PublicCall; nowMs: number; highlight?: boolean }) {
   return (
     <Card className={highlight ? 'p-5 ring-2 ring-brand-soft' : 'p-5'} id={`call-${c.id}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -41,6 +42,13 @@ function CallCard({ c, nowMs, highlight }: { c: Call; nowMs: number; highlight?:
 
       {c.flagged_reason ? <p className="mt-2 rounded-lg bg-[#1a1208] px-3 py-2 text-xs text-warn">{c.flagged_reason}</p> : null}
 
+      {c.has_voicemail ? (
+        <p className="mt-2 text-xs text-dim">
+          This caller left a voicemail.{' '}
+          <Link href="/dashboard/calls?tab=voicemails" className="inline-flex min-h-11 items-center text-brand-soft hover:underline">Listen in Voicemails</Link>
+        </p>
+      ) : null}
+
       {c.transcript ? (
         <details className="group mt-3">
           <summary className="inline-flex min-h-11 cursor-pointer list-none items-center text-xs text-dim transition-colors hover:text-brand-soft">
@@ -57,7 +65,7 @@ function CallCard({ c, nowMs, highlight }: { c: Call; nowMs: number; highlight?:
 /** The calls list: the first page comes from the server, "Load more" follows the cursor. */
 export function CallsList({
   businessId, initial, nowMs, focus,
-}: { businessId: string; initial: Page<Call>; nowMs: number; focus?: Call | null }) {
+}: { businessId: string; initial: Page<PublicCall>; nowMs: number; focus?: PublicCall | null }) {
   const [calls, setCalls] = useState(initial.items);
   const [cursor, setCursor] = useState(initial.next_cursor);
   const [loading, setLoading] = useState(false);
@@ -70,7 +78,7 @@ export function CallsList({
     setError(null);
     try {
       const q = new URLSearchParams({ business_id: businessId, cursor, limit: '25' });
-      const page = await apiRequest<Page<Call>>(`/api/calls?${q}`);
+      const page = await apiRequest<Page<PublicCall>>(`/api/calls?${q}`);
       setCalls((cur) => {
         const seen = new Set(cur.map((c) => c.id));
         return [...cur, ...page.items.filter((c) => !seen.has(c.id))];

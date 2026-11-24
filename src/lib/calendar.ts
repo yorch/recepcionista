@@ -88,6 +88,15 @@ export function nextDate(view: CalendarView, dateKey: string): string {
   return addDaysToDateKey(endOfMonth(dateKey), 1);
 }
 
+/** How far from today a calendar date may be (years): beyond it `date=` is refused instead of overflowing the date maths. */
+export const CALENDAR_MAX_YEARS = 50;
+
+/** A real YYYY-MM-DD that is also within +-CALENDAR_MAX_YEARS of `now` (so `9999-12-15` is a 422, not a 500). */
+export function isCalendarDateKey(s: unknown, now: Date = new Date()): s is string {
+  if (!isDateKey(s)) return false;
+  return Math.abs(Number(s.slice(0, 4)) - now.getUTCFullYear()) <= CALENDAR_MAX_YEARS;
+}
+
 export function rangeFor(view: CalendarView, dateKey: string, tz: string, weekStart: WeekStart): CalendarRange {
   if (!isDateKey(dateKey)) throw new RangeError(`bad date key: ${dateKey}`);
   const days = view === 'day' ? [dateKey] : view === 'week' ? weekDays(dateKey, weekStart) : monthGrid(dateKey, weekStart).flat();
@@ -130,7 +139,8 @@ export function segmentOnDay(
   const continuesBefore = startMs < gte.getTime();
   const continuesAfter = endMs > lt.getTime();
   const startMin = continuesBefore ? 0 : wallMinutes(startMs, tz);
-  const endMin = continuesAfter ? MINUTES_PER_DAY : wallMinutes(endMs, tz);
+  // A job that ends exactly at local midnight reaches the end of the day (its wall minute reads 0, which is NOT "start of day").
+  const endMin = endMs >= lt.getTime() ? MINUTES_PER_DAY : wallMinutes(endMs, tz);
   // Guard against DST skew producing an empty or inverted box: always at least 15 minutes tall, never past midnight.
   const end = Math.min(MINUTES_PER_DAY, Math.max(endMin, startMin + 15));
   return { bookingId: b.id, startMin, endMin: end, continuesBefore, continuesAfter };

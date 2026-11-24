@@ -88,9 +88,11 @@ integration('call handling mode (postgres)', () => {
     expect(res.headers.get('content-type')).toContain('text/xml');
     const xml = await res.text();
     expect(xml).toContain('<Dial');
-    expect(xml).toContain('<Number>+13055550142</Number>');
+    expect(xml).toMatch(/<Number [^>]*>\+13055550142<\/Number>/);
     expect(xml).toContain(`callerId="${biz.phone_e164}"`);
     expect(xml).toContain('action="/api/voice/voicemail"');
+    expect(xml).toContain('statusCallback="/api/voice/dial-status"'); // forwarded minutes are metered from the signed callbacks
+    expect(xml).toMatch(/timeLimit="\d+"/); // and a forwarded call can never outlive the allowance
     expect(xml).not.toMatch(/record/i);
     const row = await prisma.call.findFirst({ where: { callSid: params.CallSid } });
     expect(row).toMatchObject({ businessId: biz.id, status: 'completed', recordingDisclosed: false, consentStatus: 'unknown', recordingUrl: null, transcript: null });
@@ -165,7 +167,7 @@ integration('call handling mode (postgres)', () => {
     });
   });
 
-  test('a lapsed plan wins over paused/forward (no service for an inactive account); a used-up minutes cap does not', async () => {
+  test('a lapsed plan wins over paused/forward (no service for an inactive account); a used-up minutes cap stops FORWARDING but not the voicemail', async () => {
     const lapsed = await newBusiness();
     await setMode(lapsed.id, VERIFIED);
     await db.setBillingState(lapsed.id, { billing_status: 'canceled' });
@@ -179,7 +181,9 @@ integration('call handling mode (postgres)', () => {
       await db.setBillingState(capped.id, { billing_status: 'active', call_minutes_cap_override: 1 });
       await db.recordCallSeconds(capped.id, 600);
       const res2 = await signed(URL_IN, callParams(capped.phone!));
-      expect(await res2.text()).toContain('<Dial'); // forwarding uses no AI minutes
+      const xml2 = await res2.text();
+      expect(xml2).not.toContain('<Dial'); // forwarded minutes are real minutes: the cap stops the forward ...
+      expect(xml2).toContain('<Record'); // ... and the caller is offered the voicemail instead (H2)
     });
   });
 

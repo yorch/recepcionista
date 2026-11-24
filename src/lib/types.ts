@@ -205,6 +205,8 @@ export interface UserSession {
   created_at: string;
   last_used_at: string;
   mfa_verified_at: string | null;
+  /** Last proof of identity (login or re-authentication); sensitive changes need it within 5 minutes. */
+  sudo_at: string | null;
   ip: string | null;
   user_agent: string | null;
 }

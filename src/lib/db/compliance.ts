@@ -202,6 +202,18 @@ export function legacyNanpPhone(raw: string | null | undefined, e164: string): b
   return !/^\s*\+/.test(raw) || /^\s*\+\s*1/.test(raw);
 }
 
+/** Delete the Twilio-hosted voicemail recordings of deleted calls. Dynamic import: voice code imports this layer. Never throws. */
+async function removeVoicemailRecordings(urls: (string | null)[]): Promise<number> {
+  const present = urls.filter((u): u is string => Boolean(u));
+  if (present.length === 0) return 0;
+  try {
+    return await (await import('@/lib/voice/voicemail')).deleteTwilioRecordings(present);
+  } catch (err) {
+    log.warn('recordings.delete_failed', { error: (err as Error).message });
+    return 0;
+  }
+}
+
 export interface PurgeCounts {
   calls: number;
   sms_logs: number;
@@ -209,6 +221,8 @@ export interface PurgeCounts {
   bookings_anonymized: number;
   /** Briefing audio files removed from disk (0 on a dry run). */
   audio_files?: number;
+  /** Provider-side voicemail recordings (Twilio) deleted along with the purged calls (0 on a dry run). */
+  recordings?: number;
 }
 
 /**
@@ -244,7 +258,7 @@ export async function previewExpiredData(now: Date = new Date()): Promise<PurgeC
  *    (`anonymized_at` is set; name becomes '[redacted]', phone '').
  * `sms_opt_outs` are never purged: forgetting a STOP would re-enable texting that person.
  * Idempotent. With `{ dryRun: true }` nothing is changed and the counts say what WOULD be purged.
- * Does not delete provider-side recordings.
+ * Voicemail recordings (Twilio-hosted, referenced by a deleted call's `recording_url`) are deleted at the provider too, best effort.
  */
 export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: boolean } = {}): Promise<PurgeCounts> {
   if (opts.dryRun) return previewExpiredData(now);
@@ -257,10 +271,11 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
         FROM "businesses" b
        WHERE bk."business_id" = b."id" AND bk."anonymized_at" IS NULL
          AND bk."scheduled_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`,
-    prisma.$executeRaw`
+    prisma.$queryRaw<{ recording_url: string | null }[]>`
       DELETE FROM "calls" c USING "businesses" b
        WHERE c."business_id" = b."id"
-         AND c."started_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`,
+         AND c."started_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")
+      RETURNING c."recording_url"`,
     prisma.$executeRaw`
       DELETE FROM "sms_log" s USING "businesses" b
        WHERE s."business_id" = b."id"
@@ -272,13 +287,16 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
       RETURNING br."audio_url"`,
   ]);
   const audio = removeBriefingAudio(briefingRows.map((r) => r.audio_url));
-  const counts: PurgeCounts = { calls, sms_logs: sms, briefings: briefingRows.length, bookings_anonymized: bookings, audio_files: audio };
+  const recordings = await removeVoicemailRecordings(calls.map((c) => c.recording_url));
+  const counts: PurgeCounts = { calls: calls.length, sms_logs: sms, briefings: briefingRows.length, bookings_anonymized: bookings, audio_files: audio, recordings };
   log.info('retention.purged', { ...counts });
   return counts;
 }
 
 export interface EraseCounts {
   calls: number;
+  /** Provider-side voicemail recordings deleted with the calls. */
+  recordings?: number;
   /** Texts to the customer PLUS owner alerts / other texts that mention them (by number, booking or name). */
   sms_logs: number;
   bookings_anonymized: number;
@@ -381,7 +399,7 @@ export async function locateCustomerRecords(db: Reader, businessId: string, id: 
 export async function eraseCustomerData(businessId: string, phone: string, country: string = defaultPhoneCountry()): Promise<EraseCounts> {
   const id = phoneIdent(phone, country);
   if (!id.e164) throw new Error('eraseCustomerData: phone must be a valid number (use +country code for non-US numbers)');
-  const { counts, audio } = await prisma.$transaction(async (tx) => {
+  const { counts, audio, recordingUrls } = await prisma.$transaction(async (tx) => {
     // Locate FIRST: anonymising the bookings would erase the very phone numbers/names the matching relies on.
     const rec = await locateCustomerRecords(tx, businessId, id, country);
     const bookings = await tx.$executeRaw`
@@ -394,14 +412,15 @@ export async function eraseCustomerData(businessId: string, phone: string, count
     const briefings = await tx.$queryRaw<{ audio_url: string | null }[]>`
       DELETE FROM "briefings" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.briefingIds}::text[])
       RETURNING "audio_url"`;
-    const calls = await tx.$executeRaw`
-      DELETE FROM "calls" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.callIds}::text[])`;
+    const calls = await tx.$queryRaw<{ recording_url: string | null }[]>`
+      DELETE FROM "calls" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.callIds}::text[]) RETURNING "recording_url"`;
     return {
-      counts: { calls, sms_logs: sms, bookings_anonymized: bookings, briefings: briefings.length },
+      counts: { calls: calls.length, sms_logs: sms, bookings_anonymized: bookings, briefings: briefings.length },
       audio: briefings.map((r) => r.audio_url),
+      recordingUrls: calls.map((c) => c.recording_url),
     };
   });
-  const result: EraseCounts = { ...counts, audio_files: removeBriefingAudio(audio) };
+  const result: EraseCounts = { ...counts, audio_files: removeBriefingAudio(audio), recordings: await removeVoicemailRecordings(recordingUrls) };
   log.info('customer.erased', { business: businessId, ...result });
   return result;
 }

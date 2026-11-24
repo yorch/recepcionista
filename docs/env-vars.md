@@ -116,5 +116,11 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `FORWARD_ALLOWED_COUNTRY_CODES` | no | `SMS_ALLOWED_COUNTRY_CODES` (`1`) | calling codes a forward number may belong to (premium and non-geographic ranges are refused regardless) |
+| `VOICE_LINE_KIND` | no | `native` when `ELEVENLABS_API_KEY` and `ELEVENLABS_PHONE_NUMBER_ID` are both set, else `webhook` | `native` = the number is imported into ElevenLabs (the documented production setup): the app cannot dial a human there, so the Forward choice is refused (422) and the dashboard says "Forwarding is not available on the AI voice line". `webhook` = the number's Twilio Voice URL is `/api/voice/incoming` (signed TwiML: pause records a voicemail, forward dials). deploy.sh accepts `native`, `webhook` or empty |
+| `FORWARD_ALLOWED_COUNTRY_CODES` | no | `SMS_ALLOWED_COUNTRY_CODES` (`1`) | calling codes a forward number may belong to. Premium, toll-free, Caribbean and territory numbers are refused regardless, when the number is saved AND again on every forwarded call |
+| `FORWARD_DENY_AREA_CODES` | no | none | extra 3-digit NANP area codes refused as forward targets, ADDED to the built-in list (900, 976, toll-free 800/833/844/855/866/877/888, Caribbean 242 246 264 268 284 345 441 473 649 658 664 721 758 767 784 809 829 849 868 869 876, territories 670 671 684). An exchange `976` is refused in any area code. deploy.sh checks the format |
+| `FORWARD_MAX_CALL_SECONDS` | no | `3600` | longest single forwarded call (`<Dial timeLimit>`); with billing enforced it is also capped to the plan minutes still left. Whole number >= 60 (deploy.sh checks) |
+| `FORWARD_CALLS_PER_HOUR` | no | `30` | forwarded calls one business may start per hour; the rest get the voicemail. Whole number >= 1 |
+| `VOICEMAIL_PER_HOUR` | no | `30` | voicemails one business may take per hour; beyond it callers hear a short "try again later" and no recording starts. Whole number >= 1 |
+| `ELEVENLABS_PAUSED_PROMPT_OVERRIDE` | no | off | `true`: a paused call on the AI line also overrides the agent PROMPT (`conversation_config_override.agent.prompt`), in addition to the first message. UNVERIFIED API field: needs the prompt override enabled on the agent (re-provision with this set). The tools are refused while paused whatever this is set to |
 | `LOG_PII` | no | unset | `true` stops masking phone numbers and emails in logs (credentials are always masked); debugging only |

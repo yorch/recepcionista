@@ -71,6 +71,16 @@ export function outOfServiceToolMessage(lang: 'en' | 'es'): string {
 export const CAPACITY_EXEMPT_TOOLS: ReadonlySet<string> = new Set(['flag_emergency', 'handoff_to_human']);
 
 /**
+ * Spoken by a tool that is refused because calls are PAUSED (or a forward cannot be honoured on this line): nothing is booked, texted
+ * or charged, the agent only takes a message. Honest: it says the business is not taking bookings by phone right now.
+ */
+export function pausedToolMessage(lang: 'en' | 'es'): string {
+  return lang === 'es'
+    ? 'Por el momento no agendamos citas ni enviamos mensajes por teléfono. Dígame su nombre, su número y un mensaje breve y se lo paso al dueño, quien le devolverá la llamada.'
+    : 'We are not taking bookings or sending texts by phone right now, so I cannot do that. Please tell me your name, your number and a short message and I will pass it to the owner, who will call you back.';
+}
+
+/**
  * What the agent says on the NATIVE ElevenLabs path while calls are paused (or 'forward' cannot be honoured there: the
  * platform answers the call before our code can dial anything, see docs/known-limitations.md). The recording/AI notice
  * comes first, then a message-taking script; the call is cut short (OUT_OF_SERVICE_MAX_SECONDS) like an out-of-service call.
@@ -81,5 +91,21 @@ export function pausedFirstMessage(business: Business): string {
     + `Gracias por llamar a ${business.name}. Por el momento no agendamos citas por teléfono. Dígame su nombre, su número y un mensaje breve y se lo paso al dueño, quien le devolverá la llamada.`;
 }
 
-export const pausedOverride = (business: Business): { agent: { first_message: string }; conversation: { max_duration_seconds: number } } =>
-  ({ agent: { first_message: pausedFirstMessage(business) }, conversation: { max_duration_seconds: OUT_OF_SERVICE_MAX_SECONDS } });
+/** The instruction the agent runs on while paused (only sent when ELEVENLABS_PAUSED_PROMPT_OVERRIDE=true, see initiation-config.ts). */
+export function pausedPrompt(business: Business): string {
+  return `You are the phone assistant for ${business.name}. Calls are PAUSED: the business is not taking bookings, quotes, payments or texts by phone right now. `
+    + 'Do not book, quote prices, send texts or payment links. Say the paused message, then only collect the caller\'s name, phone number and a short message, '
+    + 'and call handoff_to_human so the owner calls them back. If it is an emergency, tell them to call 911 and call flag_emergency. Keep it short, in the caller\'s language.';
+}
+
+export type PausedOverride = { agent: { first_message: string; prompt?: { prompt: string } }; conversation: { max_duration_seconds: number } };
+
+export const pausedOverride = (business: Business, env: NodeJS.ProcessEnv = process.env): PausedOverride => ({
+  agent: {
+    first_message: pausedFirstMessage(business),
+    // A prompt override must first be ENABLED on the agent (docs/runbook.md); off by default so an agent that was not re-provisioned
+    // never receives an override the platform may reject. The tools route refuses every action while paused either way.
+    ...(env.ELEVENLABS_PAUSED_PROMPT_OVERRIDE === 'true' ? { prompt: { prompt: pausedPrompt(business) } } : {}),
+  },
+  conversation: { max_duration_seconds: OUT_OF_SERVICE_MAX_SECONDS },
+});

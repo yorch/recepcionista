@@ -1,8 +1,8 @@
 import { fail, ok } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { countryForBusiness, getBusiness, listAllBookingsInRange, listBookingsPage } from '@/lib/db';
-import { defaultWeekStart, isCalendarView, parseWeekStart, rangeFor, type CalendarView, type WeekStart } from '@/lib/calendar';
-import { isDateKey, localDateKey, tzOf } from '@/lib/time';
+import { defaultWeekStart, isCalendarDateKey, isCalendarView, parseWeekStart, rangeFor, type CalendarView, type WeekStart } from '@/lib/calendar';
+import { localDateKey, tzOf } from '@/lib/time';
 import type { Booking } from '@/lib/types';
 import type { Page } from '@/lib/db/paging';
 
@@ -50,7 +50,7 @@ export async function GET(req: Request) {
     const view = q.get('view') ?? 'week';
     if (!isCalendarView(view)) return fail('view must be "week", "day" or "month"', 422);
     const date = q.get('date') ?? localDateKey(new Date(), tz);
-    if (!isDateKey(date)) return fail('date must be YYYY-MM-DD', 422);
+    if (!isCalendarDateKey(date)) return fail('date must be YYYY-MM-DD within 50 years of today', 422);
     const ws = parseWeekStart(q.get('ws'), defaultWeekStart({ country: countryForBusiness(business), timezone: tz }));
     const range = rangeFor(view, date, tz, ws);
     const { items, truncated } = await listAllBookingsInRange(businessId, range.from, range.to);

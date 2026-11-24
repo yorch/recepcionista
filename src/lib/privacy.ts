@@ -2,6 +2,7 @@
 import { prisma } from '@/lib/db';
 import { isOptedOut, locateCustomerRecords, phoneIdent } from '@/lib/db/compliance';
 import { defaultPhoneCountry } from '@/lib/phone';
+import { parseRecordingUrl } from '@/lib/voice/voicemail';
 
 export interface CustomerExport {
   business_id: string;
@@ -34,7 +35,13 @@ export async function exportCustomerData(businessId: string, phone: string, coun
     business_id: businessId,
     phone_e164: id.e164,
     exported_at: new Date().toISOString(),
-    calls, bookings, sms, briefings,
+    // A voicemail is the customer's own recorded voice: the export says it exists and where the owner plays it back (the
+    // authenticated proxy), never the credentialed provider URL.
+    calls: calls.map(({ recordingUrl, ...c }) => ({
+      ...c,
+      voicemail: recordingUrl && parseRecordingUrl(recordingUrl) ? { available: true, playback_path: `/api/calls/${c.id}/voicemail`, seconds: c.durationSec ?? null } : null,
+    })),
+    bookings, sms, briefings,
     sms_opted_out: optedOut,
   };
 }

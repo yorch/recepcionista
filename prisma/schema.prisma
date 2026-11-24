@@ -315,6 +315,9 @@ model UserSession {
   lastUsedAt    DateTime  @default(now()) @map("last_used_at")
   /// Set when the second factor was satisfied for this session (NULL = password only / no MFA).
   mfaVerifiedAt DateTime? @map("mfa_verified_at") @db.Timestamptz(6)
+  /// Last time the holder proved who they are (set at login, and by POST /api/auth/reauth). Sensitive changes (call forwarding)
+  /// need it within the last 5 minutes. NULL on rows from before the column existed = not recent.
+  sudoAt        DateTime? @map("sudo_at") @db.Timestamptz(6)
   ip            String?
   userAgent     String?   @map("user_agent")
 

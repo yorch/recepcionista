@@ -1,7 +1,10 @@
 /** Call handling mode: routing decision, forward-number vetting, TwiML, and the separation of verification purposes. */
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { callModeLabel, callModeView, isOpenNow, maskNumber, resolveCallRoute, trustedForwardNumber } from '../src/lib/voice/call-mode';
-import { forwardAllowedCountryCodes, validateForwardNumber } from '../src/lib/voice/forward-number';
+import { forwardAllowedCountryCodes, forwardDenyAreaCodes, validateForwardNumber } from '../src/lib/voice/forward-number';
+import { forwardingSupported, FORWARD_UNAVAILABLE, lineKind } from '../src/lib/voice/line';
+import { forwardCallsPerHour, forwardMaxCallSeconds, parseSeconds, voicemailsPerHour } from '../src/lib/voice/forward-metering';
 import { forwardTwiml, pausedTwiml, pausedVoicemailPrompt, xmlEscape } from '../src/lib/voice/twiml';
 import { pausedFirstMessage } from '../src/lib/voice/capacity';
 import { createOwnerPhoneChallenge, forwardVerificationText, verifyOwnerPhoneChallenge } from '../src/lib/messaging/owner-verify';
@@ -112,6 +115,11 @@ describe('TwiML', () => {
   test('forward: Dial with the number, never records, escapes everything', () => {
     const x = forwardTwiml('+13055550142', { callerId: '+13055550100', action: '/api/voice/voicemail?a=1&b=2' });
     expect(x).toContain('<Dial timeout="25" answerOnBridge="true" callerId="+13055550100" action="/api/voice/voicemail?a=1&amp;b=2" method="POST"><Number>+13055550142</Number></Dial>');
+    // the allowance cap and the metering callback are optional attributes
+    const capped = forwardTwiml('+13055550142', { timeLimit: 600.7, statusCallback: '/api/voice/dial-status' });
+    expect(capped).toContain('timeLimit="600"');
+    expect(capped).toContain('<Number statusCallback="/api/voice/dial-status" statusCallbackEvent="completed" statusCallbackMethod="POST">+13055550142</Number>');
+    expect(forwardTwiml('+13055550142', { timeLimit: 0 })).not.toContain('timeLimit');
     expect(x).not.toMatch(/record/i);
     expect(() => forwardTwiml('305-555-0142')).toThrow(); // only E.164
     expect(() => forwardTwiml('+1305</Number><Number>+19005550142')).toThrow();
@@ -153,5 +161,109 @@ describe('verification purposes are separate', () => {
     } finally {
       if (saved === undefined) delete process.env.APP_SECRET_KEY; else process.env.APP_SECRET_KEY = saved;
     }
+  });
+});
+
+describe('H1: forward-number rules on every path', () => {
+  const ok = (raw: unknown, opts: Parameters<typeof validateForwardNumber>[2] = {}) => validateForwardNumber(raw, 'US', { codes: ['1'], ...opts });
+
+  test('the review repro (+1 876 Jamaica) and every territory / premium / toll-free / 976 shape is refused', () => {
+    for (const n of [
+      '+18765550142', // Jamaica (the repro)
+      '+16705550142', '+16715550142', '+16845550142', // CNMI, Guam, American Samoa
+      '+13059760142', '+12129760142', '+17869760142', // NXX 976 inside ANY area code
+      '+18005550142', '+18335550142', '+18445550142', '+18555550142', '+18665550142', '+18775550142', '+18885550142', // toll-free
+      '+19005550142', '+19765550142', '+15005550142', '+17005550142', '+12115550142',
+      '+12425550142', '+14415550142', '+17215550142', '+18095550142',
+    ]) expect([n, ok(n).ok]).toEqual([n, false]);
+    expect(ok('+13055550142').ok).toBe(true);
+    expect(ok('+14165550142').ok).toBe(true); // Canada is fine
+    expect(ok('+17875550142').ok).toBe(true); // Puerto Rico bills as domestic
+  });
+
+  test('libphonenumber type refuses premium / shared-cost / personal numbers abroad even when the country is allowed', () => {
+    for (const n of ['+447012345678', '+449005550142']) expect([n, validateForwardNumber(n, 'US', { codes: ['1', '44'] }).ok]).toEqual([n, false]);
+    expect(validateForwardNumber('+442071234567', 'US', { codes: ['1', '44'] }).ok).toBe(true);
+  });
+
+  test('FORWARD_DENY_AREA_CODES adds area codes (malformed entries ignored); the defaults always apply', () => {
+    const deny = forwardDenyAreaCodes({ FORWARD_DENY_AREA_CODES: ' 305, 1-212 ,abc,99,+1415 ' });
+    for (const c of ['305', '212', '415', '876', '670', '671', '684', '976', '800']) expect(deny.has(c)).toBe(true);
+    expect(deny.has('786')).toBe(false);
+    expect(ok('+13055550142', { denyAreaCodes: deny }).ok).toBe(false);
+    expect(ok('+17865550142', { denyAreaCodes: deny }).ok).toBe(true);
+    expect(forwardDenyAreaCodes({}).has('305')).toBe(false);
+  });
+
+  test('a VERIFIED owner phone is not exempt: trustedForwardNumber / resolveCallRoute re-validate it', () => {
+    const jm = '+18765550142';
+    const owner = { call_mode: 'forward' as const, forward_number_e164: jm, forward_number_verified_at: null, owner_phone_e164: jm, owner_phone_verified_at: '2026-11-01T00:00:00Z' };
+    expect(trustedForwardNumber(owner)).toBeNull();
+    expect(resolveCallRoute(biz(owner), open, 'webhook')).toEqual({ action: 'ai', why: 'forward_number_rejected' });
+    // verified by SMS code is not exempt either (the list may have changed since)
+    expect(trustedForwardNumber({ ...owner, forward_number_verified_at: '2026-11-02T00:00:00Z' })).toBeNull();
+    // the business's own line is never a target
+    expect(trustedForwardNumber({ forward_number_e164: '+13055550142', forward_number_verified_at: '2026-11-02T00:00:00Z', owner_phone_e164: null, owner_phone_verified_at: null, phone_e164: '+13055550142' })).toBeNull();
+    // and the view says why
+    const view = callModeView({ ...biz(owner), forward_number: jm }, { full: true }, open, 'webhook');
+    expect(view).toMatchObject({ forward_verified: false, route_now: 'ai' });
+    expect(view.forward_blocked).toMatch(/premium|international|toll-free/);
+    expect(view.label).toMatch(/not allowed/);
+  });
+});
+
+describe('M2: honest forwarding by line kind', () => {
+  const fwd = biz({ call_mode: 'forward', forward_number_e164: '+13055550142', forward_number_verified_at: '2026-11-02T00:00:00Z' });
+
+  test('lineKind: native only with ElevenLabs configured (or forced); forwarding is a webhook-line feature', () => {
+    expect(lineKind({})).toBe('webhook');
+    expect(lineKind({ ELEVENLABS_API_KEY: 'k' })).toBe('webhook');
+    expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p' })).toBe('native');
+    expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p', VOICE_LINE_KIND: 'webhook' })).toBe('webhook');
+    expect(lineKind({ VOICE_LINE_KIND: ' Native ' })).toBe('native');
+    expect(forwardingSupported('native')).toBe(false);
+    expect(forwardingSupported('webhook')).toBe(true);
+  });
+
+  test('on the native line a due forward is the paused script, the label and view say so', () => {
+    expect(resolveCallRoute(fwd, open, 'native')).toEqual({ action: 'paused', why: 'forward_unavailable_on_line' });
+    expect(resolveCallRoute(fwd, open, 'webhook')).toEqual({ action: 'forward', to: '+13055550142' });
+    expect(callModeLabel(fwd, open, 'native')).toEqual({ text: FORWARD_UNAVAILABLE, tone: 'warn' });
+    expect(FORWARD_UNAVAILABLE).toBe('Forwarding is not available on the AI voice line — callers will hear the paused message');
+    expect(callModeView(fwd, {}, open, 'native')).toMatchObject({ forward_supported: false, route_now: 'paused' });
+    // after hours the AI answers on either line (the schedule is respected before the line matters)
+    const sched = { ...fwd, forward_during_hours: true };
+    expect(resolveCallRoute(sched, after, 'native')).toEqual({ action: 'ai', why: 'forward_outside_hours' });
+    expect(resolveCallRoute(sched, open, 'native').action).toBe('paused');
+  });
+});
+
+describe('H2 helpers', () => {
+  test('parseSeconds accepts whole non-negative numbers only and clamps absurd values', () => {
+    expect(parseSeconds('75')).toBe(75);
+    expect(parseSeconds(' 3000 ')).toBe(3000);
+    expect(parseSeconds('99999999')).toBeNull();
+    expect(parseSeconds('9999999')).toBe(4 * 3600);
+    for (const bad of ['-5', '1.5', 'abc', '', undefined, null, 5 as unknown as string]) expect(parseSeconds(bad)).toBeNull();
+  });
+  test('limits come from env with safe defaults', () => {
+    expect(forwardMaxCallSeconds({})).toBe(3600);
+    expect(forwardMaxCallSeconds({ FORWARD_MAX_CALL_SECONDS: '600' })).toBe(600);
+    expect(forwardMaxCallSeconds({ FORWARD_MAX_CALL_SECONDS: '5' })).toBe(3600); // below the minimum: default
+    expect(forwardCallsPerHour({ FORWARD_CALLS_PER_HOUR: 'x' })).toBe(30);
+    expect(voicemailsPerHour({ VOICEMAIL_PER_HOUR: '3' })).toBe(3);
+  });
+});
+
+describe('L4: the call mode buttons never become `disabled` while saving (that dropped keyboard focus to <body>)', () => {
+  test('source regression: aria-disabled + a busy guard, focus restored', () => {
+    const src = readFileSync(new URL('../src/components/dashboard/call-mode.tsx', import.meta.url), 'utf8');
+    const buttons = src.slice(src.indexOf("aria-pressed={view.call_mode === mode}"), src.indexOf("{busy === mode ? 'Saving"));
+    expect(buttons).toContain('aria-disabled');
+    expect(buttons).not.toMatch(/\sdisabled=/);
+    expect(src).toContain('buttons.current[mode]?.focus()');
+    // L5: the hours checkbox sends only the field it changes
+    expect(src).toContain("body: { forward_during_hours: v }");
+    expect(src).not.toMatch(/mode: view\.call_mode/);
   });
 });

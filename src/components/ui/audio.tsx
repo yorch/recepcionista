@@ -3,8 +3,8 @@ import { useRef, useState } from 'react';
 import { cn } from './cn';
 
 export function VoicePlayer({
-  src, label, className, bars = 42,
-}: { src?: string | null; label: string; className?: string; bars?: number }) {
+  src, label, className, bars = 42, preload, idleLabel = 'voice note',
+}: { src?: string | null; label: string; className?: string; bars?: number; preload?: 'none' | 'metadata' | 'auto'; idleLabel?: string }) {
   const ref = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -52,7 +52,7 @@ export function VoicePlayer({
           <div className="flex items-baseline justify-between gap-3">
             <p className="truncate text-xs font-medium text-soft">{label}</p>
             <span className="shrink-0 text-xs tabular-nums text-dim">
-              {!src ? 'audio pending' : missing ? 'audio unavailable' : playing ? 'playing' : 'voice note'}
+              {!src ? 'audio pending' : missing ? 'audio unavailable' : playing ? 'playing' : idleLabel}
             </span>
           </div>
           <div
@@ -91,6 +91,7 @@ export function VoicePlayer({
         <audio
           ref={ref}
           src={src}
+          preload={preload}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onEnded={() => { setPlaying(false); setProgress(0); }}

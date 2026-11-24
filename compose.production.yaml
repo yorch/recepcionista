@@ -177,6 +177,14 @@ services:
       # Lower caps while a business is trialing (docs/billing.md). Empty = defaults (50 texts / 30 minutes).
       TRIAL_SMS_CAP: ${TRIAL_SMS_CAP:-}
       TRIAL_CALL_MINUTES_CAP: ${TRIAL_CALL_MINUTES_CAP:-}
+      # Call handling (docs/runbook.md section 8). Empty = the code defaults.
+      VOICE_LINE_KIND: ${VOICE_LINE_KIND:-}
+      FORWARD_ALLOWED_COUNTRY_CODES: ${FORWARD_ALLOWED_COUNTRY_CODES:-}
+      FORWARD_DENY_AREA_CODES: ${FORWARD_DENY_AREA_CODES:-}
+      FORWARD_MAX_CALL_SECONDS: ${FORWARD_MAX_CALL_SECONDS:-}
+      FORWARD_CALLS_PER_HOUR: ${FORWARD_CALLS_PER_HOUR:-}
+      VOICEMAIL_PER_HOUR: ${VOICEMAIL_PER_HOUR:-}
+      ELEVENLABS_PAUSED_PROMPT_OVERRIDE: ${ELEVENLABS_PAUSED_PROMPT_OVERRIDE:-}
       # Never true in production: the mock checkout / demo routes stay off.
       DEMO_MODE: "false"
       # Only set true when Traefik is the sole path to the app (it overwrites X-Forwarded-For).

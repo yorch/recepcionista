@@ -2,7 +2,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   allowedActions, axisFor, blockBox, countsByDay, defaultWeekStart, endOfMonth, groupByDay, hourLabel, layoutLanes, monthGrid, nextDate, nowLine,
-  previousDate, rangeFor, segmentOnDay, startOfWeek, weekDays, wallMinutes, STATUS_META, STATUS_ORDER,
+  isCalendarDateKey, previousDate, rangeFor, segmentOnDay, startOfWeek, weekDays, wallMinutes, STATUS_META, STATUS_ORDER,
 } from '../src/lib/calendar';
 import { dayRange, zonedTimeToUtc } from '../src/lib/time';
 import type { Hours } from '../src/lib/types';
@@ -211,5 +211,29 @@ describe('presentation and actions', () => {
 
   test('hour labels', () => {
     expect([hourLabel(0), hourLabel(540), hourLabel(720), hourLabel(780), hourLabel(1380)]).toEqual(['12 AM', '9 AM', '12 PM', '1 PM', '11 PM']);
+  });
+});
+
+describe('round 5 regressions', () => {
+  test('L1: a job that ends exactly at local midnight is drawn to the end of the day, not 15 minutes tall', () => {
+    const seg = segmentOnDay(b('late', '2026-12-01', '22:00', 120), '2026-12-01', NY);
+    expect(seg).toMatchObject({ startMin: 22 * 60, endMin: 24 * 60, continuesAfter: false });
+    // box height: 120 minutes of a 24 h axis, never the 15 minute guard
+    expect(blockBox(seg!, { startMin: 0, endMin: 24 * 60 }).height).toBeCloseTo((120 / 1440) * 100, 5);
+    // a short job at 23:45-24:00 and one that really runs past midnight
+    expect(segmentOnDay(b('x', '2026-12-01', '23:45', 15), '2026-12-01', NY)).toMatchObject({ startMin: 23 * 60 + 45, endMin: 24 * 60 });
+    expect(segmentOnDay(b('y', '2026-12-01', '23:00', 120), '2026-12-01', NY)).toMatchObject({ endMin: 24 * 60, continuesAfter: true });
+    // the day it ends on starts at 0 (touching, not overlapping)
+    expect(segmentOnDay(b('late', '2026-12-01', '22:00', 120), '2026-12-02', NY)).toBeNull();
+    // the DST days still work
+    expect(segmentOnDay(b('dst', '2026-11-01', '22:00', 120), '2026-11-01', NY)).toMatchObject({ endMin: 24 * 60 });
+  });
+
+  test('L6: calendar dates must be real and within 50 years of today', () => {
+    const now = new Date('2026-11-24T12:00:00Z');
+    for (const ok of ['2026-11-24', '2076-11-24', '1976-11-24']) expect(isCalendarDateKey(ok, now)).toBe(true);
+    for (const bad of ['9999-12-15', '0001-01-01', '2077-01-01', '1975-12-31', '2026-02-30', '2026-13-01', 'x', '', null, undefined, 20261124]) expect(isCalendarDateKey(bad, now)).toBe(false);
+    // 9999 really did overflow the range maths: that is why it is refused before rangeFor
+    expect(() => rangeFor('month', '9999-12-15', NY, 0)).toThrow();
   });
 });

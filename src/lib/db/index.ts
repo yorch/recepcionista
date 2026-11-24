@@ -252,14 +252,13 @@ function dayRange(date: string, tz: string = DEFAULT_TIMEZONE): { gte: Date; lt:
 
 // ---------- businesses ----------
 /**
- * Every business (admin switcher, jobs, routing fallback), oldest first, BOUNDED to `limit` rows (default MAX_LIST) with a
- * keyset `after` (a business id) for callers that really walk the whole table.
+ * Every business (admin switcher, routing fallback), oldest first, BOUNDED to `limit` rows (default MAX_LIST). To walk the whole
+ * table use listBusinessesPage / listAllBusinesses (keyset, tolerant of rows deleted mid-walk).
  */
-export async function listBusinesses(opts: { limit?: number; after?: ID } = {}): Promise<Business[]> {
+export async function listBusinesses(opts: { limit?: number } = {}): Promise<Business[]> {
   const rows = await prisma.business.findMany({
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: clampLimit(opts.limit, MAX_LIST, MAX_LIST),
-    ...(opts.after ? { cursor: { id: opts.after }, skip: 1 } : {}),
   });
   return rows.map(toBusiness);
 }
@@ -285,14 +284,19 @@ export type JobBusiness = Pick<Business, 'id' | 'timezone' | 'billing_status' | 
  */
 export async function listLiveBusinessesForJobs(opts: { businessId?: ID } = {}): Promise<JobBusiness[]> {
   const out: JobBusiness[] = [];
-  let cursor: string | null = null;
+  // Keyset on (created_at, id) carrying the LAST ROW'S VALUES, never `cursor: { id }`: a tenant deleted between two pages must
+  // not end the walk (Prisma returns an empty page for a cursor row that no longer exists, skipping every later tenant).
+  let cursor: { at: Date; id: string } | null = null;
   for (;;) {
-    const rows: { id: string; timezone: string; billingStatus: string; pastDueSince: Date | null }[] = await prisma.business.findMany({
-      where: { status: 'live', ...(opts.businessId ? { id: opts.businessId } : {}) },
-      select: { id: true, timezone: true, billingStatus: true, pastDueSince: true },
+    const rows: { id: string; createdAt: Date; timezone: string; billingStatus: string; pastDueSince: Date | null }[] = await prisma.business.findMany({
+      where: {
+        status: 'live',
+        ...(opts.businessId ? { id: opts.businessId } : {}),
+        ...(cursor ? { OR: [{ createdAt: { gt: cursor.at } }, { createdAt: cursor.at, id: { gt: cursor.id } }] } : {}),
+      },
+      select: { id: true, createdAt: true, timezone: true, billingStatus: true, pastDueSince: true },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: MAX_PAGE_SIZE_RANGE,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
     for (const r of rows) {
       out.push({
@@ -302,7 +306,8 @@ export async function listLiveBusinessesForJobs(opts: { businessId?: ID } = {}):
       });
     }
     if (rows.length < MAX_PAGE_SIZE_RANGE) break;
-    cursor = rows[rows.length - 1].id;
+    const last = rows[rows.length - 1];
+    cursor = { at: last.createdAt, id: last.id };
   }
   return out;
 }
@@ -310,12 +315,16 @@ export async function listLiveBusinessesForJobs(opts: { businessId?: ID } = {}):
 /** One page of businesses plus the cursor of the next page. */
 export async function listBusinessesPage(opts: { limit?: number; cursor?: string | null } = {}): Promise<Page<Business>> {
   const limit = clampLimit(opts.limit, 50);
+  const cur = parseTimeCursor(opts.cursor);
+  // Keyset on (created_at, id) with the values carried IN the cursor (`<iso>~<id>`): a cursor whose row was deleted since the
+  // last page still resumes at the right place (Prisma's `cursor: { id }` returns nothing for a deleted row, which made a
+  // background job silently skip every later tenant).
   const rows = await prisma.business.findMany({
+    where: cur ? { OR: [{ createdAt: { gt: cur.at } }, { createdAt: cur.at, id: { gt: cur.id } }] } : {},
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: limit + 1,
-    ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
   });
-  return toPage(rows, limit, toBusiness, (r) => r.id);
+  return toPage(rows, limit, toBusiness, (r) => encodeTimeCursor(r.createdAt, r.id));
 }
 
 export async function getBusiness(id: ID): Promise<Business | null> {
@@ -700,12 +709,14 @@ export async function countCalls(businessId: ID): Promise<number> {
 }
 
 /** Cursor-paginated calls, newest first. */
-export async function listCallsPage(businessId: ID, opts: { limit?: number; cursor?: string | null } = {}): Promise<Page<Call>> {
+export async function listCallsPage(businessId: ID, opts: { limit?: number; cursor?: string | null; voicemailOnly?: boolean } = {}): Promise<Page<Call>> {
   const limit = clampLimit(opts.limit);
   const cur = parseTimeCursor(opts.cursor);
   const rows = await prisma.call.findMany({
     where: {
       businessId,
+      // A voicemail is a call whose Twilio recording is stored (the URL is only ever written after the recording notice was spoken).
+      ...(opts.voicemailOnly ? { recordingUrl: { startsWith: 'https://api.twilio.com/2010-04-01/Accounts/' } } : {}),
       ...(cur ? { OR: [{ startedAt: { lt: cur.at } }, { startedAt: cur.at, id: { lt: cur.id } }] } : {}),
     },
     orderBy: [{ startedAt: 'desc' }, { id: 'desc' }],
@@ -908,10 +919,19 @@ export async function listBookingsPage(
   const cur = parseTimeCursor(opts.cursor);
   const now = opts.now ?? new Date();
   const upcoming = opts.direction === 'upcoming';
+  // A job that started before `now` but has not ended yet is "in progress": it belongs to `upcoming` (it leads the first page)
+  // and NEVER to `past`, so it is never listed twice.
+  const runningRows = await prisma.booking.findMany({
+    where: { businessId, scheduledAt: { gte: new Date(now.getTime() - MAX_DURATION_MIN * 60_000), lt: now } },
+    orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
+  });
+  const running = runningRows.map(toBooking).filter((b) => bookingInterval(b).end > now.getTime());
+  const runningIds = new Set(running.map((b) => b.id));
   const rows = await prisma.booking.findMany({
     where: {
       businessId,
       scheduledAt: upcoming ? { gte: now } : { lt: now },
+      ...(!upcoming && runningIds.size > 0 ? { id: { notIn: [...runningIds] } } : {}),
       ...(cur
         ? { OR: upcoming
           ? [{ scheduledAt: { gt: cur.at } }, { scheduledAt: cur.at, id: { gt: cur.id } }]
@@ -922,14 +942,7 @@ export async function listBookingsPage(
     take: limit + 1,
   });
   const page = toPage(rows, limit, toBooking, (r) => encodeTimeCursor(r.scheduledAt, r.id));
-  // A job that started before `now` but has not ended yet is still "upcoming"/"in progress": it leads the first page.
-  if (upcoming && !cur) {
-    const running = await prisma.booking.findMany({
-      where: { businessId, scheduledAt: { gte: new Date(now.getTime() - MAX_DURATION_MIN * 60_000), lt: now } },
-      orderBy: [{ scheduledAt: 'asc' }, { id: 'asc' }],
-    });
-    page.items.unshift(...running.map(toBooking).filter((b) => bookingInterval(b).end > now.getTime()));
-  }
+  if (upcoming && !cur) page.items.unshift(...running);
   return page;
 }
 

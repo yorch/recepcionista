@@ -32,6 +32,7 @@ const PUBLIC_API_EXACT = new Set([
   '/api/voice/webhook',
   '/api/voice/post-call',
   '/api/voice/incoming',
+  '/api/voice/dial-status', // Twilio per-leg status callback of a forwarded call (meters minutes): verifies the Twilio signature itself
   '/api/voice/voicemail', // Twilio callback for paused/forwarded calls: verifies the Twilio signature itself
   '/api/voice/initiation', // ElevenLabs conversation-initiation webhook: authenticated by the shared tool secret header
   '/api/payments/webhook',

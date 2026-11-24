@@ -147,9 +147,21 @@ case "${jobs_value}" in
   off|false|0|no)
     echo "WARNING: JOBS=${JOBS}. The 6 PM daily briefing, the hourly gratitude sweep, the expired-row cleanup and the retention purge will NOT run (docs/runbook.md)." >&2 ;;
 esac
-for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP OWNER_ALERT_HOURLY_LIMIT; do
+for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP OWNER_ALERT_HOURLY_LIMIT FORWARD_MAX_CALL_SECONDS FORWARD_CALLS_PER_HOUR VOICEMAIL_PER_HOUR; do
   [[ -z "${!v:-}" || "${!v}" =~ ^[0-9]+$ ]] || die "${v} is '${!v}' in .env: it must be a whole number (docs/env-vars.md)."
 done
+# Call handling (docs/runbook.md section 8): the line kind decides whether Forward exists at all; the deny list is 3-digit NANP area codes.
+case "${VOICE_LINE_KIND:-}" in
+  ""|native|webhook) ;;
+  *) die "VOICE_LINE_KIND is '${VOICE_LINE_KIND}' in .env: use native (number imported into ElevenLabs) or webhook (Voice URL is /api/voice/incoming), or leave it empty." ;;
+esac
+if [[ -n "${FORWARD_DENY_AREA_CODES:-}" ]]; then
+  IFS=',' read -ra _deny_codes <<< "${FORWARD_DENY_AREA_CODES}"
+  for c in "${_deny_codes[@]}"; do
+    c="${c//[[:space:]]/}"
+    [[ "${c}" =~ ^[2-9][0-9]{2}$ ]] || die "FORWARD_DENY_AREA_CODES has '${c}' in .env: use comma separated 3-digit NANP area codes such as 305,212 (docs/env-vars.md)."
+  done
+fi
 # Default area code for newly bought numbers (a business's own owner-phone area code wins): three digits, first 2-9.
 [[ -z "${TWILIO_AREA_CODE:-}" || "${TWILIO_AREA_CODE}" =~ ^[2-9][0-9]{2}$ ]] \
   || die "TWILIO_AREA_CODE is '${TWILIO_AREA_CODE}' in .env: it must be a 3-digit US/Canada area code such as 305 (docs/env-vars.md). Unset it to use 305."

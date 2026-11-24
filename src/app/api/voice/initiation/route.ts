@@ -91,8 +91,10 @@ export async function POST(req: Request): Promise<Response> {
     // 'paused' and a due 'forward' become the paused script (message + callback capture) with a short maximum duration.
     // A lapsed plan keeps winning (out-of-service text); a used-up minutes cap does not block these (no AI minutes needed
     // beyond the short message). See docs/known-limitations.md "Call forwarding on the native ElevenLabs path".
-    const route = resolveCallRoute(business);
-    const nonAi: 'paused' | 'forward' | null = route.action === 'paused' ? 'paused' : route.action === 'forward' ? 'forward' : null;
+    // The same decision the tools use (voice/tools.ts refuses booking, texting and payments whenever it is not 'ai'), on the 'native' line,
+    // where a due forward can only ever be the paused script (forwarding is not available on this line: docs/known-limitations.md).
+    const route = resolveCallRoute(business, new Date(), 'native');
+    const nonAi: 'paused' | 'forward' | null = route.action === 'paused' ? (route.why === 'forward_unavailable_on_line' ? 'forward' : 'paused') : null;
     const planLapsed = outOfService && gate.reason === 'no_plan';
     const usePausedScript = nonAi !== null && !planLapsed;
     const override = usePausedScript

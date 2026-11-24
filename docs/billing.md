@@ -105,6 +105,10 @@ SMS usage is metered in **segments**, the unit carriers bill, not in sends. Plai
 The Billing page shows "Text message segments". While a business is **trialing** (and billing is enforced) the lower `TRIAL_SMS_CAP` / `TRIAL_CALL_MINUTES_CAP` apply (default 50 / 30, never more than the paid-plan cap); an admin
 per-business override (`sms_cap_override` / `call_minutes_cap_override`) always wins, so a trial that needs more is one `/api/admin/billing` call away.
 
+#### Forwarded calls and voicemails count
+
+Forwarded calls are metered into the same monthly call seconds as AI calls (the bridged seconds, from the signed Twilio callbacks, once per call), and voicemail seconds too. With billing enforced a forward is not placed when the plan lapsed or the month's minutes (trial caps while trialing, overrides always) are used up, and the dialled call is cut off by `<Dial timeLimit>` when the minutes left run out; the caller gets the voicemail instead. `FORWARD_MAX_CALL_SECONDS`, `FORWARD_CALLS_PER_HOUR` and `VOICEMAIL_PER_HOUR` bound a single call and the hourly volume (docs/env-vars.md).
+
 ### 5. Grandfather existing businesses (before enforcing)
 
 Every existing tenant has `billing_status='none'` and would be locked out the moment `BILLING_ENFORCED=true`. Comp them first, as an admin

@@ -95,7 +95,11 @@ export function scopeBusinessId(principal: Principal, requested?: string | null)
 }
 
 export type Resolution =
-  | { ok: true; principal: Principal; ambient: boolean; /** The DB session behind a cookie credential (null for Bearer/dev). */ sessionId: string | null }
+  | {
+    ok: true; principal: Principal; ambient: boolean;
+    /** The DB session behind a cookie credential (null for Bearer/dev). */ sessionId: string | null;
+    /** When that session last proved who it is (login or re-authentication); null for Bearer/dev/break-glass or a pre-existing session. */ sudoAt?: string | null;
+  }
   | { ok: false; status: 401 | 403 | 503; error: string; code?: 'mfa_required' | '2fa_enrollment_required' };
 
 /** Should REQUIRE_2FA_FOR_ADMINS force DB admin users to enrol? Default off. */
@@ -137,7 +141,7 @@ export async function resolvePrincipal(h: Headers, opts: { allowEnrollment?: boo
     if (adminToken) {
       const found = await resolveSessionByToken(adminToken);
       if (found && found.kind === 'admin_token') {
-        return { ok: true, principal: { kind: 'admin', via: 'cookie', email_verified: true }, ambient: true, sessionId: found.session.id };
+        return { ok: true, principal: { kind: 'admin', via: 'cookie', email_verified: true }, ambient: true, sessionId: found.session.id, sudoAt: found.session.sudo_at };
       }
     }
   }
@@ -162,6 +166,7 @@ export async function resolvePrincipal(h: Headers, opts: { allowEnrollment?: boo
           principal: { kind: 'admin', via: 'user', user, email_verified, ...(needs ? { needs_2fa_enrollment: true } : {}) },
           ambient: true,
           sessionId: session.id,
+          sudoAt: session.sudo_at,
         };
       }
       if (user.business_id) {
@@ -170,6 +175,7 @@ export async function resolvePrincipal(h: Headers, opts: { allowEnrollment?: boo
           principal: { kind: 'user', user, business_id: user.business_id, role: user.role === 'owner' ? 'owner' : 'staff', email_verified },
           ambient: true,
           sessionId: session.id,
+          sudoAt: session.sudo_at,
         };
       }
       // owner/staff without a business must not exist (createUser forbids it): refuse rather than guess.
@@ -181,7 +187,10 @@ export async function resolvePrincipal(h: Headers, opts: { allowEnrollment?: boo
 }
 
 export type AuthResult =
-  | { ok: true; principal: Principal; /** The caller's own DB session id (cookie credentials only). */ sessionId: string | null }
+  | {
+    ok: true; principal: Principal; /** The caller's own DB session id (cookie credentials only). */ sessionId: string | null;
+    /** Last proof of identity of that session (ISO), when known. */ sudoAt: string | null;
+  }
   | { ok: false; response: NextResponse<{ ok: false; error: string; code?: string }> };
 
 const deny = (status: number, error: string, code?: string): AuthResult => ({
@@ -222,7 +231,29 @@ export async function authenticate(req: Request, opts: AuthenticateOptions = {})
   }
   if (!hasRole(res.principal, opts.role ?? 'staff')) return deny(403, 'forbidden');
   if (opts.verifiedEmail && !res.principal.email_verified) return deny(403, 'email_not_verified', 'email_not_verified');
-  return { ok: true, principal: res.principal, sessionId: res.sessionId };
+  return { ok: true, principal: res.principal, sessionId: res.sessionId, sudoAt: res.sudoAt ?? null };
+}
+
+/** How recent a proof of identity must be for a sensitive change (call forwarding / call mode): 5 minutes. */
+export const RECENT_AUTH_MS = 5 * 60_000;
+
+/**
+ * Step-up ("sudo") guard for sensitive changes. A user (owner or staff) or a DB admin working through a browser session must have
+ * proved who they are (login, or POST /api/auth/reauth with the password or a 2FA code) within RECENT_AUTH_MS; otherwise 403 with
+ * `code: 'reauth_required'` (the dashboard then asks for the password and retries). Bearer ADMIN_TOKEN, the break-glass cookie
+ * session and ALLOW_INSECURE_DEV carry no password to re-enter: the token itself is the proof, so they pass.
+ * Returns the response to send, or null when allowed.
+ */
+export function requireRecentAuth(auth: Extract<AuthResult, { ok: true }>, now: Date = new Date()): NextResponse<{ ok: false; error: string; code: string }> | null {
+  const p = auth.principal;
+  const needs = p.kind === 'user' || (p.kind === 'admin' && p.via === 'user');
+  if (!needs) return null;
+  const at = auth.sudoAt ? new Date(auth.sudoAt).getTime() : NaN;
+  if (Number.isFinite(at) && now.getTime() - at >= 0 && now.getTime() - at < RECENT_AUTH_MS) return null;
+  return NextResponse.json(
+    { ok: false as const, error: 'Re-enter your password to continue.', code: 'reauth_required' },
+    { status: 403 },
+  );
 }
 
 /**

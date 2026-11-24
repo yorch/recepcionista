@@ -1,12 +1,13 @@
 import { NextResponse } from 'next/server';
 import { readJson } from '@/lib/http';
-import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
+import { authenticate, authErrorResponse, requireBusinessAccess, requireRecentAuth } from '@/lib/session';
 import { clientKey } from '@/lib/auth';
-import { countryForBusiness, getBusiness, isOptedOut, recordAudit, setForwardNumberVerified } from '@/lib/db';
+import { countryForBusiness, ForwardNumberRejectedError, getBusiness, isOptedOut, recordAudit, setForwardNumberVerified } from '@/lib/db';
 import { rateLimit } from '@/lib/ratelimit';
 import { challengeId, verifyOwnerPhoneChallenge } from '@/lib/messaging/owner-verify';
 import { callModeView } from '@/lib/voice/call-mode';
-import { validateForwardNumber } from '@/lib/voice/forward-number';
+import { vetForwardNumber } from '@/lib/voice/forward-vet';
+import { announceCallHandlingChange } from '@/lib/voice/call-handling-changes';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -35,9 +36,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const business = await getBusiness(id);
     if (!business) return bad('business not found', 404);
     const country = countryForBusiness(business);
-    const check = validateForwardNumber(body.phone, country, { ownLines: [business.phone_e164] });
+    const check = await vetForwardNumber(business, body.phone);
     if (!check.ok) return bad(check.error, 422);
     const e164 = check.e164;
+    const denied = requireRecentAuth(auth);
+    if (denied) return denied;
 
     const cid = challengeId(body.challenge, 'forward-number');
     const limits: [string, number, number][] = [
@@ -62,13 +65,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     if (await isOptedOut(id, e164, country)) return bad('that number opted out of texts from this business', 422);
 
-    const state = await setForwardNumberVerified(id, e164);
-    if (!state) return bad('business not found', 404);
+    let change;
+    try {
+      change = await setForwardNumberVerified(id, e164);
+    } catch (err) {
+      if (err instanceof ForwardNumberRejectedError) return bad(err.message, 422);
+      throw err;
+    }
+    if (!change) return bad('business not found', 404);
     await recordAudit({
       ...actor, business_id: id, action: 'business.forward_number_verified', target: `business:${id}`, ip: clientKey(req), meta: { phone_last4: e164.slice(-4) },
     });
     const fresh = await getBusiness(id);
-    return NextResponse.json({ ok: true as const, verified_at: state.forward_number_verified_at, state: callModeView(fresh!, { full: true }) });
+    await announceCallHandlingChange({
+      business: fresh!, actor: { ...actor, email: auth.principal.user?.email ?? null }, ip: clientKey(req), change, reason: 'forward_number_verified',
+    });
+    return NextResponse.json({ ok: true as const, verified_at: change.after.forward_number_verified_at, state: callModeView(fresh!, { full: true }) });
   } catch (err) {
     const r = authErrorResponse(err);
     if (r) return r;

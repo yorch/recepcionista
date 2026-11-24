@@ -32,7 +32,7 @@ type UserRow = {
 };
 type SessionRow = {
   id: string; userId: string | null; kind: string; expiresAt: Date; createdAt: Date; lastUsedAt: Date;
-  mfaVerifiedAt: Date | null; ip: string | null; userAgent: string | null;
+  mfaVerifiedAt: Date | null; sudoAt: Date | null; ip: string | null; userAgent: string | null;
 };
 
 function toUser(row: UserRow): User {
@@ -56,6 +56,7 @@ const toSession = (r: SessionRow): UserSession => ({
   created_at: r.createdAt.toISOString(),
   last_used_at: r.lastUsedAt.toISOString(),
   mfa_verified_at: r.mfaVerifiedAt ? r.mfaVerifiedAt.toISOString() : null,
+  sudo_at: r.sudoAt ? r.sudoAt.toISOString() : null,
   ip: r.ip ?? null,
   user_agent: r.userAgent ?? null,
 });
@@ -173,6 +174,7 @@ async function insertSession(userId: string | null, kind: SessionKind, defaultTt
       createdAt: now,
       lastUsedAt: now,
       mfaVerifiedAt: opts.mfaVerified ? now : null,
+      sudoAt: now, // a session is born from a fresh proof of identity (password / invite / reset / second factor)
       ip: clip(opts.ip, 64),
       userAgent: clip(opts.userAgent, 300),
     },
@@ -243,6 +245,12 @@ export async function getSessionByToken(
 /** Record that the second factor was satisfied for this session. Returns whether a row changed. */
 export async function markSessionMfaVerified(sessionId: string, now: Date = new Date()): Promise<boolean> {
   const res = await prisma.userSession.updateMany({ where: { id: sessionId }, data: { mfaVerifiedAt: now } });
+  return res.count === 1;
+}
+
+/** Record a fresh proof of identity (password or second factor re-entered) on this session. Returns whether a row changed. */
+export async function markSessionSudo(sessionId: string, now: Date = new Date()): Promise<boolean> {
+  const res = await prisma.userSession.updateMany({ where: { id: sessionId }, data: { sudoAt: now } });
   return res.count === 1;
 }
 

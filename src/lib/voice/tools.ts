@@ -25,6 +25,8 @@ import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert
 import { isOwnerNumber } from '@/lib/messaging/owner';
 import { countryForBusiness } from '@/lib/db';
 import { TOOL_NAMES, type ToolName } from '@/lib/kb';
+import { CAPACITY_EXEMPT_TOOLS, pausedToolMessage } from '@/lib/voice/capacity';
+import { resolveCallRoute } from '@/lib/voice/call-mode';
 
 export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
@@ -983,6 +985,22 @@ function canonicalTool(raw: string): ToolName | null {
   return TOOL_NAMES.find((t) => t.replace(/_/g, '') === compact) ?? null;
 }
 
+/**
+ * Call handling gate: while calls are PAUSED (or a 'forward' is due on this AI line, where it can only be the paused script) the agent
+ * must not book, quote, text or take payment: every tool except the message-taking ones (CAPACITY_EXEMPT_TOOLS: handoff_to_human,
+ * flag_emergency) is refused with an honest spoken line. The decision is the same resolveCallRoute the initiation webhook uses, on the
+ * 'native' line (a tool call IS an AI conversation), so the script the caller hears and what the tools allow can never disagree; an
+ * after-hours schedule (forward only during business hours) therefore leaves the AI fully working outside those hours.
+ */
+async function callHandlingRefusal(businessId: unknown, lang: ToolLanguage): Promise<ToolResult | null> {
+  if (typeof businessId !== 'string' || !businessId) return null;
+  const business = await getBusiness(businessId);
+  if (!business) return null; // each tool reports an unknown business itself
+  const route = resolveCallRoute(business, new Date(), 'native');
+  if (route.action === 'ai') return null;
+  return { ok: false, message: pausedToolMessage(lang), data: { reason: 'calls_paused', route: route.action } };
+}
+
 /** Single entry point for the HTTP route. Never throws. */
 export async function runTool(
   name: string,
@@ -1006,6 +1024,10 @@ export async function runTool(
   const a = (args ?? {}) as Record<string, never>; // NOTE: loosely typed LLM args; each tool validates its own fields
   try {
     const result = await (async (): Promise<ToolResult> => {
+      if (!CAPACITY_EXEMPT_TOOLS.has(tool)) {
+        const refused = await callHandlingRefusal((a as Record<string, unknown>).business_id, lang);
+        if (refused) return refused;
+      }
       switch (tool) {
         case 'check_availability': return await checkAvailability(a);
         case 'create_booking': return await createBooking(a);

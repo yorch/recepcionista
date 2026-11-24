@@ -43,12 +43,22 @@ export function pausedTwiml(business: Pick<Business, 'name'>, voicemailAction: s
  * Forwarded: ring `to`. Never `record` (a forwarded call is not recorded by us), caller id stays the business line when it
  * is known so the owner sees it is a business call. `to` must be an E.164 the caller of this function already trusts.
  */
-export function forwardTwiml(to: string, opts: { callerId?: string | null; action?: string } = {}): string {
+export function forwardTwiml(to: string, opts: { callerId?: string | null; action?: string; timeLimit?: number; statusCallback?: string } = {}): string {
   if (!/^\+[1-9]\d{7,14}$/.test(to)) throw new RangeError('forward target must be E.164');
   const callerId = opts.callerId && /^\+[1-9]\d{7,14}$/.test(opts.callerId) ? ` callerId="${xmlEscape(opts.callerId)}"` : '';
   const action = opts.action ? ` action="${xmlEscape(opts.action)}" method="POST"` : '';
-  return wrap(`<Dial timeout="${FORWARD_RING_SECONDS}" answerOnBridge="true"${callerId}${action}><Number>${xmlEscape(to)}</Number></Dial>`);
+  // `timeLimit` caps the BRIDGED call (seconds) so a forwarded call can never outlive the minutes the plan has left.
+  const limit = opts.timeLimit !== undefined && Number.isFinite(opts.timeLimit) && opts.timeLimit >= 1 ? ` timeLimit="${Math.floor(opts.timeLimit)}"` : '';
+  // The per-leg "completed" callback reports the bridged duration even when the caller hangs up first (metered once per call).
+  const status = opts.statusCallback ? ` statusCallback="${xmlEscape(opts.statusCallback)}" statusCallbackEvent="completed" statusCallbackMethod="POST"` : '';
+  return wrap(`<Dial timeout="${FORWARD_RING_SECONDS}" answerOnBridge="true"${limit}${callerId}${action}><Number${status}>${xmlEscape(to)}</Number></Dial>`);
 }
+
+/** Said when the voicemail budget of the hour is spent or the line cannot take a message: honest, short, then hang up (no <Record>). */
+export const unavailableTwiml = (): string => wrap(
+  '<Say language="en-US">We cannot take your call right now. Please try again later. Goodbye.</Say>'
+  + '<Say language="es-MX">No podemos atender su llamada en este momento. Intente de nuevo m\u00e1s tarde. Adi\u00f3s.</Say><Hangup/>',
+);
 
 export const thanksTwiml = (): string => wrap('<Say language="en-US">Thank you. Goodbye.</Say><Hangup/>');
 export const emptyHangupTwiml = (): string => wrap('<Hangup/>');
