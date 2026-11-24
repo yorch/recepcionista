@@ -7,6 +7,10 @@
  * - Caps: per-business override columns (these always win), else, while billing_status='trialing', the lower trial caps
  *   TRIAL_SMS_CAP (default 50) / TRIAL_CALL_MINUTES_CAP (default 30) (never above the plan cap), else env
  *   PLAN_SMS_CAP (default 500) / PLAN_CALL_MINUTES_CAP (default 300).
+ * - Call time is split in THREE counters so one kind of traffic can never starve another: `call_seconds` = AI conversation seconds (the
+ *   only thing the plan's call-minutes cap gates on), `voicemail_seconds` (cap VOICEMAIL_MINUTES_CAP, default 60/month) and
+ *   `forward_seconds` (cap FORWARD_MINUTES_CAP, default 600/month; trial: TRIAL_FORWARD_MINUTES_CAP, default 30). Anonymous voicemails
+ *   or silent forwarded calls can use up their own counter, never the AI line.
  * - SMS usage is counted in real SMS SEGMENTS (GSM-7 160/153, UCS-2 70/67), not in sends: a 3-segment text is 3 units, and a text
  *   that would push usage past the cap is blocked (see checkSmsAllowed `units`).
  * - Plan gate: in production billing is enforced unless BILLING_ENFORCED=false is set explicitly (fail closed); in
@@ -22,6 +26,9 @@ export const DEFAULT_CALL_MINUTES_CAP = 300;
 export const DEFAULT_TRIAL_SMS_CAP = 50;
 export const DEFAULT_TRIAL_CALL_MINUTES_CAP = 30;
 export const DEFAULT_PAST_DUE_GRACE_DAYS = 5;
+export const DEFAULT_VOICEMAIL_MINUTES_CAP = 60;
+export const DEFAULT_FORWARD_MINUTES_CAP = 600;
+export const DEFAULT_TRIAL_FORWARD_MINUTES_CAP = 30;
 
 const nonNegInt = (raw: string | undefined, fallback: number): number => {
   if (raw === undefined || raw.trim() === '') return fallback;
@@ -62,6 +69,15 @@ export const callMinutesCapFor = (b: CapSubject & { call_minutes_cap_override?: 
   return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_CALL_MINUTES_CAP, DEFAULT_TRIAL_CALL_MINUTES_CAP)) : plan;
 };
 
+/** Monthly cap (minutes) of voicemail recordings: VOICEMAIL_MINUTES_CAP (default 60). Separate from the AI minutes. */
+export const voicemailMinutesCap = (env: NodeJS.ProcessEnv = process.env): number => nonNegInt(env.VOICEMAIL_MINUTES_CAP, DEFAULT_VOICEMAIL_MINUTES_CAP);
+
+/** Monthly cap (minutes) of forwarded calls: FORWARD_MINUTES_CAP (default 600); while trialing min(that, TRIAL_FORWARD_MINUTES_CAP, default 30). Separate from the AI minutes. */
+export const forwardMinutesCapFor = (b: CapSubject, env: NodeJS.ProcessEnv = process.env): number => {
+  const plan = nonNegInt(env.FORWARD_MINUTES_CAP, DEFAULT_FORWARD_MINUTES_CAP);
+  return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_FORWARD_MINUTES_CAP, DEFAULT_TRIAL_FORWARD_MINUTES_CAP)) : plan;
+};
+
 /**
  * Does this business's billing state currently allow service? Pure. NOT subject to BILLING_ENFORCED:
  * use isProvisioningAllowed / checkSmsAllowed / checkCallAllowed for the enforced decision.
@@ -97,7 +113,12 @@ export interface UsageSummary {
   /** 'YYYY-MM-01' in the business timezone. */
   period_start: string;
   sms_count: number;
+  /** AI conversation seconds ONLY. */
   call_seconds: number;
+  /** Voicemail recording seconds (own cap). */
+  voicemail_seconds: number;
+  /** Bridged seconds of forwarded calls (own cap). */
+  forward_seconds: number;
 }
 
 export interface AllowResult {
@@ -114,19 +135,21 @@ function positiveInt(n: number, what: string): number {
   return Math.round(n);
 }
 
-type CounterRow = { sms_count: number; call_seconds: number };
+type CounterRow = { sms_count: number; call_seconds: number; voicemail_seconds: number; forward_seconds: number };
 
-async function bump(businessId: string, sms: number, seconds: number, now: Date): Promise<UsageSummary | null> {
+async function bump(businessId: string, sms: number, seconds: number, now: Date, voicemail = 0, forward = 0): Promise<UsageSummary | null> {
   const rows = await prisma.$queryRaw<(CounterRow & { period_start: string })[]>`
-    INSERT INTO "usage_counters" ("id", "business_id", "period_start", "sms_count", "call_seconds", "updated_at")
+    INSERT INTO "usage_counters" ("id", "business_id", "period_start", "sms_count", "call_seconds", "voicemail_seconds", "forward_seconds", "updated_at")
     SELECT ${crypto.randomUUID()}, b."id", date_trunc('month', timezone(b."timezone", ${now}::timestamptz))::date,
-           ${sms}::int, ${seconds}::int, clock_timestamp()
+           ${sms}::int, ${seconds}::int, ${voicemail}::int, ${forward}::int, clock_timestamp()
       FROM "businesses" b WHERE b."id" = ${businessId}
     ON CONFLICT ("business_id", "period_start") DO UPDATE
       SET "sms_count" = "usage_counters"."sms_count" + EXCLUDED."sms_count",
           "call_seconds" = "usage_counters"."call_seconds" + EXCLUDED."call_seconds",
+          "voicemail_seconds" = "usage_counters"."voicemail_seconds" + EXCLUDED."voicemail_seconds",
+          "forward_seconds" = "usage_counters"."forward_seconds" + EXCLUDED."forward_seconds",
           "updated_at" = EXCLUDED."updated_at"
-    RETURNING to_char("period_start", 'YYYY-MM-DD') AS period_start, "sms_count", "call_seconds"`;
+    RETURNING to_char("period_start", 'YYYY-MM-DD') AS period_start, "sms_count", "call_seconds", "voicemail_seconds", "forward_seconds"`;
   return rows[0] ?? null;
 }
 
@@ -135,16 +158,27 @@ export async function recordSms(businessId: string, n = 1, now: Date = new Date(
   return bump(businessId, positiveInt(n, 'recordSms n'), 0, now);
 }
 
-/** Atomically add call time (whole seconds) to the current period. Null when the business does not exist. */
+/** Atomically add AI call time (whole seconds) to the current period. Null when the business does not exist. */
 export async function recordCallSeconds(businessId: string, seconds: number, now: Date = new Date()): Promise<UsageSummary | null> {
   return bump(businessId, 0, positiveInt(seconds, 'recordCallSeconds seconds'), now);
+}
+
+/** Atomically add voicemail recording time (whole seconds). Never touches the AI minutes. */
+export async function recordVoicemailSeconds(businessId: string, seconds: number, now: Date = new Date()): Promise<UsageSummary | null> {
+  return bump(businessId, 0, 0, now, positiveInt(seconds, 'recordVoicemailSeconds seconds'), 0);
+}
+
+/** Atomically add forwarded (bridged) call time (whole seconds). Never touches the AI minutes. */
+export async function recordForwardSeconds(businessId: string, seconds: number, now: Date = new Date()): Promise<UsageSummary | null> {
+  return bump(businessId, 0, 0, now, 0, positiveInt(seconds, 'recordForwardSeconds seconds'));
 }
 
 /** Usage in the current period (zeros before the first event). Null when the business does not exist. */
 export async function getUsage(businessId: string, now: Date = new Date()): Promise<UsageSummary | null> {
   const rows = await prisma.$queryRaw<(CounterRow & { period_start: string })[]>`
     SELECT to_char(date_trunc('month', timezone(b."timezone", ${now}::timestamptz))::date, 'YYYY-MM-DD') AS period_start,
-           COALESCE(u."sms_count", 0) AS sms_count, COALESCE(u."call_seconds", 0) AS call_seconds
+           COALESCE(u."sms_count", 0) AS sms_count, COALESCE(u."call_seconds", 0) AS call_seconds,
+           COALESCE(u."voicemail_seconds", 0) AS voicemail_seconds, COALESCE(u."forward_seconds", 0) AS forward_seconds
       FROM "businesses" b
       LEFT JOIN "usage_counters" u ON u."business_id" = b."id"
        AND u."period_start" = date_trunc('month', timezone(b."timezone", ${now}::timestamptz))::date
@@ -159,18 +193,22 @@ async function billingRow(businessId: string) {
   });
 }
 
-async function decide(businessId: string, kind: 'sms' | 'call', now: Date, units = 1): Promise<AllowResult> {
+type DecideKind = 'sms' | 'call' | 'forward' | 'voicemail';
+
+async function decide(businessId: string, kind: DecideKind, now: Date, units = 1): Promise<AllowResult> {
   const [b, usage] = await Promise.all([billingRow(businessId), getUsage(businessId, now)]);
   if (!b || !usage) return { ok: false, reason: 'no_plan', used: 0, cap: 0 };
-  const used = kind === 'sms' ? usage.sms_count : usage.call_seconds;
+  const used = kind === 'sms' ? usage.sms_count : kind === 'forward' ? usage.forward_seconds : kind === 'voicemail' ? usage.voicemail_seconds : usage.call_seconds;
   const cap = kind === 'sms'
     ? smsCapFor({ sms_cap_override: b.smsCapOverride, billing_status: b.billingStatus })
-    : callMinutesCapFor({ call_minutes_cap_override: b.callMinutesCapOverride, billing_status: b.billingStatus }) * 60;
+    : kind === 'forward' ? forwardMinutesCapFor({ billing_status: b.billingStatus }) * 60
+      : kind === 'voicemail' ? voicemailMinutesCap() * 60
+        : callMinutesCapFor({ call_minutes_cap_override: b.callMinutesCapOverride, billing_status: b.billingStatus }) * 60;
   if (!billingEnforced()) return { ok: true, used, cap };
   const plan = billingStateAllows({ billing_status: b.billingStatus as Business['billing_status'], past_due_since: b.pastDueSince ? b.pastDueSince.toISOString() : null }, now);
   if (!plan) return { ok: false, reason: 'no_plan', used, cap };
   // Calls: blocked once the allowance is used. Texts: blocked when THIS message (`units` segments) would not fit.
-  if (kind === 'call' ? used >= cap : used + Math.max(1, units) > cap) return { ok: false, reason: 'cap_reached', used, cap };
+  if (kind !== 'sms' ? used >= cap : used + Math.max(1, units) > cap) return { ok: false, reason: 'cap_reached', used, cap };
   return { ok: true, used, cap };
 }
 
@@ -232,5 +270,11 @@ export async function releaseSmsReservation(businessId: string, segments: number
  */
 export const checkSmsAllowed = (businessId: string, now: Date = new Date(), segments = 1): Promise<AllowResult> => decide(businessId, 'sms', now, segments);
 
-/** May this business take/make another call this period? `used` and `cap` are in SECONDS. */
+/** May this business take another AI call this period? Gates on AI seconds ONLY. `used` and `cap` are in SECONDS. */
 export const checkCallAllowed = (businessId: string, now: Date = new Date()): Promise<AllowResult> => decide(businessId, 'call', now);
+
+/** May this business forward another call this period (its own forwarded-minutes cap, not the AI minutes)? SECONDS. */
+export const checkForwardAllowed = (businessId: string, now: Date = new Date()): Promise<AllowResult> => decide(businessId, 'forward', now);
+
+/** May this business take another voicemail this period (its own voicemail-minutes cap, not the AI minutes)? SECONDS. */
+export const checkVoicemailAllowed = (businessId: string, now: Date = new Date()): Promise<AllowResult> => decide(businessId, 'voicemail', now);

@@ -9,6 +9,9 @@
  *                    are enforced inside it, unchanged). A business in quiet hours is skipped, not swept.
  *  - cleanup         hourly: expired sessions, expired email tokens, old processed_events claims, stale rate-limit buckets.
  *  - retention       daily PII purge. OFF unless RETENTION_JOB=on (unchanged semantics; see retention-job.ts).
+ *  - recording_deletions  every tick: delete the provider-side voicemail recordings queued by a purge / erasure (retries with backoff,
+ *                    a 404 counts as deleted, an alert fires when one keeps failing). Runs even while RETENTION_JOB is off (erasure
+ *                    requests queue recordings too).
  *
  * Safe with several instances / several runners: every unit of work is a per-business lease (`withLease`) PLUS an
  * idempotency claim in `processed_events` (`claimEvent`), so two runners ticking at the same instant do the work once.
@@ -22,7 +25,7 @@
 import {
   claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, EMAIL_TOKEN_GRACE_MS,
   getBusiness, isProvisioningAllowed, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
-  checkSmsAllowed, withLease,
+  checkSmsAllowed, recordingDeletionStatus, withLease,
 } from '@/lib/db';
 import { appBaseUrl } from '@/lib/email/templates';
 import { generateBriefing } from '@/lib/briefing';
@@ -33,6 +36,7 @@ import { smsSegments } from '@/lib/messaging/policy';
 import { CLEANUP_HORIZON_MS, cleanupRateLimitBuckets } from '@/lib/ratelimit';
 import { retentionJobEnabled, logRetentionPreview, runRetentionNow } from '@/lib/retention-job';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { drainRecordingDeletions } from '@/lib/voice/recording-deletion';
 import type { Briefing, Business } from '@/lib/types';
 import type { JobBusiness } from '@/lib/db';
 import {
@@ -64,6 +68,7 @@ export const JOB_INFO: Record<JobName, { description: string; schedule: string }
   gratitude_sweep: { description: 'Day-after thank-you / review texts for completed jobs (consent, opt-out, quiet-hours and cap rules enforced).', schedule: 'hourly' },
   cleanup: { description: 'Delete expired sessions, expired email tokens, old processed events and stale rate-limit buckets.', schedule: 'hourly' },
   retention: { description: 'Delete customer data past each business retention window (OFF unless RETENTION_JOB=on).', schedule: 'daily' },
+  recording_deletions: { description: 'Delete the provider-side voicemail recordings queued by retention / erasure (retries with backoff; alerts when one keeps failing).', schedule: 'every tick' },
 };
 
 // ---- types ------------------------------------------------------------------------------------
@@ -377,6 +382,33 @@ export async function runRetentionJob(opts: RunOptions = {}): Promise<JobReport>
   return report;
 }
 
+// ---- provider-side recording deletion (the queue written by retention / erasure) -----------------
+
+export async function runRecordingDeletions(opts: RunOptions & { fetchImpl?: typeof fetch } = {}): Promise<JobReport> {
+  const now = opts.now ?? new Date();
+  const dryRun = opts.dryRun === true;
+  const report: JobReport = { job: 'recording_deletions', dry_run: dryRun, at: now.toISOString(), processed: 0, errors: 0, items: [] };
+  try {
+    if (dryRun) {
+      const due = await prisma.pendingRecordingDeletion.count({ where: { nextAttemptAt: { lte: now } } });
+      report.counts = { due };
+      report.items.push({ outcome: 'would_delete' });
+      return report;
+    }
+    const res = await drainRecordingDeletions({ now, fetchImpl: opts.fetchImpl, limit: 100 });
+    report.processed = res.deleted;
+    report.errors = res.failed;
+    report.counts = { attempted: res.attempted, deleted: res.deleted, failed: res.failed, alerted: res.alerted, pending: res.pending_total };
+    if (res.attempted > 0) report.items.push({ outcome: res.failed > 0 ? 'partial' : 'deleted', detail: report.counts });
+    if (res.attempted > 0) { await markRun('recording_deletions', now); await auditRun(report); }
+  } catch (err) {
+    report.errors++;
+    report.items.push({ outcome: 'error', detail: { error: errMsg(err) } });
+    log.error('recording_deletions.failed', { err });
+  }
+  return report;
+}
+
 // ---- dispatch, tick, runner -------------------------------------------------------------------
 
 /** Run one job by name now (admin endpoint and tests). */
@@ -386,6 +418,7 @@ export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> 
     case 'gratitude_sweep': return runGratitudeJob(opts);
     case 'cleanup': return runCleanup(opts);
     case 'retention': return runRetentionJob(opts);
+    case 'recording_deletions': return runRecordingDeletions(opts);
   }
 }
 
@@ -395,7 +428,7 @@ export function enabledJobs(env: NodeJS.ProcessEnv = process.env): JobName[] {
   const retention = retentionJobEnabled(env.RETENTION_JOB);
   if (s.enabled) return JOB_NAMES.filter((j) => j !== 'retention' || retention);
   // JOBS unset outside production: the retention job keeps working on its own, as it always did. JOBS=off turns everything off.
-  return !s.explicit && retention ? ['retention'] : [];
+  return !s.explicit && retention ? ['retention', 'recording_deletions'] : [];
 }
 
 /** One scheduler pass: the due jobs, in order. Never throws. */
@@ -467,6 +500,10 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
       note = `${businesses.length} live business(es) eligible`;
     } else if (name === 'cleanup') {
       next = last ? new Date(Math.max(now.getTime(), last.getTime() + CLEANUP_EVERY_MS)) : now;
+    } else if (name === 'recording_deletions') {
+      const status = await recordingDeletionStatus();
+      next = now;
+      note = `${status.pending} recording(s) queued for provider-side deletion${status.stuck > 0 ? `, ${status.stuck} NOT draining (alerted): check the runbook` : ''}`;
     } else {
       next = retentionJobEnabled(env.RETENTION_JOB)
         ? (last ? new Date(Math.max(now.getTime(), last.getTime() + RETENTION_EVERY_MS)) : now)

@@ -46,10 +46,12 @@ export function outOfServiceOverride(business: Business): { agent: { first_messa
  * MISSED_CALL_ALERTS_PER_HOUR per hour, so a lapsed tenant (or a caller redialling) cannot pump owner SMS.
  * Fails closed (no text) when the limiter store is down.
  */
-export async function allowMissedCallAlert(businessId: string): Promise<boolean> {
-  const burst = await rateLimit(`voice/missed-call:burst:${businessId}`, 1, 10 * 60_000, { failClosed: true });
+export async function allowMissedCallAlert(businessId: string, opts: { known?: boolean } = {}): Promise<boolean> {
+  // A KNOWN customer's missed call has its own budget, so a flood of strangers cannot use up the owner's text allowance first.
+  const scope = opts.known ? 'known:' : '';
+  const burst = await rateLimit(`voice/missed-call:${scope}burst:${businessId}`, 1, 10 * 60_000, { failClosed: true });
   if (!burst.allowed) return false;
-  const hour = await rateLimit(`voice/missed-call:hour:${businessId}`, MISSED_CALL_ALERTS_PER_HOUR, 60 * 60_000, { failClosed: true });
+  const hour = await rateLimit(`voice/missed-call:${scope}hour:${businessId}`, MISSED_CALL_ALERTS_PER_HOUR, 60 * 60_000, { failClosed: true });
   return hour.allowed;
 }
 

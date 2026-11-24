@@ -92,17 +92,17 @@ describe('switches', () => {
   });
 
   test('enabledJobs: retention stays OFF unless RETENTION_JOB=on, in every mode', () => {
-    expect(enabledJobs(env({ NODE_ENV: 'production' }))).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup']);
+    expect(enabledJobs(env({ NODE_ENV: 'production' }))).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'recording_deletions']);
     expect(enabledJobs(env({ NODE_ENV: 'production', RETENTION_JOB: 'true' }))).not.toContain('retention'); // only the exact value "on"
-    expect(enabledJobs(env({ NODE_ENV: 'production', RETENTION_JOB: 'on' }))).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention']);
+    expect(enabledJobs(env({ NODE_ENV: 'production', RETENTION_JOB: 'on' }))).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions']);
     expect(enabledJobs(env({ NODE_ENV: 'development' }))).toEqual([]);
-    expect(enabledJobs(env({ NODE_ENV: 'development', RETENTION_JOB: 'on' }))).toEqual(['retention']); // works on its own, as before JOBS existed
-    expect(enabledJobs(env({ NODE_ENV: 'development', JOBS: 'on' }))).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup']);
+    expect(enabledJobs(env({ NODE_ENV: 'development', RETENTION_JOB: 'on' }))).toEqual(['retention', 'recording_deletions']); // works on its own, as before JOBS existed
+    expect(enabledJobs(env({ NODE_ENV: 'development', JOBS: 'on' }))).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'recording_deletions']);
     expect(enabledJobs(env({ NODE_ENV: 'production', JOBS: 'off', RETENTION_JOB: 'on' }))).toEqual([]); // explicit off wins
   });
 
   test('job names', () => {
-    expect([...JOB_NAMES]).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention']);
+    expect([...JOB_NAMES]).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions']);
     expect(isJobName('cleanup')).toBe(true);
     expect(isJobName('rm -rf')).toBe(false);
     expect(isJobName(undefined)).toBe(false);

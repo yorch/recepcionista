@@ -21,6 +21,7 @@ import {
 import { phoneKey } from '@/lib/format';
 import { defaultPhoneCountry, toE164 } from '@/lib/phone';
 import { countryForBusiness, phoneIdent } from './compliance';
+import { enqueueRecordingDeletions } from './recording-deletions';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
   Service, FAQ, BriefingStats, ConsentStatus, BillingStatus, CallMode,
@@ -32,6 +33,8 @@ export { prisma };
 export { newId, nowIso } from './ids';
 export * from './events';
 export * from './locks';
+export * from './forward-leases';
+export * from './recording-deletions';
 export * from './number-attempts';
 export * from './compliance';
 export * from './users';
@@ -1310,14 +1313,17 @@ export async function clearAll(): Promise<void> {
   // Destructive and reachable over HTTP (POST /api/demo/reset): always warn,
   // even at info-level logging, so a wiped database is never a mystery.
   log.warn('clear_all');
-  await prisma.$transaction([
-    prisma.smsLog.deleteMany(),
-    prisma.briefing.deleteMany(),
-    prisma.booking.deleteMany(),
-    prisma.call.deleteMany(),
-    prisma.knowledgeBase.deleteMany(),
-    prisma.business.deleteMany(),
-  ]);
+  await prisma.$transaction(async (tx) => {
+    // The recordings at the provider must not outlive the only rows pointing at them: queue them first (same transaction).
+    const withRecording = await tx.call.findMany({ where: { recordingUrl: { not: null } }, select: { recordingUrl: true, businessId: true } });
+    await enqueueRecordingDeletions(tx, withRecording.map((c) => ({ url: c.recordingUrl, businessId: c.businessId })));
+    await tx.smsLog.deleteMany();
+    await tx.briefing.deleteMany();
+    await tx.booking.deleteMany();
+    await tx.call.deleteMany();
+    await tx.knowledgeBase.deleteMany();
+    await tx.business.deleteMany();
+  });
 }
 
 export async function disconnect(): Promise<void> {

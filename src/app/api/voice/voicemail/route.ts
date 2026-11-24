@@ -4,13 +4,16 @@
  *    offered the voicemail (recording notice first) and a verified owner is told, rate limited;
  *  - the finished voicemail <Record> (`RecordingUrl`): stored on the call row so the owner sees it in Calls > Voicemails (played back
  *    through the authenticated proxy /api/calls/:id/voicemail; the Twilio URL itself is never sent to a browser).
- * Forwarded and voicemail seconds are METERED here (once per call, claimEvent) into the plan's call minutes (forward-metering.ts).
+ * Forwarded and voicemail seconds are METERED here (once per call, claimEvent) into their OWN counters (`forward_seconds`,
+ * `voicemail_seconds`; never the AI minutes: forward-metering.ts). A leg that "completed" in a few seconds or was answered by a machine
+ * (the owner's carrier voicemail) counts as unanswered; a caller who hung up while it rang gets nothing and costs nothing.
  * No tenant data is taken from the request: the call is found by its CallSid and the business comes from that row.
  */
 import { getBusiness, getCallBySid, updateCall } from '@/lib/db';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
-import { allowVoicemail, meterForwardedCall, meterVoicemail, parseSeconds } from '@/lib/voice/forward-metering';
-import { FORWARD_UNANSWERED_FLAG, notifyMissedCall } from '@/lib/voice/non-ai';
+import { classifyDial, meterForwardedCall, meterVoicemail, parseSeconds, voicemailAllowance } from '@/lib/voice/forward-metering';
+import { callerKey, isKnownCaller } from '@/lib/voice/caller-limits';
+import { FORWARD_UNANSWERED_FLAG, markUnavailable, notifyMissedCall } from '@/lib/voice/non-ai';
 import { TWILIO_RECORDING_URL } from '@/lib/voice/voicemail';
 import { emptyHangupTwiml, pausedTwiml, thanksTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
 import { logger } from '@/lib/log';
@@ -41,23 +44,37 @@ export async function POST(req: Request): Promise<Response> {
 
   try {
     if (form.DialCallStatus) {
-      const status = form.DialCallStatus;
-      if (status === 'completed' || status === 'answered') {
-        const secs = parseSeconds(form.DialCallDuration);
+      const dial = classifyDial(form);
+      const secs = parseSeconds(form.DialCallDuration);
+      if (dial.result === 'answered') {
         await updateCall(call.id, { status: 'completed', ...(secs !== null ? { duration_sec: secs } : {}) });
         await meterForwardedCall(call.call_sid ?? callSid, business.id, secs);
         return twimlResponse(emptyHangupTwiml());
       }
-      // Nobody picked up: fall back to the voicemail (the notice below is spoken before the beep).
-      // Ringing time that was bridged before the far end dropped (rare) is still real minutes.
-      await meterForwardedCall(call.call_sid ?? callSid, business.id, parseSeconds(form.DialCallDuration));
-      if (!(await allowVoicemail(business.id))) {
-        log.warn('voicemail_rate_limited', { business: business.id, call: call.id });
+      // Whatever was bridged is real minutes (a carrier voicemail "answering" included): metered into the forward counter, never the AI minutes.
+      await meterForwardedCall(call.call_sid ?? callSid, business.id, secs);
+      if (dial.result === 'canceled') {
+        // The caller hung up while it rang: there is nobody to offer a voicemail to and it costs nothing. Only a KNOWN customer's
+        // missed call is texted (their own small budget), so hanging up on purpose cannot pump the owner's texts.
+        await updateCall(call.id, { status: 'handed_off', flagged_reason: 'The caller hung up before the forwarded call was answered' });
+        const known = await isKnownCaller(business.id, callerKey(call.caller_phone, business.id).e164);
+        const notified = known ? await notifyMissedCall(business, call.caller_phone, 'the caller hung up while it rang', { known: true }) : false;
+        log.info('forward_canceled', { business: business.id, call: call.id, known, owner_notified: notified });
+        return twimlResponse(emptyHangupTwiml());
+      }
+      // Nobody picked up (or only a machine / an instant hang-up did): fall back to the voicemail (the notice below is spoken before the beep).
+      const vm = await voicemailAllowance(business.id, process.env, { business, callSid: call.call_sid ?? callSid, from: call.caller_phone });
+      if (!vm.ok) {
+        log.warn('voicemail_refused', { business: business.id, call: call.id, why: vm.why });
+        const callerCaused = vm.why === 'caller_limited' || vm.why === 'unknown_reserved';
+        await markUnavailable(business, call, call.caller_phone, vm.why === 'cap_reached' ? 'the voicemail minutes of this month are used up' : callerCaused ? 'too many calls from this number' : 'too many voicemails this hour', {
+          notify: !callerCaused, known: vm.known,
+        });
         return twimlResponse(unavailableTwiml());
       }
       await updateCall(call.id, { status: 'handed_off', flagged_reason: FORWARD_UNANSWERED_FLAG, recording_disclosed: true, consent_status: 'disclosed' });
       const notified = await notifyMissedCall(business, call.caller_phone, 'the forwarded call was not answered');
-      log.info('forward_unanswered', { business: business.id, call: call.id, dial_status: status, owner_notified: notified });
+      log.info('forward_unanswered', { business: business.id, call: call.id, dial_status: form.DialCallStatus, why: dial.why, owner_notified: notified });
       return twimlResponse(pausedTwiml(business, '/api/voice/voicemail'));
     }
 

@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { callModeLabel, callModeView, isOpenNow, maskNumber, resolveCallRoute, trustedForwardNumber } from '../src/lib/voice/call-mode';
 import { forwardAllowedCountryCodes, forwardDenyAreaCodes, validateForwardNumber } from '../src/lib/voice/forward-number';
-import { forwardingSupported, FORWARD_UNAVAILABLE, lineKind } from '../src/lib/voice/line';
+import { forwardingSupported, FORWARD_UNAVAILABLE, lineKind, lineKindMismatch } from '../src/lib/voice/line';
 import { forwardCallsPerHour, forwardMaxCallSeconds, parseSeconds, voicemailsPerHour } from '../src/lib/voice/forward-metering';
 import { forwardTwiml, pausedTwiml, pausedVoicemailPrompt, xmlEscape } from '../src/lib/voice/twiml';
 import { pausedFirstMessage } from '../src/lib/voice/capacity';
@@ -114,7 +114,7 @@ describe('validateForwardNumber', () => {
 describe('TwiML', () => {
   test('forward: Dial with the number, never records, escapes everything', () => {
     const x = forwardTwiml('+13055550142', { callerId: '+13055550100', action: '/api/voice/voicemail?a=1&b=2' });
-    expect(x).toContain('<Dial timeout="25" answerOnBridge="true" callerId="+13055550100" action="/api/voice/voicemail?a=1&amp;b=2" method="POST"><Number>+13055550142</Number></Dial>');
+    expect(x).toContain('<Dial timeout="20" answerOnBridge="true" callerId="+13055550100" action="/api/voice/voicemail?a=1&amp;b=2" method="POST"><Number>+13055550142</Number></Dial>');
     // the allowance cap and the metering callback are optional attributes
     const capped = forwardTwiml('+13055550142', { timeLimit: 600.7, statusCallback: '/api/voice/dial-status' });
     expect(capped).toContain('timeLimit="600"');
@@ -219,7 +219,12 @@ describe('M2: honest forwarding by line kind', () => {
     expect(lineKind({})).toBe('webhook');
     expect(lineKind({ ELEVENLABS_API_KEY: 'k' })).toBe('webhook');
     expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p' })).toBe('native');
-    expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p', VOICE_LINE_KIND: 'webhook' })).toBe('webhook');
+    // L5 (round 6): `webhook` contradicting a configured native line is IGNORED (the safe reading wins) and reported as a mismatch
+    expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p', VOICE_LINE_KIND: 'webhook' })).toBe('native');
+    expect(lineKindMismatch({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p', VOICE_LINE_KIND: 'webhook' })).toMatch(/VOICE_LINE_KIND=webhook/);
+    expect(lineKindMismatch({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p' })).toBeNull();
+    expect(lineKindMismatch({ VOICE_LINE_KIND: 'webhook' })).toBeNull();
+    expect(lineKind({ VOICE_LINE_KIND: 'webhook' })).toBe('webhook'); // no native line configured: webhook is honoured
     expect(lineKind({ VOICE_LINE_KIND: ' Native ' })).toBe('native');
     expect(forwardingSupported('native')).toBe(false);
     expect(forwardingSupported('webhook')).toBe(true);
@@ -250,7 +255,7 @@ describe('H2 helpers', () => {
     expect(forwardMaxCallSeconds({})).toBe(3600);
     expect(forwardMaxCallSeconds({ FORWARD_MAX_CALL_SECONDS: '600' })).toBe(600);
     expect(forwardMaxCallSeconds({ FORWARD_MAX_CALL_SECONDS: '5' })).toBe(3600); // below the minimum: default
-    expect(forwardCallsPerHour({ FORWARD_CALLS_PER_HOUR: 'x' })).toBe(30);
+    expect(forwardCallsPerHour({ FORWARD_CALLS_PER_HOUR: 'x' })).toBe(60);
     expect(voicemailsPerHour({ VOICEMAIL_PER_HOUR: '3' })).toBe(3);
   });
 });

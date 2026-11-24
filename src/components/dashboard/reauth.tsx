@@ -11,8 +11,8 @@ export function isReauthRequired(err: unknown): boolean {
 
 /**
  * Step-up for sensitive changes (call mode / forwarding number). Wrap the action in `guard(action)`: when the server answers
- * `reauth_required` the `panel` appears (password, or an authenticator code), the password is checked at /api/auth/reauth and the
- * action is retried ONCE. Focus moves into the panel and goes back to the control that started the action when it closes.
+ * `reauth_required` the `panel` appears (password; an authenticator code for an account with 2FA, which the server REQUIRES; the admin
+ * token for a break-glass admin session), the proof is checked at /api/auth/reauth and the action is retried ONCE. Focus moves into the panel and goes back to the control that started the action when it closes.
  */
 export function useReauth(onError: (err: unknown) => void = () => undefined) {
   const [pending, setPending] = useState<{ retry: () => Promise<void> } | null>(null);
@@ -42,13 +42,14 @@ export function useReauth(onError: (err: unknown) => void = () => undefined) {
 
 function ReauthPanel({ onCancel, onDone }: { onCancel: () => void; onDone: () => Promise<void> }) {
   const headingId = useId();
-  const [useCode, setUseCode] = useState(false);
+  const [mode, setMode] = useState<'password' | 'code' | 'token'>('password');
+  const useCode = mode === 'code';
   const [secret, setSecret] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLFormElement>(null);
 
-  useEffect(() => { ref.current?.querySelector('input')?.focus(); }, [useCode]);
+  useEffect(() => { ref.current?.querySelector('input')?.focus(); }, [mode]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -56,11 +57,15 @@ function ReauthPanel({ onCancel, onDone }: { onCancel: () => void; onDone: () =>
     setBusy(true);
     setError(null);
     try {
-      await apiRequest('/api/auth/reauth', { method: 'POST', body: useCode ? { code: secret.replace(/\s/g, '') } : { password: secret } });
+      await apiRequest('/api/auth/reauth', {
+        method: 'POST', body: mode === 'code' ? { code: secret.replace(/\s/g, '') } : mode === 'token' ? { admin_token: secret } : { password: secret },
+      });
       setBusy(false);
       await onDone();
     } catch (err) {
       setBusy(false);
+      // A 2FA account must use its authenticator code: switch to it instead of asking for the password again.
+      if (err instanceof ApiError && (err.payload as { code?: string } | undefined)?.code === 'totp_required') { setMode('code'); setSecret(''); }
       setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
     }
   }
@@ -76,10 +81,10 @@ function ReauthPanel({ onCancel, onDone }: { onCancel: () => void; onDone: () =>
         <p className="mt-1 text-xs leading-relaxed text-dim">Changing how your business line is answered needs a fresh sign-in check. We will also tell you by email and text when it changes.</p>
       </div>
       <TextField
-        label={useCode ? 'Authenticator code' : 'Password'}
+        label={useCode ? 'Authenticator code' : mode === 'token' ? 'Admin token' : 'Password'}
         type={useCode ? 'text' : 'password'}
         inputMode={useCode ? 'numeric' : undefined}
-        autoComplete={useCode ? 'one-time-code' : 'current-password'}
+        autoComplete={useCode ? 'one-time-code' : mode === 'token' ? 'off' : 'current-password'}
         value={secret} onChange={(e) => setSecret(e.target.value)} mono={useCode}
         error={error}
       />
@@ -87,10 +92,16 @@ function ReauthPanel({ onCancel, onDone }: { onCancel: () => void; onDone: () =>
         <Button type="submit" disabled={busy || !secret.trim()}>{busy ? 'Checking…' : 'Confirm'}</Button>
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
         <button
-          type="button" onClick={() => { setUseCode((v) => !v); setSecret(''); setError(null); }}
+          type="button" onClick={() => { setMode(useCode ? 'password' : 'code'); setSecret(''); setError(null); }}
           className="min-h-11 rounded-xl px-2 text-xs text-brand-soft hover:underline"
         >
           {useCode ? 'Use my password instead' : 'Use an authenticator code instead'}
+        </button>
+        <button
+          type="button" onClick={() => { setMode(mode === 'token' ? 'password' : 'token'); setSecret(''); setError(null); }}
+          className="min-h-11 rounded-xl px-2 text-xs text-brand-soft hover:underline"
+        >
+          {mode === 'token' ? 'Use my password instead' : 'Signed in with the admin token?'}
         </button>
       </div>
     </form>

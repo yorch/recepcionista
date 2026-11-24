@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { readJson } from '@/lib/http';
-import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
+import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { clientKey } from '@/lib/auth';
 import { countryForBusiness, getBusiness, isOptedOut, recordAudit, setOwnerPhoneVerified } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
@@ -59,7 +59,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!verdict.ok) {
       log.warn('verify.rejected', { business: id, reason: verdict.reason });
       void recordAudit({
-        actor_kind: auth.principal.kind === 'user' ? 'user' : 'admin_token', actor_user_id: auth.principal.kind === 'user' ? auth.principal.user.id : auth.principal.user?.id ?? null,
+        actor_kind: auditActorOf(auth.principal).actor_kind, actor_user_id: auditActorOf(auth.principal).actor_user_id,
         business_id: id, action: 'business.owner_phone_verify_failed', target: `business:${id}`, ip: clientKey(req), meta: { reason: verdict.reason },
       });
       return bad(verdict.reason === 'expired' ? 'the code expired; request a new one' : 'invalid code', 400);
@@ -69,7 +69,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const at = await setOwnerPhoneVerified(id, e164);
     if (!at) return bad('business not found', 404);
     await recordAudit({
-      actor_kind: auth.principal.kind === 'user' ? 'user' : 'admin_token', actor_user_id: auth.principal.kind === 'user' ? auth.principal.user.id : auth.principal.user?.id ?? null,
+      actor_kind: auditActorOf(auth.principal).actor_kind, actor_user_id: auditActorOf(auth.principal).actor_user_id,
       business_id: id, action: 'business.owner_phone_verified', target: `business:${id}`, ip: clientKey(req),
       meta: { phone_last4: e164.slice(-4) },
     });

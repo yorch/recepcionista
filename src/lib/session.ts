@@ -42,6 +42,19 @@ export function principalRole(p: Principal): Role {
   return p.kind === 'admin' ? 'admin' : p.role;
 }
 
+/**
+ * Who to write in the audit trail for this principal. A DB user, admin role included, is ALWAYS `user` (with its id; the role and how it
+ * authenticated go in meta); only the Bearer / break-glass cookie / dev credentials, which are not a person's account, are `admin_token`.
+ */
+export function auditActorOf(p: Principal): { actor_kind: 'user' | 'admin_token'; actor_user_id: string | null; meta: { actor_role: Role; actor_via?: string } } {
+  const user = p.kind === 'user' ? p.user : p.user ?? null;
+  return {
+    actor_kind: user ? 'user' : 'admin_token',
+    actor_user_id: user?.id ?? null,
+    meta: { actor_role: principalRole(p), ...(p.kind === 'admin' ? { actor_via: p.via } : {}) },
+  };
+}
+
 /** Is this principal at least `min`? (admin > owner > staff) */
 export function hasRole(p: Principal, min: Role): boolean {
   return RANK[principalRole(p)] >= RANK[min];
@@ -238,20 +251,21 @@ export async function authenticate(req: Request, opts: AuthenticateOptions = {})
 export const RECENT_AUTH_MS = 5 * 60_000;
 
 /**
- * Step-up ("sudo") guard for sensitive changes. A user (owner or staff) or a DB admin working through a browser session must have
- * proved who they are (login, or POST /api/auth/reauth with the password or a 2FA code) within RECENT_AUTH_MS; otherwise 403 with
- * `code: 'reauth_required'` (the dashboard then asks for the password and retries). Bearer ADMIN_TOKEN, the break-glass cookie
- * session and ALLOW_INSECURE_DEV carry no password to re-enter: the token itself is the proof, so they pass.
- * Returns the response to send, or null when allowed.
+ * Step-up ("sudo") guard for sensitive changes. Every AMBIENT browser credential must have proved who it is within RECENT_AUTH_MS:
+ * a user (owner or staff), a DB admin user, and the break-glass admin COOKIE session (the 12 h `admin_token` session). They prove it by login,
+ * or POST /api/auth/reauth (the password, or for an account with 2FA the 6-digit code; for the break-glass cookie session the ADMIN_TOKEN
+ * itself); otherwise 403 with `code: 'reauth_required'` (the dashboard then asks and retries). Only credentials that are NOT ambient pass
+ * without it: the Bearer ADMIN_TOKEN header (sent on purpose with every request, and audited with actor kind `admin_token`) and
+ * ALLOW_INSECURE_DEV (never in production). Returns the response to send, or null when allowed.
  */
 export function requireRecentAuth(auth: Extract<AuthResult, { ok: true }>, now: Date = new Date()): NextResponse<{ ok: false; error: string; code: string }> | null {
   const p = auth.principal;
-  const needs = p.kind === 'user' || (p.kind === 'admin' && p.via === 'user');
+  const needs = p.kind === 'user' || (p.kind === 'admin' && (p.via === 'user' || p.via === 'cookie'));
   if (!needs) return null;
   const at = auth.sudoAt ? new Date(auth.sudoAt).getTime() : NaN;
   if (Number.isFinite(at) && now.getTime() - at >= 0 && now.getTime() - at < RECENT_AUTH_MS) return null;
   return NextResponse.json(
-    { ok: false as const, error: 'Re-enter your password to continue.', code: 'reauth_required' },
+    { ok: false as const, error: p.kind === 'admin' && p.via === 'cookie' ? 'Re-enter the admin token to continue.' : 'Re-enter your password to continue.', code: 'reauth_required' },
     { status: 403 },
   );
 }

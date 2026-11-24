@@ -7,7 +7,8 @@
  *    through `publicCall`, which drops it and says `has_voicemail` instead.
  *  - Playback: GET /api/calls/:id/voicemail (authenticated, tenant-scoped) streams the audio server-side with the account
  *    credentials (`fetchVoicemailAudio`).
- *  - Retention: purge / erase delete the provider-side recording as well (`deleteTwilioRecordings`), best effort and logged.
+ *  - Retention: purge / erase QUEUE the provider-side recording for deletion in the same transaction as the call-row DELETE
+ *    (db/recording-deletions.ts); the jobs runner deletes it with retries (voice/recording-deletion.ts).
  */
 import { logger } from '@/lib/log';
 import type { Call } from '@/lib/types';
@@ -47,15 +48,78 @@ export type VoicemailAudio =
   | { ok: false; status: 404 | 502 | 503; error: string };
 
 /**
- * Fetch the recording's audio (mp3) from Twilio with the ACCOUNT credentials and hand back a streaming Response (Range is passed
- * through so the browser can seek). Only a recording of this deployment's own account is ever requested, over https to api.twilio.com,
- * and the credentials are never forwarded to a redirect target (fetch drops Authorization across origins).
+ * Short-lived in-process cache of recording audio, so a player's burst of Range requests (every seek is one) costs ONE Twilio REST call
+ * instead of one per seek. Safe because: it is only consulted AFTER the route authenticated the caller and checked the call belongs to
+ * their business (fetchVoicemailAudio is never reachable without that); only a complete, small (<= CACHE_MAX_BYTES) 200 response is kept;
+ * it is bounded (CACHE_MAX_ENTRIES), expires after CACHE_TTL_MS, never leaves the process (browsers still get `private, no-store`) and is
+ * dropped when the recording is queued for deletion (`forgetCachedRecording`). A Range request on a cold entry is passed through unchanged.
+ */
+export const VOICEMAIL_CACHE_TTL_MS = 45_000;
+const CACHE_MAX_BYTES = 2 * 1024 * 1024;
+const CACHE_MAX_ENTRIES = 16;
+const audioCache = new Map<string, { at: number; body: Uint8Array }>();
+
+const cacheKey = (ref: RecordingRef) => `${ref.accountSid}/${ref.recordingSid}`.toLowerCase();
+const cacheGet = (ref: RecordingRef): Uint8Array | null => {
+  const hit = audioCache.get(cacheKey(ref));
+  if (!hit) return null;
+  if (Date.now() - hit.at > VOICEMAIL_CACHE_TTL_MS) { audioCache.delete(cacheKey(ref)); return null; }
+  return hit.body;
+};
+const cachePut = (ref: RecordingRef, body: Uint8Array): void => {
+  if (body.byteLength === 0 || body.byteLength > CACHE_MAX_BYTES) return;
+  audioCache.set(cacheKey(ref), { at: Date.now(), body });
+  while (audioCache.size > CACHE_MAX_ENTRIES) audioCache.delete(audioCache.keys().next().value as string);
+};
+/** Drop a recording from the cache (it is being deleted). */
+export const forgetCachedRecording = (ref: RecordingRef): void => { audioCache.delete(cacheKey(ref)); };
+/** Test seam. */
+export const clearVoicemailCache = (): void => audioCache.clear();
+
+const audioHeaders = (): Headers => new Headers({
+  'content-type': 'audio/mpeg',
+  'cache-control': 'private, no-store',
+  'content-disposition': 'inline; filename="voicemail.mp3"',
+  'x-content-type-options': 'nosniff',
+  'accept-ranges': 'bytes',
+});
+
+/** Answer a (valid, single) Range request from a complete body. Null = not satisfiable here (the caller then goes upstream). */
+function sliceRange(body: Uint8Array, range: string | null): Response | null {
+  const headers = audioHeaders();
+  if (!range) {
+    headers.set('content-length', String(body.byteLength));
+    return new Response(body.slice(), { status: 200, headers });
+  }
+  const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!m || (m[1] === '' && m[2] === '')) return null;
+  const size = body.byteLength;
+  let start: number;
+  let end: number;
+  if (m[1] === '') { const n = Number(m[2]); if (n === 0) return null; start = Math.max(0, size - n); end = size - 1; }
+  else { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1); }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return null;
+  headers.set('content-length', String(end - start + 1));
+  headers.set('content-range', `bytes ${start}-${end}/${size}`);
+  return new Response(body.slice(start, end + 1), { status: 206, headers });
+}
+
+/**
+ * Fetch the recording's audio (mp3) from Twilio with the ACCOUNT credentials and hand back a Response (Range is honoured so the browser can
+ * seek: from the short-lived cache when the whole file is there, else passed through). Only a recording of this deployment's own account is
+ * ever requested, over https to api.twilio.com, and the credentials are never forwarded to a redirect target (fetch drops Authorization
+ * across origins).
  */
 export async function fetchVoicemailAudio(recordingUrl: string, range: string | null, fetchImpl: typeof fetch = fetch): Promise<VoicemailAudio> {
   const ref = parseRecordingUrl(recordingUrl);
   if (!ref) return { ok: false, status: 404, error: 'no voicemail' };
   const auth = authHeader();
   if (!auth || process.env.TWILIO_ACCOUNT_SID !== ref.accountSid) return { ok: false, status: 503, error: 'voicemail playback is not configured' };
+  const cached = cacheGet(ref);
+  if (cached) {
+    const hit = sliceRange(cached, range);
+    if (hit) return { ok: true, response: hit };
+  }
   const url = `https://api.twilio.com/2010-04-01/Accounts/${ref.accountSid}/Recordings/${ref.recordingSid}.mp3`;
   try {
     const upstream = await fetchImpl(url, {
@@ -63,21 +127,22 @@ export async function fetchVoicemailAudio(recordingUrl: string, range: string | 
       redirect: 'follow',
       signal: AbortSignal.timeout(20_000),
     });
-    if (upstream.status === 404) return { ok: false, status: 404, error: 'the recording no longer exists' };
+    if (upstream.status === 404) { audioCache.delete(cacheKey(ref)); return { ok: false, status: 404, error: 'the recording no longer exists' }; }
     if (!(upstream.status === 200 || upstream.status === 206) || !upstream.body) {
       log.warn('upstream_failed', { status: upstream.status });
       return { ok: false, status: 502, error: 'could not load the recording' };
     }
-    const headers = new Headers({
-      'content-type': 'audio/mpeg',
-      'cache-control': 'private, no-store',
-      'content-disposition': 'inline; filename="voicemail.mp3"',
-      'x-content-type-options': 'nosniff',
-      'accept-ranges': 'bytes',
-    });
+    const headers = audioHeaders();
     for (const h of ['content-length', 'content-range']) {
       const v = upstream.headers.get(h);
       if (v) headers.set(h, v);
+    }
+    // A complete small file (no Range sent, 200, length known) is read once and kept for the next seeks.
+    const length = Number(upstream.headers.get('content-length'));
+    if (upstream.status === 200 && Number.isFinite(length) && length > 0 && length <= CACHE_MAX_BYTES) {
+      const body = new Uint8Array(await upstream.arrayBuffer());
+      if (body.byteLength === length) cachePut(ref, body);
+      return { ok: true, response: new Response(body, { status: 200, headers }) };
     }
     return { ok: true, response: new Response(upstream.body, { status: upstream.status, headers }) };
   } catch (err) {
@@ -86,26 +151,39 @@ export async function fetchVoicemailAudio(recordingUrl: string, range: string | 
   }
 }
 
+export type RecordingDeleteResult = { ok: true } | { ok: false; error: string };
+
 /**
- * Delete provider-side recordings (retention purge, customer erasure). Best effort: a failure is logged, never thrown, and a
- * recording that is already gone (404) counts as deleted. Returns how many are gone.
+ * Delete ONE provider-side recording. 2xx and 404 (already gone) are success; everything else (5xx, 429, timeout, no matching
+ * credentials) is a failure with a short, credential-free reason, for the retry queue (voice/recording-deletion.ts). Never throws.
+ */
+export async function deleteTwilioRecording(ref: RecordingRef, fetchImpl: typeof fetch = fetch): Promise<RecordingDeleteResult> {
+  const auth = authHeader();
+  if (!auth || process.env.TWILIO_ACCOUNT_SID !== ref.accountSid) { log.warn('delete_skipped', { reason: 'no matching Twilio credentials' }); return { ok: false, error: 'no matching Twilio credentials' }; }
+  try {
+    const res = await fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${ref.accountSid}/Recordings/${ref.recordingSid}.json`, {
+      method: 'DELETE', headers: { authorization: auth }, signal: AbortSignal.timeout(15_000),
+    });
+    if (res.status === 204 || res.status === 200 || res.status === 404) return { ok: true };
+    log.warn('delete_failed', { status: res.status });
+    return { ok: false, error: `http_${res.status}` };
+  } catch (err) {
+    log.warn('delete_error', { error: (err as Error).name });
+    return { ok: false, error: `error_${(err as Error).name}`.slice(0, 80) };
+  }
+}
+
+/**
+ * Delete provider-side recordings by URL, best effort (a failure is logged, never thrown; a recording that is already gone (404)
+ * counts as deleted). Returns how many are gone. Retention and erasure do NOT use this directly: they queue the recordings first
+ * (db/recording-deletions.ts) so a failure is retried; this stays for ad-hoc callers.
  */
 export async function deleteTwilioRecordings(urls: (string | null | undefined)[], fetchImpl: typeof fetch = fetch): Promise<number> {
-  const auth = authHeader();
   let deleted = 0;
   for (const u of urls) {
     const ref = parseRecordingUrl(u);
     if (!ref) continue;
-    if (!auth || process.env.TWILIO_ACCOUNT_SID !== ref.accountSid) { log.warn('delete_skipped', { reason: 'no matching Twilio credentials' }); continue; }
-    try {
-      const res = await fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${ref.accountSid}/Recordings/${ref.recordingSid}.json`, {
-        method: 'DELETE', headers: { authorization: auth }, signal: AbortSignal.timeout(15_000),
-      });
-      if (res.status === 204 || res.status === 200 || res.status === 404) deleted++;
-      else log.warn('delete_failed', { status: res.status });
-    } catch (err) {
-      log.warn('delete_error', { error: (err as Error).name });
-    }
+    if ((await deleteTwilioRecording(ref, fetchImpl)).ok) deleted++;
   }
   return deleted;
 }

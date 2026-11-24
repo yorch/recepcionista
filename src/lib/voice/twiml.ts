@@ -12,8 +12,17 @@ const wrap = (inner: string): string => `<?xml version="1.0" encoding="UTF-8"?><
 export const TWIML_HEADERS = { 'content-type': 'text/xml; charset=utf-8', 'cache-control': 'no-store' } as const;
 export const twimlResponse = (xml: string, status = 200): Response => new Response(xml, { status, headers: TWIML_HEADERS });
 
-/** Seconds a forwarded call rings before it is treated as unanswered. */
-export const FORWARD_RING_SECONDS = 25;
+/**
+ * Seconds a forwarded call rings before it is treated as unanswered. Default 20: shorter than the ~25 s after which most carriers'
+ * voicemail picks up, so the owner's carrier voicemail does not "answer" and get bridged (and metered) for a silent caller.
+ * FORWARD_RING_SECONDS overrides it (10-40).
+ */
+export const FORWARD_RING_SECONDS = 20;
+export function forwardRingSeconds(env: Record<string, string | undefined> = process.env): number {
+  const raw = (env.FORWARD_RING_SECONDS ?? '').trim();
+  const n = Number(raw);
+  return raw !== '' && Number.isInteger(n) && n >= 10 && n <= 40 ? n : FORWARD_RING_SECONDS;
+}
 /** Longest voicemail (seconds). */
 export const VOICEMAIL_MAX_SECONDS = 90;
 
@@ -43,7 +52,7 @@ export function pausedTwiml(business: Pick<Business, 'name'>, voicemailAction: s
  * Forwarded: ring `to`. Never `record` (a forwarded call is not recorded by us), caller id stays the business line when it
  * is known so the owner sees it is a business call. `to` must be an E.164 the caller of this function already trusts.
  */
-export function forwardTwiml(to: string, opts: { callerId?: string | null; action?: string; timeLimit?: number; statusCallback?: string } = {}): string {
+export function forwardTwiml(to: string, opts: { callerId?: string | null; action?: string; timeLimit?: number; statusCallback?: string; ringSeconds?: number } = {}): string {
   if (!/^\+[1-9]\d{7,14}$/.test(to)) throw new RangeError('forward target must be E.164');
   const callerId = opts.callerId && /^\+[1-9]\d{7,14}$/.test(opts.callerId) ? ` callerId="${xmlEscape(opts.callerId)}"` : '';
   const action = opts.action ? ` action="${xmlEscape(opts.action)}" method="POST"` : '';
@@ -51,7 +60,7 @@ export function forwardTwiml(to: string, opts: { callerId?: string | null; actio
   const limit = opts.timeLimit !== undefined && Number.isFinite(opts.timeLimit) && opts.timeLimit >= 1 ? ` timeLimit="${Math.floor(opts.timeLimit)}"` : '';
   // The per-leg "completed" callback reports the bridged duration even when the caller hangs up first (metered once per call).
   const status = opts.statusCallback ? ` statusCallback="${xmlEscape(opts.statusCallback)}" statusCallbackEvent="completed" statusCallbackMethod="POST"` : '';
-  return wrap(`<Dial timeout="${FORWARD_RING_SECONDS}" answerOnBridge="true"${limit}${callerId}${action}><Number${status}>${xmlEscape(to)}</Number></Dial>`);
+  return wrap(`<Dial timeout="${opts.ringSeconds !== undefined && Number.isInteger(opts.ringSeconds) && opts.ringSeconds >= 5 && opts.ringSeconds <= 60 ? opts.ringSeconds : FORWARD_RING_SECONDS}" answerOnBridge="true"${limit}${callerId}${action}><Number${status}>${xmlEscape(to)}</Number></Dial>`);
 }
 
 /** Said when the voicemail budget of the hour is spent or the line cannot take a message: honest, short, then hang up (no <Record>). */

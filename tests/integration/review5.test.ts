@@ -11,6 +11,7 @@ import {
 } from '../helpers/fixtures';
 import { captureMail } from '../helpers/auth-harness';
 import { hashPassword } from '../../src/lib/password';
+import { clearVoicemailCache } from '../../src/lib/voice/voicemail';
 
 const PASSWORD = 'correct horse battery staple';
 const ACCOUNT = `AC${'a'.repeat(32)}`;
@@ -60,6 +61,7 @@ integration('review round 5 fixes (postgres)', () => {
     await cleanup();
   });
   beforeEach(async () => {
+    clearVoicemailCache();
     outboundCalls.length = 0;
     await prisma.rateLimitBucket.deleteMany({
       where: { OR: [{ key: { startsWith: 'voice/' } }, { key: { startsWith: 'forward-number/' } }, { key: { startsWith: 'callmode-notice' } }, { key: { startsWith: 'auth/reauth' } }, { key: { startsWith: 'owner-phone/' } }] },
@@ -168,15 +170,15 @@ integration('review round 5 fixes (postgres)', () => {
     await setBiz(biz.id, FWD);
     const params = callParams(biz.phone!);
     expect(await (await signedIn(params)).text()).toContain('<Dial');
-    expect((await db.getUsage(biz.id))?.call_seconds).toBe(0);
+    expect((await db.getUsage(biz.id))).toMatchObject({ call_seconds: 0, forward_seconds: 0 });
 
-    // the per-leg status callback (child leg), then the <Dial action> and a Twilio retry: one count
+    // the per-leg status callback (child leg), then the <Dial action> and a Twilio retry: one count, in the FORWARD counter (never the AI minutes)
     const leg = { ParentCallSid: params.CallSid, CallSid: uniq('CAchild'), CallStatus: 'completed', CallDuration: '3000' };
     expect((await post(URL_DS, leg, dialStatus)).status).toBe(200);
-    expect((await db.getUsage(biz.id))?.call_seconds).toBe(3000);
+    expect((await db.getUsage(biz.id))).toMatchObject({ forward_seconds: 3000, call_seconds: 0 });
     await post(URL_DS, leg, dialStatus);
     await post(URL_VM, { CallSid: params.CallSid, DialCallStatus: 'completed', DialCallDuration: '3000' }, voicemail);
-    expect((await db.getUsage(biz.id))?.call_seconds).toBe(3000);
+    expect((await db.getUsage(biz.id))).toMatchObject({ forward_seconds: 3000, call_seconds: 0 });
     expect((await prisma.call.findFirst({ where: { callSid: params.CallSid } }))?.durationSec).toBe(3000);
   });
 
@@ -188,42 +190,49 @@ integration('review round 5 fixes (postgres)', () => {
     const body = { ParentCallSid: params.CallSid, CallDuration: '120', business_id: b.id, BusinessId: b.id };
     expect((await post(URL_DS, body, dialStatus, null)).status).toBe(403);
     expect((await post(URL_DS, body, dialStatus, 'bad')).status).toBe(403);
-    expect((await db.getUsage(a.id))?.call_seconds).toBe(0);
+    expect((await db.getUsage(a.id))?.forward_seconds).toBe(0);
     expect((await post(URL_DS, body, dialStatus)).status).toBe(200);
-    expect((await db.getUsage(a.id))?.call_seconds).toBe(120);
-    expect((await db.getUsage(b.id))?.call_seconds).toBe(0);
+    expect((await db.getUsage(a.id))?.forward_seconds).toBe(120);
+    expect((await db.getUsage(b.id))?.forward_seconds).toBe(0);
     // unknown parent / garbage durations are ignored, not errors
     expect((await post(URL_DS, { ParentCallSid: 'CAnope', CallDuration: '5' }, dialStatus)).status).toBe(200);
     expect((await post(URL_DS, { ParentCallSid: params.CallSid, CallDuration: '-5' }, dialStatus)).status).toBe(200);
-    expect((await db.getUsage(a.id))?.call_seconds).toBe(120);
+    expect((await db.getUsage(a.id))?.forward_seconds).toBe(120);
   });
 
-  test('H2 the plan allowance caps the forwarded call (timeLimit) and a used-up cap, a trial cap or a lapsed plan stops forwarding', async () => {
-    await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
-      // 10 minute allowance, 5 used: <Dial timeLimit> is the 300 s that are left
+  test('H2 the FORWARD allowance caps the forwarded call (timeLimit) and a used-up forward cap, a trial cap or a lapsed plan stops forwarding; the AI minutes are not involved', async () => {
+    await withEnv({ BILLING_ENFORCED: 'true', FORWARD_MINUTES_CAP: '10' }, async () => {
+      // 10 minute forward allowance, 5 used: <Dial timeLimit> is the 300 s that are left
       const part = await newBusiness();
       await setBiz(part.id, FWD);
-      await billing(part.id, { billing_status: 'active', call_minutes_cap_override: 10 });
-      await db.recordCallSeconds(part.id, 300);
+      await billing(part.id, { billing_status: 'active' });
+      await db.recordForwardSeconds(part.id, 300);
       expect(await (await signedIn(callParams(part.phone!))).text()).toContain('timeLimit="300"');
 
-      // used up: no <Dial>, the voicemail instead (the notice comes before the beep)
+      // the AI minutes being used up does NOT stop forwarding (separate counters)
+      const aiFull = await newBusiness();
+      await setBiz(aiFull.id, FWD);
+      await billing(aiFull.id, { billing_status: 'active', call_minutes_cap_override: 1 });
+      await db.recordCallSeconds(aiFull.id, 600);
+      expect(await (await signedIn(callParams(aiFull.phone!))).text()).toContain('<Dial');
+
+      // forward minutes used up: no <Dial>, the voicemail instead (the notice comes before the beep)
       const used = await newBusiness();
       await setBiz(used.id, FWD);
-      await billing(used.id, { billing_status: 'active', call_minutes_cap_override: 1 });
-      await db.recordCallSeconds(used.id, 600);
+      await billing(used.id, { billing_status: 'active' });
+      await db.recordForwardSeconds(used.id, 600);
       const params = callParams(used.phone!);
       const xml = await (await signedIn(params)).text();
       expect(xml).not.toContain('<Dial');
       expect(xml.indexOf('will be recorded')).toBeLessThan(xml.indexOf('<Record'));
       expect((await prisma.call.findFirst({ where: { callSid: params.CallSid } }))?.flaggedReason).toMatch(/minutes are used up/);
 
-      // trialing tenants get the (lower) trial cap
-      await withEnv({ TRIAL_CALL_MINUTES_CAP: '2' }, async () => {
+      // trialing tenants get the (lower) trial forward cap
+      await withEnv({ TRIAL_FORWARD_MINUTES_CAP: '2' }, async () => {
         const trial = await newBusiness();
         await setBiz(trial.id, FWD);
         await billing(trial.id, { billing_status: 'trialing' });
-        await db.recordCallSeconds(trial.id, 121);
+        await db.recordForwardSeconds(trial.id, 121);
         expect(await (await signedIn(callParams(trial.phone!))).text()).not.toContain('<Dial');
       });
 
@@ -236,7 +245,7 @@ integration('review round 5 fixes (postgres)', () => {
   });
 
   test('H2 forwarded calls per hour are rate limited per business (the rest go to the voicemail) and voicemails too', async () => {
-    await withEnv({ FORWARD_CALLS_PER_HOUR: '2', VOICEMAIL_PER_HOUR: '2' }, async () => {
+    await withEnv({ FORWARD_CALLS_PER_HOUR: '2', VOICEMAIL_PER_HOUR: '2', CALLER_UNKNOWN_SHARE_PCT: '100' }, async () => {
       const biz = await newBusiness();
       await setBiz(biz.id, FWD);
       const results: string[] = [];
@@ -261,7 +270,7 @@ integration('review round 5 fixes (postgres)', () => {
     const done = { CallSid: params.CallSid, RecordingUrl: REC, RecordingDuration: '45' };
     await post(URL_VM, done, voicemail);
     await post(URL_VM, done, voicemail);
-    expect((await db.getUsage(biz.id))?.call_seconds).toBe(45);
+    expect((await db.getUsage(biz.id))).toMatchObject({ voicemail_seconds: 45, call_seconds: 0 });
   });
 
   // ================================================================== M1
@@ -397,19 +406,28 @@ integration('review round 5 fixes (postgres)', () => {
           expect([...new Uint8Array(await res.arrayBuffer())]).toEqual([1, 2, 3, 4]);
         }
         // the server fetched the .mp3 of OUR account with Basic auth (account sid : token); the browser never sees either
+        // the second listener was served from the short-lived server-side cache: ONE Twilio fetch for both
+        expect(twilio.seen.length).toBe(1);
         expect(twilio.seen[0].url).toBe(`https://api.twilio.com/2010-04-01/Accounts/${ACCOUNT}/Recordings/RE${'b'.repeat(32)}.mp3`);
         const auth = (twilio.seen[0].init.headers as Record<string, string>).authorization;
         expect(Buffer.from(auth.replace('Basic ', ''), 'base64').toString()).toBe(`${ACCOUNT}:${SECRETS.twilioToken}`);
-        // a Range request is passed through
+        // a Range request on a warm entry is answered from it (a seek costs no Twilio call) ...
+        const seek = await get(call.id, { ...asUser(owner.cookie), range: 'bytes=2-3' });
+        expect(seek.status).toBe(206);
+        expect(seek.headers.get('content-range')).toBe('bytes 2-3/4');
+        expect([...new Uint8Array(await seek.arrayBuffer())]).toEqual([3, 4]);
+        expect(twilio.seen.length).toBe(1);
+        // ... and passed through to Twilio on a cold one
+        clearVoicemailCache();
         await get(call.id, { ...asUser(owner.cookie), range: 'bytes=2-3' });
-        expect((twilio.seen[2].init.headers as Record<string, string>).range).toBe('bytes=2-3');
+        expect((twilio.seen[1].init.headers as Record<string, string>).range).toBe('bytes=2-3');
 
         // other tenants: 404 exactly like a missing id; no credential: 401; a call without a voicemail: 404
         expect((await get(call.id, asUser(stranger.cookie))).status).toBe(404);
         expect((await get('nope', asUser(owner.cookie))).status).toBe(404);
         expect((await get(call.id, { 'content-type': 'application/json' })).status).toBe(401);
         expect((await get(plain.id, asUser(owner.cookie))).status).toBe(404);
-        expect(twilio.seen.length).toBe(3); // refused requests never reached Twilio
+        expect(twilio.seen.length).toBe(2); // refused requests never reached Twilio
         expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'call.voicemail_played' } })).toBe(2); // owner + staff (the seek is not logged again)
       } finally { twilio.restore(); }
 

@@ -147,7 +147,9 @@ case "${jobs_value}" in
   off|false|0|no)
     echo "WARNING: JOBS=${JOBS}. The 6 PM daily briefing, the hourly gratitude sweep, the expired-row cleanup and the retention purge will NOT run (docs/runbook.md)." >&2 ;;
 esac
-for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP OWNER_ALERT_HOURLY_LIMIT FORWARD_MAX_CALL_SECONDS FORWARD_CALLS_PER_HOUR VOICEMAIL_PER_HOUR; do
+for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP OWNER_ALERT_HOURLY_LIMIT FORWARD_MAX_CALL_SECONDS FORWARD_CALLS_PER_HOUR VOICEMAIL_PER_HOUR \
+  VOICEMAIL_MINUTES_CAP FORWARD_MINUTES_CAP TRIAL_FORWARD_MINUTES_CAP FORWARD_MAX_CONCURRENT FORWARD_PER_CALLER_PER_HOUR VOICEMAIL_PER_CALLER_PER_HOUR \
+  FORWARD_WITHHELD_PER_HOUR VOICEMAIL_WITHHELD_PER_HOUR CALLER_UNKNOWN_SHARE_PCT FORWARD_MIN_ANSWERED_SECONDS FORWARD_RING_SECONDS; do
   [[ -z "${!v:-}" || "${!v}" =~ ^[0-9]+$ ]] || die "${v} is '${!v}' in .env: it must be a whole number (docs/env-vars.md)."
 done
 # Call handling (docs/runbook.md section 8): the line kind decides whether Forward exists at all; the deny list is 3-digit NANP area codes.
@@ -155,6 +157,18 @@ case "${VOICE_LINE_KIND:-}" in
   ""|native|webhook) ;;
   *) die "VOICE_LINE_KIND is '${VOICE_LINE_KIND}' in .env: use native (number imported into ElevenLabs) or webhook (Voice URL is /api/voice/incoming), or leave it empty." ;;
 esac
+# Round 6 L5: webhook against a native ElevenLabs number would only make the dashboard promise forwarding that never happens. The app
+# treats the line as native (the safe reading) and logs/diagnoses it; say so here too.
+if [[ "${VOICE_LINE_KIND:-}" == "webhook" && -n "${ELEVENLABS_API_KEY:-}" && -n "${ELEVENLABS_PHONE_NUMBER_ID:-}" ]]; then
+  echo "WARNING: VOICE_LINE_KIND=webhook, but ELEVENLABS_PHONE_NUMBER_ID is set: that number is answered by ElevenLabs, which can never forward a call. The app will treat the line as NATIVE (forwarding NOT available). Unset VOICE_LINE_KIND, or remove the ElevenLabs phone number settings if this deployment really answers on a Twilio Voice URL (docs/runbook.md section 8)." >&2
+fi
+# Round 6: percentages and the ring time have a range (the app falls back to the default outside it; failing here is kinder than a silent default).
+if [[ -n "${CALLER_UNKNOWN_SHARE_PCT:-}" ]] && (( CALLER_UNKNOWN_SHARE_PCT < 1 || CALLER_UNKNOWN_SHARE_PCT > 100 )); then
+  die "CALLER_UNKNOWN_SHARE_PCT is '${CALLER_UNKNOWN_SHARE_PCT}' in .env: use a whole number from 1 to 100 (docs/env-vars.md)."
+fi
+if [[ -n "${FORWARD_RING_SECONDS:-}" ]] && (( FORWARD_RING_SECONDS < 10 || FORWARD_RING_SECONDS > 40 )); then
+  die "FORWARD_RING_SECONDS is '${FORWARD_RING_SECONDS}' in .env: use a whole number from 10 to 40 (docs/env-vars.md)."
+fi
 if [[ -n "${FORWARD_DENY_AREA_CODES:-}" ]]; then
   IFS=',' read -ra _deny_codes <<< "${FORWARD_DENY_AREA_CODES}"
   for c in "${_deny_codes[@]}"; do

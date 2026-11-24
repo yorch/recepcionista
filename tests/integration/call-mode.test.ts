@@ -167,7 +167,7 @@ integration('call handling mode (postgres)', () => {
     });
   });
 
-  test('a lapsed plan wins over paused/forward (no service for an inactive account); a used-up minutes cap stops FORWARDING but not the voicemail', async () => {
+  test('a lapsed plan wins over paused/forward (no service for an inactive account); a used-up FORWARD minutes cap stops FORWARDING but not the voicemail', async () => {
     const lapsed = await newBusiness();
     await setMode(lapsed.id, VERIFIED);
     await db.setBillingState(lapsed.id, { billing_status: 'canceled' });
@@ -178,11 +178,11 @@ integration('call handling mode (postgres)', () => {
 
       const capped = await newBusiness();
       await setMode(capped.id, VERIFIED);
-      await db.setBillingState(capped.id, { billing_status: 'active', call_minutes_cap_override: 1 });
-      await db.recordCallSeconds(capped.id, 600);
+      await db.setBillingState(capped.id, { billing_status: 'active' });
+      await db.recordForwardSeconds(capped.id, 60 * 600);
       const res2 = await signed(URL_IN, callParams(capped.phone!));
       const xml2 = await res2.text();
-      expect(xml2).not.toContain('<Dial'); // forwarded minutes are real minutes: the cap stops the forward ...
+      expect(xml2).not.toContain('<Dial'); // forwarded minutes have their own cap (FORWARD_MINUTES_CAP, 600 by default): it stops the forward ...
       expect(xml2).toContain('<Record'); // ... and the caller is offered the voicemail instead (H2)
     });
   });

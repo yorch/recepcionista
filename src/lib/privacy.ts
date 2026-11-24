@@ -1,5 +1,5 @@
 /** Data-subject access: everything stored about one customer (matched on their E.164 number) of one business. */
-import { prisma } from '@/lib/db';
+import { prisma, recordingDeletionStatus } from '@/lib/db';
 import { isOptedOut, locateCustomerRecords, phoneIdent } from '@/lib/db/compliance';
 import { defaultPhoneCountry } from '@/lib/phone';
 import { parseRecordingUrl } from '@/lib/voice/voicemail';
@@ -16,6 +16,8 @@ export interface CustomerExport {
   /** Evening briefings (narration + stats) that cover a day the customer appears in, or mention them. */
   briefings: unknown[];
   sms_opted_out: boolean;
+  /** Voicemail recordings of this business that were deleted here but whose provider-side deletion is still PENDING (retried automatically); 0 = nothing outstanding. */
+  recording_deletions_pending: number;
 }
 
 export async function exportCustomerData(businessId: string, phone: string, country: string = defaultPhoneCountry()): Promise<CustomerExport> {
@@ -43,5 +45,6 @@ export async function exportCustomerData(businessId: string, phone: string, coun
     })),
     bookings, sms, briefings,
     sms_opted_out: optedOut,
+    recording_deletions_pending: (await recordingDeletionStatus(businessId)).pending,
   };
 }

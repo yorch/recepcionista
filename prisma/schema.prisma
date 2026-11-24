@@ -396,13 +396,55 @@ model UsageCounter {
   /// First day of the month in the business's timezone.
   periodStart DateTime @map("period_start") @db.Date
   smsCount    Int      @default(0) @map("sms_count")
+  /// AI conversation seconds ONLY (the plan's call-minutes cap gates on this alone).
   callSeconds Int      @default(0) @map("call_seconds")
+  /// Voicemail recording seconds (own cap, VOICEMAIL_MINUTES_CAP): never counted against the AI minutes.
+  voicemailSeconds Int @default(0) @map("voicemail_seconds")
+  /// Bridged seconds of forwarded calls (own cap, FORWARD_MINUTES_CAP): never counted against the AI minutes.
+  forwardSeconds   Int @default(0) @map("forward_seconds")
   updatedAt   DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
   @@unique([businessId, periodStart])
   @@map("usage_counters")
+}
+
+/// A forwarded call in progress: caps SIMULTANEOUS forwards per business and reserves the minutes they may still use (review 6, M1).
+/// Deleted when the call is metered; an unreleased row expires by itself (`expires_at`). No foreign key: expired rows are swept by acquire.
+model ForwardLease {
+  businessId      String   @map("business_id")
+  callSid         String   @map("call_sid")
+  reservedSeconds Int      @map("reserved_seconds")
+  expiresAt       DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@id([businessId, callSid])
+  @@index([expiresAt])
+  @@map("forward_leases")
+}
+
+/// Provider-side (Twilio) voicemail recordings that MUST be deleted. Written in the same transaction that deletes the call row
+/// (retention purge, customer erasure, demo reset), so the only reference to a recording is never dropped before a durable record
+/// of the deletion exists. The jobs runner drains it with retries and backoff; a row goes away only on 2xx or 404 from the provider.
+/// No foreign key to businesses on purpose: it must outlive a cascade delete of the tenant.
+model PendingRecordingDeletion {
+  id            String    @id @default(uuid())
+  accountSid    String    @map("account_sid")
+  recordingSid  String    @map("recording_sid")
+  /// For reporting only (erasure / export say how many are pending for THIS business); not a foreign key.
+  businessId    String?   @map("business_id")
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error")
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  /// Set once the "deletion is not draining" alert fired for this row.
+  alertedAt     DateTime? @map("alerted_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([accountSid, recordingSid])
+  @@index([nextAttemptAt])
+  @@index([businessId])
+  @@map("pending_recording_deletions")
 }
 
 /// Free-trial abuse guard: one trial per payment card / normalised email. `fingerprint` is a hash (card: Stripe's

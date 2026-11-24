@@ -20,9 +20,9 @@ export const PAUSED_FLAG = 'Paused: the assistant did not answer; the caller was
 export const FORWARD_UNANSWERED_FLAG = 'Forwarded call was not answered; the caller was asked to leave a message';
 
 /** Tell a verified owner about a call nobody took (rate limited: 1 / 10 min, 6 / hour; never throws). */
-export async function notifyMissedCall(business: Business, from: string | null | undefined, why: string): Promise<boolean> {
+export async function notifyMissedCall(business: Business, from: string | null | undefined, why: string, opts: { known?: boolean } = {}): Promise<boolean> {
   try {
-    if (!(await allowMissedCallAlert(business.id))) return false;
+    if (!(await allowMissedCallAlert(business.id, opts))) return false;
     const who = from ? ` from ${from}` : '';
     return (await alertOwner(business, `MISSED CALL — ${business.name}\nA call${who} was not taken by the assistant (${why}). Please call back.`)).notified;
   } catch (err) {
@@ -41,11 +41,14 @@ export async function markForwarded(call: Call, to: string): Promise<void> {
  * A paused call, Twilio path: the call is handed off, the voicemail notice is spoken before the beep (so the recording
  * evidence is true), and the owner is told once (rate limited).
  */
-export async function markPaused(business: Business, call: Call, from: string | null | undefined, refusal?: string | null): Promise<void> {
+export async function markPaused(
+  business: Business, call: Call, from: string | null | undefined, refusal?: string | null, opts: { notify?: boolean; known?: boolean } = {},
+): Promise<void> {
   if (call.status === 'handed_off') return; // a Twilio retry of the same CallSid: already handled
   // `refusal`: a forward that could NOT be dialled (cap, rate limit, disallowed number) is flagged as such, not as a pause the owner chose.
   await updateCall(call.id, { status: 'handed_off', flagged_reason: refusal ?? PAUSED_FLAG, recording_disclosed: true, consent_status: 'disclosed' });
-  const notified = await notifyMissedCall(business, from, refusal ? 'forwarding could not be used' : 'calls are paused');
+  // `notify: false`: a caller over their own limit never costs the owner a text (it would be a way to pump the owner's SMS).
+  const notified = opts.notify === false ? false : await notifyMissedCall(business, from, refusal ? 'forwarding could not be used' : 'calls are paused', { known: opts.known });
   log.info('paused_call', { business: business.id, call: call.id, owner_notified: notified });
 }
 
@@ -58,4 +61,17 @@ export async function markPausedNative(business: Business, call: Call, from: str
   });
   const notified = await notifyMissedCall(business, from, mode === 'forward' ? 'forwarding is not available on this line' : 'calls are paused');
   log.info('paused_call_native', { business: business.id, call: call.id, mode, owner_notified: notified });
+}
+
+/**
+ * A call that gets neither the owner nor a voicemail (its caller is over their own limit, or the voicemail budget / minutes are spent):
+ * the call row says so (instead of staying "in progress" with no trace) and, unless the CALLER is the cause, a known customer or the
+ * budget being spent tells the owner (rate limited, own budget for known customers).
+ */
+export async function markUnavailable(
+  business: Business, call: Call, from: string | null | undefined, why: string, opts: { notify: boolean; known?: boolean },
+): Promise<void> {
+  if (call.status !== 'handed_off') await updateCall(call.id, { status: 'handed_off', flagged_reason: `Not taken: ${why}` });
+  const notified = opts.notify ? await notifyMissedCall(business, from, why, { known: opts.known }) : false;
+  log.warn('call_unavailable', { business: business.id, call: call.id, why, owner_notified: notified });
 }

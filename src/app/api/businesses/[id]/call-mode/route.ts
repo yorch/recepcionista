@@ -28,8 +28,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
  * PATCH { mode?: 'ai' | 'paused' | 'forward', forward_during_hours?: boolean }. Owner only.
  *  - `mode` may be omitted to change ONLY the hours flag (the dashboard never re-sends a mode it merely remembers).
  *  - 'forward' needs a verified, allowed forward number AND a line that can forward (not the native ElevenLabs line).
- *  - Switching INTO paused or forward needs a recent proof of identity (re-enter the password: 403 `reauth_required`); switching back
- *    to 'ai' never does. Every transition is audited and the owners are told by email and text (call-handling-changes.ts).
+ *  - Switching INTO paused or forward, and changing forward_during_hours, need a recent proof of identity (password, the 2FA code or, for the
+ *    break-glass admin cookie session, the admin token: 403 `reauth_required`); switching back to 'ai' never does. Every transition is audited and the owners are told by email and text (call-handling-changes.ts).
  */
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await authenticate(req, { role: 'owner' });
@@ -47,7 +47,11 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
     const current = await getBusiness(id);
     if (!current) return fail('business not found', 404);
-    if (mode && mode !== 'ai' && mode !== (current.call_mode ?? 'ai')) {
+    // Step-up: switching INTO paused / forward, and ANY change of forward_during_hours (it widens or narrows when the owner's phone rings,
+    // so a stale session must not flip it even when the mode is merely re-sent). Switching back to 'ai' never needs it.
+    const intoNonAi = Boolean(mode && mode !== 'ai' && mode !== (current.call_mode ?? 'ai'));
+    const hoursChanged = body.forward_during_hours !== undefined && body.forward_during_hours !== (current.forward_during_hours ?? false);
+    if (intoNonAi || hoursChanged) {
       const denied = requireRecentAuth(auth);
       if (denied) return denied;
     }
@@ -65,7 +69,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     if (result.before.forward_during_hours !== result.after.forward_during_hours) {
       await recordAudit({
         actor_kind: actor.actor_kind, actor_user_id: actor.actor_user_id, business_id: id, action: 'business.forward_hours_changed',
-        target: `business:${id}`, ip: clientKey(req), meta: { forward_during_hours: result.after.forward_during_hours },
+        target: `business:${id}`, ip: clientKey(req), meta: { ...actor.meta, forward_during_hours: result.after.forward_during_hours },
       });
     }
     return ok<CallModeView>(callModeView(fresh, { full: true }));

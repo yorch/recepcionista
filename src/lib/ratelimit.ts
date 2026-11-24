@@ -30,6 +30,8 @@ export interface RateLimitResult {
   retryAfterS: number;
   /** True when the store was unreachable (the decision came from the failure policy). */
   error?: boolean;
+  /** The sliding-window estimate AFTER counting this call (absent when the store failed). Lets callers see how full a budget is. */
+  estimate?: number;
 }
 
 export interface RateLimitOptions {
@@ -95,9 +97,9 @@ export async function rateLimit(
     const frac = Math.min(1, Math.max(0, elapsed_ms / w));
     const estimate = cur + prev * (1 - frac);
     void cleanupExpired();
-    if (estimate <= limit) return { allowed: true, retryAfterS: 0 };
+    if (estimate <= limit) return { allowed: true, retryAfterS: 0, estimate };
     // Conservative: wait for the next window boundary (the estimate only decays then).
-    return { allowed: false, retryAfterS: Math.max(1, Math.ceil((w - elapsed_ms) / 1000)) };
+    return { allowed: false, retryAfterS: Math.max(1, Math.ceil((w - elapsed_ms) / 1000)), estimate };
   } catch (err) {
     log.error('store_unavailable', { key, fail_closed: Boolean(opts.failClosed), err });
     return opts.failClosed

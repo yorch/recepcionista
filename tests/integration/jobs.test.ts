@@ -332,7 +332,7 @@ integration('job runner (postgres)', () => {
       expect(typeof r.counts!.calls).toBe('number');
       expect(typeof r.counts!.sms_logs).toBe('number');
       // the tick never purges while RETENTION_JOB is not on
-      const tick = await jobs.runJobTick({ env: { NODE_ENV: 'production', JOBS: 'on' } as any, jobs: jobs.enabledJobs({ NODE_ENV: 'production' } as any).filter((j) => j !== 'daily_briefing' && j !== 'gratitude_sweep' && j !== 'cleanup') });
+      const tick = await jobs.runJobTick({ env: { NODE_ENV: 'production', JOBS: 'on' } as any, jobs: jobs.enabledJobs({ NODE_ENV: 'production' } as any).filter((j) => j !== 'daily_briefing' && j !== 'gratitude_sweep' && j !== 'cleanup' && j !== 'recording_deletions') });
       expect(tick).toEqual([]);
     });
   });
@@ -351,7 +351,7 @@ integration('job runner (postgres)', () => {
       expect(res.status).toBe(200);
       const data = ((await res.json()) as any).data;
       expect(data.runner).toMatchObject({ tick_seconds: 60, jobs_setting: 'off' }); // test env: JOBS unset => off outside production
-      expect(data.jobs.map((j: any) => j.name)).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention']);
+      expect(data.jobs.map((j: any) => j.name)).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions']);
       const cleanupJob = data.jobs.find((j: any) => j.name === 'cleanup');
       expect(cleanupJob.last_run_at).toBeTruthy();
       expect(new Date(cleanupJob.next_due_at).getTime()).toBeGreaterThan(Date.now());

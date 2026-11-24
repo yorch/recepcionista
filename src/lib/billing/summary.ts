@@ -1,7 +1,7 @@
 /**
  * Billing summary for a business (status route + dashboard page). Node runtime only.
  */
-import { billingEnforced, isProvisioningAllowed, callMinutesCapFor, getUsage, pastDueGraceDays, smsCapFor } from '@/lib/db';
+import { billingEnforced, isProvisioningAllowed, callMinutesCapFor, forwardMinutesCapFor, getUsage, pastDueGraceDays, smsCapFor, voicemailMinutesCap } from '@/lib/db';
 import type { BillingStatus, Business } from '@/lib/types';
 
 export interface BillingSummary {
@@ -20,7 +20,12 @@ export interface BillingSummary {
   usage: {
     period_start: string | null;
     sms: { used: number; cap: number };
+    /** AI conversation minutes ONLY (what the plan's call-minutes cap gates on). */
     call_minutes: { used: number; used_seconds: number; cap: number };
+    /** Forwarded-call minutes (own cap, FORWARD_MINUTES_CAP): never counted against the AI minutes. */
+    forward_minutes: { used: number; used_seconds: number; cap: number };
+    /** Voicemail recording minutes (own cap, VOICEMAIL_MINUTES_CAP): never counted against the AI minutes. */
+    voicemail_minutes: { used: number; used_seconds: number; cap: number };
   };
 }
 
@@ -33,6 +38,8 @@ export async function billingSummary(b: Business, now: Date = new Date()): Promi
   const usage = await getUsage(b.id, now);
   const status = b.billing_status ?? 'none';
   const seconds = usage?.call_seconds ?? 0;
+  const forward = usage?.forward_seconds ?? 0;
+  const voicemail = usage?.voicemail_seconds ?? 0;
   return {
     billing_status: status,
     plan: b.plan ?? null,
@@ -47,6 +54,8 @@ export async function billingSummary(b: Business, now: Date = new Date()): Promi
       period_start: usage?.period_start ?? null,
       sms: { used: usage?.sms_count ?? 0, cap: smsCapFor(b) },
       call_minutes: { used: Math.floor(seconds / 60), used_seconds: seconds, cap: callMinutesCapFor(b) },
+      forward_minutes: { used: Math.floor(forward / 60), used_seconds: forward, cap: forwardMinutesCapFor(b) },
+      voicemail_minutes: { used: Math.floor(voicemail / 60), used_seconds: voicemail, cap: voicemailMinutesCap() },
     },
   };
 }

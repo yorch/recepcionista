@@ -4,10 +4,10 @@ import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, ha
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { allowMissedCallAlert, callGate, outOfServiceFirstMessage, pausedFirstMessage } from '@/lib/voice/capacity';
 import { resolveCallRoute } from '@/lib/voice/call-mode';
-import { markForwarded, markPaused } from '@/lib/voice/non-ai';
-import { allowVoicemail, forwardAllowance } from '@/lib/voice/forward-metering';
+import { markForwarded, markPaused, markUnavailable } from '@/lib/voice/non-ai';
+import { forwardAllowance, voicemailAllowance } from '@/lib/voice/forward-metering';
 import { vetForwardNumber } from '@/lib/voice/forward-vet';
-import { forwardTwiml, pausedTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
+import { forwardRingSeconds, forwardTwiml, pausedTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
@@ -103,6 +103,9 @@ export async function POST(req: Request) {
     }
     const isJson = (req.headers.get('content-type') ?? '').includes('application/json');
     let refusal: string | null = null;
+    // The CALLER is the reason a forward was refused (their own hourly budget): the owner is not texted about it.
+    let callerLimited = false;
+    let knownCaller = false;
     if (route.action === 'ai' && route.why === 'forward_number_rejected') {
       log.error('forward_number_rejected', { business: business.id, call: call.id, reason: 'stored number no longer passes the forward rules' });
       refusal = 'Forwarding was refused: the forwarding number is not allowed';
@@ -118,13 +121,17 @@ export async function POST(req: Request) {
       } else if (!(gate.ok || gate.reason !== 'no_plan')) {
         // plan lapsed: handled by the out-of-service branch below
       } else {
-        const allowance = await forwardAllowance(business.id);
+        const allowance = await forwardAllowance(business.id, process.env, { business, callSid: callSid || null, from });
+        knownCaller = allowance.known ?? false;
         if (!allowance.ok) {
           if (allowance.why !== 'no_plan') {
             log.warn('forward_refused', { business: business.id, call: call.id, why: allowance.why });
+            callerLimited = allowance.why === 'caller_limited';
             refusal = allowance.why === 'cap_reached'
-              ? 'Forwarding was not used: this month\'s call minutes are used up'
-              : allowance.why === 'rate_limited' ? 'Forwarding was not used: too many forwarded calls this hour' : 'Forwarding was not used: the minutes check failed';
+              ? 'Forwarding was not used: this month\'s forwarded-call minutes are used up'
+              : allowance.why === 'rate_limited' ? 'Forwarding was not used: too many forwarded calls this hour'
+                : allowance.why === 'caller_limited' ? 'Forwarding was not used: too many calls from this number this hour'
+                  : allowance.why === 'concurrent_limit' ? 'Forwarding was not used: too many forwarded calls at the same time' : 'Forwarding was not used: the minutes check failed';
             route = { action: 'paused' };
           }
         } else {
@@ -141,13 +148,22 @@ export async function POST(req: Request) {
         if (isJson) return ok({ business_id: business.id, call_id: call.id, call_mode: 'forward', forwarded: true, ws_url: null, mock: true });
         return twimlResponse(forwardTwiml(route.to, {
           callerId: business.phone_e164 ?? null, action: '/api/voice/voicemail', timeLimit: allowedSeconds, statusCallback: '/api/voice/dial-status',
+          ringSeconds: forwardRingSeconds(),
         }));
       }
-      if (!isJson && !(await allowVoicemail(business.id))) {
-        log.warn('voicemail_rate_limited', { business: business.id, call: call.id });
-        return twimlResponse(unavailableTwiml());
+      if (!isJson) {
+        const vm = await voicemailAllowance(business.id, process.env, { business, callSid: callSid || null, from });
+        if (!vm.ok) {
+          // Over their own limit (or the stranger share): the cheap path, nothing is recorded, and the owner is not texted for it.
+          log.warn('voicemail_refused', { business: business.id, call: call.id, why: vm.why });
+          const callerCaused = vm.why === 'caller_limited' || vm.why === 'unknown_reserved';
+          await markUnavailable(business, call, from, vm.why === 'cap_reached' ? 'the voicemail minutes of this month are used up' : callerCaused ? 'too many calls from this number' : 'too many voicemails this hour', {
+            notify: !callerCaused, known: vm.known,
+          });
+          return twimlResponse(unavailableTwiml());
+        }
       }
-      await markPaused(business, call, from, refusal);
+      await markPaused(business, call, from, refusal, { notify: !callerLimited, known: knownCaller });
       if (isJson) {
         return ok({
           agent_id: '', business_id: business.id, call_id: call.id, business_name: business.name, caller_phone: from || null,

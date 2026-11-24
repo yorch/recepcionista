@@ -11,6 +11,7 @@ import type { Instrumentation } from 'next';
 import { logger, serializeError } from '@/lib/log';
 import { ownerPhoneGrandfatherProblem } from '@/lib/messaging/owner';
 import { signupAvailability, signupConfigWarning } from '@/lib/signup-config';
+import { lineKindMismatch } from '@/lib/voice/line';
 
 const boot = logger('boot');
 let booted = false;
@@ -64,6 +65,8 @@ function startupWarnings(): void {
   }
   const sw = signupConfigWarning();
   if (sw) boot.warn(signupAvailability().open ? 'signup.without_captcha' : 'signup.disabled', { banner: sw });
+  const lm = lineKindMismatch();
+  if (lm) boot.error('voice_line_kind_mismatch', { banner: `!!! ${lm}` });
   const og = ownerPhoneGrandfatherProblem();
   if (og) boot.warn('owner_phone_grandfather', { warning: og });
 }

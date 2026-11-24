@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { readJson } from '@/lib/http';
-import { authenticate, authErrorResponse, requireBusinessAccess, requireRecentAuth } from '@/lib/session';
+import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess, requireRecentAuth } from '@/lib/session';
 import { clientKey } from '@/lib/auth';
 import { countryForBusiness, ForwardNumberRejectedError, getBusiness, isOptedOut, recordAudit, setForwardNumberVerified } from '@/lib/db';
 import { rateLimit } from '@/lib/ratelimit';
@@ -24,10 +24,7 @@ const bad = (error: string, status: number, headers?: Record<string, string>) =>
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await authenticate(req, { role: 'owner', verifiedEmail: true });
   if (!auth.ok) return auth.response;
-  const actor = {
-    actor_kind: auth.principal.kind === 'user' ? ('user' as const) : ('admin_token' as const),
-    actor_user_id: auth.principal.user?.id ?? null,
-  };
+  const actor = auditActorOf(auth.principal);
   try {
     const { id } = await params;
     requireBusinessAccess(auth.principal, id);
@@ -60,7 +57,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const verdict = verifyOwnerPhoneChallenge(body.challenge, id, e164, body.code, Date.now(), 'forward-number');
     if (!verdict.ok) {
       log.warn('verify.rejected', { business: id, reason: verdict.reason });
-      void recordAudit({ ...actor, business_id: id, action: 'business.forward_number_verify_failed', target: `business:${id}`, ip: clientKey(req), meta: { reason: verdict.reason } });
+      void recordAudit({ ...actor, business_id: id, action: 'business.forward_number_verify_failed', target: `business:${id}`, ip: clientKey(req), meta: { ...actor.meta, reason: verdict.reason } });
       return bad(verdict.reason === 'expired' ? 'the code expired; request a new one' : 'invalid code', 400);
     }
     if (await isOptedOut(id, e164, country)) return bad('that number opted out of texts from this business', 422);
@@ -74,7 +71,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     if (!change) return bad('business not found', 404);
     await recordAudit({
-      ...actor, business_id: id, action: 'business.forward_number_verified', target: `business:${id}`, ip: clientKey(req), meta: { phone_last4: e164.slice(-4) },
+      ...actor, business_id: id, action: 'business.forward_number_verified', target: `business:${id}`, ip: clientKey(req), meta: { ...actor.meta, phone_last4: e164.slice(-4) },
     });
     const fresh = await getBusiness(id);
     await announceCallHandlingChange({

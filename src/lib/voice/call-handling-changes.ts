@@ -11,6 +11,7 @@ import type { CallModeChange } from '@/lib/db/call-mode';
 import { sendEmail } from '@/lib/email';
 import { appBaseUrl, escapeHtml, safeDisplayName } from '@/lib/email/templates';
 import { rateLimit } from '@/lib/ratelimit';
+import { auditActorOf, type Principal } from '@/lib/session';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
@@ -20,11 +21,12 @@ const log = logger('voice/call-handling');
 /** Notices per business per hour, per channel. Past it the change still happens and is audited; only the extra notices are held back. */
 export const CHANGE_NOTICES_PER_HOUR = 6;
 
-export interface ChangeActor { actor_kind: 'user' | 'admin_token'; actor_user_id: string | null; email?: string | null }
+export interface ChangeActor { actor_kind: 'user' | 'admin_token'; actor_user_id: string | null; email?: string | null; /** Role and how the credential authenticated: audit meta only. */ meta?: Record<string, unknown> }
 
 /** The audit/notice actor of an authenticated request. */
-export function actorOf(auth: { principal: { kind: 'admin' | 'user'; user?: { id: string; email: string } | null } }): ChangeActor {
-  return { actor_kind: auth.principal.kind === 'user' ? 'user' : 'admin_token', actor_user_id: auth.principal.user?.id ?? null, email: auth.principal.user?.email ?? null };
+export function actorOf(auth: { principal: Principal }): ChangeActor {
+  const a = auditActorOf(auth.principal);
+  return { actor_kind: a.actor_kind, actor_user_id: a.actor_user_id, email: auth.principal.user?.email ?? null, meta: a.meta };
 }
 
 const MODE_WORD = { ai: 'AI answers', paused: 'paused', forward: 'forwarding' } as const;
@@ -64,7 +66,7 @@ export async function announceCallHandlingChange(opts: {
     out.audited = await recordAudit({
       actor_kind: actor.actor_kind, actor_user_id: actor.actor_user_id, business_id: business.id, action: 'business.call_mode_changed',
       target: `business:${business.id}`, ip,
-      meta: { from: change.before.call_mode, to: change.after.call_mode, reason, forward_during_hours: change.after.forward_during_hours, forward_last4: last4(change.after.forward_number_e164) },
+      meta: { ...actor.meta, from: change.before.call_mode, to: change.after.call_mode, reason, forward_during_hours: change.after.forward_during_hours, forward_last4: last4(change.after.forward_number_e164) },
     });
   }
   if (!sum.modeChanged && !sum.targetChanged) return out;
