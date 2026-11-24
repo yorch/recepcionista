@@ -35,7 +35,9 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `CSP_REPORT_URI` | no | none | adds `report-uri` to the CSP (a collector URL you operate) | no |
 | `LOG_LEVEL` | no | `debug` (dev), `info` (prod) | log verbosity | no |
 | `PRISMA_LOG` | no | unset | `1` logs every query | no |
-| `RETENTION_JOB` | no | off | exactly `on` enables the automatic PII purge (docs/compliance.md) | no |
+| `RETENTION_JOB` | no | off | exactly `on` enables the automatic PII purge (docs/compliance.md); it is driven by the job runner below | no |
+| `JOBS` | no | `on` in production, `off` in development and test | `on`/`off`: the background job runner (6 PM daily briefing per business time zone, hourly gratitude sweep, hourly cleanup of expired sessions/tokens/events/rate-limit rows; the retention purge when `RETENTION_JOB=on`). `off` disables ALL of them, the retention purge included. deploy.sh refuses any other value and warns on `off`. Unset in development still lets `RETENTION_JOB=on` run on its own | no |
+| `JOBS_TICK_SECONDS` | no | `60` | seconds between scheduler passes (clamped to 5-3600). Work is claimed per business in Postgres, so any tick rate and any number of app instances are safe | no |
 | `NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE` | set by Next / the image | | runtime mode flags; never set by hand | no |
 
 ## Accounts, signup and email
@@ -69,14 +71,16 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `BILLING_PLAN_NAME` | no | `standard` | plan label stored on subscribed businesses | no |
 | `BILLING_ALLOW_PROMO_CODES` | no | off | `true` shows the promotion-code box in Checkout | no |
 | `BILLING_PAST_DUE_GRACE_DAYS` | no | `5` | days a past_due business keeps working | no |
-| `PLAN_SMS_CAP` | no | `500` | monthly texts per business (overrides per business win) | no |
+| `PLAN_SMS_CAP` | no | `500` | monthly SMS SEGMENTS per business (a text is metered as its real segment count: GSM-7 160/153, UCS-2 70/67; a text that would not fit in what is left is blocked). Per-business overrides win | no |
 | `PLAN_CALL_MINUTES_CAP` | no | `300` | monthly call minutes per business | no |
+| `TRIAL_SMS_CAP` | no | `50` | monthly SMS segments while `billing_status='trialing'` (never above `PLAN_SMS_CAP`; per-business overrides win). Applies only while billing is enforced | no |
+| `TRIAL_CALL_MINUTES_CAP` | no | `30` | monthly call minutes while `billing_status='trialing'` (never above `PLAN_CALL_MINUTES_CAP`; overrides win) | no |
 
 ## Voice, SMS, phone numbers and LLM
 
 | Name | Required | Default | Feature | Secret |
 | --- | --- | --- | --- | --- |
-| `TWILIO_ACCOUNT_SID` | cond (real SMS and numbers) | unset: SMS is logged, numbers are mock | Twilio | no |
+| `TWILIO_ACCOUNT_SID` | prod (real SMS and numbers) | unset: SMS is logged and numbers are mock-pool numbers, outside production only | Twilio. In production, or whenever Twilio is configured, a failed number purchase FAILS provisioning (502, or 503 `phone_provider_not_configured` without credentials): a fake number is never issued | no |
 | `TWILIO_AUTH_TOKEN` | cond (with the SID; also verifies Twilio webhooks) | none | Twilio | yes |
 | `TWILIO_PHONE_NUMBER` | cond | none | SMS sender number | no |
 | `SMS_ALLOWED_COUNTRY_CODES` | no | `1` | destination countries for outbound texts. Also applied to `owner_phone` (PATCH) and to verification texts, so an owner alert destination is always in an enabled country | no |

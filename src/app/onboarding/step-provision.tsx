@@ -43,7 +43,10 @@ export function ProvisionStep({ businessId, status, go, refresh }: StepProps) {
       else if (e.status === 403) setError({ text: 'This account cannot turn on a number yet. Everything you entered is saved. Please contact support to finish.' });
       else if (e.status === 429) setError({ text: 'Too many tries in a row. Wait a minute and try again.' });
       else if (e.status === 422) setError({ text: `We could not read your website: ${e.message}. Go back and enter your services by hand.` });
-      else setError({ text: `${e.message}. Nothing was charged for a failed attempt. Try again.` });
+      else if (e.status === 502 || e.status === 503) {
+        setError({ text: `${e.message} Wait a minute and press Try again: if a number was already reserved for you, the retry reuses it and does not buy another.` });
+        void refresh();
+      } else setError({ text: `${e.message}. Nothing was charged for a failed attempt. Try again.` });
     } finally {
       if (ticker.current) clearInterval(ticker.current);
     }
@@ -105,6 +108,13 @@ export function ProvisionStep({ businessId, status, go, refresh }: StepProps) {
           </ul>
         </Card>
       )}
+
+      {status.provision_partial && !error ? (
+        <p role="note" className="mt-4 rounded-xl border border-warn-line bg-warn-bg px-4 py-3 text-[13px] text-warn">
+          Your number {prettyPhone(status.provision_partial.phone)} is reserved, but setup did not finish{status.provision_partial.error ? ` (${status.provision_partial.error})` : ''}.
+          Press the button to finish: it reuses this number and does not buy another.
+        </p>
+      ) : null}
 
       {error ? (
         <div role="alert" className="mt-4 rounded-xl border border-danger-line bg-danger-bg px-4 py-3 text-[13px] text-danger">

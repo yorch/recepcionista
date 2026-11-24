@@ -166,6 +166,17 @@ until then nothing is auto-deleted and boot logs what a purge would remove. Insp
 `POST /api/admin/retention {"dry_run":true}`. Twilio's inbound-SMS webhook must be `POST /api/sms/inbound`
 (see DEPLOY.md and `docs/compliance.md`).
 
+**Background jobs run by themselves in production.** A small runner inside the app (Postgres leases, safe with several instances) generates each
+live business's end-of-day briefing at 18:00 in that business's own time zone (and texts the verified owner a link), runs the gratitude sweep hourly
+and cleans expired sessions/tokens/events. `JOBS=on|off` (default on in production, off in development), `JOBS_TICK_SECONDS` (default 60).
+`GET /api/admin/jobs` shows last run / next due; `POST /api/admin/jobs/run` runs one by hand (dry run by default). See `docs/runbook.md` "Background jobs".
+
+**Phone numbers never fake it in production.** If the carrier purchase fails, provisioning answers 502 (503 without Twilio credentials) and the business
+stays `onboarding`; a retry reuses a number that was already bought. The `+1<area>555xxxx` demo number exists only outside production with no Twilio credentials.
+
+**Texts are metered in SMS segments** (an emoji or accented character makes each segment shorter), a text that would exceed the cap is not sent, and trials get lower caps
+(`TRIAL_SMS_CAP` 50, `TRIAL_CALL_MINUTES_CAP` 30). See `docs/billing.md`.
+
 ## Security checklist before going live
 
 Work through this before pointing a real phone number or a real Stripe account
@@ -276,6 +287,7 @@ src/lib/db/               Prisma client + async data layer (single import point)
 src/lib/providers/        llm · twilio · stripe — real-or-mock adapters
 src/lib/voice/            the seven tools + ElevenLabs agent client
 src/lib/briefing/         Spanglish script generation + TTS
+src/lib/jobs/             background job runner: 6 PM briefing per time zone, gratitude sweep, cleanup, retention
 src/lib/messaging/        bilingual SMS templates
 src/app/api/              all route handlers
 src/app/dashboard/        owner UI

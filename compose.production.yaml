@@ -166,6 +166,13 @@ services:
       APP_SECRET_KEY: ${APP_SECRET_KEY:-}
       EMAIL_PROVIDER: ${EMAIL_PROVIDER:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
+      # Background jobs (daily briefing, gratitude sweep, cleanup; docs/runbook.md). Empty = the code default: ON in production.
+      # JOBS=off disables all of them (and the retention purge). RETENTION_JOB still defaults to off (docs/compliance.md).
+      JOBS: ${JOBS:-}
+      JOBS_TICK_SECONDS: ${JOBS_TICK_SECONDS:-}
+      # Lower caps while a business is trialing (docs/billing.md). Empty = defaults (50 texts / 30 minutes).
+      TRIAL_SMS_CAP: ${TRIAL_SMS_CAP:-}
+      TRIAL_CALL_MINUTES_CAP: ${TRIAL_CALL_MINUTES_CAP:-}
       # Never true in production: the mock checkout / demo routes stay off.
       DEMO_MODE: "false"
       # Only set true when Traefik is the sole path to the app (it overwrites X-Forwarded-For).

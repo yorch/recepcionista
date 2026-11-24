@@ -2,6 +2,7 @@ import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { billingEnforced, isProvisioningAllowed, getBusiness, getKnowledgeBase, listAuditEvents, prisma } from '@/lib/db';
 import type { BillingStatus } from '@/lib/types';
+import { isMockPoolNumber } from '@/lib/providers/twilio';
 import { nextStep, type OnboardingStatus } from './status';
 
 export const dynamic = 'force-dynamic';
@@ -29,6 +30,17 @@ export async function GET(
       prisma.booking.findFirst({ where: { businessId: id }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
       listAuditEvents({ business_id: id, action: 'knowledge.extracted', limit: 1 }),
     ]);
+    // Partial provisioning state: only meaningful while the business is not live.
+    const provisionEvents = business.status === 'live' ? [] : await listAuditEvents({ business_id: id, limit: 20 }).then(
+      (rows) => rows.filter((e) => e.action.startsWith('provision.')),
+    );
+    const latestProvision = provisionEvents[0];
+    const failedLast = latestProvision && (latestProvision.action === 'provision.partial' || latestProvision.action === 'provision.number_failed'
+      || latestProvision.action === 'provision.number_record_failed');
+    const provisionMeta = (latestProvision?.meta ?? {}) as { stage?: unknown; error?: unknown };
+    const lastErr = failedLast
+      ? { stage: typeof provisionMeta.stage === 'string' ? provisionMeta.stage : 'number', error: typeof provisionMeta.error === 'string' ? provisionMeta.error : null, at: latestProvision.at }
+      : null;
 
     const billingStatus = (business.billing_status ?? 'none') as BillingStatus;
     const enforced = billingEnforced();
@@ -62,8 +74,12 @@ export async function GET(
       trial_ends_at: business.trial_ends_at ?? null,
       provisioned,
       phone: business.phone ?? null,
-      phone_mock: Boolean(business.phone && business.phone.includes('555')),
+      phone_mock: Boolean(business.phone && isMockPoolNumber(business.phone)),
       status: business.status,
+      provision_partial: business.phone && business.status !== 'live' && !provisioned
+        ? { phone: business.phone, stage: lastErr?.stage ?? 'agent', error: lastErr?.error ?? null, at: lastErr?.at ?? business.created_at }
+        : null,
+      provision_last_error: lastErr,
       first_call_at: facts.first_call_at,
       latest_call: latestCall
         ? {

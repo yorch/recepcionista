@@ -135,6 +135,22 @@ if [[ "${OWNER_PHONE_GRANDFATHER:-}" == "true" ]]; then
     || die "OWNER_PHONE_GRANDFATHER=true needs OWNER_PHONE_GRANDFATHER_ACK=i-understand (and, strongly, OWNER_PHONE_GRANDFATHER_UNTIL / _BEFORE). Without the ack the app ignores it. See docs/runbook.md section 6."
   echo "WARNING: OWNER_PHONE_GRANDFATHER=true: unverified owner phones receive alerts that bypass opt-outs and the country allow-list. Turn it off once owners verified." >&2
 fi
+# Background jobs (docs/runbook.md "Background jobs"): JOBS must be on, off or empty (= on in production); an invalid value is refused
+# instead of silently running the default. Off is allowed but loud: no daily briefing, no gratitude sweep, no cleanup, no retention purge.
+case "${JOBS:-}" in
+  ""|on|off) ;;
+  *) die "JOBS is '${JOBS}' in .env: use on or off (empty = on in production)." ;;
+esac
+if [[ "${JOBS:-}" == "off" ]]; then
+  echo "WARNING: JOBS=off. The 6 PM daily briefing, the hourly gratitude sweep, the expired-row cleanup and the retention purge will NOT run (docs/runbook.md)." >&2
+fi
+for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP; do
+  [[ -z "${!v:-}" || "${!v}" =~ ^[0-9]+$ ]] || die "${v} is '${!v}' in .env: it must be a whole number (docs/env-vars.md)."
+done
+# Phone numbers: in production a failed purchase FAILS provisioning (no fake number is ever issued), so Twilio must be complete.
+if [[ -z "${TWILIO_ACCOUNT_SID:-}" || -z "${TWILIO_AUTH_TOKEN:-}" || -z "${TWILIO_PHONE_NUMBER:-}" ]]; then
+  echo "WARNING: Twilio is not fully configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER). Provisioning a business will answer 503 phone_provider_not_configured: production never hands out a mock number (docs/runbook.md)." >&2
+fi
 # Signup abuse control: the captcha waiver is allowed but loud.
 if [[ "${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" == "true" && ( -z "${TURNSTILE_SECRET_KEY:-}" || -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ) ]]; then
   echo "################################################################################" >&2

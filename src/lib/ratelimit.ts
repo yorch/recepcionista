@@ -21,7 +21,7 @@ import { logger } from '@/lib/log';
 const log = logger('ratelimit');
 
 const CLEANUP_EVERY_MS = 60_000;
-const CLEANUP_HORIZON_MS = 3 * 60 * 60 * 1000;
+export const CLEANUP_HORIZON_MS = 3 * 60 * 60 * 1000;
 export const MAX_WINDOW_MS = 60 * 60 * 1000;
 let lastCleanup = 0;
 
@@ -52,6 +52,17 @@ async function cleanupExpired(): Promise<void> {
     await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: new Date(now - CLEANUP_HORIZON_MS) } } });
   } catch (err) {
     log.warn('cleanup_failed', { err });
+  }
+}
+
+/** Delete rate-limit buckets whose window ended long ago (the scheduled cleanup job). Never throws; returns the count. */
+export async function cleanupRateLimitBuckets(now: Date = new Date()): Promise<number> {
+  try {
+    const res = await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: new Date(now.getTime() - CLEANUP_HORIZON_MS) } } });
+    return res.count;
+  } catch (err) {
+    log.warn('cleanup_failed', { err });
+    return 0;
   }
 }
 

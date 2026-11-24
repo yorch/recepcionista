@@ -217,12 +217,14 @@ integration('billing routes (postgres)', () => {
     const d = (await json(res)).data;
     expect(d).toMatchObject({
       billing_status: 'trialing', plan: 'standard', cancel_at_period_end: false, provisioning_allowed: true, enforced: false,
-      usage: { sms: { used: 3, cap: 10 }, call_minutes: { used: 2, used_seconds: 150, cap: 300 } },
+      usage: { sms: { used: 3, cap: 10 }, call_minutes: { used: 2, used_seconds: 150, cap: 30 } }, // trialing: TRIAL_CALL_MINUTES_CAP (30); the SMS override (10) wins
     });
     expect(d.trial_ends_at).toBeTruthy();
     await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
       await db.setBillingState(biz.id, { billing_status: 'canceled' });
-      expect((await json(await status(req('GET', '/api/billing/status', staff)))).data).toMatchObject({ enforced: true, provisioning_allowed: false });
+      expect((await json(await status(req('GET', '/api/billing/status', staff)))).data).toMatchObject({
+        enforced: true, provisioning_allowed: false, usage: { call_minutes: { cap: 300 } }, // no longer trialing: the plan cap
+      });
     });
   });
 

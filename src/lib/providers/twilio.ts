@@ -112,52 +112,113 @@ export async function sendSms(to: string, body: string, opts: { anyCountry?: boo
   }
 }
 
-export async function provisionNumber(areaCode = '305'): Promise<{ phone: string; mock: boolean }> {
-  if (!hasTwilio()) {
-    const suffix = String(Math.floor(Math.random() * 9000) + 1000);
-    const phone = `+1${areaCode}555${suffix}`;
-    log.warn('number.mock', { phone, area_code: areaCode, reason: 'TWILIO_* incomplete' });
-    return { phone, mock: true };
+export type ProvisionNumberFailureStage = 'not_configured' | 'search' | 'purchase';
+
+export type ProvisionNumberResult =
+  | { ok: true; phone: string; mock: boolean }
+  | {
+    ok: false;
+    stage: ProvisionNumberFailureStage;
+    /** Operator-readable reason (never contains credentials). */
+    error: string;
+  };
+
+/**
+ * May a FAKE number (+1<area>555xxxx, nothing exists at Twilio) be handed to a business? Only in explicit mock mode:
+ * outside production AND with no Twilio credentials at all. In production, or whenever Twilio is configured, a failed
+ * purchase must fail the provisioning step instead: a fake line would silently take no calls while the business shows 'live'.
+ */
+export function fakeNumberAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  const configured = Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER);
+  return env.NODE_ENV !== 'production' && !configured;
+}
+
+function mockNumber(areaCode: string): string {
+  const suffix = String(Math.floor(Math.random() * 9000) + 1000);
+  return `+1${areaCode}555${suffix}`;
+}
+
+/**
+ * Buy a local number. Never returns a fake number when Twilio is configured or in production (see fakeNumberAllowed):
+ * those cases return `{ ok: false }` and the caller must fail the step. If the purchase request itself fails ambiguously
+ * (timeout, 5xx) the account is checked for the candidate number first, so a purchase that actually went through is
+ * adopted instead of being bought again on retry.
+ */
+export async function provisionNumber(
+  areaCode = '305',
+  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+): Promise<ProvisionNumberResult> {
+  const env = deps.env ?? process.env;
+  const doFetch = deps.fetchImpl ?? fetch;
+  const sid = env.TWILIO_ACCOUNT_SID;
+  const token = env.TWILIO_AUTH_TOKEN;
+  const configured = Boolean(sid && token && env.TWILIO_PHONE_NUMBER);
+  if (!configured) {
+    if (fakeNumberAllowed(env)) {
+      const phone = mockNumber(areaCode);
+      log.warn('number.mock', { phone, area_code: areaCode, reason: 'TWILIO_* incomplete (mock mode, not production)' });
+      return { ok: true, phone, mock: true };
+    }
+    log.error('number.not_configured', { area_code: areaCode, reason: 'TWILIO_* incomplete in production: refusing to issue a fake number' });
+    return { ok: false, stage: 'not_configured', error: 'phone provider is not configured' };
   }
-  const sid = process.env.TWILIO_ACCOUNT_SID as string;
-  const token = process.env.TWILIO_AUTH_TOKEN as string;
   const auth = { authorization: `Basic ${btoa(`${sid}:${token}`)}` };
+  const base = `https://api.twilio.com/2010-04-01/Accounts/${sid}`;
+  let candidate: string | undefined;
   try {
-    const search = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${sid}/AvailablePhoneNumbers/US/Local.json?AreaCode=${areaCode}&SmsEnabled=true&VoiceEnabled=true`,
+    const search = await doFetch(
+      `${base}/AvailablePhoneNumbers/US/Local.json?AreaCode=${encodeURIComponent(areaCode)}&SmsEnabled=true&VoiceEnabled=true`,
       { headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS) },
     );
-    const list = await search.json();
-    const candidate = list.available_phone_numbers?.[0]?.phone_number;
-    if (!candidate) {
-      log.warn('number.search_empty', { area_code: areaCode, status: search.status });
-      return provisionNumberFallback(areaCode);
+    const list = (await search.json().catch(() => ({}))) as { available_phone_numbers?: Array<{ phone_number?: string }>; message?: string };
+    candidate = list.available_phone_numbers?.[0]?.phone_number;
+    if (!search.ok || !candidate) {
+      log.warn('number.search_failed', { area_code: areaCode, status: search.status, error: list.message });
+      return { ok: false, stage: 'search', error: search.ok ? `no numbers available in area code ${areaCode}` : `number search failed (${search.status})` };
     }
-    log.debug('number.candidate', { area_code: areaCode, phone: candidate });
-    const buy = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers.json`, {
+  } catch (err) {
+    log.error('number.search_error', { area_code: areaCode, err });
+    return { ok: false, stage: 'search', error: 'number search failed (network)' };
+  }
+  log.debug('number.candidate', { area_code: areaCode, phone: candidate });
+  let failure = 'number purchase failed';
+  try {
+    const buy = await doFetch(`${base}/IncomingPhoneNumbers.json`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ PhoneNumber: candidate }),
       signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
     });
-    const bought = await buy.json();
-    if (!buy.ok) {
-      log.warn('number.buy_failed', { phone: candidate, status: buy.status, error: bought.message });
-      return provisionNumberFallback(areaCode);
+    const bought = (await buy.json().catch(() => ({}))) as { phone_number?: string; message?: string };
+    if (buy.ok && bought.phone_number) {
+      log.info('number.bought', { phone: bought.phone_number, area_code: areaCode });
+      return { ok: true, phone: bought.phone_number, mock: false };
     }
-    log.info('number.bought', { phone: bought.phone_number, area_code: areaCode });
-    return { phone: bought.phone_number, mock: false };
+    failure = `number purchase failed (${buy.status})`;
+    log.warn('number.buy_failed', { phone: candidate, status: buy.status, error: bought.message });
+    // A 4xx is a definite refusal (nothing was bought); only an ambiguous answer needs the reconciliation below.
+    if (buy.status >= 400 && buy.status < 500) return { ok: false, stage: 'purchase', error: failure };
   } catch (err) {
-    log.error('number.error', { area_code: areaCode, err });
-    return provisionNumberFallback(areaCode);
+    failure = 'number purchase failed (network)';
+    log.error('number.buy_error', { phone: candidate, err });
   }
-}
-
-function provisionNumberFallback(areaCode: string) {
-  const suffix = String(Math.floor(Math.random() * 9000) + 1000);
-  const phone = `+1${areaCode}555${suffix}`;
-  log.warn('number.fallback_mock', { phone });
-  return { phone, mock: true };
+  // Ambiguous outcome: did Twilio create it anyway? Adopt it rather than leave an orphan that a retry would duplicate.
+  try {
+    const found = await doFetch(`${base}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(candidate)}`, {
+      headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
+    });
+    if (found.ok) {
+      const rows = (await found.json().catch(() => null)) as { incoming_phone_numbers?: Array<{ phone_number?: string }> } | null;
+      const hit = (rows?.incoming_phone_numbers ?? []).find((n) => n.phone_number === candidate);
+      if (hit?.phone_number) {
+        log.warn('number.bought_adopted', { phone: hit.phone_number, reason: 'purchase answer was lost but the number exists' });
+        return { ok: true, phone: hit.phone_number, mock: false };
+      }
+    }
+  } catch (err) {
+    log.error('number.reconcile_error', { phone: candidate, err });
+  }
+  return { ok: false, stage: 'purchase', error: failure };
 }
 
 /** Numbers issued by the mock pool (+1<area>555xxxx): nothing exists at Twilio for them. */

@@ -119,8 +119,13 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
       <Card className="mt-6">
         <CardHead title="Usage this month" subtitle={s.usage.period_start ? `Since ${s.usage.period_start}` : undefined} />
         <div className="space-y-5 p-5">
-          <Meter label="Text messages" used={s.usage.sms.used} cap={s.usage.sms.cap} unit="texts" />
+          <Meter label="Text message segments" used={s.usage.sms.used} cap={s.usage.sms.cap} unit="segments" />
           <Meter label="Call minutes" used={s.usage.call_minutes.used} cap={s.usage.call_minutes.cap} unit="minutes" />
+          <p className="text-[11px] text-[#6b7b91]">
+            Texts are counted in segments, the unit carriers bill: a short plain text is 1 segment, a longer one 2 or more, and
+            emoji or accented characters (like a Spanish message with an emoji) make each segment shorter. A text that would go past your limit is not sent.
+            {s.billing_status === 'trialing' ? ' Free trials have a lower limit than paid plans.' : ''}
+          </p>
           <p className="text-[11px] text-[#6b7b91]">Counts reset on the first of each month in your time zone ({tz}).</p>
         </div>
       </Card>

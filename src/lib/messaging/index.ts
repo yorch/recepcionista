@@ -6,7 +6,7 @@
 import { checkSmsAllowed, countryForBusiness, getBusiness, isOptedOut, logSms, recordSms } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
 import { tzOf } from '@/lib/time';
-import { decide, withStopFooter } from '@/lib/messaging/policy';
+import { decide, smsSegments, withStopFooter } from '@/lib/messaging/policy';
 import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
 import { ownerVerificationText } from '@/lib/messaging/owner-verify';
 import { logger } from '@/lib/log';
@@ -39,10 +39,13 @@ export interface SendAndLogOutput {
   blocked?: BlockedStatus;
 }
 
-/** Count a sent text against the plan; a metering failure must never turn a delivered text into an error. */
-export async function meterSms(businessId: string, n = 1): Promise<void> {
+/**
+ * Count sent SMS SEGMENTS against the plan (pass `smsSegments(text)`; one segment by default); a metering failure must
+ * never turn a delivered text into an error.
+ */
+export async function meterSms(businessId: string, segments = 1): Promise<void> {
   try {
-    await recordSms(businessId, n);
+    await recordSms(businessId, Math.max(1, Math.floor(segments)));
   } catch (err) {
     log.warn('usage.record_failed', { business: businessId, err });
   }
@@ -89,17 +92,21 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
 
   if (!decision.allow) return blockedResult(decision.reason, input.consent_basis ?? null);
 
-  // Plan cap: customer-facing texts stop at the cap; owner alerts are exempt from blocking (but are still counted).
+  // The exact text that goes out (with the STOP footer): its segment count is what is metered and what the cap is checked against.
+  const text = decision.footer ? withStopFooter(input.body) : input.body;
+  const segments = Math.max(1, smsSegments(text));
+
+  // Plan cap: customer-facing texts stop at the cap (a text that would not fit in what is left is blocked);
+  // owner alerts are exempt from blocking (but are still counted).
   const ownerClass = decision.consent_basis === 'owner_alert';
   if (!ownerClass) {
-    const allowed = await checkSmsAllowed(input.business_id);
+    const allowed = await checkSmsAllowed(input.business_id, new Date(), segments);
     if (!allowed.ok) {
-      log.warn('send.over_cap', { business: input.business_id, reason: allowed.reason, used: allowed.used, cap: allowed.cap });
+      log.warn('send.over_cap', { business: input.business_id, reason: allowed.reason, used: allowed.used, cap: allowed.cap, segments });
       return blockedResult('blocked_cap', decision.consent_basis);
     }
   }
 
-  const text = decision.footer ? withStopFooter(input.body) : input.body;
   // The country allow-list does not apply to the owner's verified number (proven by possession).
   const result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass });
 
@@ -120,7 +127,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
       booking: input.booking_id ?? null,
       ms: Date.now() - started,
     });
-    await meterSms(input.business_id);
+    await meterSms(input.business_id, segments);
   }
 
   const sms = await logSms({
@@ -153,8 +160,9 @@ export async function sendOwnerVerificationCode(businessId: string, phoneE164: s
     }, { country });
     return { sms, result: { id: '', status: 'failed', error: 'blocked_opt_out' }, blocked: 'blocked_opt_out' };
   }
-  const result = await sendSms(phoneE164, ownerVerificationText(code)); // fixed template: nothing tenant-controlled
-  if (result.status !== 'failed') await meterSms(businessId);
+  const verificationText = ownerVerificationText(code); // fixed template: nothing tenant-controlled
+  const result = await sendSms(phoneE164, verificationText);
+  if (result.status !== 'failed') await meterSms(businessId, smsSegments(verificationText));
   const sms = await logSms({
     business_id: businessId, to_phone: phoneE164,
     // The code itself is not retained in the log.

@@ -88,13 +88,22 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 | `BILLING_TRIAL_DAYS` | 0-90, default 7 |
 | `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh and compose. Outside production only `true` enforces |
 | `BILLING_PAST_DUE_GRACE_DAYS` | default 5 |
-| `PLAN_SMS_CAP`, `PLAN_CALL_MINUTES_CAP` | default monthly caps (500 texts, 300 minutes); per-business overrides win |
+| `PLAN_SMS_CAP`, `PLAN_CALL_MINUTES_CAP` | default monthly caps (500 SMS segments, 300 minutes); per-business overrides win |
+| `TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP` | lower caps while `billing_status='trialing'` (defaults 50 segments, 30 minutes); never above the plan cap, per-business overrides win |
 | `BILLING_PLAN_NAME` | label stored on subscribed businesses, default `standard` |
 | `BILLING_ALLOW_PROMO_CODES` | `true` shows the promotion code box in Checkout |
 | `APP_URL` / `PUBLIC_BASE_URL` | return URLs; required in production |
 
 `deploy.sh` refuses to deploy when `BILLING_ENFORCED` is unset/invalid, and with `BILLING_ENFORCED=true` unless `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
 `STRIPE_BILLING_WEBHOOK_SECRET` are set. In production a missing key or price makes checkout answer 503; the local mock never runs there.
+
+#### How texts are counted
+
+SMS usage is metered in **segments**, the unit carriers bill, not in sends. Plain GSM-7 text is 160 characters in one segment and 153 per segment once it is split; a message containing any character outside GSM-7
+(an emoji, or an accented letter such as `a` with an acute accent; `n` with a tilde is fine) is UCS-2: 70, then 67 per segment. The count is taken on the text that actually goes out, STOP footer included
+(`src/lib/messaging/policy.ts` `smsSegments`). A customer-facing text that would not fit in what is left of the cap (used + segments > cap) is **blocked** (`blocked_cap`) instead of overshooting; owner alerts are never blocked but are counted.
+The Billing page shows "Text message segments". While a business is **trialing** (and billing is enforced) the lower `TRIAL_SMS_CAP` / `TRIAL_CALL_MINUTES_CAP` apply (default 50 / 30, never more than the paid-plan cap); an admin
+per-business override (`sms_cap_override` / `call_minutes_cap_override`) always wins, so a trial that needs more is one `/api/admin/billing` call away.
 
 ### 5. Grandfather existing businesses (before enforcing)
 

@@ -18,7 +18,7 @@ Not legal advice.
    header is stored as a secret reference instead of a literal.
    Open signup also needs a captcha in production: `TURNSTILE_SECRET_KEY` + `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, or the explicit, not recommended `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` (deploy.sh fails without one of them; at runtime `POST /api/auth/signup` answers `503 signup_disabled` and `/signup` shows an invite-only notice; invites keep working).
    Must be absent or off: `ALLOW_INSECURE_DEV`, `DEMO_MODE`, `STRIPE_ALLOW_UNSIGNED`. Keep `RETENTION_JOB` unset
-   until step 6. Set `TRUSTED_PROXY=true` only behind a proxy you control.
+   until step 6. `JOBS` is on by default in production (see "Background jobs" below); leave it unset unless you deliberately want `off`. Set `TRUSTED_PROXY=true` only behind a proxy you control.
 3. **Deploy** (`./deploy.sh`), then run `bun run verify:deploy` (section 3) before touching DNS/number routing.
 4. **Re-provision every business** (`POST /api/businesses/:id/provision`, admin token) so each ElevenLabs agent gets
    the current first message (disclosure), prompt and tool definitions (the tool secret header is refreshed on
@@ -34,6 +34,33 @@ Not legal advice.
 7. **Create the first owner:** `CREATE_USER_PASSWORD=... bun scripts/create-user.ts --email owner@x.com --role owner --business <id>`
    (and a global admin with `--role admin`). Log in at `/login`.
 8. **Provider-side settings** (section 5): retention / zero-retention in ElevenLabs, Twilio recording off.
+
+### Background jobs (daily briefing, gratitude sweep, cleanup, retention)
+
+One small runner starts with the app (`src/instrumentation.ts` -> `src/lib/jobs`), never during `next build`. `JOBS=on|off` (default **on in
+production**, off in development/test), `JOBS_TICK_SECONDS` (default 60). It runs inside every app instance; each unit of work is fenced by a
+Postgres lease plus an idempotency claim in `processed_events`, so several instances (or a restart in the middle of a pass) never do the same work twice.
+
+| Job | When | What it does |
+| --- | --- | --- |
+| `daily_briefing` | 18:00 in each business's own time zone (a missed run is caught up until local midnight, never the next day) | Generates the day's briefing once per local day for every **live** business whose billing allows service (`isProvisioningAllowed`; in production a plan is always required, so comp admin-provisioned tenants with `/api/admin/billing`). Then texts the owner a link to `/dashboard/briefings`, only to a **verified** owner phone, never in quiet hours (9pm-8am local) and only while the SMS cap has room. A briefing already generated after 18:00 that day (by hand or by another instance) is not redone. Max 10 per pass; the rest follow on the next pass |
+| `gratitude_sweep` | hourly | `runGratitudeSweep` per live, billing-allowed business: consent, opt-out, quiet-hours and cap rules are unchanged. A business in quiet hours is skipped. Max 25 businesses per pass |
+| `cleanup` | hourly | deletes expired sessions, expired email tokens, `processed_events` older than 30 days and stale rate-limit buckets |
+| `retention` | daily, only when `RETENTION_JOB=on` | the PII purge of docs/compliance.md. Default OFF is unchanged |
+
+Look and drive (admin token): `GET /api/admin/jobs` shows, per job, whether this instance runs it, `last_run_at`, the newest recorded result and `next_due_at`.
+`POST /api/admin/jobs/run {"job":"daily_briefing"|"gratitude_sweep"|"cleanup"|"retention","business_id"?:"...","dry_run"?:true}` runs one job by hand;
+**`dry_run` defaults to true** (reports what it would do, changes nothing). A real manual run ignores only the time-of-day gate, never billing, consent, caps or idempotency, and is audited (`jobs.manual_run`).
+Job runs that did work or failed are in the audit trail (`jobs.<name>`). No new table: state lives in `processed_events` (`job-state`, `daily-briefing`, `gratitude-sweep`) and `provision_locks` (`job:*`).
+If a briefing never appears: check `GET /api/admin/jobs`, then the owner's phone verification, the business `status` (must be `live`) and billing; the logs line is `jobs ... briefing.failed`.
+
+### Phone numbers fail loudly
+
+`POST /api/businesses/:id/provision` never stores a fake number when Twilio is configured or in production. A failed search/purchase answers **502** (`number_purchase_failed`) and, without Twilio credentials in production,
+**503** (`phone_provider_not_configured`); the business stays `onboarding`, an audit event (`provision.number_failed`) is written and retrying is safe (nothing was bought, or the number that was bought is adopted/reused).
+If the number was bought but the voice agent / post-call webhook step failed, the answer is 502 `agent_registration_failed` with `partial.phone`: the number stays recorded on the business (`provision.partial` audit event),
+the business is still `onboarding`, `GET /api/businesses/:id/onboarding-status` shows `provision_partial`, and the next provision call reuses that number (never buys a second one) and resumes at the agent step. The mock-pool number
+(`+1<area>555xxxx`) is issued only outside production with no Twilio credentials at all.
 
 ## 2. Manual live test-call protocol
 

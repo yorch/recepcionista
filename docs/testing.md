@@ -47,6 +47,10 @@ bun run test:integration
 Re-run `prisma migrate deploy` whenever new migrations land (the exclusion constraint and the unique agent id
 the tests rely on come from migrations). `LOG_LEVEL=debug` shows the application logs, which the tests silence.
 
+The job runner, provisioning failure paths and SMS metering have their own files: `tests/jobs-schedule.test.ts` (time zones, DST, switches), `tests/integration/jobs.test.ts`
+(two concurrent runners, billing/cap/quiet-hour gating, admin endpoints; the clock is injected with `now`), `tests/integration/provision-numbers.test.ts` (fake Twilio/ElevenLabs `fetch`: purchase failure,
+partial failure + retry without a second purchase, production refusal) and `tests/sms-metering.test.ts` / `tests/integration/sms-metering.test.ts` (segments, emoji, footer budget, trial caps).
+
 CI (`.github/workflows/ci.yml`) starts a `postgres:16` service, runs `prisma migrate deploy` against
 `recepcionista_test` and then `bun test` with `TEST_DATABASE_URL` set.
 

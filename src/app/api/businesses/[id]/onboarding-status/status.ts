@@ -31,6 +31,13 @@ export interface OnboardingStatus {
   /** True for the mock number pool (+1<area>555xxxx): it cannot receive real calls. */
   phone_mock: boolean;
   status: string;
+  /**
+   * Set when an earlier provisioning run bought/recorded the number but a later step (voice agent / webhook) failed.
+   * The business is NOT live; retrying provisioning reuses `phone` (no second purchase).
+   */
+  provision_partial: { phone: string; stage: string; error: string | null; at: string } | null;
+  /** The most recent provisioning failure (number purchase or agent step), if the business is not live. */
+  provision_last_error: { stage: string; error: string | null; at: string } | null;
   first_call_at: string | null;
   latest_call: { started_at: string; language: string | null; duration_sec: number | null; status: string } | null;
   first_booking_at: string | null;

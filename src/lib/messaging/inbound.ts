@@ -4,6 +4,7 @@
  */
 import { countryForBusiness, recordFollowupConsentFromReply, recordOptIn, recordOptOut } from '@/lib/db';
 import { meterSms } from '@/lib/messaging';
+import { smsSegments } from '@/lib/messaging/policy';
 import { consentReply, helpReply, isPositiveKeyword, mentionsStopWord, parseKeyword, startReply, stopReply, twiml } from '@/lib/messaging/keywords';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
@@ -24,26 +25,30 @@ export async function applyInboundKeyword(business: Business, from: string, body
   const keyword = parseKeyword(body);
   if (keyword === 'stop') {
     await recordOptOut(business.id, from, 'stop_keyword', country);
-    await meterSms(business.id);
-    return twiml(stopReply(business.name));
+    const reply = stopReply(business.name);
+    await meterSms(business.id, smsSegments(reply));
+    return twiml(reply);
   }
   if (keyword === 'start') {
     await recordOptIn(business.id, from, country);
     // START is also an explicit opt in to the follow-up text on their latest booking.
     await recordFollowupConsentFromReply(business.id, from, `${FOLLOWUP_CONSENT_REPLY_SOURCE}:start`, country);
-    await meterSms(business.id);
-    return twiml(startReply(business.name));
+    const reply = startReply(business.name);
+    await meterSms(business.id, smsSegments(reply));
+    return twiml(reply);
   }
   if (keyword === 'help') {
-    await meterSms(business.id);
-    return twiml(helpReply(business.name, business.phone));
+    const reply = helpReply(business.name, business.phone);
+    await meterSms(business.id, smsSegments(reply));
+    return twiml(reply);
   }
   if (isPositiveKeyword(body)) {
     // A customer's own YES / Y / SI is the re-permission path for bookings made before follow-up consent was recorded.
     const res = await recordFollowupConsentFromReply(business.id, from, `${FOLLOWUP_CONSENT_REPLY_SOURCE}:yes`, country);
     if (res.granted) {
-      await meterSms(business.id);
-      return twiml(consentReply(business.name));
+      const reply = consentReply(business.name);
+      await meterSms(business.id, smsSegments(reply));
+      return twiml(reply);
     }
     return null;
   }

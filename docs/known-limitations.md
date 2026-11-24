@@ -1,7 +1,7 @@
 # Known limitations
 
 Deliberate or accepted gaps in this release, so nobody discovers them in production. Each says what is missing, the
-consequence and what the operator can do. Hardening fixed in review rounds 1-3 is in `docs/review/`; this file lists what
+consequence and what the operator can do. Hardening fixed in review rounds 1-3 is in `docs/review/` (the reviews are point-in-time snapshots: several of their statements, such as "no CI" or "nothing schedules the briefing", were true when written and are not true now; `docs/changelog-hardening.md` maps every finding to its current state); this file lists what
 remains. Not legal advice (see `docs/compliance.md`).
 
 ## Accounts and authentication (docs/auth.md)
@@ -19,7 +19,7 @@ remains. Not legal advice (see `docs/compliance.md`).
 ## Deployment and scale
 
 - **Single region, single Postgres, no read replicas.** Rate limits, leases, idempotency claims and the signup caps live in Postgres (`rate_limit_buckets`, `processed_events`, leases), so several app instances behind one database work,
-  but multi-region or active-active is not designed. The daily retention job and the in-process scheduler run inside the app process (they are idempotent, so a second instance repeats nothing harmful).
+  but multi-region or active-active is not designed. The background job runner (daily briefing at 18:00 per business time zone, hourly gratitude sweep, hourly cleanup, and the retention purge when enabled) runs inside every app process under Postgres leases and idempotency claims, so a second instance repeats nothing. It is a timer, not a queue: if every instance is down at 18:00 the briefing is caught up when one returns, but only until local midnight; the briefing-ready text is skipped in quiet hours and when the SMS cap is full. Work per pass is bounded (10 briefings, 25 gratitude sweeps), so very large installs catch up over several ticks. `JOBS=off` stops all of it.
 - **Backups, restores, TLS termination and the reverse proxy are the operator's** (`DEPLOY.md`, `docs/runbook.md`). Per-client rate limits need `TRUSTED_PROXY=true` behind a proxy you control; without it all clients share one bucket.
 - **Plain-HTTP staging** works only with `CSP_UPGRADE_INSECURE=false` or an `http://` `APP_URL` (otherwise browsers upgrade subresources to HTTPS and fail); Twilio, Stripe and ElevenLabs call back over public HTTPS, so a staging box that must receive their webhooks needs HTTPS anyway.
 - `NEXT_PUBLIC_*` values (Turnstile site key, plan price text) are inlined at build time: changing them needs `./deploy.sh` (a rebuild), not a restart.
@@ -31,9 +31,10 @@ remains. Not legal advice (see `docs/compliance.md`).
 - **Provider-side retention needs operator settings.** ElevenLabs conversation retention / zero-retention, audio saving, Twilio recording and message-log retention, and the LLM provider's no-training settings are configured by the operator in each console
   (`docs/runbook.md` section 5). The app does not set them, cannot verify them, and does not purge provider-side recordings/transcripts (declined calls: best effort). Retention shorter than post-call delivery would break the transcript webhook.
 - **Several ElevenLabs API call shapes are unverified best effort** (the conversation-initiation webhook configuration on workspace/agent, and, for tenant release, detaching the shared phone number from an agent before deleting it). Failures are logged and the runbook says what to check by hand.
-- **Number provisioning is US-only with a fixed starting area code (305)**, falling back to a mock number when Twilio search/buy fails (logged `number.fallback_mock`). A tenant outside the US needs an operator-assigned number. Provisioning binds the single configured `ELEVENLABS_PHONE_NUMBER_ID` to an agent; serving several tenant lines on the native-Twilio path
+- **Number provisioning is US-only with a fixed starting area code (305).** When Twilio search/purchase fails (or in production without Twilio credentials) provisioning FAILS with a 502/503 and the business stays `onboarding`; no fake number is ever issued there (the mock-pool number exists only outside production with no Twilio credentials). A purchase whose answer was lost is looked up and adopted, and a number bought before a later failed step is kept and reused by the retry. A tenant outside the US needs an operator-assigned number. Provisioning binds the single configured `ELEVENLABS_PHONE_NUMBER_ID` to an agent; serving several tenant lines on the native-Twilio path
   means importing each number into ElevenLabs, which is an operator step the app does not perform.
 - **Languages: English and Spanish only** for the agent, texts and UI.
+- **SMS caps count segments, not sends**, using the GSM-7/UCS-2 rules of `smsSegments`. Carriers can split slightly differently (for example some treat a few characters as extension table), so the count can differ from the Twilio invoice by a segment on edge cases; inbound-reply auto-answers sent by Twilio are counted from our own reply templates. Trial caps (`TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP`) apply only while billing is enforced.
 - **Usage metering depends on the post-call webhook.** Call minutes are added once per conversation when that webhook is accepted; a conversation whose post-call never arrives, is unmatched or is rejected is not metered, so the call cap can under-count.
   Over-cap calls are cut to 60 s by the initiation override (needs that override enabled on the agent); the cap is not enforced mid-call for calls already running.
 - **Emergency handling is advice plus an owner alert**, not dispatch. The agent tells the caller to hang up and call 911 and alerts a verified owner phone; an unverified or opted-out owner phone gets no alert (the agent says so honestly).

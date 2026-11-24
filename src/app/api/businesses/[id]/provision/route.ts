@@ -1,9 +1,10 @@
+import { NextResponse } from 'next/server';
 import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
-import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
+import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase, recordAudit } from '@/lib/db';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
-import { provisionNumber } from '@/lib/providers/twilio';
+import { isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
 import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
@@ -88,6 +89,40 @@ function lostLeaseCheck(signal: AbortSignal): void {
   if (signal.aborted) throw new Error('provisioning lease lost; aborting before the next paid step');
 }
 
+
+/**
+ * A provisioning step failed. Never a 200: the business stays 'onboarding' (never 'live'), nothing fake is stored, and the
+ * response says whether a number was already bought (`partial`) so the retry is known to reuse it (no second purchase).
+ */
+function provisionFailure(
+  status: 502 | 503,
+  error: string,
+  extra: { code: string; stage: string; phone?: string | null },
+): ReturnType<typeof fail> {
+  return NextResponse.json({
+    ok: false,
+    error,
+    code: extra.code,
+    stage: extra.stage,
+    retryable: true,
+    ...(extra.phone ? { partial: { phone: extra.phone, number_kept: true } } : {}),
+    retry: extra.phone
+      ? 'Your phone number is reserved for this business. Try again in a minute: the retry reuses it and will not buy another.'
+      : 'Nothing was purchased or charged. Try again in a minute; if it keeps failing, contact support.',
+  }, { status }) as unknown as ReturnType<typeof fail>;
+}
+
+function auditProvision(principal: Principal, businessId: string, action: string, meta: Record<string, unknown>) {
+  return recordAudit({
+    actor_kind: principal.kind === 'admin' ? (principal.via === 'user' && principal.user ? 'user' : 'admin_token') : 'user',
+    actor_user_id: principal.kind === 'user' ? principal.user.id : principal.user?.id ?? null,
+    business_id: businessId,
+    action,
+    target: `business:${businessId}`,
+    meta,
+  });
+}
+
 async function provision(
   req: Request,
   id: string,
@@ -127,15 +162,15 @@ async function provision(
     let kb = await getKnowledgeBase(id);
     let regenerated = false;
 
-    // Idempotent: already provisioned (number + agent + healthy KB) -> return it
+    // Idempotent: already provisioned and live (number + agent + healthy KB) -> return it
     // instead of buying a number / creating an agent again.
-    if (!force && business.phone && business.agent_id && kb && !kbIsStale(kb, business) && !kbNeedsRegen(kb, business)) {
+    if (!force && business.status === 'live' && business.phone && business.agent_id && kb && !kbIsStale(kb, business) && !kbNeedsRegen(kb, business)) {
       log.info('already_provisioned', { business: id, phone: business.phone });
       return ok<ProvisionResult>({
         business,
         knowledge_base: kb,
         phone: business.phone,
-        mock: business.phone.includes('555'),
+        mock: isMockPoolNumber(business.phone),
         agent_id: business.agent_id,
         regenerated: false,
       });
@@ -177,18 +212,40 @@ async function provision(
     // Preserve the business's existing line: CONTRACTS.md documents the demo
     // number (+13055550142) and WS3 routes inbound calls by phone, so a reset
     // must not hand the business a new one. Provision only if it has none.
+    // A number recorded by an earlier, partly failed run is such a line: the retry reuses it and never buys again.
     let phone = business.phone;
     let mock = true;
     if (!phone) {
       lostLeaseCheck(signal); // never buy a number after the lease was lost: a successor may already hold it
       const provisioned = await provisionNumber('305');
+      if (!provisioned.ok) {
+        // Never a fake number once Twilio is configured or in production: fail the step, stay 'onboarding'.
+        await auditProvision(principal, id, 'provision.number_failed', { stage: provisioned.stage, error: provisioned.error });
+        log.error('number.failed', { business: id, stage: provisioned.stage, error: provisioned.error });
+        return provisionFailure(
+          provisioned.stage === 'not_configured' ? 503 : 502,
+          provisioned.stage === 'not_configured'
+            ? 'Phone provider is not configured on this server. Contact support.'
+            : `We could not get a phone number from the carrier (${provisioned.error}).`,
+          { code: provisioned.stage === 'not_configured' ? 'phone_provider_not_configured' : 'number_purchase_failed', stage: 'number' },
+        );
+      }
       phone = provisioned.phone;
       mock = provisioned.mock;
+      // Record the number IMMEDIATELY (status unchanged: it is not 'live' until the agent exists), so a failure below can
+      // never lose a paid number and a retry reuses it.
+      const saved = await updateBusiness(id, { phone }).catch(() => null);
+      if (!saved) {
+        log.error('number.record_failed', { business: id, phone, action: 'releasing the number so it is not orphaned' });
+        const released = await releaseNumber(phone);
+        await auditProvision(principal, id, 'provision.number_record_failed', { phone, released: released.ok });
+        return provisionFailure(502, 'We bought a number but could not save it, so it was released. Try again.', { code: 'number_record_failed', stage: 'number' });
+      }
+      await auditProvision(principal, id, 'provision.number_purchased', { phone, mock });
     } else {
-      mock = phone.includes('555'); // mock-pool numbers are issued as +1<area>555xxxx
+      mock = isMockPoolNumber(phone); // mock-pool numbers are issued as +1<area>555xxxx
     }
-    let updated = await updateBusiness(id, { phone, status: 'live' });
-    if (!updated) return fail('business not found', 404);
+    let updated = (await getBusiness(id)) ?? business;
     log.info('number.assigned', { business: id, phone, mock });
 
     // Only rebuild the prompt when it genuinely fails our rules — a curated or
@@ -211,17 +268,19 @@ async function provision(
     }
 
     // 3. Register the ElevenLabs agent against THIS knowledge base so the live
-    //    phone line speaks the prompt we just wrote. Best-effort by design:
-    //    a failed registration must never leave the business unprovisioned.
+    //    phone line speaks the prompt we just wrote. A configured provider that FAILS leaves the business partly
+    //    provisioned: the number stays recorded, status stays 'onboarding', the response is a 502 and a retry resumes here.
     let agentId: string | undefined;
     let agentMock: boolean | undefined;
     let webhookSecret: string | undefined;
     let postCallPending = false;
+    let agentFailure: string | null = null;
     lostLeaseCheck(signal);
     try {
       const agent = await createOrUpdateAgent({ business: updated, kb });
       agentId = agent.agent_id;
       agentMock = agent.mock;
+      if (agent.error) agentFailure = `agent registration failed (${agent.error})`;
       if (!agent.mock && agent.agent_id && agent.agent_id !== updated.agent_id) {
         const withAgent = await updateBusiness(id, { agent_id: agent.agent_id });
         if (withAgent) updated = withAgent;
@@ -241,7 +300,22 @@ async function provision(
       }
     } catch (err) {
       log.error('agent.registration_failed', { business: id, err });
+      agentFailure = 'agent or webhook registration failed';
     }
+
+    if (agentFailure) {
+      await auditProvision(principal, id, 'provision.partial', { phone, stage: 'agent', error: agentFailure });
+      return provisionFailure(
+        502,
+        `Your phone number is ready but the voice agent could not be set up (${agentFailure}).`,
+        { code: 'agent_registration_failed', stage: 'agent', phone },
+      );
+    }
+
+    const live = await updateBusiness(id, { status: 'live' });
+    if (!live) return fail('business not found', 404);
+    updated = live;
+    await auditProvision(principal, id, 'provision.completed', { phone, mock, agent_mock: agentMock ?? null });
 
     log.info('done', {
       business: id,

@@ -127,6 +127,15 @@ upgrade (existing businesses have a 365-day window, which would otherwise purge 
 logs the counts that *would* be purged. Review each business's window (Dashboard > Settings), check with
 `POST /api/admin/retention {"dry_run":true}` (admin token), then set `RETENTION_JOB=on` in `.env`. See `docs/compliance.md`.
 
+**Background jobs are on by default in production** (`JOBS`, unset = on): the 6 PM briefing per business time zone, the hourly gratitude sweep and the hourly
+cleanup of expired sessions/tokens/events/rate-limit rows run inside the `app` container (no extra service, no cron needed), fenced by Postgres leases so scaling the
+app to several containers is safe. `JOBS=off` stops all of them (deploy.sh prints a warning). Tick length: `JOBS_TICK_SECONDS` (default 60). Check them with
+`GET /api/admin/jobs` (admin token); run one by hand with `POST /api/admin/jobs/run` (dry run unless `"dry_run":false`). `docs/runbook.md` has the details.
+
+**Twilio must be complete in production** (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`): provisioning refuses to hand out a mock number there
+(503 `phone_provider_not_configured`; a failed purchase is a 502 and the retry reuses any number already bought). deploy.sh warns when they are missing.
+Trial businesses get lower caps (`TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP`; docs/billing.md).
+
 **Set `STRIPE_WEBHOOK_SECRET` in production.** Without it,
 `/api/payments/webhook` would accept *unsigned* payloads, and anyone who finds
 the URL could mark a deposit as paid. `deploy.sh` refuses to deploy when it is

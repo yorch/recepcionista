@@ -140,10 +140,12 @@ export async function invalidateUserEmailTokens(userId: string, purpose: EmailTo
   return res.count;
 }
 
+export const EMAIL_TOKEN_GRACE_MS = 24 * 60 * 60 * 1000;
+
 /** Delete tokens that expired more than a day ago. Never throws; returns the count. */
 export async function deleteExpiredEmailTokens(now: Date = new Date()): Promise<number> {
   try {
-    const res = await prisma.emailToken.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - 24 * 60 * 60 * 1000) } } });
+    const res = await prisma.emailToken.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - EMAIL_TOKEN_GRACE_MS) } } });
     return res.count;
   } catch {
     return 0;
