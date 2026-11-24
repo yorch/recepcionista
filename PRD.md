@@ -215,7 +215,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Post-deploy checks (signatures, auth, public pages) | Shipped | `scripts/verify-deploy.ts`, `docs/runbook.md` section 3 |
 | Audit log of security, billing, provisioning and job events | Shipped | `src/lib/db/audit.ts`, `docs/auth.md`, `docs/billing.md` |
 | Typed, paginated database layer (Prisma; list queries return a `Page`) | Shipped | `src/lib/db/paging.ts`, `src/lib/db/index.ts` (`listCallsPage`) |
-| CI: install, Prisma generate, typecheck, lint, build, migrate, `bun test` against Postgres 16 with `TEST_DATABASE_URL` set (production runs Postgres 17) | Shipped | `.github/workflows/ci.yml` |
+| CI: install, Prisma generate, typecheck, lint, build, migrate, `bun test` against Postgres 17 (same major as production) with `TEST_DATABASE_URL` set | Shipped | `.github/workflows/ci.yml` |
 | Test suite: about 730 `test()`/`it()` cases in about 59 files under `tests/`, including `tests/db` and `tests/integration` (DB-backed suites need `TEST_DATABASE_URL`) | Shipped. Not re-run for this document. | `tests/`, `docs/testing.md` |
 | Hardening changelog (every review finding mapped to its current state) and point-in-time reviews | Shipped | `docs/changelog-hardening.md`, `docs/review/` |
 

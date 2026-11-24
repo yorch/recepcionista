@@ -28,7 +28,7 @@ nothing is wiped globally and runs can share one database.
 Docker:
 
 ```bash
-docker run -d --name rc-scratch -e POSTGRES_PASSWORD=postgres -p 54329:5432 postgres:16
+docker run -d --name rc-scratch -e POSTGRES_PASSWORD=postgres -p 54329:5432 postgres:17
 docker exec rc-scratch createdb -U postgres scratch
 export TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54329/scratch
 DATABASE_URL=$TEST_DATABASE_URL bunx prisma migrate deploy
@@ -51,7 +51,7 @@ The job runner, provisioning failure paths and SMS metering have their own files
 (two concurrent runners, billing/cap/quiet-hour gating, admin endpoints; the clock is injected with `now`), `tests/integration/provision-numbers.test.ts` (fake Twilio/ElevenLabs `fetch`: purchase failure,
 partial failure + retry without a second purchase, production refusal) and `tests/sms-metering.test.ts` / `tests/integration/sms-metering.test.ts` (segments, emoji, footer budget, trial caps).
 
-CI (`.github/workflows/ci.yml`) starts a `postgres:16` service, runs `prisma migrate deploy` against
+CI (`.github/workflows/ci.yml`) starts a `postgres:17` service (matching production), runs `prisma migrate deploy` against
 `recepcionista_test` and then `bun test` with `TEST_DATABASE_URL` set.
 
 ## Destructive scripts
