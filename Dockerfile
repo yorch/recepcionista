@@ -14,7 +14,7 @@
 # Digests are the multi-arch index digests, resolved 2026-11-23. Tags stay in
 # the comments so Dependabot can bump both together.
 # oven/bun:1.4.1
-FROM oven/bun:1.4.1@sha256:9e123d5fc069e29d519fd4c981afb61b8542ac80274771961136db1e4538d53e AS base
+FROM oven/bun:1.4.5@sha256:3aa040e5445efa09d75bb428a64ba50db13e2b3ac9b6b0c7f145615f62b2ee18 AS base
 WORKDIR /app
 
 # Prisma's query engine links against openssl at runtime. ca-certificates is for
