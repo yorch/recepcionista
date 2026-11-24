@@ -2,7 +2,7 @@
  * Phase 2 telephony (postgres, fake providers): live transcript poller + SSE + polling fallback, native transfer, call screening,
  * STIR/SHAKEN buckets, metering reconciliation, cap warnings, language detection config.
  */
-import { integration, SECRETS, withEnv } from '../helpers/env';
+import { integration, outboundCalls, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { cleanup, loadDb, loadPrisma, newBusiness, phone, toolRequest, twilioSignature, uniq } from '../helpers/fixtures';
 import { hashPassword } from '../../src/lib/password';
@@ -668,6 +668,11 @@ integration('telephony phase 2 (postgres)', () => {
       await purgeExpiredData(new Date());
       expect(await prisma.pendingRecordingDeletion.count({ where: { recordingSid: old, provider: 'elevenlabs' } })).toBe(1);
       await prisma.pendingRecordingDeletion.deleteMany({ where: { recordingSid: old } });
+      // the erase and the purge each tried the inline provider delete on the (blocked) global fetch: this test owns those two
+      // attempts, so assert them and take them out of the shared outboundCalls list instead of leaking them into later files
+      const mine = [`https://api.elevenlabs.io/v1/convai/conversations/${conv}`, `https://api.elevenlabs.io/v1/convai/conversations/${old}`];
+      for (const url of mine) expect(outboundCalls).toContain(url);
+      for (let i = outboundCalls.length - 1; i >= 0; i--) if (mine.includes(outboundCalls[i])) outboundCalls.splice(i, 1);
     });
     // without a provider key there is nothing at the provider to delete: nothing is queued (and nothing can alert forever)
     await withEnv({ ELEVENLABS_API_KEY: undefined }, async () => {
