@@ -32,7 +32,26 @@ export interface StripeSubscriptionLike {
   current_period_end?: unknown;
   cancel_at_period_end?: unknown;
   cancel_at?: unknown;
-  items?: { data?: Array<{ current_period_end?: unknown }> } | null;
+  items?: { data?: Array<{ current_period_end?: unknown; price?: { id?: unknown; recurring?: { interval?: unknown } | null } | null }> } | null;
+}
+
+/**
+ * The billing cadence a subscription is on, from its price: the annual price id (STRIPE_PRICE_ID_ANNUAL) or any price whose recurring
+ * interval is 'year' means 'year'; the configured monthly price or a monthly interval means 'month'. Null when the subscription carries no
+ * price information at all (an event without items), so a thin payload never flips the stored cadence.
+ */
+export function intervalOfSubscription(sub: StripeSubscriptionLike, env: NodeJS.ProcessEnv = process.env): 'month' | 'year' | null {
+  const price = sub.items?.data?.[0]?.price;
+  if (!price || typeof price !== 'object') return null;
+  const id = typeof price.id === 'string' ? price.id : null;
+  const annual = env.STRIPE_PRICE_ID_ANNUAL?.trim();
+  if (annual && id === annual) return 'year';
+  const monthly = env.STRIPE_PRICE_ID?.trim();
+  if (monthly && id === monthly) return 'month';
+  const interval = price.recurring?.interval;
+  if (interval === 'year') return 'year';
+  if (interval === 'month') return 'month';
+  return null;
 }
 
 /** Stripe ids appear as a string or an expanded object with an `id`. */

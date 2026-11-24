@@ -10,6 +10,8 @@ export interface CustomerExport {
   phone_e164: string;
   exported_at: string;
   calls: unknown[];
+  /** Live transcript rows (utterance by utterance) of those calls; empty for calls whose consent was declined. */
+  transcript_events: unknown[];
   bookings: unknown[];
   /** Texts to the customer and owner alerts / other texts that mention them. */
   sms: unknown[];
@@ -27,11 +29,12 @@ export async function exportCustomerData(businessId: string, phone: string, coun
     locateCustomerRecords(prisma, businessId, id, country),
     isOptedOut(businessId, id.e164),
   ]);
-  const [calls, bookings, sms, briefings] = await Promise.all([
+  const [calls, bookings, sms, briefings, events] = await Promise.all([
     prisma.call.findMany({ where: { id: { in: rec.callIds } }, orderBy: { startedAt: 'asc' } }),
     prisma.booking.findMany({ where: { id: { in: rec.bookingIds } }, orderBy: { scheduledAt: 'asc' } }),
     prisma.smsLog.findMany({ where: { id: { in: rec.smsIds } }, orderBy: { createdAt: 'asc' } }),
     prisma.briefing.findMany({ where: { id: { in: rec.briefingIds } }, orderBy: { date: 'asc' } }),
+    prisma.callTranscriptEvent.findMany({ where: { callId: { in: rec.callIds } }, orderBy: [{ callId: 'asc' }, { seq: 'asc' }] }),
   ]);
   return {
     business_id: businessId,
@@ -43,6 +46,7 @@ export async function exportCustomerData(businessId: string, phone: string, coun
       ...c,
       voicemail: recordingUrl && parseRecordingUrl(recordingUrl) ? { available: true, playback_path: `/api/calls/${c.id}/voicemail`, seconds: c.durationSec ?? null } : null,
     })),
+    transcript_events: events.map((e) => ({ call_id: e.callId, seq: e.seq, role: e.role, text: e.text, at: e.at.toISOString(), is_final: e.isFinal })),
     bookings, sms, briefings,
     sms_opted_out: optedOut,
     recording_deletions_pending: (await recordingDeletionStatus(businessId)).pending,

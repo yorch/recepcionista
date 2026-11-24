@@ -91,7 +91,7 @@ async function provisionDemoAgent() {
   try {
     const { getBusiness, getKnowledgeBase, updateBusiness, upsertKnowledgeBase } = await import('../src/lib/db');
     const { generateKnowledgeBase } = await import('../src/lib/kb');
-    const { createOrUpdateAgent } = await import('../src/lib/voice/elevenlabs');
+    const { syncAgent } = await import('../src/lib/voice/elevenlabs');
 
     const business = await getBusiness(DEMO_BUSINESS_ID);
     if (!business) return;
@@ -112,7 +112,7 @@ async function provisionDemoAgent() {
       business,
     ));
 
-    const agent = await createOrUpdateAgent({ business, kb: regenerated });
+    const agent = await syncAgent({ business, kb: regenerated });
     if (!agent.mock && agent.agent_id) await updateBusiness(DEMO_BUSINESS_ID, { agent_id: agent.agent_id });
     console.log(`  provisioned in-process: agent=${agent.agent_id} mock=${agent.mock} prompt=${regenerated.system_prompt.length} chars`);
   } catch (err) {

@@ -1,7 +1,13 @@
+import type { MessageKey } from '@/lib/i18n/core';
 import type { OnboardingStatus } from '@/app/api/businesses/[id]/onboarding-status/status';
 
 export const STEP_IDS = ['info', 'review', 'verify', 'plan', 'provision', 'connect', 'test'] as const;
 export type StepId = (typeof STEP_IDS)[number];
+
+/** English labels (fallback / tests); the UI shows `ob.step.<id>` from the message catalog (STEP_LABEL_KEYS). */
+export const STEP_LABEL_KEYS: Record<StepId, MessageKey> = {
+  info: 'ob.step.info', review: 'ob.step.review', verify: 'ob.step.verify', plan: 'ob.step.plan', provision: 'ob.step.provision', connect: 'ob.step.connect', test: 'ob.step.test',
+};
 
 export const STEP_LABELS: Record<StepId, string> = {
   info: 'Your business',

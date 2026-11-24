@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     const key = mfaPairKey(user.id, req);
     const gate = await checkPair(key);
     if (!gate.ok) return verdictResponse(gate);
-    const result = await verifySecondFactor(user.id, body, { allowRecovery: true, account: { email: user.email, businessId: user.business_id, ip: auditIp(req) } });
+    const result = await verifySecondFactor(user.id, body, { allowRecovery: true, account: { email: user.email, businessId: user.business_id, ip: auditIp(req), locale: user.locale } });
     if (!result.ok && result.locked) return verdictResponse(result.locked);
     if (!result.ok) {
       await recordFailure(key, accountId(user.id));
@@ -39,7 +39,7 @@ export async function POST(req: Request) {
       actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.2fa_disabled', target: `user:${user.id}`,
       ip: auditIp(req), meta: { other_sessions_revoked: revoked, method: result.method },
     });
-    await afterResponse('2fa.notice', () => sendTwoFactorNotice(user.email, false));
+    await afterResponse('2fa.notice', () => sendTwoFactorNotice(user.email, false, user.locale));
     return NextResponse.json({ ok: true, data: { enabled: false } });
   } catch (err) {
     log.error('error', { err });

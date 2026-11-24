@@ -1,5 +1,6 @@
 'use client';
 import { useId } from 'react';
+import { useT } from '@/lib/i18n/client';
 import { cn } from './cn';
 
 export const inputClass =
@@ -25,11 +26,12 @@ function useFieldIds(id?: string) {
 function Shell({
   ids, label, hint, error, optional, className, srOnlyLabel, children,
 }: FieldShellProps & { ids: ReturnType<typeof useFieldIds>; children: React.ReactNode }) {
+  const t = useT();
   return (
     <div className={className}>
       <label htmlFor={ids.id} className={cn('block text-xs font-medium uppercase tracking-wider text-dim', srOnlyLabel && 'sr-only')}>
         {label}
-        {optional ? <span className="ml-1 normal-case tracking-normal text-dim">(optional)</span> : null}
+        {optional ? <span className="ml-1 normal-case tracking-normal text-dim">({t('common.optional')})</span> : null}
       </label>
       <div className={srOnlyLabel ? '' : 'mt-1.5'}>{children}</div>
       {hint && !error ? <p id={ids.hintId} className="mt-1.5 text-xs leading-relaxed text-dim">{hint}</p> : null}

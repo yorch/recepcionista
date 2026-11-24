@@ -22,6 +22,7 @@ import { POST as gratitudeRoute } from '../src/app/api/sms/gratitude/route';
 import { POST as gratitudeReplyRoute } from '../src/app/api/sms/gratitude-reply/route';
 import { POST as createLinkRoute } from '../src/app/api/payments/create-link/route';
 import { POST as webhookRoute } from '../src/app/api/payments/webhook/route';
+import { makeT } from '../src/lib/i18n';
 import PayPage from '../src/app/pay/[id]/page';
 import { PaymentReceived } from '../src/app/pay/[id]/received';
 import { assertSafeDatabase, forwardedArgs } from './_safe-db';
@@ -307,6 +308,8 @@ async function main() {
       label: 'Emergency deposit',
       businessName: 'Miami Cool Air Conditioning',
       last4: '4242',
+      t: makeT('en'),
+      locale: 'en',
     }),
   );
   check('success state says "Payment received"', successHtml.includes('Payment received'), successHtml.slice(0, 200));

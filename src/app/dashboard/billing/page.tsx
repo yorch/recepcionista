@@ -4,33 +4,28 @@ import { Card, CardHead } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { billingSummary } from '@/lib/billing/summary';
 import { daysLeft } from '@/lib/billing/banner-state';
+import { getLocale, getT } from '@/lib/i18n/server';
+import { formatNumber, intlTag, type Locale } from '@/lib/i18n/core';
+import type { TFunction } from '@/lib/i18n/core';
 import { BillingActions } from './billing-actions';
+import { planPriceDisplay, planPriceDisplayAnnual } from '@/app/site-config';
 import type { BillingStatus } from '@/lib/types';
 
-export const metadata: Metadata = { title: 'Billing' };
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: (await getT())('bill.metaTitle') };
+}
 
 export const dynamic = 'force-dynamic';
 
-const LABEL: Record<BillingStatus, string> = {
-  none: 'No plan', trialing: 'Free trial', active: 'Active', past_due: 'Payment failed', canceled: 'Canceled', unpaid: 'On hold',
-};
 const TONE: Record<BillingStatus, string> = {
   none: 'neutral', trialing: 'sky', active: 'routine', past_due: 'unsure', canceled: 'emergency', unpaid: 'emergency',
 };
 
-const EXPLAIN: Record<BillingStatus, string> = {
-  none: 'Add a card to start your free trial. You will not be charged until the trial ends, and you can cancel before then.',
-  trialing: 'Your free trial is running. Your card is charged when it ends unless you cancel first.',
-  active: 'Your subscription is active.',
-  past_due: 'We could not charge your card. Service continues for a few days; update your payment method to avoid an interruption.',
-  canceled: 'Your subscription is canceled, so your receptionist is paused. Resubscribe to turn it back on.',
-  unpaid: 'Payment could not be collected and your plan is on hold. Update your payment method to resume service.',
-};
 
-const fmtDate = (iso: string | null, tz: string) =>
-  iso ? new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeZone: tz }).format(new Date(iso)) : null;
+const fmtDate = (iso: string | null, tz: string, locale: Locale) =>
+  iso ? new Intl.DateTimeFormat(intlTag(locale), { dateStyle: 'medium', timeZone: tz }).format(new Date(iso)) : null;
 
-function Meter({ label, used, cap, unit }: { label: string; used: number; cap: number; unit: string }) {
+function Meter({ label, used, cap, unit, t, locale }: { label: string; used: number; cap: number; unit: string; t: TFunction; locale: Locale }) {
   const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 100;
   const over = used >= cap;
   const near = !over && pct >= 80;
@@ -39,12 +34,12 @@ function Meter({ label, used, cap, unit }: { label: string; used: number; cap: n
       <div className="flex items-baseline justify-between gap-3 text-[13px]">
         <span className="font-medium text-white">{label}</span>
         <span className="tabular-nums text-[#9fb0c5]">
-          {used.toLocaleString('en-US')} of {cap.toLocaleString('en-US')} {unit}
+          {t('bill.usage.of', { used: formatNumber(locale, used), cap: formatNumber(locale, cap), unit })}
         </span>
       </div>
       <div
         role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={cap} aria-valuenow={Math.min(used, cap)}
-        aria-valuetext={`${used} of ${cap} ${unit} used${over ? ', limit reached' : ''}`}
+        aria-valuetext={t('bill.usage.valueText', { used, cap, unit, over: over ? t('bill.usage.overText') : '' })}
         className="mt-2 h-2 overflow-hidden rounded-full bg-[#1b232e]"
       >
         <div
@@ -52,12 +47,14 @@ function Meter({ label, used, cap, unit }: { label: string; used: number; cap: n
           style={{ width: `${pct}%` }}
         />
       </div>
-      {over ? <p className="mt-1 text-[11px] text-[#ff9b86]">Limit reached for this month.</p> : null}
+      {over ? <p className="mt-1 text-[11px] text-[#ff9b86]">{t('bill.usage.limitReached')}</p> : null}
     </div>
   );
 }
 
 export default async function BillingPage({ searchParams }: { searchParams: Promise<{ checkout?: string }> }) {
+  const t = await getT();
+  const locale = await getLocale();
   const ctx = await getDashboardContext();
   requireRolePage(ctx, 'owner');
   const biz = ctx.business;
@@ -68,73 +65,85 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   const trialDays = s.billing_status === 'trialing' ? daysLeft(s.trial_ends_at, now) : null;
   const canStart = s.billing_status === 'none' || s.billing_status === 'canceled';
   const canManage = s.has_customer && !canStart;
-  const trialEnd = fmtDate(s.trial_ends_at, tz);
-  const periodEnd = fmtDate(s.current_period_end, tz);
-  const graceEnd = fmtDate(s.grace_ends_at, tz);
+  const trialEnd = fmtDate(s.trial_ends_at, tz, locale);
+  const periodEnd = fmtDate(s.current_period_end, tz, locale);
+  const graceEnd = fmtDate(s.grace_ends_at, tz, locale);
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
       <header>
-        <h1 className="text-[24px] font-semibold tracking-[-0.02em]">Billing</h1>
-        <p className="mt-1 text-[13px] text-[#8b98ab]">Your plan, free trial and monthly usage for {biz.name}.</p>
+        <h1 className="text-[24px] font-semibold tracking-[-0.02em]">{t('bill.title')}</h1>
+        <p className="mt-1 text-[13px] text-[#8b98ab]">{t('bill.subtitle', { business: biz.name })}</p>
       </header>
 
       {sp.checkout === 'success' ? (
         <p role="status" className="mt-4 rounded-xl border border-[#1c4635] bg-[#10291f] px-4 py-3 text-[13px] text-[#6ee7b0]">
-          Thanks. Your plan can take a few seconds to show up here; refresh if it still says no plan.
+          {t('bill.checkoutSuccess')}
         </p>
       ) : null}
       {sp.checkout === 'cancel' ? (
         <p role="status" className="mt-4 rounded-xl border border-[#2a3546] bg-[#141c26] px-4 py-3 text-[13px] text-[#cbd7e6]">
-          Checkout was canceled. Nothing was charged.
+          {t('bill.checkoutCancel')}
         </p>
       ) : null}
 
       <Card className="mt-6">
         <CardHead
-          title="Plan"
-          subtitle={s.plan ? `Plan: ${s.plan}` : undefined}
-          right={<Badge tone={TONE[s.billing_status]}>{LABEL[s.billing_status]}</Badge>}
+          title={t('bill.plan')}
+          subtitle={s.plan ? t('bill.planName', { plan: s.plan }) : undefined}
+          right={<Badge tone={TONE[s.billing_status]}>{t(`bill.status.${s.billing_status}` as const)}</Badge>}
         />
         <div className="space-y-3 p-5 text-[13px] leading-relaxed text-[#cbd7e6]">
-          <p>{EXPLAIN[s.billing_status]}</p>
+          <p>{t(`bill.explain.${s.billing_status}` as const)}</p>
           {trialDays !== null && trialEnd ? (
             <p>
-              <strong className="text-white">{trialDays === 0 ? 'Ends today' : `${trialDays} day${trialDays === 1 ? '' : 's'} left`}</strong>
-              {' '}(trial ends {trialEnd}).
+              <strong className="text-white">{trialDays === 0 ? t('bill.endsToday') : t('bill.daysLeft', { count: trialDays })}</strong>
+              {' '}{t('bill.trialEnds', { date: trialEnd })}
             </p>
           ) : null}
           {s.billing_status === 'active' && periodEnd ? (
-            <p>{s.cancel_at_period_end ? `Cancels on ${periodEnd}; service stops then.` : `Renews on ${periodEnd}.`}</p>
+            <p>{s.cancel_at_period_end ? t('bill.cancelsOn', { date: periodEnd }) : t('bill.renewsOn', { date: periodEnd })}</p>
           ) : null}
-          {s.billing_status === 'trialing' && s.cancel_at_period_end ? <p>Set to cancel when the trial ends.</p> : null}
-          {s.billing_status === 'past_due' && graceEnd ? <p>Service pauses on {graceEnd} unless the payment goes through.</p> : null}
+          {s.billing_status === 'trialing' && s.cancel_at_period_end ? <p>{t('bill.cancelAtTrialEnd')}</p> : null}
+          {s.billing_status === 'past_due' && graceEnd ? <p>{t('bill.pausesOn', { date: graceEnd })}</p> : null}
+          {s.billing_status !== 'none' && s.billing_status !== 'canceled' ? (
+            <p>{s.billing_interval === 'year' ? t('bill.billedYearly') : t('bill.billedMonthly')}
+              {s.annual_available && s.billing_interval === 'month' && s.has_customer ? t('bill.switchAnnual') : ''}
+              {s.billing_interval === 'year' && s.has_customer ? t('bill.backMonthly') : ''}
+            </p>
+          ) : null}
+          {s.usage_warnings.length > 0 ? (
+            <ul aria-label={t('bill.warnings')} className="space-y-1 text-[#f2c86b]">
+              {s.usage_warnings.map((w) => (
+                <li key={`${w.kind}-${w.level}`}>{t('bill.warn.line', { state: w.level === 100 ? t('bill.warn.limit') : t('bill.warn.near'), label: t(`banner.usage.label.${w.kind}` as const), used: formatNumber(locale, w.used), cap: formatNumber(locale, w.cap), unit: t(w.unit === 'texts' ? 'banner.usage.unit.texts' : 'banner.usage.unit.minutes') })}</li>
+              ))}
+            </ul>
+          ) : null}
           {!s.enforced && s.billing_status === 'none' ? (
-            <p className="text-[#8b98ab]">Plans are not enforced on this installation yet, so nothing is paused.</p>
+            <p className="text-[#8b98ab]">{t('bill.notEnforced')}</p>
           ) : null}
           <div className="pt-1">
-            {canStart ? <BillingActions businessId={biz.id} mode="start" /> : null}
+            {canStart ? <BillingActions businessId={biz.id} mode="start" annualAvailable={s.annual_available} monthlyLabel={planPriceDisplay()} annualLabel={planPriceDisplayAnnual()} /> : null}
             {canManage ? <BillingActions businessId={biz.id} mode="manage" /> : null}
           </div>
         </div>
       </Card>
 
       <Card className="mt-6">
-        <CardHead title="Usage this month" subtitle={s.usage.period_start ? `Since ${s.usage.period_start}` : undefined} />
+        <CardHead title={t('bill.usage.title')} subtitle={s.usage.period_start ? t('bill.usage.since', { date: s.usage.period_start }) : undefined} />
         <div className="space-y-5 p-5">
-          <Meter label="Text message segments" used={s.usage.sms.used} cap={s.usage.sms.cap} unit="segments" />
-          <Meter label="AI assistant call minutes" used={s.usage.call_minutes.used} cap={s.usage.call_minutes.cap} unit="minutes" />
-          <Meter label="Forwarded call minutes" used={s.usage.forward_minutes.used} cap={s.usage.forward_minutes.cap} unit="minutes" />
-          <Meter label="Voicemail minutes" used={s.usage.voicemail_minutes.used} cap={s.usage.voicemail_minutes.cap} unit="minutes" />
+          <Meter t={t} locale={locale} label={t('bill.usage.sms')} used={s.usage.sms.used} cap={s.usage.sms.cap} unit={t('bill.usage.unit.segments')} />
+          <Meter t={t} locale={locale} label={t('bill.usage.call')} used={s.usage.call_minutes.used} cap={s.usage.call_minutes.cap} unit={t('bill.usage.unit.minutes')} />
+          <Meter t={t} locale={locale} label={t('bill.usage.forward')} used={s.usage.forward_minutes.used} cap={s.usage.forward_minutes.cap} unit={t('bill.usage.unit.minutes')} />
+          <Meter t={t} locale={locale} label={t('bill.usage.voicemail')} used={s.usage.voicemail_minutes.used} cap={s.usage.voicemail_minutes.cap} unit={t('bill.usage.unit.minutes')} />
           <p className="text-[11px] text-[#6b7b91]">
-            Forwarded calls and voicemails have their own limits and never use up your assistant minutes: when one of them is full, the assistant keeps answering.
+            {t('bill.usage.note1')}
           </p>
           <p className="text-[11px] text-[#6b7b91]">
-            Texts are counted in segments, the unit carriers bill: a short plain text is 1 segment, a longer one 2 or more, and
-            emoji or accented characters (like a Spanish message with an emoji) make each segment shorter. A text that would go past your limit is not sent.
-            {s.billing_status === 'trialing' ? ' Free trials have a lower limit than paid plans.' : ''}
+            {t('bill.usage.note2')}
+            {s.billing_status === 'trialing' ? t('bill.usage.trialLower') : ''}
           </p>
-          <p className="text-[11px] text-[#6b7b91]">Counts reset on the first of each month in your time zone ({tz}).</p>
+          <p className="text-[11px] text-[#6b7b91]">{t('bill.usage.reset', { tz })}</p>
         </div>
       </Card>
     </main>

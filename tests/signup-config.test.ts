@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
 import { signupAvailability, signupConfigWarning, turnstileFullyConfigured } from '../src/lib/signup-config';
+import { I18nProvider } from '../src/lib/i18n/client';
+import { en } from '../src/lib/i18n/en';
 import { SignupForm } from '../src/components/auth/signup-form';
 
 const prod = (extra: Record<string, string> = {}) => ({ NODE_ENV: 'production', ...extra }) as unknown as NodeJS.ProcessEnv;
@@ -37,14 +39,14 @@ describe('signup availability (captcha required in production)', () => {
 
 describe('/signup page when disabled', () => {
   test('hides the form and explains invite-only', () => {
-    const html = renderToStaticMarkup(createElement(SignupForm, { turnstileSiteKey: null, disabled: true }));
+    const html = renderToStaticMarkup(createElement(I18nProvider, { locale: 'en', messages: en } as never, createElement(SignupForm, { turnstileSiteKey: null, disabled: true })));
     expect(html).toContain('invite-only');
     expect(html).toContain('data-testid="signup-disabled"');
     expect(html).not.toContain('name="password"');
     expect(html).not.toContain('<form');
   });
   test('enabled renders the form', () => {
-    const html = renderToStaticMarkup(createElement(SignupForm, { turnstileSiteKey: null }));
+    const html = renderToStaticMarkup(createElement(I18nProvider, { locale: 'en', messages: en } as never, createElement(SignupForm, { turnstileSiteKey: null })));
     expect(html).toContain('name="password"');
   });
 });

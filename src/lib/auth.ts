@@ -29,10 +29,15 @@ const PUBLIC_API_EXACT = new Set([
   '/api/auth/reset-password',
   '/api/auth/accept-invite',
   '/api/auth/mfa', // second login step: authenticates its own (MFA-pending) session cookie
+  // Passwordless sign-in (WebAuthn): public by nature; each handler checks the origin, rate limits and verifies the signed assertion itself.
+  '/api/auth/passkeys/login/options',
+  '/api/auth/passkeys/login/verify',
   '/api/voice/webhook',
   '/api/voice/post-call',
   '/api/voice/incoming',
   '/api/voice/dial-status', // Twilio per-leg status callback of a forwarded call (meters minutes): verifies the Twilio signature itself
+  '/api/voice/screen', // call-screening whisper on the owner's leg (Twilio-signed): verifies the Twilio signature itself
+  '/api/voice/transcript-event', // a pushing line's live transcript lines: authenticated by the shared tool secret header
   '/api/voice/voicemail', // Twilio callback for paused/forwarded calls: verifies the Twilio signature itself
   '/api/voice/initiation', // ElevenLabs conversation-initiation webhook: authenticated by the shared tool secret header
   '/api/payments/webhook',
@@ -41,10 +46,11 @@ const PUBLIC_API_EXACT = new Set([
   '/api/pay/mock-complete',
   '/api/sms/gratitude-reply',
   '/api/sms/inbound',
+  '/api/integrations/google/webhook', // Google Calendar push: authenticated by the channel id + resource id + HMAC channel token (constant time)
 ]);
 const PUBLIC_API_PREFIX = ['/api/voice/tools/'];
 const PUBLIC_PAGE_EXACT = new Set([
-  '/robots.txt', '/sitemap.xml', '/', '/login', '/login/mfa', '/signup', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite',
+  '/robots.txt', '/sitemap.xml', '/', '/login', '/login/mfa', '/signup', '/refunds', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite',
 ]);
 const PUBLIC_PAGE_PREFIX = ['/pay/'];
 

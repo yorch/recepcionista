@@ -1,9 +1,11 @@
 'use client';
 import { useState } from 'react';
+import { useT } from '@/lib/i18n/client';
 import { safeNextPath } from '@/lib/safe-redirect';
 import { AuthShell, Field, FormError, SubmitButton, friendly, go, sendJson } from './auth-ui';
 
 export function MfaForm() {
+  const t = useT();
   const [useRecovery, setUseRecovery] = useState(false);
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -22,7 +24,7 @@ export function MfaForm() {
         go('/login');
         return;
       }
-      setError(friendly(r.error === 'invalid code' ? 'That code did not work. Check the time on your phone and try again.' : r.error));
+      setError(friendly(t, r.error));
       return;
     }
     go(safeNextPath(new URLSearchParams(window.location.search).get('next')));
@@ -35,13 +37,13 @@ export function MfaForm() {
 
   return (
     <AuthShell
-      title="Two-step verification"
-      subtitle={useRecovery ? 'Enter one of your recovery codes. Each works once.' : 'Enter the 6-digit code from your authenticator app.'}
+      title={t('auth.mfa.title')}
+      subtitle={useRecovery ? t('auth.mfa.subtitleRecovery') : t('auth.mfa.subtitleCode')}
     >
       <form onSubmit={submit}>
         <Field
           key={useRecovery ? 'r' : 't'}
-          label={useRecovery ? 'Recovery code' : 'Authentication code'}
+          label={useRecovery ? t('auth.mfa.labelRecovery') : t('auth.mfa.labelCode')}
           name="code"
           autoComplete="one-time-code"
           inputMode={useRecovery ? 'text' : 'numeric'}
@@ -53,12 +55,12 @@ export function MfaForm() {
           onChange={(e) => setCode(e.target.value)}
         />
         <FormError message={error} />
-        <SubmitButton busy={busy} disabled={!code}>{busy ? 'Checking...' : 'Verify'}</SubmitButton>
+        <SubmitButton busy={busy} disabled={!code}>{busy ? t('common.checking') : t('auth.mfa.verify')}</SubmitButton>
       </form>
       <button type="button" onClick={() => { setUseRecovery((v) => !v); setCode(''); setError(null); }} className="mt-4 w-full text-center text-[13px] text-[#8b98ab] hover:text-white">
-        {useRecovery ? 'Use my authenticator app instead' : 'Use a recovery code instead'}
+        {useRecovery ? t('auth.mfa.useApp') : t('auth.mfa.useRecovery')}
       </button>
-      <button type="button" onClick={cancel} className="mt-2 w-full text-center text-[12px] text-[#6b7b91] hover:text-[#cbd7e6]">Cancel and sign out</button>
+      <button type="button" onClick={cancel} className="mt-2 w-full text-center text-[12px] text-[#6b7b91] hover:text-[#cbd7e6]">{t('auth.mfa.cancel')}</button>
     </AuthShell>
   );
 }

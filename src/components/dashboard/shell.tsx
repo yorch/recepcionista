@@ -4,26 +4,30 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/components/ui/cn';
 import { Logo } from '@/components/ui/logo';
+import { LocaleSwitcher } from '@/components/ui/locale-switcher';
+import { useT } from '@/lib/i18n/client';
+import { formatPhoneDisplay, type MessageKey } from '@/lib/i18n/core';
+import { BusinessSwitcher, type SwitcherMembership } from '@/components/dashboard/business-switcher';
 
 interface NavItem {
   href: string;
-  label: string;
+  label: MessageKey;
   icon: string;
   /** Minimum role to see the link (server pages still enforce it). */
   gate?: 'owner' | 'admin';
 }
 
 const NAV: NavItem[] = [
-  { href: '/dashboard', label: 'Today', icon: 'M3 10.5 12 3l9 7.5M5 9.5V21h5v-6h4v6h5V9.5' },
-  { href: '/dashboard/calls', label: 'Calls', icon: 'M4 5c0 8 6 14 14 14l1.5-3.2-3.5-1.8-2 2C11 15 9 13 8 10l2-2-1.8-3.5L5 4' },
-  { href: '/dashboard/bookings', label: 'Calendar', icon: 'M4 6h16v14H4zM4 10h16M9 3v4M15 3v4' },
-  { href: '/dashboard/knowledge', label: 'Brain', icon: 'M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8A3 3 0 0 0 8 18a3 3 0 0 0 4 2m0-16a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8A3 3 0 0 1 16 18a3 3 0 0 1-4 2m0-16v16' },
-  { href: '/dashboard/briefings', label: 'Briefings', icon: 'M4 13a8 8 0 1 0 16 0 8 8 0 0 0-16 0Zm4-2v4m4-7v10m4-7v4' },
-  { href: '/dashboard/team', label: 'Team', icon: 'M16 11a3 3 0 1 0-6 0 3 3 0 0 0 6 0ZM5 20a7 7 0 0 1 14 0M19 8a2.5 2.5 0 0 1 0 5M5 8a2.5 2.5 0 0 0 0 5', gate: 'owner' },
-  { href: '/dashboard/billing', label: 'Billing', icon: 'M3 7h18v12H3zM3 11h18M7 16h3', gate: 'owner' },
-  { href: '/dashboard/security', label: 'Security', icon: 'M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6l-7-3Zm-2.5 9 2 2 3.5-4', },
-  { href: '/dashboard/settings', label: 'Settings', icon: 'M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6m-4 4v6', gate: 'owner' },
-  { href: '/dashboard/demo', label: 'Demo console', icon: 'M9 3h6l1 4h3v14H5V7h3l1-4Zm0 10h6m-3-3v6', gate: 'admin' },
+  { href: '/dashboard', label: 'nav.today', icon: 'M3 10.5 12 3l9 7.5M5 9.5V21h5v-6h4v6h5V9.5' },
+  { href: '/dashboard/calls', label: 'nav.calls', icon: 'M4 5c0 8 6 14 14 14l1.5-3.2-3.5-1.8-2 2C11 15 9 13 8 10l2-2-1.8-3.5L5 4' },
+  { href: '/dashboard/bookings', label: 'nav.calendar', icon: 'M4 6h16v14H4zM4 10h16M9 3v4M15 3v4' },
+  { href: '/dashboard/knowledge', label: 'nav.brain', icon: 'M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8A3 3 0 0 0 8 18a3 3 0 0 0 4 2m0-16a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8A3 3 0 0 1 16 18a3 3 0 0 1-4 2m0-16v16' },
+  { href: '/dashboard/briefings', label: 'nav.briefings', icon: 'M4 13a8 8 0 1 0 16 0 8 8 0 0 0-16 0Zm4-2v4m4-7v10m4-7v4' },
+  { href: '/dashboard/team', label: 'nav.team', icon: 'M16 11a3 3 0 1 0-6 0 3 3 0 0 0 6 0ZM5 20a7 7 0 0 1 14 0M19 8a2.5 2.5 0 0 1 0 5M5 8a2.5 2.5 0 0 0 0 5', gate: 'owner' },
+  { href: '/dashboard/billing', label: 'nav.billing', icon: 'M3 7h18v12H3zM3 11h18M7 16h3', gate: 'owner' },
+  { href: '/dashboard/security', label: 'nav.security', icon: 'M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6l-7-3Zm-2.5 9 2 2 3.5-4', },
+  { href: '/dashboard/settings', label: 'nav.settings', icon: 'M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6m-4 4v6', gate: 'owner' },
+  { href: '/dashboard/demo', label: 'nav.demo', icon: 'M9 3h6l1 4h3v14H5V7h3l1-4Zm0 10h6m-3-3v6', gate: 'admin' },
 ];
 
 const BUSINESS_COOKIE = 'rc_business';
@@ -33,8 +37,8 @@ export interface SidebarProps {
   /** The business's own (provisioned) number; null until provisioned. */
   phone?: string | null;
   live: boolean;
-  /** Short status shown next to the green dot while live ('Answering calls', 'Paused', 'Forwarding calls'). */
-  statusText?: string;
+  /** Which call route is active: shown next to the green dot while live. */
+  status?: 'ai' | 'paused' | 'forward';
   /** Signed-in user's email (or "admin token"). */
   who: string;
   role: 'staff' | 'owner' | 'admin';
@@ -44,9 +48,14 @@ export interface SidebarProps {
   currentBusinessId: string;
   /** Admin only: every business for the switcher. */
   businesses: { id: string; name: string }[];
+  /** Accounts in several businesses (not admins): where they can switch to, and whether they may add another location. */
+  memberships?: SwitcherMembership[];
+  canAddBusiness?: boolean;
 }
 
 const FOCUSABLE = 'a[href], button:not([disabled]), select, input, textarea, [tabindex]:not([tabindex="-1"])';
+
+const STATUS_KEY = { ai: 'shell.answering', paused: 'shell.paused', forward: 'shell.forwarding' } as const;
 
 function Icon({ d }: { d: string }) {
   return (
@@ -57,7 +66,9 @@ function Icon({ d }: { d: string }) {
 }
 
 export function Sidebar(props: SidebarProps) {
-  const { businessName, live, statusText = 'Answering calls' } = props;
+  const { businessName, live, status = 'ai' } = props;
+  const t = useT();
+  const statusText = t(STATUS_KEY[status]);
   const path = usePathname();
   // `open` remembers the path it was opened on, so navigating closes the drawer without an effect.
   const [openAt, setOpenAt] = useState<string | null>(null);
@@ -112,8 +123,8 @@ export function Sidebar(props: SidebarProps) {
           <div className="min-w-0">
             <p className="truncate text-[13px] font-medium text-white">{businessName}</p>
             <p className="flex items-center gap-1.5 text-xs text-mute">
-              <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? (statusText === 'Answering calls' ? 'bg-mint' : 'bg-warn') : 'bg-dim')} />
-              {live ? statusText : 'Not live'}
+              <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? (status === 'ai' ? 'bg-mint' : 'bg-warn') : 'bg-dim')} />
+              {live ? statusText : t('shell.notLive')}
             </p>
           </div>
         </div>
@@ -121,7 +132,7 @@ export function Sidebar(props: SidebarProps) {
           ref={triggerRef}
           type="button"
           onClick={() => setOpenAt(path)}
-          aria-label="Open menu"
+          aria-label={t('shell.openMenu')}
           aria-expanded={open}
           aria-controls="mobile-nav"
           className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-line-3 text-soft hover:bg-panel-2"
@@ -140,7 +151,7 @@ export function Sidebar(props: SidebarProps) {
             ref={drawerRef}
             role="dialog"
             aria-modal="true"
-            aria-label="Main menu"
+            aria-label={t('shell.mainMenu')}
             className="absolute inset-y-0 left-0 flex w-[min(86vw,320px)] flex-col overflow-y-auto border-r border-[#171f2a] bg-sunken px-4 py-4"
           >
             <div className="flex items-center justify-between">
@@ -148,7 +159,7 @@ export function Sidebar(props: SidebarProps) {
               <button
                 type="button"
                 onClick={close}
-                aria-label="Close menu"
+                aria-label={t('shell.closeMenu')}
                 className="grid h-11 w-11 place-items-center rounded-xl text-soft hover:bg-raised"
               >
                 <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -162,7 +173,7 @@ export function Sidebar(props: SidebarProps) {
       ) : null}
 
       {/* Desktop sidebar */}
-      <aside aria-label="Sidebar" className="hidden w-[248px] shrink-0 flex-col border-r border-[#171f2a] bg-sunken/70 px-4 py-5 lg:flex lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto">
+      <aside aria-label={t('shell.sidebar')} className="hidden w-[248px] shrink-0 flex-col border-r border-[#171f2a] bg-sunken/70 px-4 py-5 lg:flex lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto">
         <Logo href="/dashboard" className="px-2" />
         <SidebarBody {...props} path={path} />
       </aside>
@@ -171,8 +182,10 @@ export function Sidebar(props: SidebarProps) {
 }
 
 function SidebarBody({
-  businessName, phone, live, statusText = 'Answering calls', who, role, isAdmin, isOwner, currentBusinessId, businesses, path,
+  businessName, phone, live, status = 'ai', who, role, isAdmin, isOwner, currentBusinessId, businesses, memberships = [], canAddBusiness = false, path,
 }: SidebarProps & { path: string }) {
+  const t = useT();
+  const statusText = t(STATUS_KEY[status]);
   const router = useRouter();
   const gates = { owner: isOwner, admin: isAdmin };
 
@@ -196,7 +209,7 @@ function SidebarBody({
       <div className="mt-5 rounded-xl border border-[#1b2430] bg-[#0b1017] p-3">
         {isAdmin && businesses.length > 1 ? (
           <select
-            aria-label="Switch business"
+            aria-label={t('shell.switchBusiness')}
             value={currentBusinessId}
             onChange={(e) => switchBusiness(e.target.value)}
             className="mb-2 min-h-11 w-full rounded-lg border border-[#1b2430] bg-sunken px-2 py-1 text-[13px] text-soft lg:min-h-9"
@@ -206,33 +219,34 @@ function SidebarBody({
             ))}
           </select>
         ) : null}
+        {!isAdmin ? <BusinessSwitcher memberships={memberships} currentBusinessId={currentBusinessId} canAddBusiness={canAddBusiness} /> : null}
         <p className="truncate text-[13px] font-medium text-white">{businessName}</p>
         <div className="mt-1.5 flex items-center gap-1.5">
-          <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? (statusText === 'Answering calls' ? 'bg-mint live-dot' : 'bg-warn') : 'bg-dim')} />
-          <span className="text-xs text-mute">{live ? statusText : 'Not live yet'}</span>
+          <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? (status === 'ai' ? 'bg-mint live-dot' : 'bg-warn') : 'bg-dim')} />
+          <span className="text-xs text-mute">{live ? statusText : t('shell.notLiveYet')}</span>
         </div>
         {phone ? (
           <a
             href={`tel:${phone}`}
-            aria-label={`Call your front desk line, ${phone}`}
+            aria-label={t('shell.callLine', { phone })}
             className="mt-2 flex min-h-11 items-center gap-2 rounded-lg border border-mint-line px-2.5 py-1.5 font-mono text-[12px] text-mint-text transition-colors hover:border-mint lg:min-h-9"
           >
             <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-mint" />
-            {phone}
+            {formatPhoneDisplay(phone)}
           </a>
         ) : isOwner ? (
           <Link
             href="/onboarding"
             className="mt-2 flex min-h-11 items-center justify-center rounded-lg bg-brand px-2.5 py-1.5 text-[13px] font-semibold text-on-brand hover:bg-brand-hover lg:min-h-9"
           >
-            Finish setup
+            {t('shell.finishSetup')}
           </Link>
         ) : (
-          <p className="mt-2 text-xs text-dim">No number yet</p>
+          <p className="mt-2 text-xs text-dim">{t('shell.noNumber')}</p>
         )}
       </div>
 
-      <nav aria-label="Dashboard" className="mt-5 flex flex-col gap-0.5">
+      <nav aria-label={t('shell.dashboardNav')} className="mt-5 flex flex-col gap-0.5">
         {NAV.filter((item) => !item.gate || gates[item.gate]).map((item) => {
           const active = path === item.href || (item.href !== '/dashboard' && path.startsWith(item.href));
           return (
@@ -246,7 +260,7 @@ function SidebarBody({
               )}
             >
               <Icon d={item.icon} />
-              {item.label}
+              {t(item.label)}
             </Link>
           );
         })}
@@ -254,7 +268,7 @@ function SidebarBody({
 
       <div className="mt-auto px-3 pb-1 pt-5 text-xs leading-tight">
         <p className="truncate text-soft" title={who}>{who}</p>
-        <p className="mt-0.5 uppercase tracking-wider text-dim">{role}</p>
+        <p className="mt-0.5 uppercase tracking-wider text-dim">{t(role === 'admin' ? 'common.admin' : role === 'owner' ? 'common.owner' : 'common.staff')}</p>
       </div>
       <button
         type="button"
@@ -262,13 +276,18 @@ function SidebarBody({
         className="mt-1 flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-left text-[14px] text-mute transition-colors hover:bg-hover hover:text-soft lg:min-h-9 lg:text-[13px]"
       >
         <Icon d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9" />
-        Log out
+        {t('shell.logout')}
       </button>
 
+      <div className="mt-3 flex items-center justify-between gap-2 px-1">
+        <span className="text-xs text-dim">{t('common.language')}</span>
+        <LocaleSwitcher compact />
+      </div>
+
       <div className="mt-3 rounded-xl border border-[#1b2430] bg-[#0b1017] p-3">
-        <p className="text-xs font-medium text-soft">Bilingual by default</p>
+        <p className="text-xs font-medium text-soft">{t('shell.bilingualTitle')}</p>
         <p className="mt-1 text-xs leading-relaxed text-dim">
-          English, Spanish, or both in the same sentence. She follows the caller.
+          {t('shell.bilingualBody')}
         </p>
       </div>
     </>

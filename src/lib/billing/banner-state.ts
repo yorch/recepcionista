@@ -2,6 +2,8 @@
  * Which billing banner (if any) to show. Pure: unit-tested without a database.
  */
 import { billingEnforced, billingStateAllows, pastDueGraceDays } from '@/lib/db/usage';
+import { makeT } from '@/lib/i18n';
+import type { Locale } from '@/lib/i18n/core';
 import type { BillingStatus, Business } from '@/lib/types';
 
 export type BannerKind = 'trial_ending' | 'past_due' | 'unpaid' | 'canceled' | 'none' | 'over_cap';
@@ -33,42 +35,41 @@ export function daysLeft(until: string | Date | null | undefined, now: Date): nu
   return Math.max(0, Math.ceil((t - now.getTime()) / DAY));
 }
 
-const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
-
 export function bannerFor(
   b: Pick<Business, 'billing_status' | 'past_due_since' | 'trial_ends_at' | 'cancel_at_period_end' | 'current_period_end'>,
   usage: BannerUsage | null,
   canManage: boolean,
   now: Date = new Date(),
   env: NodeJS.ProcessEnv = process.env,
+  locale: Locale = 'en',
 ): BannerState | null {
+  const t = makeT(locale);
   const status: BillingStatus = b.billing_status ?? 'none';
   const enforced = billingEnforced(env);
   const cta = (label: string) => (canManage ? label : null);
-  const ask = canManage ? '' : ' Ask the account owner to fix this.';
 
   // Legacy / demo tenants (nothing enforced, no subscription): stay quiet.
   if (!enforced && status === 'none') return null;
 
   if (status === 'none') {
     return {
-      kind: 'none', tone: 'danger', title: 'Start your free trial',
-      message: `Your receptionist is not active yet.${canManage ? ' Add a card to start your free trial; you will not be charged until it ends.' : ask}`,
-      cta: cta('Start free trial'),
+      kind: 'none', tone: 'danger', title: t('banner.none.title'),
+      message: t(canManage ? 'banner.none.owner' : 'banner.none.staff'),
+      cta: cta(t('banner.none.cta')),
     };
   }
   if (status === 'canceled') {
     return {
-      kind: 'canceled', tone: 'danger', title: 'Subscription canceled',
-      message: `Your plan is canceled, so calls and texts are paused.${canManage ? ' Resubscribe to turn your receptionist back on.' : ask}`,
-      cta: cta('Resubscribe'),
+      kind: 'canceled', tone: 'danger', title: t('banner.canceled.title'),
+      message: t(canManage ? 'banner.canceled.owner' : 'banner.canceled.staff'),
+      cta: cta(t('banner.canceled.cta')),
     };
   }
   if (status === 'unpaid') {
     return {
-      kind: 'unpaid', tone: 'danger', title: 'Payment required',
-      message: `We could not collect payment and your plan is on hold.${canManage ? ' Update your card to resume service.' : ask}`,
-      cta: cta('Update payment method'),
+      kind: 'unpaid', tone: 'danger', title: t('banner.unpaid.title'),
+      message: t(canManage ? 'banner.unpaid.owner' : 'banner.unpaid.staff'),
+      cta: cta(t('banner.updateCard')),
     };
   }
   if (status === 'past_due') {
@@ -76,11 +77,11 @@ export function bannerFor(
     const left = daysLeft(grace, now);
     const stillWorks = billingStateAllows({ billing_status: status, past_due_since: b.past_due_since }, now, env);
     return {
-      kind: 'past_due', tone: stillWorks ? 'warning' : 'danger', title: 'Payment failed',
+      kind: 'past_due', tone: stillWorks ? 'warning' : 'danger', title: t('banner.pastDue.title'),
       message: stillWorks
-        ? `We could not charge your card. Service continues for ${left !== null ? plural(left, 'more day') : 'a few more days'}.${canManage ? ' Update your payment method to avoid interruption.' : ask}`
-        : `We could not charge your card and the grace period has ended, so service is paused.${canManage ? ' Update your payment method to resume.' : ask}`,
-      cta: cta('Update payment method'),
+        ? t(canManage ? 'banner.pastDue.grace.owner' : 'banner.pastDue.grace.staff', { days: left !== null ? t('banner.pastDue.days', { count: left }) : t('banner.pastDue.fewDays') })
+        : t(canManage ? 'banner.pastDue.paused.owner' : 'banner.pastDue.paused.staff'),
+      cta: cta(t('banner.updateCard')),
     };
   }
   if (status === 'trialing') {
@@ -88,11 +89,9 @@ export function bannerFor(
     if (left !== null && left <= TRIAL_BANNER_DAYS) {
       return {
         kind: 'trial_ending', tone: 'info',
-        title: left === 0 ? 'Your trial ends today' : `Your trial ends in ${plural(left, 'day')}`,
-        message: b.cancel_at_period_end
-          ? 'Your subscription is set to cancel; service will stop when the trial ends.'
-          : 'Your card will be charged when the trial ends. You can cancel any time before that.',
-        cta: cta('Manage billing'),
+        title: left === 0 ? t('banner.trial.today') : t('banner.trial.days', { count: left }),
+        message: b.cancel_at_period_end ? t('banner.trial.cancels') : t('banner.trial.charge'),
+        cta: cta(t('banner.manageBilling')),
       };
     }
   }
@@ -100,11 +99,11 @@ export function bannerFor(
     const smsOver = usage.sms_count >= usage.sms_cap;
     const callOver = usage.call_seconds >= usage.call_minutes_cap * 60;
     if (smsOver || callOver) {
-      const what = smsOver && callOver ? 'text and call-minute' : smsOver ? 'text' : 'call-minute';
+      const what = t(smsOver && callOver ? 'banner.cap.what.both' : smsOver ? 'banner.cap.what.sms' : 'banner.cap.what.call');
       return {
-        kind: 'over_cap', tone: 'warning', title: 'Monthly limit reached',
-        message: `You have used all of this month's ${what} allowance${enforced ? ', so that service is paused until the next period' : ''}.${canManage ? ' Contact us to raise your limit.' : ask}`,
-        cta: cta('View usage'),
+        kind: 'over_cap', tone: 'warning', title: t('banner.cap.title'),
+        message: t('banner.cap.message', { what, paused: enforced ? t('banner.cap.paused') : '' }) + (canManage ? t('banner.cap.contact') : t('banner.cap.askOwner')),
+        cta: cta(t('banner.cap.view')),
       };
     }
   }

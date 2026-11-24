@@ -1,6 +1,10 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, authErrorResponse, hasRole, requireBusinessAccess } from '@/lib/session';
-import { getBusiness, updateBusiness, getKnowledgeBase, getDashboardStats, isOptedOut } from '@/lib/db';
+import { auditActorOf, authenticate, authErrorResponse, hasRole, requireBusinessAccess, requireRecentAuth } from '@/lib/session';
+import { clientKey } from '@/lib/auth';
+import { getBusiness, updateBusiness, getKnowledgeBase, getDashboardStats, isOptedOut, recordAudit } from '@/lib/db';
+import { isVertical } from '@/lib/verticals';
+import { applyVerticalChange, type VerticalChangeOutcome } from '@/lib/verticals/change';
+import { VERTICALS } from '@/lib/types';
 import { tzOf } from '@/lib/time';
 import { countryAllowed } from '@/lib/messaging/recipient';
 import type { Business, Hours, KnowledgeBase } from '@/lib/types';
@@ -23,6 +27,7 @@ const PATCHABLE: Record<string, (v: unknown) => unknown> = {
   owner_phone: (v) => (v === null ? null : typeof v === 'string' && E164.test(v.replace(/[\s().-]/g, '')) ? v.replace(/[\s().-]/g, '') : undefined),
   service_area: (v) =>
     Array.isArray(v) && v.length <= 100 && v.every((x) => typeof x === 'string' && x.length <= 100) ? v : undefined,
+  vertical: (v) => (isVertical(v) ? v : undefined),
   hours: (v) => {
     if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
     for (const d of Object.values(v as Record<string, unknown>)) {
@@ -82,7 +87,7 @@ export async function PATCH(
       const validate = PATCHABLE[key];
       if (!validate) return fail(`field "${key}" cannot be updated`, 422);
       const clean = validate(value);
-      if (clean === undefined) return fail(`invalid value for "${key}"`, 422);
+      if (clean === undefined) return fail(key === 'vertical' ? `vertical must be one of: ${VERTICALS.join(', ')}` : `invalid value for "${key}"`, 422);
       patch[key] = clean;
     }
     // owner_alert texts to the owner phone are exempt from customer opt-outs: that number must never be one
@@ -94,9 +99,30 @@ export async function PATCH(
     if (typeof patch.owner_phone === 'string' && !countryAllowed(patch.owner_phone)) {
       return fail('owner_phone is in a country that is not enabled for this account', 422);
     }
+    // Changing the trade rewrites how the agent triages emergencies, so on a business that is already set up it needs a recent proof of
+    // identity (the same step-up as call mode). A business still in onboarding (no number, no agent) has nothing live to protect.
+    const before = typeof patch.vertical === 'string' ? await getBusiness(id) : null;
+    if (typeof patch.vertical === 'string' && !before) return fail('business not found', 404);
+    const verticalChanges = before !== null && patch.vertical !== (before.vertical ?? 'hvac');
+    if (before && verticalChanges && (before.status !== 'onboarding' || before.phone || before.agent_id)) {
+      const reauth = requireRecentAuth(auth);
+      if (reauth) return reauth as unknown as ReturnType<typeof fail>;
+    }
     const updated = await updateBusiness(id, patch as Partial<Business>);
     if (!updated) return fail('business not found', 404);
-    return ok<Business>(publicBusiness(updated));
+    let verticalSync: VerticalChangeOutcome | null = null;
+    if (before && verticalChanges) {
+      const outcome: VerticalChangeOutcome = await applyVerticalChange(before, updated);
+      verticalSync = outcome;
+      const actor = auditActorOf(auth.principal);
+      await recordAudit({
+        actor_kind: actor.actor_kind, actor_user_id: actor.actor_user_id, business_id: id, action: 'business.vertical_changed',
+        target: `business:${id}`, ip: clientKey(req),
+        meta: { ...actor.meta, from: before.vertical ?? 'hvac', to: updated.vertical ?? 'hvac', ...outcome, kb_content_kept: true },
+      });
+    }
+    // `vertical_sync` (only after a trade change): the dashboard warns when the live agent could not be updated yet (a retry is queued).
+    return ok<Business & { vertical_sync?: VerticalChangeOutcome }>({ ...publicBusiness(updated), ...(verticalSync ? { vertical_sync: verticalSync } : {}) });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 400);
   }

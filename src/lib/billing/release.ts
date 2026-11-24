@@ -115,7 +115,7 @@ export function decideRelease(f: ReleaseFacts, o: ReleaseOptions = {}): ReleaseD
 export async function countRecentRealCalls(businessId: string, since: Date): Promise<number> {
   const rows = await prisma.$queryRaw<{ n: number }[]>`
     SELECT count(*)::int AS n FROM "calls" c
-     WHERE c."business_id" = ${businessId} AND c."started_at" >= ${since}
+     WHERE c."business_id" = ${businessId} AND c."started_at" >= ${since} AND c."kind" = 'customer'
        AND NOT starts_with(COALESCE(c."flagged_reason", ''), 'out_of_service:')
        AND (COALESCE(c."duration_sec", 0) >= ${RECENT_CALL_MIN_SECONDS}
             OR COALESCE(c."transcript", '') <> '' OR COALESCE(c."summary", '') <> ''

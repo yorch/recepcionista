@@ -263,7 +263,7 @@ describe('H2 helpers', () => {
 describe('L4: the call mode buttons never become `disabled` while saving (that dropped keyboard focus to <body>)', () => {
   test('source regression: aria-disabled + a busy guard, focus restored', () => {
     const src = readFileSync(new URL('../src/components/dashboard/call-mode.tsx', import.meta.url), 'utf8');
-    const buttons = src.slice(src.indexOf("aria-pressed={view.call_mode === mode}"), src.indexOf("{busy === mode ? 'Saving"));
+    const buttons = src.slice(src.indexOf("aria-pressed={view.call_mode === mode}"), src.indexOf("{busy === mode ? t('common.saving')"));
     expect(buttons).toContain('aria-disabled');
     expect(buttons).not.toMatch(/\sdisabled=/);
     expect(src).toContain('buttons.current[mode]?.focus()');

@@ -347,7 +347,8 @@ integration('call handling mode (postgres)', () => {
     const { res, json, code } = await startFwd(biz.id, number);
     expect(res.status).toBe(200);
     expect(code).toMatch(/^\d{6}$/);
-    expect((await prisma.smsLog.findFirst({ where: { businessId: biz.id } }))?.body).toBe('[forward number verification code]');
+    // the owner may ALSO get a "forwarding number changed" notice (sent in the daytime, deferred in quiet hours): look for the code row itself
+    expect((await prisma.smsLog.findFirst({ where: { businessId: biz.id, body: '[forward number verification code]' } }))?.body).toBe('[forward number verification code]');
     // stored but UNVERIFIED: forward mode refused, and calls are never routed to it
     expect((await db.getBusiness(biz.id))).toMatchObject({ forward_number_e164: number, forward_number_verified_at: null });
     const early = await modeRoute.PATCH(api(`/api/businesses/${biz.id}/call-mode`, 'PATCH', { mode: 'forward' }), ctx(biz.id));

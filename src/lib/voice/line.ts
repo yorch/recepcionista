@@ -3,8 +3,9 @@
  *
  *   'native'   the number is imported into ElevenLabs (the documented production setup, docs/runbook.md section 8). ElevenLabs owns
  *              the Voice URL and answers the call itself, so the app only sees the conversation-initiation webhook
- *              (/api/voice/initiation) and can change what the agent SAYS: it can never dial a human. `paused` works (message +
- *              callback capture); `forward` does NOT, and the dashboard says so instead of promising it.
+ *              (/api/voice/initiation) and can change what the agent SAYS. It cannot dial a human itself, but with NATIVE_TRANSFER=on the
+ *              agent can TRANSFER the call (voice/transfer.ts). `paused` works (message + callback capture); with NATIVE_TRANSFER off
+ *              (the default) `forward` does NOT, and the dashboard says so instead of promising it.
  *   'webhook'  the Twilio number's Voice URL is /api/voice/incoming (a signed form POST answered with TwiML): `paused` records a
  *              voicemail and `forward` dials the verified number. There is no AI conversation on such a line (the route answers
  *              JSON only to the unsigned demo UI), so it is for forwarding / voicemail-only numbers and local demos.
@@ -47,8 +48,12 @@ export function lineKindMismatch(env: Record<string, string | undefined> = proce
     : null;
 }
 
-/** Can a call be forwarded to a human on this kind of line? */
-export const forwardingSupported = (line: LineKind = lineKind()): boolean => line === 'webhook';
+/**
+ * Can a call be forwarded to a human on this kind of line? Always on a 'webhook' line. On the 'native' ElevenLabs line only with
+ * NATIVE_TRANSFER=on (the transfer-to-number system tool, voice/transfer.ts; default OFF until the live test in docs/runbook.md section 8).
+ */
+export const forwardingSupported = (line: LineKind = lineKind(), env: Record<string, string | undefined> = process.env): boolean =>
+  line === 'webhook' || (env.NATIVE_TRANSFER ?? '').trim().toLowerCase() === 'on';
 
 /** The honest sentence shown wherever 'forward' would otherwise be offered or claimed on a line that cannot do it. */
 export const FORWARD_UNAVAILABLE = 'Forwarding is not available on the AI voice line — callers will hear the paused message';

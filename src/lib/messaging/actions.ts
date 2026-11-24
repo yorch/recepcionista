@@ -7,7 +7,9 @@ import { claimEvent, countryForBusiness, findRecentSms, getBooking, getBusiness,
 import { confirmationSms, FOLLOWUP_NOTICE_RE, gratitudeSms, paymentLinkSms, type Lang } from '@/lib/messaging/templates';
 import { sameNumber } from '@/lib/phone';
 import { sendAndLog } from '@/lib/messaging';
-import { createPaymentLink } from '@/lib/providers/stripe';
+import { appUrl, createPaymentLink } from '@/lib/providers/stripe';
+import { checkoutRefundNote } from '@/lib/refunds';
+import { BookingCancelledError, rememberPaymentLink } from '@/lib/payments/link-store';
 import type { Business, Booking, SmsLog } from '@/lib/types';
 
 /** A voice tool can fire twice in one turn; the customer should only get one text. */
@@ -102,6 +104,7 @@ export interface PaymentLinkInput {
 /** Creates exactly one payment link, records the deposit (cents) on the booking, and texts it. */
 export async function createAndSendPaymentLink(input: PaymentLinkInput) {
   const { business, booking } = input;
+  if (booking && ((await getBooking(booking.id))?.status ?? booking.status) === 'cancelled') throw new BookingCancelledError();
   const amountCents = Math.round(input.amountCents);
   const description = input.description?.trim()
     || `${business.name} deposit${booking ? ` — ${booking.service}` : ''}`;
@@ -109,9 +112,11 @@ export async function createAndSendPaymentLink(input: PaymentLinkInput) {
   const link = await createPaymentLink(amountCents, description, business.name, {
     bookingId: booking?.id ?? null,
     businessId: business.id,
+    refundNote: checkoutRefundNote(business, appUrl()),
   });
   // Remember what is owed so the pay page and dashboard read it from the DB (cents).
   if (booking && !booking.deposit_paid) await updateBooking(booking.id, { deposit_amount: amountCents });
+  if (booking && !link.mock) await rememberPaymentLink(booking.id, link.id);
 
   const text = paymentLinkSms({
     business, amount_cents: amountCents, url: link.url,

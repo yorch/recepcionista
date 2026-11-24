@@ -6,9 +6,10 @@
  * Locale: English and Spanish for every path. Times are always rendered in
  * America/New_York, which is where the demo business lives.
  */
+import { emitBookingChanged } from '@/lib/booking-hooks';
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall, upsertCallForConversation,
-  updateCall, createBooking as dbCreateBooking, BookingRejectedError,
+  updateCall, setTransferStatus, createBooking as dbCreateBooking, BookingRejectedError,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
 import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
@@ -20,13 +21,18 @@ import { logger } from '@/lib/log';
 import { normalizePhone } from '@/lib/providers/twilio';
 import { E164 } from '@/lib/messaging/recipient';
 import { sendAndLog } from '@/lib/messaging';
-import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
+import { SERVICE_ALIASES } from '@/lib/verticals/aliases';
+import { CALL_911_EN, CALL_911_ES, call911For, call911Hazards } from '@/lib/voice/emergency';
 import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { isOwnerNumber } from '@/lib/messaging/owner';
 import { countryForBusiness } from '@/lib/db';
 import { TOOL_NAMES, type ToolName } from '@/lib/kb';
 import { CAPACITY_EXEMPT_TOOLS, pausedToolMessage } from '@/lib/voice/capacity';
 import { resolveCallRoute } from '@/lib/voice/call-mode';
+import { cancelBookingTool, rescheduleBookingTool } from '@/lib/voice/tools-bookings';
+import { decideTransfer, nativeTransferEnabled, noteTransferAttempt, transferApprovedMessage, transferRefusalMessage } from '@/lib/voice/transfer';
 
 export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
@@ -234,13 +240,14 @@ export type { OwnerAlert };
 /** What to tell a caller when we could NOT reach the owner. */
 function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolean): { message: string; data: Record<string, unknown> } {
   const phone = business.owner_phone ? normalizePhone(business.owner_phone) : null;
-  const call911 = say(lang, CALL_911_EN, CALL_911_ES);
+  const copy911 = call911For(business);
+  const call911 = say(lang, copy911.en, copy911.es);
   const owner = phone
     ? say(lang, `You can also call the owner directly at ${phone}.`, `También puede llamar al dueño directamente al ${phone}.`)
     : say(lang, 'I will keep trying to reach the owner and they will call you back.', 'Voy a seguir intentando comunicarme con el dueño y él le devolverá la llamada.');
   return {
     message: emergency ? `${call911} ${owner}` : owner,
-    data: { call_911_for: ['gas', 'carbon_monoxide', 'smoke', 'fire'], owner_phone: phone },
+    data: { call_911_for: call911Hazards(business), owner_phone: phone },
   };
 }
 
@@ -455,6 +462,7 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
       throw err;
     }
 
+    await emitBookingChanged(booking.id, 'created', business.id); // Google Calendar push etc. (fire-and-forget handlers, never throws)
     if (!call.caller_name) await updateCall(call.id, { caller_name: name });
 
     // The confirmation goes to the VERIFIED caller number (call row / platform caller id), in the language
@@ -501,6 +509,9 @@ async function rejectionResult(
     case 'slot_taken':
       return { ok: false, data, message: say(lang,
         `That slot just got taken. ${alt}`, `Ese horario se acaba de ocupar. ${alt}`) };
+    case 'calendar_busy': // the owner has something on their own calendar then; never say what
+      return { ok: false, data, message: say(lang,
+        `We are not available at that time. ${alt}`, `No estamos disponibles a esa hora. ${alt}`) };
     case 'past':
       return { ok: false, data, message: say(lang,
         `That time has already passed. ${alt}`, `Esa hora ya pasó. ${alt}`) };
@@ -509,6 +520,7 @@ async function rejectionResult(
         `That job would run past our closing time. ${alt}`,
         `Ese trabajo terminaría después de nuestra hora de cierre. ${alt}`) };
     case 'closed_day':
+    case 'closed_date':
     case 'before_open':
       return { ok: false, data, message: say(lang,
         `That is outside our hours. ${alt}`, `Eso está fuera de nuestro horario. ${alt}`) };
@@ -743,13 +755,14 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     });
 
     // Caller-controlled text is clamped field by field (the whole alert is also capped at 320 GSM-safe characters by alertOwner).
+    const ot = makeT(await ownerLocaleFor(business));
     const alertBody = [
-      `EMERGENCY - ${alertField(business.name, 50)}`,
-      callerName ? `Caller: ${alertField(callerName, 50)}` : '',
-      callerPhone ? `Phone: ${alertField(normalizePhone(callerPhone), 20)}` : call.caller_phone ? `Phone: ${call.caller_phone}` : '',
-      address ? `Address: ${alertField(address, 100)}` : '',
-      `Reason: ${alertField(reason, 140)}`,
-      'Call them back now.',
+      ot('alert.emergency.title', { business: alertField(business.name, 50) }),
+      callerName ? ot('alert.caller', { name: alertField(callerName, 50) }) : '',
+      callerPhone ? ot('alert.phone', { phone: alertField(normalizePhone(callerPhone), 20) }) : call.caller_phone ? ot('alert.phone', { phone: call.caller_phone }) : '',
+      address ? ot('alert.address', { address: alertField(address, 100) }) : '',
+      ot('alert.reason', { reason: alertField(reason, 140) }),
+      ot('alert.callbackNow'),
     ].filter(Boolean).join('\n');
     const alert = await alertOwner(business, alertBody, { class: 'emergency', callId: call.id });
 
@@ -757,8 +770,8 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       return {
         ok: true,
         message: say(lang,
-          `${CALL_911_EN} I've flagged this as an emergency and the owner has been notified.`,
-          `${CALL_911_ES} Lo marqué como emergencia y el dueño ya fue notificado.`),
+          `${call911For(business).en} I've flagged this as an emergency and the owner has been notified.`,
+          `${call911For(business).es} Lo marqué como emergencia y el dueño ya fue notificado.`),
         data: { call: updated, owner_sms: alert.sms, owner_notified: true },
       };
     }
@@ -783,42 +796,32 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
   }
 }
 
-/** Spanish callers describe the same jobs with different words — bridge them. */
-const SERVICE_ALIASES: Record<string, string> = {
-  reparacion: 'repair', reparación: 'repair', arreglar: 'repair', arreglo: 'repair',
-  instalacion: 'installation', instalación: 'installation', instalar: 'installation',
-  mantenimiento: 'maintenance', afinacion: 'maintenance', afinación: 'maintenance',
-  servicio: 'service', diagnostico: 'diagnostic', diagnóstico: 'diagnostic',
-  revision: 'diagnostic', revisión: 'diagnostic', visita: 'visit',
-  limpieza: 'cleaning', ductos: 'duct', conductos: 'duct',
-  emergencia: 'emergency', emergencias: 'emergency', urgencia: 'emergency',
-  aire: 'ac', acondicionado: 'ac', equipo: 'system', sistema: 'system',
-  calefaccion: 'heating', calefacción: 'heating', calentar: 'heating',
-};
-
-function normalizeQuery(query: string): string {
+function normalizeQuery(query: string, aliases = true): string {
   return query
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .split(/\s+/)
     .filter(Boolean)
-    .map((w) => SERVICE_ALIASES[w] ?? w)
+    .map((w) => (aliases ? SERVICE_ALIASES[w] ?? w : w))
     .join(' ');
 }
 
 function matchService<T extends { name: string }>(services: T[], query: string): T[] {
   const q = normalizeQuery(query).trim();
   if (!q) return services;
-  const words = q.split(/\s+/).filter((w) => w.length > 2);
+  // The query as spoken is scored too: a service named in Spanish ("Limpieza profunda") must match the Spanish words, not only their English aliases.
+  const queries = [...new Set([q, normalizeQuery(query, false).trim()].filter(Boolean))];
+  const scoreOf = (name: string, query2: string): number => {
+    const words = query2.split(/\s+/).filter((w) => w.length > 2);
+    if (name === query2) return 100;
+    if (name.includes(query2)) return 80;
+    if (query2.includes(name)) return 70;
+    return words.filter((w) => name.includes(w)).length * 20;
+  };
   const scored = services
     .map((s) => {
       const name = s.name.toLowerCase();
-      let score = 0;
-      if (name === q) score = 100;
-      else if (name.includes(q)) score = 80;
-      else if (q.includes(name)) score = 70;
-      else score = words.filter((w) => name.includes(w)).length * 20;
-      return { s, score };
+      return { s, score: Math.max(...queries.map((q2) => scoreOf(name, q2))) };
     })
     .filter((row) => row.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -926,13 +929,14 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     const altDiffers = Boolean(alt && alt !== verified);
     const callbackLast4 = altDiffers ? alt!.slice(-4) : verified ? verified.slice(-4) : null;
 
+    const ot = makeT(await ownerLocaleFor(business));
     const alertBody = [
-      `HANDOFF - ${alertField(business.name, 50)}`,
-      call.caller_name ? `Caller: ${alertField(call.caller_name, 50)}` : '',
-      call.caller_phone ? `Phone: ${call.caller_phone}` : verified ? `Phone: ${verified}` : '',
-      altDiffers ? `Asked to be called back on: ${alt} (said by the caller)` : '',
-      `Reason: ${alertField(reason, 140)}`,
-      'Please call them back.',
+      ot('alert.handoff.title', { business: alertField(business.name, 50) }),
+      call.caller_name ? ot('alert.caller', { name: alertField(call.caller_name, 50) }) : '',
+      call.caller_phone ? ot('alert.phone', { phone: call.caller_phone }) : verified ? ot('alert.phone', { phone: verified }) : '',
+      altDiffers ? ot('alert.callbackOn', { phone: alt ?? '' }) : '',
+      ot('alert.reason', { reason: alertField(reason, 140) }),
+      ot('alert.callbackPlease'),
     ].filter(Boolean).join('\n');
     const alert = await alertOwner(business, alertBody, { class: 'handoff', callId: call.id });
 
@@ -1001,6 +1005,36 @@ async function callHandlingRefusal(businessId: unknown, lang: ToolLanguage): Pro
   return { ok: false, message: pausedToolMessage(lang), data: { reason: 'calls_paused', route: route.action } };
 }
 
+/**
+ * transfer_to_human: the AI asks for a live transfer (NATIVE_TRANSFER=on). Re-checks the verified number, hours, caps and concurrency (the
+ * forward machinery) and charges the allowance; approved -> the agent then calls the transfer system tool; anything else (flag off,
+ * outside hours, unverified number, caps, limits) -> the owner is texted a callback request (handoff_to_human) and the caller is told so.
+ */
+async function transferToHuman(args: HandoffArgs): Promise<ToolResult> {
+  const lang = langOf(args.language);
+  const es = lang === 'es';
+  try {
+    const business = await resolveBusiness(args);
+    if (!business) return missingBusiness(lang);
+    const call = await resolveCall(business, args);
+    const decision = nativeTransferEnabled()
+      ? await decideTransfer(business, { callSid: call?.call_sid ?? str(args.call_sid), from: call?.caller_phone ?? platformCaller(args), stirStatus: call?.stir_status ?? null })
+      : ({ ok: false, why: 'disabled' } as const);
+    if (decision.ok) {
+      if (call) await noteTransferAttempt(call.id);
+      log.info('transfer.approved', { business: business.id, call: call?.id });
+      return { ok: true, message: transferApprovedMessage(es), data: { approved: true } };
+    }
+    log.info('transfer.refused', { business: business.id, call: call?.id, why: decision.why });
+    if (call && decision.why !== 'disabled') { try { await setTransferStatus(call.id, 'failed'); } catch { /* best-effort */ } }
+    const fallback = await handoffToHuman({ ...args, reason: `Caller asked for a person; live transfer not available (${decision.why.replace(/_/g, ' ')})` });
+    return { ok: false, message: `${transferRefusalMessage(decision.why, es)}${fallback.message}`, data: { approved: false, why: decision.why } };
+  } catch (err) {
+    log.error('transfer.failed', { err });
+    return { ok: false, message: say(lang, 'I cannot transfer the call right now. Let me take a message for the owner.', 'No puedo transferir la llamada ahora. Permítame tomar un mensaje para el dueño.') };
+  }
+}
+
 /** Single entry point for the HTTP route. Never throws. */
 export async function runTool(
   name: string,
@@ -1024,7 +1058,7 @@ export async function runTool(
   const a = (args ?? {}) as Record<string, never>; // NOTE: loosely typed LLM args; each tool validates its own fields
   try {
     const result = await (async (): Promise<ToolResult> => {
-      if (!CAPACITY_EXEMPT_TOOLS.has(tool)) {
+      if (!CAPACITY_EXEMPT_TOOLS.has(tool) && tool !== 'transfer_to_human') {
         const refused = await callHandlingRefusal((a as Record<string, unknown>).business_id, lang);
         if (refused) return refused;
       }
@@ -1036,6 +1070,9 @@ export async function runTool(
         case 'flag_emergency': return await flagEmergency(a);
         case 'get_pricing': return await getPricing(a);
         case 'handoff_to_human': return await handoffToHuman(a);
+        case 'reschedule_booking': return await rescheduleBookingTool(a);
+        case 'cancel_booking': return await cancelBookingTool(a);
+        case 'transfer_to_human': return await transferToHuman(a);
         default:
           return {
             ok: false,

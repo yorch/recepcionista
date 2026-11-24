@@ -21,7 +21,10 @@ import { claimEvent, completeEvent, releaseEvent } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
 import { peekRateLimit, rateLimit } from '@/lib/ratelimit';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { logger } from '@/lib/log';
+import { attestationLevel, type Attestation } from '@/lib/stir';
 import type { Business } from '@/lib/types';
 
 const log = logger('voice/caller-limits');
@@ -52,6 +55,22 @@ export const unknownSharePct = (env: Env = process.env): number => intEnv(env.CA
 /** Numbers Twilio / carriers send instead of a caller id. */
 const WITHHELD = new Set(['', 'anonymous', 'restricted', 'unavailable', 'unknown', 'private', 'blocked', '+266696687', '+86282452253', '+7378742883', '+2562533', '+8656696', '+464']);
 
+/**
+ * STIR/SHAKEN trust (Twilio `StirVerstat`). Caller-id can be spoofed, so a per-caller identity (own bucket, "known customer" reserved capacity)
+ * is only granted to a caller whose number passed attestation A. Everyone else (B, C, no verstat, a native line that provides none) shares
+ * the 'unverified' stranger bucket; a number that FAILED validation gets a stricter shared bucket (half the withheld budget). A spoofer who
+ * dials as a known customer therefore can neither burn that customer's own budget nor use the capacity reserved for known customers.
+ * `STIR_TRUST=off` (a deployment whose callers are mostly outside the US/Canada, where no verstat exists) restores caller-id identity.
+ */
+export type TrustClass = 'verified' | 'unverified' | 'failed';
+export const stirTrustEnabled = (env: Env = process.env): boolean => (env.STIR_TRUST ?? '').trim().toLowerCase() !== 'off';
+export function trustClassOf(stirStatus: string | null | undefined, env: Env = process.env): TrustClass {
+  if (!stirTrustEnabled(env)) return 'verified';
+  const a: Attestation = attestationLevel(stirStatus);
+  return a === 'A' ? 'verified' : a === 'failed' ? 'failed' : 'unverified';
+}
+export const failedPerHour = (kind: BudgetKind, env: Env = process.env): number => Math.max(1, Math.floor(withheldPerHour(kind, env) / 2));
+
 export interface CallerKey {
   /** Valid E.164, or null when the caller withheld the number. */
   e164: string | null;
@@ -59,10 +78,11 @@ export interface CallerKey {
   bucket: string;
 }
 
-export function callerKey(from: string | null | undefined, businessId: string): CallerKey {
+export function callerKey(from: string | null | undefined, businessId: string, trust: TrustClass = 'verified'): CallerKey {
   const raw = (from ?? '').trim().toLowerCase();
   const e164 = WITHHELD.has(raw) ? null : toE164(raw);
   if (!e164) return { e164: null, bucket: 'withheld' };
+  if (trust !== 'verified') return { e164: null, bucket: trust === 'failed' ? 'failed' : 'unverified' };
   return { e164, bucket: crypto.createHash('sha256').update(`${businessId}:${e164}`).digest('hex').slice(0, 24) };
 }
 
@@ -78,7 +98,7 @@ export async function isKnownCaller(businessId: string, e164: string | null, now
     SELECT (
       EXISTS (SELECT 1 FROM "bookings" WHERE "business_id" = ${businessId} AND "phone_e164" = ${e164} AND "anonymized_at" IS NULL
                 AND ("created_at" >= ${since} OR "scheduled_at" >= ${since}))
-      OR EXISTS (SELECT 1 FROM "calls" WHERE "business_id" = ${businessId} AND "caller_e164" = ${e164} AND "started_at" >= ${since}
+      OR EXISTS (SELECT 1 FROM "calls" WHERE "business_id" = ${businessId} AND "kind" = 'customer' AND "caller_e164" = ${e164} AND "started_at" >= ${since}
                    AND "transcript" IS NOT NULL AND "recording_url" IS NULL AND COALESCE("duration_sec", 0) >= 15)
     ) AS known`;
   return rows[0]?.known === true;
@@ -100,6 +120,11 @@ export interface BudgetContext {
   callSid?: string | null;
   from?: string | null;
   now?: Date;
+  /**
+   * Twilio StirVerstat of the call (e.g. 'TN-Validation-Passed-A'). Pass the call's stored `stir_status` (null = none reported). Leaving the
+   * key OUT (undefined) skips the trust check (legacy callers / tests): every real entry path passes it.
+   */
+  stirStatus?: string | null;
 }
 
 export type BudgetDenial = 'caller_limited' | 'unknown_reserved' | 'business_budget' | 'check_failed';
@@ -118,18 +143,19 @@ export async function chargeCallBudget(kind: BudgetKind, ctx: BudgetContext, env
   let claimed = false;
   const source = kind === 'forward' ? 'voice-forward-budget' : 'voice-voicemail-budget';
   try {
-    const caller = callerKey(ctx.from, businessId);
+    const trust: TrustClass = ctx.stirStatus === undefined ? 'verified' : trustClassOf(ctx.stirStatus, env);
+    const caller = callerKey(ctx.from, businessId, trust);
     const first = ctx.callSid ? await claimEvent(source, ctx.callSid) : true;
     claimed = Boolean(ctx.callSid) && first;
     const known = await isKnownCaller(businessId, caller.e164, ctx.now);
 
     const own = await spend(
       `voice/${kind}:caller:${businessId}:${caller.bucket}`,
-      caller.e164 ? perCallerPerHour(kind, env) : withheldPerHour(kind, env), first,
+      caller.e164 ? perCallerPerHour(kind, env) : caller.bucket === 'failed' ? failedPerHour(kind, env) : withheldPerHour(kind, env), first,
     );
     if (own.error) { if (claimed && ctx.callSid) { await releaseEvent(source, ctx.callSid); claimed = false; } return { ok: false, why: 'check_failed', known }; }
     if (!own.allowed) {
-      log.warn('caller_limited', { business: businessId, kind, caller: caller.bucket, withheld: caller.e164 === null });
+      log.warn('caller_limited', { business: businessId, kind, caller: caller.bucket, withheld: caller.e164 === null, trust });
       if (claimed && ctx.callSid) await completeEvent(source, ctx.callSid);
       return { ok: false, why: 'caller_limited', known };
     }
@@ -173,10 +199,11 @@ export async function reportPressure(
       business: business.id, kind, used_pct: pct, limit, strangers_only: strangersOnly, share_pct: unknownSharePct(env),
       action: 'unusually many calls this hour; known customers keep their reserved share (docs/runbook.md, call flood)',
     });
-    const what = kind === 'forward' ? 'forwarded calls' : 'voicemails';
+    const t = makeT(await ownerLocaleFor(business));
+    const what = t(kind === 'forward' ? 'alert.pressure.kind.forward' : 'alert.pressure.kind.voicemail');
     const body = strangersOnly
-      ? `HEADS UP — ${business.name}: unusually many ${what} from unknown numbers this hour. Their share is used up; known customers still get through. If this is not expected, switch calls back to the assistant.`
-      : `HEADS UP — ${business.name}: ${pct}% of this hour's ${what} allowance is used. Known customers keep a reserved share. If this is not expected, check Calls.`;
+      ? t('alert.pressure.strangers', { business: business.name, what })
+      : t('alert.pressure.pct', { business: business.name, what, pct });
     return (await alertOwner(business, body)).notified;
   } catch (err) {
     log.error('pressure_notice_failed', { business: business.id, err });

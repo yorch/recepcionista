@@ -80,6 +80,7 @@ export function applyTestEnv(): void {
   process.env.ADMIN_TOKEN = SECRETS.adminToken;
   if (!process.env.LOG_LEVEL) process.env.LOG_LEVEL = 'error'; // keep test output readable (LOG_LEVEL=debug to see everything)
 
+  outboundCalls.length = 0; // each integration file starts with a clean slate (the list is shared by the whole bun process)
   originalFetch ??= globalThis.fetch;
   globalThis.fetch = (async (input: unknown) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;

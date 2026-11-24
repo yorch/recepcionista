@@ -88,6 +88,12 @@ case "${EMAIL_PROVIDER:-}" in
     die "EMAIL_PROVIDER must be 'resend' or 'smtp' in production (got '${EMAIL_PROVIDER:-}'); 'log' is refused. Verification and reset emails depend on it." ;;
 esac
 [[ -n "${EMAIL_FROM:-}" ]] || die "EMAIL_FROM is unset in .env (e.g. 'Recepcionista <no-reply@${DOMAIN}>')"
+# Google Calendar (docs/integrations/google-calendar.md): all-or-nothing, only when the OAuth client id is set.
+if [[ -n "${GOOGLE_CLIENT_ID:-}" ]]; then
+  [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]] || die "GOOGLE_CLIENT_ID is set but GOOGLE_CLIENT_SECRET is not"
+  [[ "${APP_URL:-}" == https://* ]] || die "Google Calendar needs APP_URL=https://... (OAuth redirect + push notifications are https only)"
+fi
+[[ "${GOOGLE_OAUTH_MOCK:-}" != "true" ]] || die "GOOGLE_OAUTH_MOCK=true is for local development only; remove it from the production .env"
 # Signup abuse control: the Turnstile site key (public, build time) and secret (server) only work as a pair.
 if [[ -n "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" && -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
   die "NEXT_PUBLIC_TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET_KEY is not: the widget would render but nothing would verify it."
@@ -108,6 +114,12 @@ fi
 for v in DEMO_MODE ALLOW_INSECURE_DEV STRIPE_ALLOW_UNSIGNED; do
   [[ "${!v:-}" != "true" ]] || die "${v}=true in .env: never enable it on a production host (docs/runbook.md)."
 done
+
+# Optional annual plan: the price id must look like a Stripe price, and needs the Stripe key to be offered at all.
+if [[ -n "${STRIPE_PRICE_ID_ANNUAL:-}" ]]; then
+  [[ "${STRIPE_PRICE_ID_ANNUAL}" =~ ^price_[A-Za-z0-9]+$ ]] || die "STRIPE_PRICE_ID_ANNUAL is not a Stripe price id (price_...). See docs/billing.md."
+  [[ -n "${STRIPE_SECRET_KEY:-}" ]] || die "STRIPE_PRICE_ID_ANNUAL is set but STRIPE_SECRET_KEY is not: the annual plan could never be offered."
+fi
 
 # Subscription billing (docs/billing.md). FAIL CLOSED: in production billing is enforced unless BILLING_ENFORCED=false is
 # set explicitly, because signup is public and anything else would hand every stranger a free number, agent and texts.
@@ -169,6 +181,19 @@ fi
 if [[ -n "${FORWARD_RING_SECONDS:-}" ]] && (( FORWARD_RING_SECONDS < 10 || FORWARD_RING_SECONDS > 40 )); then
   die "FORWARD_RING_SECONDS is '${FORWARD_RING_SECONDS}' in .env: use a whole number from 10 to 40 (docs/env-vars.md)."
 fi
+# Phase 2 telephony switches (docs/env-vars.md).
+for v in NATIVE_TRANSFER STIR_TRUST LANGUAGE_DETECTION; do
+  case "${!v:-}" in "" | on | off) ;; *) die "$v is '${!v}' in .env: use on or off, or leave it empty (docs/env-vars.md)." ;; esac
+done
+if [[ "${NATIVE_TRANSFER:-}" == "on" && "${VOICE_LINE_KIND:-}" != "native" && ( -z "${ELEVENLABS_API_KEY:-}" || -z "${ELEVENLABS_PHONE_NUMBER_ID:-}" ) ]]; then
+  echo "WARNING: NATIVE_TRANSFER=on only matters on a native ElevenLabs line (ELEVENLABS_API_KEY + ELEVENLABS_PHONE_NUMBER_ID); here it has no effect. Run the live transfer test first (docs/runbook.md section 8)." >&2
+fi
+if [[ "${NATIVE_TRANSFER:-}" == "on" && -z "${ELEVENLABS_TOOL_SECRET:-}" ]]; then
+  die "NATIVE_TRANSFER=on needs ELEVENLABS_TOOL_SECRET (the per-call transfer destination travels through the authenticated initiation webhook)."
+fi
+for v in LIVE_MAX_PER_USER LIVE_MAX_PER_BUSINESS LIVE_MAX_POLLS_PER_CALL RECONCILE_AFTER_MINUTES RECONCILE_MAX_ATTEMPTS; do
+  if [[ -n "${!v:-}" ]] && ! [[ "${!v}" =~ ^[1-9][0-9]*$ ]]; then die "$v is '${!v}' in .env: use a whole number of at least 1 (docs/env-vars.md)."; fi
+done
 if [[ -n "${FORWARD_DENY_AREA_CODES:-}" ]]; then
   IFS=',' read -ra _deny_codes <<< "${FORWARD_DENY_AREA_CODES}"
   for c in "${_deny_codes[@]}"; do

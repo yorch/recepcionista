@@ -6,8 +6,9 @@
  *   1. `Authorization: Bearer <ADMIN_TOKEN>`     -> admin (break-glass superadmin, CSRF-exempt)
  *      An invalid Bearer never falls back to cookies.
  *   2. `rc_session` cookie (random opaque token)  -> a server-side `admin_token` session (12 h, revocable)
- *   3. `rc_user_session` cookie (opaque token)    -> looked up in Postgres: owner/staff are tied to
- *      ONE business; a user with role 'admin' is a global admin.
+ *   3. `rc_user_session` cookie (opaque token)    -> looked up in Postgres: owner/staff work in ONE business at a
+ *      time (the session's active business, validated against the account's enabled MEMBERSHIPS on every request; the
+ *      role is the membership's role); a user with role 'admin' is a global admin.
  *      A user with 2FA whose session has not passed the second factor (mfa_verified_at NULL) is
  *      "MFA pending": it resolves to NOTHING here (401 `mfa_required`); only /api/auth/mfa and logout see it.
  *   4. ALLOW_INSECURE_DEV=true without ADMIN_TOKEN -> admin (never in production)
@@ -21,8 +22,9 @@ import { NextResponse } from 'next/server';
 import {
   adminSessionTokenFrom, authConfig, checkSameOrigin, hasBearer, SAFE_METHODS, tokensMatch, userSessionTokenFrom,
 } from '@/lib/auth';
+import { listMembershipsForUser } from '@/lib/db/memberships';
 import { resolveSessionByToken } from '@/lib/db/users';
-import type { User, UserSession } from '@/lib/types';
+import type { MembershipWithBusiness, User, UserSession } from '@/lib/types';
 
 export type Role = 'staff' | 'owner' | 'admin';
 
@@ -33,8 +35,12 @@ export type Principal =
    * break-glass paths (they are not tied to a mailbox).
    */
   | { kind: 'admin'; via: 'token' | 'cookie' | 'user' | 'dev'; user?: User; email_verified: boolean; needs_2fa_enrollment?: boolean }
-  /** `email_verified`: the user proved their address. Provisioning/billing routes must require it (requireVerifiedEmail). */
-  | { kind: 'user'; user: User; business_id: string; role: 'owner' | 'staff'; email_verified: boolean };
+  /**
+   * `business_id` / `role`: the ACTIVE business of this session and the account's role IN THAT business (from its membership; the
+   * legacy `user.role` is only the role in the primary business and must not be used for authorization). `memberships` are all the
+   * account's ENABLED memberships. `email_verified`: the user proved their address. Provisioning/billing routes must require it.
+   */
+  | { kind: 'user'; user: User; business_id: string; role: 'owner' | 'staff'; email_verified: boolean; memberships: MembershipWithBusiness[] };
 
 const RANK: Record<Role, number> = { staff: 1, owner: 2, admin: 3 };
 
@@ -88,7 +94,9 @@ export function requireRole(principal: Principal, min: Role): void {
 
 /**
  * Throws 404 (not 403: never confirm that another tenant's business exists) unless the principal may
- * access `businessId`. Admins may access every business.
+ * access `businessId`. Admins may access every business. A user may access only the business their session is ACTIVE in (which
+ * is always one with an enabled membership): the role the route checked belongs to that business, so a business the account also
+ * belongs to but has not switched to is a 404 until POST /api/auth/switch-business.
  */
 export function requireBusinessAccess(principal: Principal, businessId: string | null | undefined): void {
   if (principal.kind === 'admin') return;
@@ -96,8 +104,8 @@ export function requireBusinessAccess(principal: Principal, businessId: string |
 }
 
 /**
- * The business id a request should operate on. A user is pinned to their own business: a different
- * requested id is a 404, an omitted one defaults to their own. An admin gets the requested id (null if none).
+ * The business id a request should operate on. A user is pinned to the session's active business: a different
+ * requested id is a 404, an omitted one defaults to it. An admin gets the requested id (null if none).
  */
 export function scopeBusinessId(principal: Extract<Principal, { kind: 'user' }>, requested?: string | null): string;
 export function scopeBusinessId(principal: Principal, requested?: string | null): string | null;
@@ -114,6 +122,20 @@ export type Resolution =
     /** When that session last proved who it is (login or re-authentication); null for Bearer/dev/break-glass or a pre-existing session. */ sudoAt?: string | null;
   }
   | { ok: false; status: 401 | 403 | 503; error: string; code?: 'mfa_required' | '2fa_enrollment_required' };
+
+/**
+ * The membership a session works in: its active business while that membership is still enabled, else the account's primary
+ * (legacy) business, else the oldest enabled membership. Same rule as resolveActiveMembership in src/lib/db/memberships.ts,
+ * applied to an already loaded list (one query per request).
+ */
+export function pickActiveMembership(
+  list: MembershipWithBusiness[], activeBusinessId: string | null, primaryBusinessId: string | null,
+): MembershipWithBusiness | null {
+  if (list.length === 0) return null;
+  return (activeBusinessId ? list.find((m) => m.business_id === activeBusinessId) : undefined)
+    ?? list.find((m) => m.business_id === primaryBusinessId)
+    ?? list[0];
+}
 
 /** Should REQUIRE_2FA_FOR_ADMINS force DB admin users to enrol? Default off. */
 export const require2faForAdmins = (): boolean => process.env.REQUIRE_2FA_FOR_ADMINS === 'true';
@@ -182,16 +204,18 @@ export async function resolvePrincipal(h: Headers, opts: { allowEnrollment?: boo
           sudoAt: session.sudo_at,
         };
       }
-      if (user.business_id) {
+      const memberships = await listMembershipsForUser(user.id);
+      const active = pickActiveMembership(memberships, session.active_business_id ?? null, user.business_id);
+      if (active) {
         return {
           ok: true,
-          principal: { kind: 'user', user, business_id: user.business_id, role: user.role === 'owner' ? 'owner' : 'staff', email_verified },
+          principal: { kind: 'user', user, business_id: active.business_id, role: active.role, email_verified, memberships },
           ambient: true,
           sessionId: session.id,
           sudoAt: session.sudo_at,
         };
       }
-      // owner/staff without a business must not exist (createUser forbids it): refuse rather than guess.
+      // No enabled membership (every business disabled them): the account has nothing to act on, refuse rather than guess.
     }
   }
 

@@ -41,7 +41,8 @@ export interface CreateEmailTokenInput {
   purpose: EmailTokenPurpose;
   /** Stored lowercased. */
   email: string;
-  /** Required for 'verify' and 'reset'. */
+  /** Required for 'verify' and 'reset'. For an 'invite' it is optional: set it when the invited address ALREADY has an account
+   * (accepted with acceptInviteForExistingUser, which adds a membership instead of creating a user). */
   user_id?: string | null;
   /** Required for 'invite' (with role). */
   business_id?: string | null;
@@ -80,7 +81,7 @@ export async function createEmailToken(input: CreateEmailTokenInput): Promise<{ 
     }),
     prisma.emailToken.create({
       data: {
-        userId: input.purpose === 'invite' ? null : input.user_id,
+        userId: input.purpose === 'invite' ? (input.user_id ?? null) : input.user_id,
         email,
         purpose: input.purpose,
         tokenHash: hashEmailToken(token),

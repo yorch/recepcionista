@@ -5,6 +5,7 @@ import { clearSessionCookie, setSessionCookie } from '@/lib/auth-cookies';
 import { accountId, checkClientAttempts, checkPair, clearFailures, mfaPairKey, recordFailure, verdictResponse } from '@/lib/login-throttle';
 import { countUnusedRecoveryCodes, createSession, deleteSession, recordAudit, SESSION_TTL_MS } from '@/lib/db';
 import { verifySecondFactor } from '@/lib/mfa';
+import { signedInData } from '@/lib/login-session';
 import { rateLimit } from '@/lib/ratelimit';
 import { resolvePendingMfa } from '@/lib/session';
 import { logger } from '@/lib/log';
@@ -39,7 +40,7 @@ export async function POST(req: Request) {
     if (!gate.ok) return verdictResponse(gate);
 
     const body = (await req.json().catch(() => ({}))) as { code?: unknown; recovery_code?: unknown };
-    const result = await verifySecondFactor(user.id, body, { allowRecovery: true, account: { email: user.email, businessId: user.business_id, ip } });
+    const result = await verifySecondFactor(user.id, body, { allowRecovery: true, account: { email: user.email, businessId: user.business_id, ip, locale: user.locale } });
     if (!result.ok && result.locked) return verdictResponse(result.locked);
 
     if (!result.ok) {
@@ -67,8 +68,7 @@ export async function POST(req: Request) {
     const res = NextResponse.json({
       ok: true,
       data: {
-        authenticated: true, kind: 'user', email: user.email, role: user.role, business_id: user.business_id,
-        email_verified: user.email_verified_at !== null,
+        ...(await signedInData(user)),
         ...(result.method === 'recovery' ? { recovery_codes_left: left } : {}),
       },
     });

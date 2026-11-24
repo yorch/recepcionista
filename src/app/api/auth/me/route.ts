@@ -16,6 +16,8 @@ export async function GET(req: Request) {
       role: principalRole(p),
       email: user?.email ?? null,
       business_id: p.kind === 'user' ? p.business_id : null,
+      /** The businesses this account can switch to (enabled memberships; the role is per business). */
+      memberships: p.kind === 'user' ? p.memberships.map((m) => ({ business_id: m.business_id, business_name: m.business_name, role: m.role })) : [],
       email_verified: p.email_verified,
       totp_enabled: user?.totp_enabled ?? false,
       needs_2fa_enrollment: p.kind === 'admin' ? Boolean(p.needs_2fa_enrollment) : false,

@@ -22,9 +22,9 @@ export async function GET(
 
     const [kb, firstCall, latestCall, firstBooking, extracted] = await Promise.all([
       getKnowledgeBase(id),
-      prisma.call.findFirst({ where: { businessId: id }, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }),
+      prisma.call.findFirst({ where: { businessId: id, kind: 'customer' }, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }),
       prisma.call.findFirst({
-        where: { businessId: id }, orderBy: { startedAt: 'desc' },
+        where: { businessId: id, kind: 'customer' }, orderBy: { startedAt: 'desc' },
         select: { startedAt: true, language: true, durationSec: true, status: true },
       }),
       prisma.booking.findFirst({ where: { businessId: id }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
@@ -60,6 +60,8 @@ export async function GET(
       name: business.name,
       url: business.url ?? null,
       owner_name: business.owner_name ?? null,
+      vertical: business.vertical ?? 'hvac',
+      locale: business.locale_default === 'es' ? 'es' : 'en',
       owner_phone: business.owner_phone ?? null,
       owner_phone_verified: facts.owner_phone_verified,
       owner_phone_verified_at: business.owner_phone_verified_at ?? null,

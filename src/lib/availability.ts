@@ -2,6 +2,7 @@
  * Pure availability maths (no DB, no clock reads): opening windows, slot grids,
  * overlap and slot validation. Everything is computed in the business time zone.
  */
+import { isClosedDate } from './closures';
 import { addDaysToDateKey, dayOfWeek, localDateKey, parseHhmm, zonedTimeToUtc } from './time';
 import type { Hours, TimeSlot } from './types';
 
@@ -40,8 +41,9 @@ export function blockingIntervals(
   return bookings.filter((b) => b.status !== 'cancelled').map(bookingInterval);
 }
 
-/** The [open, close) instants for a local date, or null if closed / hours invalid. */
-export function openWindow(hours: Hours | undefined | null, dateKey: string, tz: string): Interval | null {
+/** The [open, close) instants for a local date, or null if closed / hours invalid / the date is a listed holiday closure. */
+export function openWindow(hours: Hours | undefined | null, dateKey: string, tz: string, closedDates?: readonly string[] | null): Interval | null {
+  if (isClosedDate(closedDates, dateKey)) return null;
   const day = hours?.[DAY_KEYS[dayOfWeek(dateKey)]];
   if (!day) return null;
   const open = parseHhmm(day.open);
@@ -52,7 +54,7 @@ export function openWindow(hours: Hours | undefined | null, dateKey: string, tz:
   return end > start ? { start, end } : null;
 }
 
-export type SlotRejection = 'past' | 'closed_day' | 'before_open' | 'after_close';
+export type SlotRejection = 'past' | 'closed_day' | 'closed_date' | 'before_open' | 'after_close';
 
 /**
  * Is [start, start+duration) a legal appointment? It must start now-or-later (plus
@@ -66,9 +68,12 @@ export function validateSlot(
   tz: string,
   nowMs: number,
   leadMin = 0,
+  closedDates?: readonly string[] | null,
 ): { ok: true } | { ok: false; reason: SlotRejection } {
   if (!Number.isFinite(startMs) || startMs < nowMs + leadMin * 60_000) return { ok: false, reason: 'past' };
-  const window = openWindow(hours, localDateKey(startMs, tz), tz);
+  const dateKey = localDateKey(startMs, tz);
+  if (isClosedDate(closedDates, dateKey)) return { ok: false, reason: 'closed_date' };
+  const window = openWindow(hours, dateKey, tz);
   if (!window) return { ok: false, reason: 'closed_day' };
   if (startMs < window.start) return { ok: false, reason: 'before_open' };
   if (startMs + durationMin * 60_000 > window.end) return { ok: false, reason: 'after_close' };
@@ -81,9 +86,9 @@ export function buildSlots(
   tz: string,
   durationMin: number,
   busy: Interval[],
-  opts: { stepMin?: number; nowMs?: number; leadMin?: number } = {},
+  opts: { stepMin?: number; nowMs?: number; leadMin?: number; closedDates?: readonly string[] | null } = {},
 ): TimeSlot[] {
-  const window = openWindow(hours, dateKey, tz);
+  const window = openWindow(hours, dateKey, tz, opts.closedDates);
   if (!window) return [];
   const step = (opts.stepMin ?? SLOT_STEP_MIN) * 60_000;
   const dur = durationMin * 60_000;

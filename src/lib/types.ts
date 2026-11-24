@@ -36,6 +36,8 @@ export interface Business {
   owner_name?: string | null;
   hours: Hours;
   service_area: string[];
+  /** Holiday closures (YYYY-MM-DD in the business zone, at most 366): no slots on these dates whatever `hours` says. */
+  closed_dates?: string[];
   status: BusinessStatus;
   agent_id?: string | null;
   /** IANA zone, e.g. America/New_York. Defaults to America/New_York when absent. */
@@ -58,6 +60,18 @@ export interface Business {
   forward_number_verified_at?: string | null;
   /** 'forward' only during business hours; the AI answers outside them. */
   forward_during_hours?: boolean;
+  /** Default dashboard/text language (default 'en'). */
+  locale_default?: Locale;
+  /** Trade the default prompt/templates are written for (default 'hvac'). */
+  vertical?: Vertical;
+  /** Chosen ElevenLabs voice; null = platform default. */
+  voice_id?: string | null;
+  voice_name?: string | null;
+  /** Deposit refund policy on cancellation (default 'full_24h') and optional free text (<= 2000 chars). */
+  refund_policy?: RefundPolicy;
+  refund_policy_text?: string | null;
+  /** Subscription cadence (default 'month'). */
+  billing_interval?: BillingInterval;
   /** Billing. Absent/'none' on legacy and demo tenants (only enforced when BILLING_ENFORCED=true). */
   billing_status?: BillingStatus;
   plan?: string | null;
@@ -71,6 +85,16 @@ export interface Business {
   sms_cap_override?: number | null;
   call_minutes_cap_override?: number | null;
 }
+
+export type Locale = 'en' | 'es';
+export const LOCALES: readonly Locale[] = ['en', 'es'];
+export type Vertical = 'hvac' | 'plumbing' | 'electrical' | 'cleaning' | 'landscaping' | 'dental' | 'general';
+export const VERTICALS: readonly Vertical[] = ['hvac', 'plumbing', 'electrical', 'cleaning', 'landscaping', 'dental', 'general'];
+export type RefundPolicy = 'none' | 'full_24h' | 'full_48h' | 'full_always';
+export const REFUND_POLICIES: readonly RefundPolicy[] = ['none', 'full_24h', 'full_48h', 'full_always'];
+export const REFUND_POLICY_TEXT_MAX = 2000;
+export type BillingInterval = 'month' | 'year';
+export const BILLING_INTERVALS: readonly BillingInterval[] = ['month', 'year'];
 
 export type BillingStatus = 'none' | 'trialing' | 'active' | 'past_due' | 'canceled' | 'unpaid';
 
@@ -107,7 +131,23 @@ export interface Call {
   /** True once the recording disclosure was spoken to the caller. */
   recording_disclosed?: boolean;
   consent_status?: ConsentStatus;
+  /** 'customer' (default) or 'owner' (the owner phoned in to update the knowledge base). */
+  kind?: CallKind;
+  /** Live transfer to a human (default 'none'). */
+  transfer_status?: TransferStatus;
+  /** Twilio StirStatus (verstat) as received, e.g. 'TN-Validation-Passed-A'. */
+  stir_status?: string | null;
+  /** True when STIR/SHAKEN verified the number (attestation A); null = not evaluated. */
+  caller_verified?: boolean | null;
+  /** When this call's usage was added to the counters; null = not metered yet. */
+  metered_at?: string | null;
+  /** Reconcile attempts so far. */
+  reconcile_attempts?: number;
 }
+
+export type CallKind = 'customer' | 'owner';
+export type TransferStatus = 'none' | 'attempted' | 'connected' | 'failed' | 'declined';
+export const TRANSFER_STATUSES: readonly TransferStatus[] = ['none', 'attempted', 'connected', 'failed', 'declined'];
 
 export type ConsentStatus = 'unknown' | 'disclosed' | 'declined';
 
@@ -134,7 +174,27 @@ export interface Booking {
   /** When the customer was told about follow-up (gratitude) texts; null = no recorded consent. */
   followup_consent_at?: string | null;
   followup_consent_source?: string | null;
+  /** Rebook lineage: the booking this one replaced. */
+  rescheduled_from_id?: ID | null;
+  /** How many times the booking was moved (rescheduleBooking). */
+  reschedule_count?: number;
+  cancelled_at?: string | null;
+  cancel_reason?: string | null;
+  /** When the customer was last told about a cancel/reschedule; null = not notified. */
+  customer_notified_at?: string | null;
+  stripe_payment_intent_id?: string | null;
+  stripe_checkout_session_id?: string | null;
+  refund_status?: RefundStatus;
+  /** INTEGER CENTS refunded. */
+  refund_amount_cents?: number | null;
+  stripe_refund_id?: string | null;
+  refunded_at?: string | null;
+  /** Card dispute on the deposit (Stripe charge.dispute.* events): none | open | won | lost. */
+  dispute_status?: DisputeStatus;
 }
+
+export type DisputeStatus = 'none' | 'open' | 'won' | 'lost';
+export type RefundStatus = 'none' | 'pending' | 'refunded' | 'failed' | 'not_applicable';
 
 export interface BriefingStats {
   calls: number;
@@ -183,6 +243,7 @@ export type UserRole = 'owner' | 'staff' | 'admin';
 export interface User {
   id: ID;
   email: string;
+  /** Legacy "primary" business (kept for compatibility). Who may access which business is `Membership`. */
   business_id: ID | null;
   role: UserRole;
   created_at: string;
@@ -192,6 +253,38 @@ export interface User {
   phone: string | null;
   /** True once TOTP enrolment was confirmed. The secret itself never leaves src/lib/db/users.ts. */
   totp_enabled: boolean;
+  /** UI/text language (default 'en'). */
+  locale?: Locale;
+}
+
+export type MembershipRole = 'owner' | 'staff';
+
+export interface Membership {
+  id: ID;
+  user_id: ID;
+  business_id: ID;
+  role: MembershipRole;
+  created_at: string;
+  disabled_at: string | null;
+}
+
+/** A membership with the business name (account switcher). */
+export interface MembershipWithBusiness extends Membership {
+  business_name: string;
+}
+
+/** A person on a business's team: the account plus their role IN THAT business. */
+export interface BusinessMember {
+  user_id: ID;
+  email: string;
+  role: MembershipRole;
+  /** Per-business disable (membership). */
+  membership_disabled_at: string | null;
+  /** Account-level disable (the person cannot sign in anywhere). */
+  user_disabled_at: string | null;
+  email_verified_at: string | null;
+  totp_enabled: boolean;
+  joined_at: string;
 }
 
 export type SessionKind = 'user' | 'admin_token';
@@ -209,6 +302,8 @@ export interface UserSession {
   sudo_at: string | null;
   ip: string | null;
   user_agent: string | null;
+  /** The business the session is working in (multi-business accounts); null = primary / only. */
+  active_business_id?: ID | null;
 }
 
 export type EmailTokenPurpose = 'verify' | 'reset' | 'invite';
@@ -238,6 +333,133 @@ export interface AuditEvent {
   target: string;
   ip: string | null;
   meta: Record<string, unknown>;
+}
+
+// ── Google Calendar ──────────────────────────────────────────────────────────
+
+export type CalendarProvider = 'google';
+export type CalendarConnectionStatus = 'active' | 'needs_reauth' | 'revoked' | 'error';
+export const CALENDAR_STATUSES: readonly CalendarConnectionStatus[] = ['active', 'needs_reauth', 'revoked', 'error'];
+
+/** A calendar connection as the rest of the app sees it: NEVER carries a token (only whether one is stored). */
+export interface CalendarConnection {
+  id: ID;
+  business_id: ID;
+  connected_by_user_id: ID | null;
+  provider: CalendarProvider;
+  account_email: string;
+  calendar_id: string;
+  token_expires_at: string | null;
+  scopes: string;
+  has_refresh_token: boolean;
+  sync_token: string | null;
+  watch_channel_id: string | null;
+  watch_resource_id: string | null;
+  watch_expires_at: string | null;
+  status: CalendarConnectionStatus;
+  last_sync_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CalendarTokens {
+  access_token: string | null;
+  refresh_token: string | null;
+  token_expires_at: string | null;
+}
+
+export interface CalendarEventLink {
+  id: ID;
+  booking_id: ID;
+  connection_id: ID;
+  google_event_id: string;
+  etag: string | null;
+  last_synced_at: string;
+  last_pushed_hash: string | null;
+}
+
+export type BusyTransparency = 'opaque' | 'transparent';
+
+/** Busy time mirrored from Google. Times only: no title, description or attendee is ever stored. */
+export interface CalendarBusyBlock {
+  id: ID;
+  connection_id: ID;
+  business_id: ID;
+  google_event_id: string;
+  starts_at: string;
+  ends_at: string;
+  all_day: boolean;
+  transparency: BusyTransparency;
+  summary_redacted: boolean;
+  updated_at: string;
+}
+
+// ── Owner call-in knowledge-base updates ─────────────────────────────────────
+
+export type OwnerKbSource = 'owner_voice' | 'owner_sms' | 'dashboard';
+export type OwnerKbStatus = 'proposed' | 'applied' | 'reverted' | 'rejected';
+export const OWNER_KB_SOURCES: readonly OwnerKbSource[] = ['owner_voice', 'owner_sms', 'dashboard'];
+
+/** The knowledge-base fields an owner change may touch (values are the NEW content). */
+export type KbPatch = Partial<Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes' | 'system_prompt' | 'call_script'>> & {
+  /** BUSINESS fields an owner call-in change may set for real (applied to businesses.hours / service_area / closed_dates). */
+  hours?: Hours;
+  service_area?: string[];
+  /** Holiday closures: YYYY-MM-DD dates in the business zone (at most 366). */
+  closed_dates?: string[];
+};
+
+export interface OwnerKbChange {
+  id: ID;
+  business_id: ID;
+  call_id: ID | null;
+  source: OwnerKbSource;
+  status: OwnerKbStatus;
+  summary: string;
+  patch: KbPatch;
+  /** The values `patch` replaced, captured when the change was applied (null before). */
+  previous: KbPatch | null;
+  applied_at: string | null;
+  reverted_at: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+// ── Live transcript ──────────────────────────────────────────────────────────
+
+export type TranscriptRole = 'agent' | 'caller' | 'system';
+
+export interface TranscriptEvent {
+  call_id: ID;
+  seq: number;
+  role: TranscriptRole;
+  text: string;
+  at: string;
+  is_final: boolean;
+}
+
+// ── Passkeys (WebAuthn) ──────────────────────────────────────────────────────
+
+export type WebauthnPurpose = 'register' | 'login' | 'reauth';
+
+/** A passkey as listed to its owner: never carries the public key. */
+export interface PasskeySummary {
+  id: ID;
+  user_id: ID;
+  credential_id: string;
+  transports: string[];
+  device_type: 'singleDevice' | 'multiDevice';
+  backed_up: boolean;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** What the WebAuthn verifier needs. Returned only by getPasskeyByCredentialId. */
+export interface PasskeyForVerification extends PasskeySummary {
+  public_key: Uint8Array;
+  counter: number;
 }
 
 export interface ExtractionResult {

@@ -3,12 +3,16 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { VoicePlayer } from '@/components/ui/audio';
-import { ApiError, apiRequest } from '@/hooks/use-api';
+import { apiRequest } from '@/hooks/use-api';
+import { errorText } from '@/lib/i18n/api-errors';
+import { useLocale, useT } from '@/lib/i18n/client';
 import { money } from '@/lib/format';
 import type { Page } from '@/lib/db/paging';
 import type { Briefing } from '@/lib/types';
 
 export function BriefingsList({ businessId, initial }: { businessId: string; initial: Page<Briefing> }) {
+  const t = useT();
+  const locale = useLocale();
   const [items, setItems] = useState(initial.items);
   const [cursor, setCursor] = useState(initial.next_cursor);
   const [loading, setLoading] = useState(false);
@@ -24,7 +28,7 @@ export function BriefingsList({ businessId, initial }: { businessId: string; ini
       setItems((cur) => [...cur, ...page.items.filter((b) => !cur.some((c) => c.id === b.id))]);
       setCursor(page.next_cursor);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not load more briefings.');
+      setError(errorText(t, err, 'briefings.loadMoreFailed'));
     } finally {
       setLoading(false);
     }
@@ -39,13 +43,13 @@ export function BriefingsList({ businessId, initial }: { businessId: string; ini
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-[13px] font-medium text-soft">{b.date}</h2>
                 <div className="flex gap-3 text-xs text-dim">
-                  <span>{b.stats.calls} calls</span>
-                  <span>{b.stats.bookings} booked</span>
-                  <span>{money(b.stats.revenue)}</span>
-                  {b.stats.flags ? <span className="text-warn">{b.stats.flags} flagged</span> : null}
+                  <span>{t('briefings.stats.calls', { count: b.stats.calls })}</span>
+                  <span>{t('briefings.stats.booked', { n: b.stats.bookings })}</span>
+                  <span>{money(b.stats.revenue, locale)}</span>
+                  {b.stats.flags ? <span className="text-warn">{t('briefings.stats.flagged', { n: b.stats.flags })}</span> : null}
                 </div>
               </div>
-              <VoicePlayer src={b.audio_url} label={`Evening note · ${b.date}`} />
+              <VoicePlayer src={b.audio_url} label={t('today.briefing.eveningNote', { date: b.date })} />
               <p className="mt-3 rounded-xl bg-sunken p-3.5 text-[13px] leading-relaxed text-body">{b.transcript}</p>
             </Card>
           </li>
@@ -54,7 +58,7 @@ export function BriefingsList({ businessId, initial }: { businessId: string; ini
       {error ? <p role="alert" className="mt-4 text-[13px] text-danger">{error}</p> : null}
       {cursor ? (
         <div className="mt-5 flex justify-center">
-          <Button variant="outline" onClick={more} disabled={loading}>{loading ? 'Loading…' : 'Load older briefings'}</Button>
+          <Button variant="outline" onClick={more} disabled={loading}>{loading ? t('common.loading') : t('briefings.loadMore')}</Button>
         </div>
       ) : null}
     </>

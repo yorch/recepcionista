@@ -170,7 +170,7 @@ async function staleUnverifiedBusiness(email: string, now: Date): Promise<string
  * Nothing paid is provisioned here: that waits for a verified email and the billing flow.
  */
 export async function createSignupAccount(
-  input: { email: string; passwordHash: string; businessName: string }, now: Date = new Date(),
+  input: { email: string; passwordHash: string; businessName: string; locale?: 'en' | 'es' }, now: Date = new Date(),
 ): Promise<CreatedSignup | null> {
   let replaceBusinessId: string | null = null;
   if (await getUserByEmail(input.email)) {
@@ -184,8 +184,8 @@ export async function createSignupAccount(
         const del = await tx.business.deleteMany({ where: { id: replaceBusinessId } });
         if (del.count !== 1) throw new EmailTakenError();
       }
-      const business = await createBusiness({ name: input.businessName }, tx);
-      const user = await createUser({ email: input.email, password_hash: input.passwordHash, role: 'owner', business_id: business.id, email_verified: false }, tx);
+      const business = await createBusiness({ name: input.businessName, ...(input.locale ? { locale_default: input.locale } : {}) }, tx);
+      const user = await createUser({ email: input.email, password_hash: input.passwordHash, role: 'owner', business_id: business.id, email_verified: false, ...(input.locale ? { locale: input.locale } : {}) }, tx);
       return { user, businessId: business.id, replacedStale: replaceBusinessId !== null };
     });
   } catch (err) {

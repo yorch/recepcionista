@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { actorOf, authenticateTeam, getPendingInvite, listPendingInvites, supersedeInvites, teamError } from '@/lib/team';
 import { auditIp, emailFailure, limitIp, sendInviteEmail, allowPerEmail } from '@/lib/account-flows';
-import { createEmailToken, getUserByEmail, normalizeEmail, prisma, recordAudit } from '@/lib/db';
+import { createEmailToken, getMembership, getUserByEmail, normalizeEmail, prisma, recordAudit } from '@/lib/db';
 import { rateLimit } from '@/lib/ratelimit';
 import { validatePublicEmail } from '@/lib/user-policy';
 import { logger } from '@/lib/log';
@@ -12,7 +12,7 @@ export const runtime = 'nodejs';
 const log = logger('team/invite');
 
 /**
- * `{ email, role: "owner"|"staff", business_id? }`: invite someone to the caller's own business (admins: any, via
+ * `{ email, role: "owner"|"staff", business_id? }`: invite someone (a new address or one that already has an account) to the caller's active business (admins: any, via
  * business_id). Needs a verified email on the inviter. The link is bound to this business and role and works once for 7 days.
  * Email provider problems are reported (503 email_not_configured) and leave no live invitation behind.
  */
@@ -33,17 +33,22 @@ export async function POST(req: Request) {
   if (!(await allowPerEmail('team/invite', email, 5))) return teamError(429, 'too many invitations to this address, try again later');
 
   try {
+    // An address that already has an account may be invited into THIS business too (accepting adds a membership); only a current,
+    // enabled member is refused. The token stays bound to this business + role + address.
     const existing = await getUserByEmail(email);
-    if (existing && existing.business_id === auth.business.id) return teamError(409, 'this person is already on the team', 'already_member');
+    const current = existing ? await getMembership(existing.id, auth.business.id) : null;
+    if (current && !current.disabled_at) return teamError(409, 'this person is already on the team', 'already_member');
 
     const actor = actorOf(auth.principal);
     const { token, record } = await createEmailToken({
       purpose: 'invite', email, business_id: auth.business.id, role: body.role, invited_by: actor.actor_user_id, supersede: false,
+      ...(existing && existing.role !== 'admin' ? { user_id: existing.id } : {}),
     });
     try {
       await sendInviteEmail({
         email, token, businessName: auth.business.name, role: body.role,
         inviterEmail: 'user' in auth.principal ? auth.principal.user?.email : null,
+        locale: existing?.locale ?? auth.business.locale_default,
       });
     } catch (err) {
       await prisma.emailToken.updateMany({ where: { id: record.id }, data: { usedAt: new Date() } }); // no live link without a mail

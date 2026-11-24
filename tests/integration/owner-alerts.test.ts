@@ -5,7 +5,7 @@
  */
 import { integration, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { cleanup, loadDb, loadPrisma, newBusiness, uniq } from '../helpers/fixtures';
+import { cleanup, loadDb, loadPrisma, newBusiness, quietTimezone, uniq } from '../helpers/fixtures';
 import { alertField, clampAlertBody, emergencyCeiling, OWNER_ALERT_MAX_CHARS, ownerAlertHourlyLimit } from '../../src/lib/voice/owner-alert';
 import { isGsm7, smsSegments } from '../../src/lib/messaging/policy';
 
@@ -57,7 +57,9 @@ integration('owner alerts: budget, dedupe, first emergency (postgres)', () => {
 
   const texts = (id: string) => prisma.smsLog.findMany({ where: { businessId: id, kind: 'owner_alert', status: { in: ['sent', 'mock'] } } });
   async function biz() {
-    const b = await newBusiness();
+    // A zone where it is night right now: with billing enforced, reaching 80% / 100% of the cap texts the owner a (metered, owner_alert-kind) usage warning
+    // in the daytime, which would be counted as an extra alert here. Quiet hours defer it, so the result never depends on the hour the suite runs at.
+    const b = await newBusiness({ timezone: quietTimezone() });
     await prisma.business.update({ where: { id: b.id }, data: { billingStatus: 'active', smsCapOverride: 5 } });
     return b;
   }

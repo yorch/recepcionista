@@ -30,6 +30,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       await sendInviteEmail({
         email: invite.email, token, businessName: auth.business.name, role: invite.role,
         inviterEmail: 'user' in auth.principal ? auth.principal.user?.email : null,
+        locale: auth.business.locale_default,
       });
     } catch (err) {
       await prisma.emailToken.updateMany({ where: { id: record.id }, data: { usedAt: new Date() } });

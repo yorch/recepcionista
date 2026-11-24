@@ -4,12 +4,15 @@ import Link from 'next/link';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Logo } from '@/components/ui/logo';
+import { LocaleSwitcher } from '@/components/ui/locale-switcher';
+import { errorText } from '@/lib/i18n/api-errors';
+import { useT } from '@/lib/i18n/client';
 import { cn } from '@/components/ui/cn';
 import { draftFromServer, type KnowledgeDraft } from '@/components/knowledge/model';
 import { apiRequest } from '@/hooks/use-api';
 import type { OnboardingStatus } from '@/app/api/businesses/[id]/onboarding-status/status';
 import type { Business, KnowledgeBase } from '@/lib/types';
-import { isStepAllowed, resolveStep, STEP_IDS, STEP_LABELS, stepDone, type StepId } from './steps';
+import { isStepAllowed, resolveStep, STEP_IDS, STEP_LABEL_KEYS, stepDone, type StepId } from './steps';
 import { InfoStep, type ExtractionMeta } from './step-info';
 import { ReviewStep } from './step-review';
 import { VerifyStep } from './step-verify';
@@ -22,6 +25,9 @@ export interface FlowProps {
   businessId: string | null;
   isAdmin: boolean;
   priceDisplay: string;
+  /** The annual plan can be chosen (STRIPE_PRICE_ID_ANNUAL is configured). */
+  annualAvailable?: boolean;
+  annualDisplay?: string | null;
   requestedStep: StepId | null;
   checkout: 'success' | 'cancel' | null;
   resumable: { id: string; name: string }[];
@@ -37,6 +43,7 @@ export interface StepProps {
 }
 
 export function OnboardingFlow(props: FlowProps) {
+  const t = useT();
   const { isAdmin, resumable } = props;
   const [businessId, setBusinessId] = useState(props.businessId);
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
@@ -58,12 +65,12 @@ export function OnboardingFlow(props: FlowProps) {
       setLoadError(null);
       return s;
     } catch (err) {
-      setLoadError((err as Error).message);
+      setLoadError(errorText(t, err));
       return null;
     } finally {
       setLoading(false);
     }
-  }, [businessId]);
+  }, [businessId, t]);
 
   // Resume: derive the step from database facts once the first status arrives.
   useEffect(() => {
@@ -80,11 +87,11 @@ export function OnboardingFlow(props: FlowProps) {
       })
       .catch((err: Error) => {
         if (!alive) return;
-        setLoadError(err.message);
+        setLoadError(errorText(t, err));
         setLoading(false);
       });
     return () => { alive = false; };
-  }, [businessId, resolvedFor, props.checkout, props.requestedStep]);
+  }, [businessId, resolvedFor, props.checkout, props.requestedStep, t]);
 
   // Move focus to the step heading when the step changes (not on first paint).
   useEffect(() => {
@@ -122,10 +129,10 @@ export function OnboardingFlow(props: FlowProps) {
       setDraft(d);
       return d;
     } catch (err) {
-      setLoadError((err as Error).message);
+      setLoadError(errorText(t, err));
       return null;
     }
-  }, [draft, businessId]);
+  }, [draft, businessId, t]);
 
   const idx = STEP_IDS.indexOf(step);
   const stepProps: StepProps | null = businessId && status ? { businessId, status, isAdmin, go, refresh } : null;
@@ -134,25 +141,33 @@ export function OnboardingFlow(props: FlowProps) {
     <div className="min-h-screen">
       <header className="mx-auto flex w-full max-w-3xl items-center justify-between px-4 pt-6 sm:px-6">
         <Logo />
-        <Link href="/dashboard" className="inline-flex min-h-11 items-center text-[13px] text-mute hover:text-white">
-          Skip for now
-        </Link>
+        <div className="flex items-center gap-3">
+          <LocaleSwitcher compact onChanged={async (l) => {
+            // Before she has learned the business, the business's default language follows the owner's choice.
+            if (businessId && !status?.has_knowledge) {
+              await apiRequest(`/api/businesses/${businessId}/settings`, { method: 'PATCH', body: { locale_default: l } }).catch(() => undefined);
+            }
+          }} />
+          <Link href="/dashboard" className="inline-flex min-h-11 items-center text-[13px] text-mute hover:text-white">
+            {t('ob.skip')}
+          </Link>
+        </div>
       </header>
 
       <main className="mx-auto w-full max-w-3xl px-4 pb-16 pt-4 sm:px-6">
         <Stepper step={step} status={status} go={go} />
 
         <h1 ref={headingRef} tabIndex={-1} className="sr-only">
-          Step {idx + 1} of {STEP_IDS.length}: {STEP_LABELS[step]}
+          {t('ob.stepOf', { n: idx + 1, total: STEP_IDS.length, label: t(STEP_LABEL_KEYS[step]) })}
         </h1>
 
         {loadError && !status && businessId ? (
           <Card className="mt-8 p-6">
             <p role="alert" className="text-[13px] text-danger">{loadError}</p>
-            <Button className="mt-4" variant="outline" onClick={() => { setLoadError(null); setLoading(true); setResolvedFor(null); }}>Try again</Button>
+            <Button className="mt-4" variant="outline" onClick={() => { setLoadError(null); setLoading(true); setResolvedFor(null); }}>{t('common.retry')}</Button>
           </Card>
         ) : loading && businessId ? (
-          <div className="mt-8" aria-busy="true"><p className="sr-only" role="status">Loading your setup</p><div className="skeleton h-64" /></div>
+          <div className="mt-8" aria-busy="true"><p className="sr-only" role="status">{t('ob.loadingSetup')}</p><div className="skeleton h-64" /></div>
         ) : (
           <div className="rise mt-8">
             {step === 'info' ? (
@@ -177,7 +192,7 @@ export function OnboardingFlow(props: FlowProps) {
               <ReviewStep {...stepProps} draft={draft} ensureDraft={ensureDraft} setDraft={setDraft} meta={meta} />
             ) : null}
             {step === 'verify' && stepProps ? <VerifyStep {...stepProps} /> : null}
-            {step === 'plan' && stepProps ? <PlanStep {...stepProps} priceDisplay={props.priceDisplay} checkout={checkout} clearCheckout={() => setCheckout(null)} /> : null}
+            {step === 'plan' && stepProps ? <PlanStep {...stepProps} priceDisplay={props.priceDisplay} annualAvailable={props.annualAvailable === true} annualDisplay={props.annualDisplay ?? null} checkout={checkout} clearCheckout={() => setCheckout(null)} /> : null}
             {step === 'provision' && stepProps ? <ProvisionStep {...stepProps} /> : null}
             {step === 'connect' && stepProps ? <ConnectStep {...stepProps} /> : null}
             {step === 'test' && stepProps ? <TestStep {...stepProps} /> : null}
@@ -189,11 +204,12 @@ export function OnboardingFlow(props: FlowProps) {
 }
 
 function Stepper({ step, status, go }: { step: StepId; status: OnboardingStatus | null; go: (s: StepId) => void }) {
+  const t = useT();
   const idx = STEP_IDS.indexOf(step);
   return (
-    <nav aria-label="Setup progress">
+    <nav aria-label={t('ob.progress')}>
       <p className="text-xs text-dim sm:hidden" aria-hidden="true">
-        Step {idx + 1} of {STEP_IDS.length} · {STEP_LABELS[step]}
+        {t('ob.stepOfShort', { n: idx + 1, total: STEP_IDS.length, label: t(STEP_LABEL_KEYS[step]) })}
       </p>
       <ol className="mt-2 flex items-center gap-1.5 sm:mt-0 sm:gap-2">
         {STEP_IDS.map((id, i) => {
@@ -207,7 +223,7 @@ function Stepper({ step, status, go }: { step: StepId; status: OnboardingStatus 
                 disabled={!reachable}
                 onClick={() => go(id)}
                 aria-current={current ? 'step' : undefined}
-                aria-label={`${STEP_LABELS[id]}${done ? ', completed' : current ? ', current step' : ''}`}
+                aria-label={done ? t('ob.stepCompleted', { label: t(STEP_LABEL_KEYS[id]) }) : current ? t('ob.stepCurrent', { label: t(STEP_LABEL_KEYS[id]) }) : t(STEP_LABEL_KEYS[id])}
                 className={cn(
                   'flex min-h-11 w-full items-center justify-center gap-2 rounded-full text-xs transition-colors sm:w-auto sm:px-3',
                   current ? 'bg-raised text-white' : done ? 'text-mint-text hover:bg-hover' : 'text-dim',
@@ -223,7 +239,7 @@ function Stepper({ step, status, go }: { step: StepId; status: OnboardingStatus 
                 >
                   {done ? '✓' : i + 1}
                 </span>
-                <span className="hidden sm:inline">{STEP_LABELS[id]}</span>
+                <span className="hidden sm:inline">{t(STEP_LABEL_KEYS[id])}</span>
               </button>
             </li>
           );

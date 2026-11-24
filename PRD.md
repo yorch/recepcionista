@@ -36,7 +36,8 @@ A background job runner texts the owner a briefing link at 18:00 local time and 
 ## 2. Target market
 
 - **Primary:** owner-operated HVAC, plumbing and electrical businesses, one to five people, in Florida
-  (Miami-Dade first). Owners often answer the phone on a job, or miss calls.
+  (Miami-Dade first). Cleaning, landscaping, dental and general service businesses are supported by vertical
+  templates (`docs/verticals.md`); HVAC remains the default and the best-exercised pack. Owners often answer the phone on a job, or miss calls.
 - **Language:** English- and Spanish-speaking callers. Bilingual is the wedge; the product itself is not
   Miami-only (nothing in the code restricts the market). Numbers are US-only (see section 5.4).
 - **Not sized.** No market-size, call-volume or willingness-to-pay data is in this repo. The v1.0 claim that
@@ -131,7 +132,8 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Owner alert phone verification (SMS code, rate limited) | Shipped | `src/lib/messaging/owner-verify.ts`, `src/app/api/businesses/[id]/owner-phone/verify/*` |
 | Carrier call-forwarding instructions (AT&T, T-Mobile, Verizon, GSM, landline, VoIP) | Shipped | `src/app/onboarding/forwarding.ts` |
 | Test-call step (polls until the first call) | Shipped | `src/app/onboarding/step-test.tsx` |
-| Minimum content checks (5 services, 3 FAQs) | Not built | v1.0 target; no check in `src/lib/extraction/index.ts` |
+| Vertical templates: seven trade packs (prompt, emergency rules, services, FAQs, SMS wording, deposit default), chosen in onboarding and Settings, owner-only change with step-up that never overwrites edited knowledge | Shipped | `src/lib/verticals/`, `docs/verticals.md`, `src/app/api/businesses/[id]/route.ts`, `tests/verticals-pure.test.ts`, `tests/integration/verticals.test.ts` |
+| Minimum content checks (5 services, 3 FAQs) | Shipped (gate: 3 priced services, hours, 1 FAQ; 5 and 3 recommended) | `src/lib/kb/readiness.ts`, provision 422 `kb_incomplete`, checklist on Brain and onboarding |
 
 ### 5.4 Phone and voice
 
@@ -151,9 +153,10 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Voicemail capture on a paused or forwarded webhook line; Voicemails tab in Calls; audio played through an authenticated proxy (the Twilio URL and credentials never reach the browser) | Shipped | `src/lib/voice/voicemail.ts`, `src/app/api/voice/voicemail/route.ts`, `src/app/api/calls/[id]/voicemail/route.ts`, `src/components/dashboard/voicemail-list.tsx`, `src/app/dashboard/calls/page.tsx` |
 | Booking: local wall-clock time, hours, past times refused, slot conflicts, 2-bookings-per-call cap | Shipped | `src/lib/scheduler.ts`, `src/lib/availability.ts`, `src/lib/voice/tools.ts`, `tests/integration/` |
 | Emergency: 911 first for gas, CO, fire, smoke, sparking; then `flag_emergency`; owner alerts have an hourly budget (`OWNER_ALERT_HOURLY_LIMIT`, default 6) | Shipped (prompt, tool and budget). Not a substitute for a human; see risks. | `src/lib/voice/emergency.ts`, `src/lib/kb/index.ts`, `src/lib/voice/owner-alert.ts` |
-| Live human transfer | Not built. `handoff_to_human` texts the owner and flags a callback; it does not transfer the call. | `src/lib/voice/tools.ts` (`handoffToHuman`) |
-| Owner voice reply or correction of the knowledge base by voice | Not built (owner decision: deferred) | none |
-| Live transcript during a call | Not built (owner decision: deferred). Transcripts arrive after the call. | `src/lib/voice/postcall.ts` |
+| Live human transfer | Shipped behind `NATIVE_TRANSFER` (default off, live behaviour unverified: docs/known-limitations.md); `handoff_to_human` still texts the owner. | `src/lib/voice/transfer.ts`, `src/lib/voice/elevenlabs.ts` (`transferToolConfig`) |
+| Owner correction of the knowledge base by voice | Shipped as owner call-in (SMS-confirmed, undoable; hours, closed dates, service area, services, FAQs). Owner voice REPLY stays not built (owner decision). | `docs/owner-call-in.md`, `src/lib/voice/owner/` |
+| Live transcript during a call | Shipped (SSE + polling fallback, consent-gated; provider field UNVERIFIED) | `src/lib/voice/live-transcript.ts`, `src/app/api/calls/[id]/live/route.ts` |
+| Dashboard, onboarding, auth, public pages, emails and owner texts in English and Spanish; per-user language, business default | Shipped (Spanish copy not natively reviewed; model/caller-written content stays as written) | `docs/i18n.md`, `src/lib/i18n/` |
 | Bilingual conversation (English and Spanish) | Partial. Driven by the prompt and the model. No language detection in code, and quality is not measured. | `src/lib/voice/elevenlabs.ts`, `src/lib/kb/index.ts` |
 
 ### 5.5 Messaging and consent
@@ -178,7 +181,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Production fails closed if Stripe errors (no mock link) | Shipped | `src/lib/providers/stripe.ts` |
 | Signed deposit webhook confirms the booking and records the deposit | Shipped | `src/app/api/payments/webhook/route.ts` |
 | Cancelling a booking with a paid deposit: the owner is told to refund it in Stripe; nothing is refunded or texted automatically | Shipped as a notice. No automatic refund. | `src/components/calendar/booking-panel.tsx`, `src/app/api/bookings/[id]/route.ts` |
-| Refund and dispute policy (written policy, linked from Checkout) | Not built | none |
+| Refund and dispute policy (written policy, linked from Checkout) | Shipped; operator must review the wording | per-business policy, `/refunds`, owner-initiated refunds with step-up, dispute alert (`docs/refunds.md`) |
 
 ### 5.7 Dashboard and reporting
 
@@ -186,13 +189,13 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | --- | --- | --- |
 | Today, Calls, Calendar, Brain, Briefings, Team, Billing, Security, Settings | Shipped | `src/components/dashboard/shell.tsx`, `src/app/dashboard/*` |
 | Calls page: transcript, summary, status, and a Voicemails tab | Shipped | `src/app/dashboard/calls/page.tsx`, `src/components/dashboard/calls-list.tsx` |
-| Call recording player | Not built. `recording_url` is stored when consent is `disclosed` (`src/lib/voice/postcall.ts`) but never shown. | `src/app/dashboard/calls/page.tsx` (no reference) |
+| Call recording player | Shipped: consent-gated proxy with Range | `src/app/api/calls/[id]/audio/route.ts`, `src/components/dashboard/recording-player.tsx` |
 | Calendar grid: week, day and month views; owner can cancel, mark completed and resend the confirmation. No reschedule (cancel and rebook). | Shipped | `src/app/dashboard/bookings/page.tsx`, `src/components/calendar/calendar.tsx`, `src/components/calendar/time-grid.tsx`, `src/components/calendar/month-grid.tsx`, `src/components/calendar/booking-panel.tsx` |
 | Daily briefing: content (calls, bookings, revenue, flags) | Shipped | `src/lib/briefing/index.ts`, `src/app/api/briefings/generate/route.ts` |
 | 6 PM automatic briefing, per business time zone (catch-up until local midnight); owner texted a link when verified, outside quiet hours and within the SMS cap | Shipped. Runs in the job runner (`JOBS`, on by default in production). | `src/lib/jobs/index.ts` (`runDailyBriefings`), `src/lib/jobs/schedule.ts` (`briefingSlot`), `src/instrumentation.ts` |
 | Briefing audio (ElevenLabs TTS; text only without a TTS key) | Partial. Audio only with `ELEVENLABS_API_KEY`. Served by an authenticated route. | `src/lib/briefing/tts.ts`, `src/app/api/briefings/audio/[name]/route.ts` |
 | Settings: alert phone, call disclosure text, retention window, call mode and forwarding number | Shipped. Hours are edited in Brain, not Settings. | `src/components/dashboard/settings-form.tsx`, `src/app/api/businesses/[id]/settings/route.ts`, `src/components/dashboard/call-mode.tsx` |
-| Settings: voice selection | Not built (not found in the settings UI) | `src/components/dashboard/settings-form.tsx` |
+| Settings: voice selection | Shipped (allowlist / premade voices, re-sync) | `src/components/dashboard/voice-settings.tsx`, `src/app/api/businesses/[id]/voice/route.ts` |
 
 ### 5.8 Privacy and retention
 
@@ -227,7 +230,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 - Live human transfer or a staffed answering service.
 - Google Calendar or other external calendar sync. The internal calendar is the source of truth.
 - Card data over the phone or inside the app. Deposits use Stripe-hosted payment links.
-- Legal advice, HIPAA, PCI scope, data residency.
+- Legal advice, HIPAA (the dental template is not a HIPAA-compliant product), PCI scope, data residency.
 - Native mobile app. The dashboard is responsive web.
 
 ## 7. Architecture
@@ -312,15 +315,15 @@ Ordered by what most blocks a paying launch:
 
 1. **Live human transfer** for emergencies and requested humans, instead of a callback flag.
 2. **Forwarding on the production AI line.** No supported API exists for a per-call transfer override on the native ElevenLabs path (see `docs/known-limitations.md`). Forwarding works today only on a webhook line or through carrier forwarding.
-3. **Minimum content checks** on extraction (5 services, 3 FAQs) before go-live.
-4. **Refund and dispute policy**, linked from Checkout, and automatic deposit refund or customer text on cancel (today the owner refunds in Stripe).
+3. ~~Minimum content checks~~ Done: provisioning is gated on 3 priced services, opening hours and 1 FAQ (5 and 3 recommended).
+4. ~~Refund and dispute policy~~ Done (`docs/refunds.md`): policy, `/refunds`, customer text on cancel, owner-initiated refunds. Still manual by design: the app never refunds without an owner action.
 5. **Warning before a cap** (for example at 80%) by email or text, and reconciliation for calls whose post-call webhook never arrives.
-6. **Recording player** on the call page (the URL is stored but not shown).
+6. ~~Recording player~~ Done (consent-gated proxy).
 7. **Operator-independent compliance:** 10DLC registration support and a per-state disclosure setting.
-8. **Voice selection** in Settings.
-9. **Calendar reschedule** (today: cancel and rebook).
+8. ~~Voice selection~~ Done (allowlist).
+9. ~~Calendar reschedule~~ Done (dashboard and voice).
 
-Deferred by owner decision (not built, not scheduled): owner voice reply and voice correction of the knowledge base, live transcript during calls, Google Calendar sync.
+Deferred by owner decision (not built, not scheduled): owner voice REPLY. (Voice correction of the knowledge base, the live transcript and Google Calendar sync are built: docs/changelog-hardening.md "Phase: features".)
 
 Not planned: multi-location, outbound calls.
 
@@ -334,11 +337,11 @@ Engineering debt (no behaviour change): extract `provisionBusiness` from the pro
 | Next.js 14 | Next.js 16.4.6. |
 | "30-50% of calls lost" and "Miami market is underserved" | Removed. No source. |
 | Demo number `+1-305-555-0199` | Removed. Demo numbers are mock numbers. |
-| Owner dashboard with settings for voice and hours | Partial. Alert phone, disclosure, retention and call mode in Settings; hours in Brain. Voice selection not built. |
+| Owner dashboard with settings for voice and hours | Partial. Alert phone, disclosure, retention and call mode in Settings; hours in Brain. Voice selection shipped. |
 | 6 PM auto-briefing | Shipped (job runner, per business time zone). |
-| Live human transfer | Not built. Callback flag only. |
+| Live human transfer | Shipped behind `NATIVE_TRANSFER` (off by default). |
 | Spanglish detection | Partial. Prompt-driven, no detection code. |
 | Stripe test mode only | Operator setting. No code check that the keys are test-mode keys. |
 | Recording and consent disclosure: absent in v1.0 | Shipped (section 5.4). |
 | Calendar as a list | Calendar grid (week, day, month) shipped. |
-| Stretch: gratitude, KB voice correction, live transcript | Gratitude sweep shipped and scheduled hourly. KB voice correction and live transcript not built (deferred). |
+| Stretch: gratitude, KB voice correction, live transcript | Gratitude sweep shipped and scheduled hourly. KB voice correction and live transcript are built. |

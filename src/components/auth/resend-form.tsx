@@ -1,9 +1,11 @@
 'use client';
 import { useState } from 'react';
+import { useT } from '@/lib/i18n/client';
 import { Field, FormError, FormNotice, SubmitButton, friendly, sendJson } from './auth-ui';
 
 /** "Send the confirmation link again" (public, generic answer). */
 export function ResendVerificationForm() {
+  const t = useT();
   const [email, setEmail] = useState('');
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -16,15 +18,15 @@ export function ResendVerificationForm() {
     const r = await sendJson('/api/auth/resend-verification', { email });
     setBusy(false);
     if (r.ok) setDone(true);
-    else setError(friendly(r.error));
+    else setError(friendly(t, r.error));
   }
 
   return (
     <form onSubmit={submit}>
-      <Field label="Email" type="email" name="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+      <Field label={t('auth.login.email')} type="email" name="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
       <FormError message={error} />
-      {done ? <FormNotice>If that address has an account waiting for confirmation, a new link is on its way.</FormNotice> : null}
-      <SubmitButton busy={busy}>{busy ? 'Sending...' : 'Send the link again'}</SubmitButton>
+      {done ? <FormNotice>{t('auth.resend.sent')}</FormNotice> : null}
+      <SubmitButton busy={busy}>{busy ? t('common.sending') : t('auth.resend.submit')}</SubmitButton>
     </form>
   );
 }

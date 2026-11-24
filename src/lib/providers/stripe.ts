@@ -13,6 +13,8 @@ export interface PaymentLinkOptions {
   /** Stored as Stripe metadata so the webhook can confirm the right booking. */
   bookingId?: string | null;
   businessId?: string | null;
+  /** Shown beside the Pay button on Stripe's page (Payment Links custom_text.submit.message, max 1200 chars): the refund policy. */
+  refundNote?: string | null;
 }
 
 const STRIPE_TIMEOUT_MS = 15_000;
@@ -63,6 +65,7 @@ export async function createPaymentLink(
       form.set('metadata[business_id]', opts.businessId);
       form.set('payment_intent_data[metadata][business_id]', opts.businessId);
     }
+    if (opts.refundNote) form.set('custom_text[submit][message]', opts.refundNote.slice(0, 1200));
     const res = await fetch('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
       headers: {
@@ -88,6 +91,28 @@ export async function createPaymentLink(
     }
     log.warn('link.fallback_to_mock', { amount_cents: cents, err });
     return mockLink(cents, 'stripe error (non-production)', opts.bookingId);
+  }
+}
+
+/**
+ * Deactivate a Payment Link (POST /v1/payment_links/{id} active=false) so a cancelled booking's link stops accepting money. Idempotent at
+ * Stripe. Returns false (never throws) when Stripe is not configured, the id is not a real link, or the call failed (the webhook still
+ * alerts the owner if the link is paid anyway).
+ */
+export async function deactivatePaymentLink(linkId: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  if (!hasStripe() || !/^plink_[A-Za-z0-9]{6,100}$/.test(linkId)) return false;
+  try {
+    const res = await fetchImpl(`https://api.stripe.com/v1/payment_links/${encodeURIComponent(linkId)}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ active: 'false' }),
+      signal: AbortSignal.timeout(STRIPE_TIMEOUT_MS),
+    });
+    if (!res.ok) log.warn('link.deactivate_failed', { status: res.status });
+    return res.ok;
+  } catch (err) {
+    log.warn('link.deactivate_error', { err });
+    return false;
   }
 }
 

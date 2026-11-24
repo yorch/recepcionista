@@ -310,9 +310,10 @@ integration('review round 2 regressions (postgres)', () => {
   test('M1: gratitude consent is DERIVED from a recorded basis: none => blocked_no_consent; recorded => allowed (quiet hours aside)', async () => {
     const biz = await newBusiness();
     const actions = await import('@/lib/messaging/actions');
+    let n = 0; // distinct, fixed days apart: random times could land within 30 minutes of each other (slot_taken flake)
     const mk = (customer_phone: string) => db.createBooking({
       business_id: biz.id, customer_name: 'Ana', customer_phone, service: 'AC repair',
-      scheduled_at: new Date(Date.now() + (2 + Math.random() * 20) * 86400_000).toISOString(), duration_minutes: 30,
+      scheduled_at: new Date(Date.now() + (2 + 3 * n++) * 86400_000).toISOString(), duration_minutes: 30,
     }, { enforce: false });
     const noConsent = await mk(phone());
     const r1 = await actions.sendGratitude(noConsent.id);
@@ -385,7 +386,7 @@ integration('review round 2 regressions (postgres)', () => {
 
     const res = await privacyErase(adminReq('/api/privacy/erase', { business_id: biz.id, phone: target }));
     expect(res.status).toBe(200);
-    expect(((await res.json()) as any).data).toEqual({ calls: 1, sms_logs: 3, bookings_anonymized: 1, briefings: 1, audio_files: 1, recordings: 0, recordings_pending: 0, recording_deletion: 'complete' });
+    expect(((await res.json()) as any).data).toEqual({ calls: 1, transcript_events: 0, sms_logs: 3, bookings_anonymized: 1, briefings: 1, audio_files: 1, recordings: 0, recordings_pending: 0, recording_deletion: 'complete' });
     expect(await prisma.smsLog.findMany({ where: { businessId: biz.id } }).then((r) => r.map((x) => x.id))).toEqual([keepSms.id]);
     expect(await prisma.briefing.findMany({ where: { businessId: biz.id } }).then((r) => r.map((x) => x.id))).toEqual([keepBriefing.id]);
     expect(fs.existsSync(path.join(audioDir, `briefing-${biz.id}-${day}.mp3`))).toBe(false);

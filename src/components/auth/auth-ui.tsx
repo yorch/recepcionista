@@ -2,6 +2,8 @@
 import Link from 'next/link';
 import { useId } from 'react';
 import { cn } from '@/components/ui/cn';
+import { apiErrorMessage } from '@/lib/i18n/api-errors';
+import type { TFunction } from '@/lib/i18n/core';
 
 /** Centered card used by every public account page. Server- and client-component safe. */
 export function AuthShell({ title, subtitle, children, footer }: {
@@ -75,16 +77,10 @@ export async function sendJson<T = Record<string, unknown>>(url: string, body?: 
   }
 }
 
-/** Human message for an API error string (the API's are terse). */
-export function friendly(error: string | undefined, fallback = 'Something went wrong. Please try again.'): string {
-  if (!error) return fallback;
-  if (error === 'rate limit exceeded' || error.startsWith('too many')) return 'Too many attempts. Please wait a few minutes and try again.';
-  if (error === 'service temporarily unavailable') return 'The service is temporarily unavailable. Please try again shortly.';
-  if (error === 'email_not_configured') return 'Email delivery is not configured on this server, so the message could not be sent.';
-  if (error === 'email_send_failed') return 'The email provider did not accept the message. Please try again later.';
-  if (error === 'email_not_verified') return 'Please verify your email address first.';
-  if (error === 'captcha_failed') return 'The human check failed. Please reload the page and try again.';
-  return error;
+/** Localized message for an API error string (the API's are terse English codes; see src/lib/i18n/api-errors.ts). */
+export function friendly(t: TFunction, error: string | undefined): string {
+  if (error?.startsWith('too many')) return t('err.rateLimit');
+  return apiErrorMessage(t, error);
 }
 
 /** Full-page navigation (new session state must be re-read by the server); same-origin paths only. */

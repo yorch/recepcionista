@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { getDashboardContext } from '@/lib/dashboard-context';
+import { getT } from '@/lib/i18n/server';
 import { hasRole } from '@/lib/session';
 import { countryForBusiness, listAllBookingsInRange, listBookingsPage } from '@/lib/db';
 import { PageHeader } from '@/components/ui/page-header';
@@ -11,13 +12,16 @@ import { defaultWeekStart, isCalendarDateKey, isCalendarView, parseWeekStart, ra
 import { localDateKey, tzOf } from '@/lib/time';
 import type { BookingsRangeResult } from '@/app/api/bookings/route';
 
-export const metadata: Metadata = { title: 'Calendar' };
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: (await getT())('booking.pageTitle') };
+}
 
 export const dynamic = 'force-dynamic';
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
 export default async function BookingsPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const t = await getT();
   const ctx = await getDashboardContext();
   const biz = ctx.business;
   const tz = tzOf(biz);
@@ -48,12 +52,12 @@ export default async function BookingsPage({ searchParams }: { searchParams: Pro
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
       <PageHeader
-        title="Calendar"
-        subtitle="Jobs she booked while you were on a roof."
+        title={t('booking.pageTitle')}
+        subtitle={t('booking.pageSubtitle')}
         right={
-          <nav aria-label="Calendar or agenda" className="inline-flex gap-1 rounded-2xl border border-line p-1">
-            <Link href="/dashboard/bookings" aria-current={tab === 'calendar' ? 'page' : undefined} className={tabClass(tab === 'calendar')}>Calendar</Link>
-            <Link href="/dashboard/bookings?tab=agenda" aria-current={tab === 'agenda' ? 'page' : undefined} className={tabClass(tab === 'agenda')}>Agenda</Link>
+          <nav aria-label={t('booking.tabsLabel')} className="inline-flex gap-1 rounded-2xl border border-line p-1">
+            <Link href="/dashboard/bookings" aria-current={tab === 'calendar' ? 'page' : undefined} className={tabClass(tab === 'calendar')}>{t('booking.tab.calendar')}</Link>
+            <Link href="/dashboard/bookings?tab=agenda" aria-current={tab === 'agenda' ? 'page' : undefined} className={tabClass(tab === 'agenda')}>{t('booking.tab.agenda')}</Link>
           </nav>
         }
       />

@@ -27,6 +27,12 @@ parallel work plan.
 | [docs/security-headers.md](docs/security-headers.md) | nonce-based CSP, other response headers, rollout switches |
 | [docs/testing.md](docs/testing.md) | what runs where, the scratch database, destructive scripts |
 | [docs/dependencies.md](docs/dependencies.md) | dependency audit, licenses, advisories, pins |
+| [docs/integrations/google-calendar.md](docs/integrations/google-calendar.md) | Google Calendar two-way sync: setup, data stored, busy blocks, `block_on_busy`, troubleshooting |
+| [docs/owner-call-in.md](docs/owner-call-in.md) | the owner updates the AI by phone: hours, closed dates, service area, services, FAQs; SMS confirmation and undo |
+| [docs/verticals.md](docs/verticals.md) | trade packs (HVAC, plumbing, electrical, cleaning, landscaping, dental, general): prompt, emergencies, seeds, SMS wording; choosing and changing the vertical |
+| [docs/i18n.md](docs/i18n.md) | English / Spanish: message catalogs, language resolution, switcher, localized emails and texts, residual English |
+| [docs/refunds.md](docs/refunds.md) | cancellation, deposit refunds by policy, Stripe refund/dispute events, the `C` text reply |
+| [docs/changelog-hardening.md](docs/changelog-hardening.md) | review findings and their resolution; the "Phase: features" section maps each feature to code and tests |
 | [docs/known-limitations.md](docs/known-limitations.md) | honest list of what is not covered or needs the operator |
 
 See also [DEPLOY.md](DEPLOY.md).

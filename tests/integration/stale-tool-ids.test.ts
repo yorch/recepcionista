@@ -61,7 +61,7 @@ integration('stale cached tool ids (postgres)', () => {
         const second = await el.createOrUpdateAgent({ business: b, kb: null });
         expect(second).toMatchObject({ mock: false, created: true });
         expect(eleven.agentCreates()).toBe(3); // first, rejected (stale), retried with fresh ids
-        expect(eleven.tools.size).toBe(7); // the tools were registered again
+        expect(eleven.tools.size).toBe((await import('@/lib/kb')).TOOL_NAMES.filter((n) => n !== 'transfer_to_human').length + (await import('@/lib/voice/owner/specs')).OWNER_TOOL_NAMES.length); // the tools (customer + owner-line) were registered again
         // the cache now holds the fresh ids: the next agent needs no retry and no tool lookups
         const before = eleven.agentCreates();
         const c = await newBusiness({ agent_id: null });

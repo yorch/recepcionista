@@ -3,7 +3,7 @@
  *
  * Throws ExtractionError when the URL cannot be scraped or the LLM cannot
  * extract usable data. Callers must handle this and show the user a clear
- * message — we never silently fall back to hardcoded AC-repair data.
+ * message — we never silently fall back to hardcoded template data.
  */
 // SERVER ONLY: pulls in node:* modules via safe-fetch. Client components must import './url' instead.
 // (The `server-only` package is not installed; do not import this module from a 'use client' file.)
@@ -14,7 +14,8 @@ import { safeFetchText, UnsafeUrlError } from '@/lib/net/safe-fetch';
 import { normalizeUrl } from './url';
 
 export { normalizeUrl };
-import type { ExtractionResult, FAQ, Hours, Service } from '@/lib/types';
+import type { Business, ExtractionResult, FAQ, Hours, Service, Vertical } from '@/lib/types';
+import { packFaqs, packOf, packPricingNotes, packServices, type VerticalPack } from '@/lib/verticals';
 
 const log = logger('extract');
 
@@ -35,33 +36,18 @@ export class ExtractionError extends Error {
 }
 
 /**
- * AC-repair template — used ONLY when no URL is provided at all (the business
+ * The vertical pack's template (HVAC when none is given) — used ONLY when no URL is provided at all (the business
  * was created manually). Never used as a silent fallback for a failed scrape.
  */
-export function templateResult(businessName = 'This Business'): ExtractionResult {
+export function templateResult(businessName = 'This Business', vertical?: Pick<Business, 'vertical'> | Vertical | null, lang: 'en' | 'es' = 'en'): ExtractionResult {
+  const pack = packOf(vertical);
   return {
     name: businessName,
-    services: [
-      { name: 'AC Repair', description: 'Diagnose and repair air conditioning failures', base_price: 120, duration_minutes: 90 },
-      { name: 'AC Maintenance / Tune-up', description: 'Seasonal inspection, coil cleaning, refrigerant check', base_price: 89, duration_minutes: 60 },
-      { name: 'AC Installation / Replacement', description: 'Full unit replacement with new equipment', base_price: 2500, duration_minutes: 240 },
-      { name: 'Emergency AC Service', description: 'Same-day urgent repair for no-cooling situations', base_price: 195, duration_minutes: 90 },
-    ],
-    hours: {
-      monday: { open: '08:00', close: '18:00' },
-      tuesday: { open: '08:00', close: '18:00' },
-      wednesday: { open: '08:00', close: '18:00' },
-      thursday: { open: '08:00', close: '18:00' },
-      friday: { open: '08:00', close: '18:00' },
-      saturday: { open: '09:00', close: '14:00' },
-      sunday: null,
-    },
+    services: packServices(pack, lang),
+    hours: pack.hours,
     service_area: ['Miami-Dade County'],
-    faqs: [
-      { question: 'Do you offer same-day service?', answer: 'Yes, we offer same-day emergency service — call and we will find the earliest slot.' },
-      { question: 'How much does a repair cost?', answer: 'Repairs start around $120 depending on the issue; the technician confirms pricing after diagnosis.' },
-    ],
-    pricing_notes: 'All prices are starting prices and vary by equipment and job scope. The technician confirms the exact price after diagnosis, before any work begins. Deposits are capped at $500 and collected only through a secure payment link sent by text.',
+    faqs: packFaqs(pack, lang),
+    pricing_notes: packPricingNotes(pack, lang),
     confidence: 'low',
     source: 'template',
   };
@@ -106,8 +92,8 @@ function stripToText(html: string): string {
   ].filter(Boolean).join('\n');
 }
 
-function extractPrompt(url: string, text: string): string {
-  return `You extract structured business information from scraped website text for a home-services business (e.g. AC repair, plumbing, electrician).
+function extractPrompt(url: string, text: string, pack: VerticalPack): string {
+  return `You extract structured business information from scraped website text for a local service business. Its owner says the trade is: ${pack.label.en}.
 
 WEBSITE: ${url}
 
@@ -125,7 +111,7 @@ Return ONLY valid JSON with this exact shape:
 Rules:
 - Include ALL seven day keys in "hours"; use null when closed or unknown.
 - base_price: a number in USD when the site states a price or a clear "starting at" figure, otherwise null. NEVER invent prices.
-- Only list services the business actually offers. If unclear, include the most plausible generic services for the trade and set confidence to "low".
+- Only list services the business actually offers. If unclear, include the most plausible generic services for its trade and set confidence to "low".
 - hours must be 24h "HH:MM" format.
 - Keep service_area to cities/neighborhoods/counties mentioned (or inferred from the business name/location).
 - confidence "high" only if the site clearly states most fields.
@@ -268,7 +254,8 @@ function nameFromHost(rawUrl: string): string {
  *         and show the user a clear message — never silently fall through
  *         to hardcoded template data.
  */
-export async function extractFromUrl(url: string): Promise<ExtractionResult> {
+export async function extractFromUrl(url: string, vertical?: Pick<Business, 'vertical'> | Vertical | null): Promise<ExtractionResult> {
+  const pack = packOf(vertical);
   const started = Date.now();
   const normalized = normalizeUrl(url);
   const guessName = nameFromHost(url) || 'This Business';
@@ -316,9 +303,9 @@ export async function extractFromUrl(url: string): Promise<ExtractionResult> {
   const { value, mocked } = await generateJson<ExtractionResult>({
     messages: [
       { role: 'system', content: 'You are a precise data-extraction engine. You output only valid JSON.' },
-      { role: 'user', content: extractPrompt(normalized, text) },
+      { role: 'user', content: extractPrompt(normalized, text, pack) },
     ],
-    fallback: templateResult(guessName),
+    fallback: templateResult(guessName, pack.id),
   });
 
   if (mocked) {

@@ -16,6 +16,8 @@ import {
   emailLink, escapeHtml, INVITE_PATH, inviteTemplate, RESET_PATH, resetPasswordTemplate, VERIFY_PATH, verifyEmailTemplate,
   appBaseUrl,
 } from '@/lib/email/templates';
+import { makeT } from '@/lib/i18n';
+import type { Locale } from '@/lib/i18n/core';
 import { logger } from '@/lib/log';
 
 const log = logger('account-flows');
@@ -79,24 +81,24 @@ async function deliver(msg: EmailMessage): Promise<void> {
 }
 
 /** Issue a fresh verification link (older ones stop working) and mail it. Throws EmailConfigError/EmailSendError. */
-export async function sendVerificationEmail(user: { id: string; email: string }): Promise<void> {
+export async function sendVerificationEmail(user: { id: string; email: string; locale?: Locale }): Promise<void> {
   const { token } = await createEmailToken({ purpose: 'verify', email: user.email, user_id: user.id });
-  const t = verifyEmailTemplate({ link: emailLink(VERIFY_PATH, token) });
+  const t = verifyEmailTemplate({ link: emailLink(VERIFY_PATH, token), locale: user.locale });
   await deliver({ to: user.email, ...t });
 }
 
 /** Issue a one-hour, single-use reset link and mail it. */
-export async function sendPasswordResetEmail(user: { id: string; email: string }): Promise<void> {
+export async function sendPasswordResetEmail(user: { id: string; email: string; locale?: Locale }): Promise<void> {
   const { token } = await createEmailToken({ purpose: 'reset', email: user.email, user_id: user.id });
-  const t = resetPasswordTemplate({ link: emailLink(RESET_PATH, token) });
+  const t = resetPasswordTemplate({ link: emailLink(RESET_PATH, token), locale: user.locale });
   await deliver({ to: user.email, ...t });
 }
 
-/** Mail an invitation. `token` comes from createEmailToken({ purpose: 'invite', ... }). */
+/** Mail an invitation. `token` comes from createEmailToken({ purpose: 'invite', ... }). `locale`: the business's default language (the invitee has no account yet). */
 export async function sendInviteEmail(opts: {
-  email: string; token: string; businessName: string; role: 'owner' | 'staff'; inviterEmail?: string | null;
+  email: string; token: string; businessName: string; role: 'owner' | 'staff'; inviterEmail?: string | null; locale?: Locale;
 }): Promise<void> {
-  const t = inviteTemplate({ link: emailLink(INVITE_PATH, opts.token), businessName: opts.businessName, inviterEmail: opts.inviterEmail ?? null, role: opts.role });
+  const t = inviteTemplate({ link: emailLink(INVITE_PATH, opts.token), businessName: opts.businessName, inviterEmail: opts.inviterEmail ?? null, role: opts.role, locale: opts.locale });
   await deliver({ to: opts.email, ...t });
 }
 
@@ -107,50 +109,46 @@ function plainMail(subject: string, lines: string[], footer: string): { subject:
   return { subject, text: `${lines.join('\n\n')}\n\n${footer}\n`, html };
 }
 
-/** Sent instead of a verification mail when someone signs up with an address that already has an account. */
-export async function sendSignupExistsNotice(email: string): Promise<void> {
-  const m = plainMail(
-    'Someone tried to create an account with your email',
-    [
-      'Someone just tried to sign up for Recepcionista with this email address, but it already has an account.',
-      `If that was you, sign in instead (${appBaseUrl()}/login) or reset your password if you forgot it.`,
-    ],
-    'If it was not you, you can ignore this message: nothing changed.',
-  );
+/** Sent instead of a verification mail when someone signs up with an address that already has an account. `locale`: the language of the signup request. */
+export async function sendSignupExistsNotice(email: string, locale: Locale = 'en'): Promise<void> {
+  const t = makeT(locale);
+  const m = plainMail(t('mail.exists.subject'), [t('mail.exists.l1'), t('mail.exists.l2', { url: `${appBaseUrl()}/login` })], t('mail.exists.footer'));
   await deliver({ to: email, ...m });
 }
 
 /** Security notice after a password reset/change. */
-export async function sendPasswordChangedNotice(email: string): Promise<void> {
-  const m = plainMail(
-    'Your password was changed',
-    ['The password for your Recepcionista account was just changed and all your sessions were signed out.'],
-    `If this was not you, reset your password right away at ${appBaseUrl()}/forgot-password and contact your team admin.`,
-  );
+export async function sendPasswordChangedNotice(email: string, locale: Locale = 'en'): Promise<void> {
+  const t = makeT(locale);
+  const m = plainMail(t('mail.pwChanged.subject'), [t('mail.pwChanged.l1')], t('mail.pwChanged.footer', { url: `${appBaseUrl()}/forgot-password` }));
   await deliver({ to: email, ...m });
 }
 
 /** Security notice when two-factor authentication is switched on or off. */
-export async function sendTwoFactorNotice(email: string, enabled: boolean): Promise<void> {
-  const m = plainMail(
-    enabled ? 'Two-factor authentication was turned on' : 'Two-factor authentication was turned off',
-    [enabled
-      ? 'Two-factor authentication is now active on your Recepcionista account.'
-      : 'Two-factor authentication was removed from your Recepcionista account.'],
-    'If this was not you, reset your password right away and contact your team admin.',
-  );
+export async function sendTwoFactorNotice(email: string, enabled: boolean, locale: Locale = 'en'): Promise<void> {
+  const t = makeT(locale);
+  const m = plainMail(t(enabled ? 'mail.2fa.on.subject' : 'mail.2fa.off.subject'), [t(enabled ? 'mail.2fa.on.l1' : 'mail.2fa.off.l1')], t('mail.2fa.footer'));
   await deliver({ to: email, ...m });
 }
 
 /** Sent when the second-factor step of an account keeps getting wrong codes (the password is probably known to someone else). */
-export async function sendMfaFailuresNotice(email: string): Promise<void> {
-  const m = plainMail(
-    'Someone is guessing your two-factor codes',
-    [
-      'Several wrong two-factor codes were just entered for your Recepcionista account, so sign-in is paused for a while.',
-      'Whoever is trying already knows your password. Change it now.',
-    ],
-    `Reset your password at ${appBaseUrl()}/forgot-password. If this was you, wait a few minutes and try again.`,
-  );
+export async function sendMfaFailuresNotice(email: string, locale: Locale = 'en'): Promise<void> {
+  const t = makeT(locale);
+  const m = plainMail(t('mail.mfaFail.subject'), [t('mail.mfaFail.l1'), t('mail.mfaFail.l2')], t('mail.mfaFail.footer', { url: `${appBaseUrl()}/forgot-password` }));
+  await deliver({ to: email, ...m });
+}
+
+/** Security notice when a passkey is added to or removed from the account. */
+export async function sendPasskeyNotice(email: string, change: 'added' | 'removed', name: string, locale: Locale = 'en'): Promise<void> {
+  const t = makeT(locale);
+  const label = name.replace(/[\r\n]+/g, ' ').slice(0, 80);
+  const m = plainMail(t(change === 'added' ? 'mail.pk.added.subject' : 'mail.pk.removed.subject'), [t(change === 'added' ? 'mail.pk.added.l1' : 'mail.pk.removed.l1', { name: label })], t('mail.pk.footer', { url: `${appBaseUrl()}/forgot-password` }));
+  await deliver({ to: email, ...m });
+}
+
+/** Sent when a passkey's signature counter went backwards (the authenticator was probably cloned): every session was signed out. */
+export async function sendPasskeyCloneNotice(email: string, name: string, locale: Locale = 'en'): Promise<void> {
+  const t = makeT(locale);
+  const label = name.replace(/[\r\n]+/g, ' ').slice(0, 80);
+  const m = plainMail(t('mail.pkClone.subject'), [t('mail.pkClone.l1', { name: label }), t('mail.pkClone.l2')], t('mail.pkClone.footer', { url: `${appBaseUrl()}/forgot-password` }));
   await deliver({ to: email, ...m });
 }

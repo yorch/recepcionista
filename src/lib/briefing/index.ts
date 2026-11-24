@@ -12,6 +12,9 @@ import { formatCents } from '@/lib/money';
 import type { Booking, Briefing, Business, Call } from '@/lib/types';
 import { synthesizeBriefing } from './tts';
 import { logger } from '@/lib/log';
+import { packOf, tx } from '@/lib/verticals';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
+import type { Locale } from '@/lib/i18n/core';
 
 const log = logger('briefing');
 
@@ -89,7 +92,9 @@ async function gather(businessId: string, date: string, tz?: string) {
 function fallbackScript(
   business: Business,
   data: Awaited<ReturnType<typeof gather>>,
+  locale: Locale = 'es',
 ): string {
+  if (locale === 'en') return fallbackScriptEn(business, data);
   const owner = business.owner_name?.trim() || '';
   const hola = owner ? `Hola ${owner}.` : 'Hola.';
   const tz = tzOf(business);
@@ -144,7 +149,7 @@ function fallbackScript(
 
   const emergencies = calls.filter((c) => c.urgency === 'emergency').length;
   if (emergencies > 0) {
-    parts.push(`Manejé ${emergencies === 1 ? 'una emergencia' : emergencies + ' emergencias'} hoy — el cliente quedó tranquilo y el tech está enterado.`);
+    parts.push(`Manejé ${emergencies === 1 ? 'una emergencia' : emergencies + ' emergencias'} hoy — el cliente quedó tranquilo y ${tx(packOf(business).briefing.providerWord, 'es')} está enterado.`);
   }
 
   if (flagged.length === 0) {
@@ -164,12 +169,91 @@ function fallbackScript(
   return parts.join(' ');
 }
 
+/** The same narration in plain English for owners who read the dashboard in English (docs/i18n.md). */
+function fallbackScriptEn(
+  business: Business,
+  data: Awaited<ReturnType<typeof gather>>,
+): string {
+  const owner = business.owner_name?.trim() || '';
+  const hi = owner ? `Hi ${owner}.` : 'Hi.';
+  const tz = tzOf(business);
+  const { calls, bookings, flagged, deposits } = data;
+  const parts: string[] = [hi];
+  const day = (iso: string) => new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: tz }).format(new Date(iso));
+
+  if (calls.length === 0 && bookings.length === 0) {
+    return `${hi} Today was truly quiet — zero calls and an empty calendar. I used the time to get everything ready for tomorrow, so we start early with nothing pending. If you like, I will send you the briefing again tomorrow at the same time. Get some rest. That is all.`;
+  }
+
+  if (calls.length === 0) {
+    parts.push('No calls came in today, but you have work on the calendar.');
+  } else if (calls.length === 1) {
+    parts.push('One call came in today and I handled it completely.');
+  } else {
+    const bilingual = calls.filter((c) => c.language === 'es' || c.language === 'mixed').length;
+    let langNote = '';
+    if (bilingual === calls.length) langNote = ', all of them in Spanish or in both languages';
+    else if (bilingual > 0) langNote = `, ${bilingual} of them in Spanish or in both`;
+    parts.push(`${calls.length} calls came in today${langNote}.`);
+  }
+
+  const upcoming = bookings
+    .filter((b) => b.status !== 'cancelled')
+    .sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
+
+  if (upcoming.length === 0) {
+    parts.push('No appointment was booked, so there is still room to fit in work tomorrow.');
+  } else if (upcoming.length === 1) {
+    const b = upcoming[0];
+    parts.push(`One appointment was booked: ${nameOf(b)}, ${b.service.toLowerCase()}, on ${day(b.scheduled_at)} at ${clock(b.scheduled_at, tz)}, for ${b.price_estimate == null ? 'the agreed price' : formatCents(b.price_estimate)}.`);
+  } else {
+    const list = upcoming
+      .slice(0, 3)
+      .map((b) => `${nameOf(b)} on ${day(b.scheduled_at)} at ${clock(b.scheduled_at, tz)} for ${b.service.toLowerCase()}`)
+      .join('; ');
+    parts.push(`${upcoming.length} appointments were booked: ${list}.`);
+  }
+
+  if (deposits > 0) {
+    parts.push(`${formatCents(deposits)} in deposits already came in, so that money is safe.`);
+  } else if (data.stats.revenue > 0) {
+    parts.push(`The day closed at about ${formatCents(data.stats.revenue)} in work.`);
+  }
+
+  const handled = calls.filter((c) => c.summary).length;
+  if (handled > 0 && calls.length > 1) {
+    parts.push('I took the details, the problem and the address on every one, so you do not have to call anyone back to find out what they need.');
+  }
+
+  const emergencies = calls.filter((c) => c.urgency === 'emergency').length;
+  if (emergencies > 0) {
+    parts.push(`I handled ${emergencies === 1 ? 'an emergency' : emergencies + ' emergencies'} today — the customer is calm and the ${tx(packOf(business).briefing.providerWord, 'en')} knows.`);
+  }
+
+  if (flagged.length === 0) {
+    parts.push('Nothing urgent is pending, all is well.');
+  } else {
+    const first = flagged[0];
+    const who = first.caller_name ? first.caller_name.split(' ')[0] : 'a customer';
+    const reason = (first.flagged_reason ?? '').replace(/^[^:]*:\s*/, '').toLowerCase();
+    if (flagged.length === 1) {
+      parts.push(`Only one thing needs your attention: ${who}, ${reason}. I left the number on the dashboard so you can call them when you can.`);
+    } else {
+      parts.push(`${flagged.length} things need your attention. The first is ${who}, ${reason}. The numbers are all on the dashboard.`);
+    }
+  }
+
+  parts.push('That is all. Good work today.');
+  return parts.join(' ');
+}
+
 async function narrate(
   business: Business,
   data: Awaited<ReturnType<typeof gather>>,
   date: string,
+  locale: Locale = 'es',
 ): Promise<string> {
-  const fallback = fallbackScript(business, data);
+  const fallback = fallbackScript(business, data, locale);
   const tz = tzOf(business);
 
   const facts = {
@@ -201,11 +285,15 @@ async function narrate(
       {
         role: 'system',
         content:
-          `You write a 45-second voice note from an AI receptionist to the owner of a small local service business called "${business.name}". ` +
-          'Write in natural SPANGLISH — Spanish sentence structure with the English trade words this business would use (booked, deposit, tech, the service names). ' +
-          'Warm, spoken, first person. 110-140 words. No bullet points, no headers, no markdown. ' +
-          'Open with "Hola" and the owner\'s name from the data (just "Hola." when the owner is null). Name the real bookings with real times. Say the money collected. ' +
-          'End with the ONE thing needing attention, or say nothing is pending. Close with "Eso es todo."',
+          `You write a 45-second voice note from an AI receptionist to the owner of a small local ${packOf(business).label.en.toLowerCase()} business called "${business.name}". ` +
+          (locale === 'en'
+            ? 'Write in natural, warm ENGLISH (a Spanish word here and there is fine if the owner would say it). Spoken, first person. 110-140 words. No bullet points, no headers, no markdown. ' +
+              'Open with "Hi" and the owner\'s name from the data (just "Hi." when the owner is null). Name the real bookings with real times. Say the money collected. ' +
+              'End with the ONE thing needing attention, or say nothing is pending. Close with "That is all."'
+            : `Write in natural SPANGLISH — Spanish sentence structure with the English trade words this business would use (${packOf(business).briefing.tradeWords}). ` +
+              'Warm, spoken, first person. 110-140 words. No bullet points, no headers, no markdown. ' +
+              'Open with "Hola" and the owner\'s name from the data (just "Hola." when the owner is null). Name the real bookings with real times. Say the money collected. ' +
+              'End with the ONE thing needing attention, or say nothing is pending. Close with "Eso es todo."'),
       },
       {
         role: 'user',
@@ -248,7 +336,8 @@ export async function generateBriefing(businessId: string, date?: string): Promi
     revenue: data.stats.revenue,
   });
 
-  const transcript = await narrate(business, data, day);
+  // Written in the owner's language (users.locale, else the business default).
+  const transcript = await narrate(business, data, day, await ownerLocaleFor(business));
   const audio = await synthesizeBriefing(transcript, { businessId, date: day });
 
   const briefing = await createBriefing({

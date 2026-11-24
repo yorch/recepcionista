@@ -247,6 +247,33 @@ async function main() {
     return '200 well-formed, no tenant';
   });
 
+  // Phase 2 telephony: transfer configuration, call screening, live transcript. Non-destructive (rejections and empty tenants only).
+  await check('Transfer config: an unknown tenant gets NO transfer destination (the per-call variable stays empty)', async () => {
+    if (!TOOL_SECRET) return { skip: 'ELEVENLABS_TOOL_SECRET not set here' };
+    const j = (await (await initPost(TOOL_SECRET)).json()) as { dynamic_variables?: Record<string, string> };
+    const d = j.dynamic_variables ?? {};
+    expect((d.transfer_destination ?? '') === '', 'a synthetic tenant received a transfer destination');
+    expect((d.transfer_mode ?? 'off') === 'off', `transfer_mode is ${String(d.transfer_mode)} for a synthetic tenant`);
+    return 'no destination for an unknown tenant';
+  });
+  await check('Call screening /api/voice/screen rejects unsigned requests', async () => {
+    const r = await http('/api/voice/screen', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `ParentCallSid=CA${SYN}` });
+    expect(r.status === 403, `status ${r.status}`);
+    return '403';
+  });
+  await check('Live transcript push /api/voice/transcript-event rejects a missing tool secret', async () => {
+    const r = await http('/api/voice/transcript-event', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ call_sid: `CA${SYN}`, events: [] }) });
+    expect(r.status === 401, `status ${r.status}`);
+    return '401';
+  });
+  await check('Live transcript /api/calls/:id/live and /transcript require a session', async () => {
+    const a = await http(`/api/calls/call_${SYN}/live`);
+    const b = await http(`/api/calls/call_${SYN}/transcript`);
+    expect(a.status === 401 || a.status === 403, `live: status ${a.status}`);
+    expect(b.status === 401 || b.status === 403, `transcript: status ${b.status}`);
+    return `${a.status}/${b.status}`;
+  });
+
   // Stripe BILLING webhook (subscriptions; a different endpoint secret from the deposit webhook).
   const bbBody = JSON.stringify({ id: `evt_${SYN}`, object: 'event', type: 'verify_deploy.synthetic', data: { object: {} } });
   const bbPost = (sig?: string) =>

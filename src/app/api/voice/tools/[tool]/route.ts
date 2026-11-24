@@ -1,8 +1,9 @@
 import { runTool } from '@/lib/voice/tools';
 import type { ToolResult } from '@/lib/voice/tools';
 import { verifyToolSecret } from '@/lib/voice/elevenlabs';
-import { getBusinessByAgentId, getCall } from '@/lib/db';
+import { findActiveCall, getBusinessByAgentId, getCall } from '@/lib/db';
 import { callGate, CAPACITY_EXEMPT_TOOLS, outOfServiceToolMessage } from '@/lib/voice/capacity';
+import { canonicalOwnerTool, runOwnerTool } from '@/lib/voice/owner/tools';
 import { logger } from '@/lib/log';
 
 const log = logger('voice/tools');
@@ -115,10 +116,19 @@ export async function POST(
       result = { ok: false, message: 'Let me get the owner for that.' };
     } else {
       const toolName = tool.trim().toLowerCase().replace(/[\s-]+/g, '_');
-      const gate = CAPACITY_EXEMPT_TOOLS.has(toolName) || typeof args.business_id !== 'string'
+      // Owner-line tools (voice/owner) never reach runTool: they have their own gate (call row kind 'owner', set server-side) and are exempt from the minute cap.
+      const ownerTool = canonicalOwnerTool(tool) !== null;
+      const gate = ownerTool || CAPACITY_EXEMPT_TOOLS.has(toolName) || typeof args.business_id !== 'string'
         ? null
         : await callGate(args.business_id);
-      result = gate && !gate.ok
+      // The other way round: an OWNER call may not use customer tools (booking, texting, payments), whatever the model asks.
+      const onOwnerCall = !ownerTool && typeof args.business_id === 'string'
+        && (await findActiveCall(args.business_id, { callSid: String(args.call_sid ?? '') || undefined, conversationId: String(args.conversation_id ?? '') || undefined }))?.kind === 'owner';
+      result = ownerTool
+        ? await runOwnerTool(tool, args)
+        : onOwnerCall
+        ? { ok: false, message: 'That is not available on the owner line.' }
+        : gate && !gate.ok
         ? {
           ok: false,
           message: outOfServiceToolMessage(typeof args.language === 'string' && args.language.toLowerCase().startsWith('es') ? 'es' : 'en'),

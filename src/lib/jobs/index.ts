@@ -23,7 +23,7 @@
  * RETENTION_JOB=on still works on its own (JOBS unset in development) and is off by default. JOBS=off turns everything off.
  */
 import {
-  claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, EMAIL_TOKEN_GRACE_MS,
+  claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, deleteExpiredWebauthnChallenges, WEBAUTHN_CHALLENGE_GRACE_MS, EMAIL_TOKEN_GRACE_MS,
   getBusiness, isProvisioningAllowed, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
   checkSmsAllowed, recordingDeletionStatus, withLease,
 } from '@/lib/db';
@@ -36,6 +36,10 @@ import { smsSegments } from '@/lib/messaging/policy';
 import { CLEANUP_HORIZON_MS, cleanupRateLimitBuckets } from '@/lib/ratelimit';
 import { retentionJobEnabled, logRetentionPreview, runRetentionNow } from '@/lib/retention-job';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { makeT } from '@/lib/i18n';
+import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
+import { runReconcileJob, runUsageWarningsJob } from './reconcile';
+import { POLL_EVERY_MS as GOOGLE_POLL_EVERY_MS, runGoogleCalendarWork } from './calendar';
 import { drainRecordingDeletions } from '@/lib/voice/recording-deletion';
 import type { Briefing, Business } from '@/lib/types';
 import type { JobBusiness } from '@/lib/db';
@@ -57,6 +61,7 @@ const GRATITUDE_LEASE_MS = 5 * 60_000;
 const CLEANUP_LEASE_MS = 2 * 60_000;
 export const CLEANUP_EVERY_MS = 60 * 60_000;
 export const RETENTION_EVERY_MS = 24 * 60 * 60_000;
+export const USAGE_WARNINGS_EVERY_MS = 10 * 60_000;
 const FIRST_TICK_DELAY_MS = 20_000;
 
 const STATE_SOURCE = 'job-state';
@@ -69,6 +74,9 @@ export const JOB_INFO: Record<JobName, { description: string; schedule: string }
   cleanup: { description: 'Delete expired sessions, expired email tokens, old processed events and stale rate-limit buckets.', schedule: 'hourly' },
   retention: { description: 'Delete customer data past each business retention window (OFF unless RETENTION_JOB=on).', schedule: 'daily' },
   recording_deletions: { description: 'Delete the provider-side voicemail recordings queued by retention / erasure (retries with backoff; alerts when one keeps failing).', schedule: 'every tick' },
+  reconcile: { description: 'Add the AI minutes of calls whose post-call webhook never arrived (fetched from ElevenLabs; once, shared with the webhook; backs off, gives up with an audit row). Also re-syncs voice agents whose last sync failed (e.g. after a business-type change).', schedule: 'every tick' },
+  usage_warnings: { description: 'Safety net for the 80% / 100% cap warnings (email + text, once per kind per period). One instance at a time (lease).', schedule: 'every 10 minutes' },
+  google_calendar: { description: 'Google Calendar: fallback poll (15 min), push-channel renewal, retry/backoff, push reconcile, privacy sweep.', schedule: 'every tick (per connection every 15 min)' },
 };
 
 // ---- types ------------------------------------------------------------------------------------
@@ -179,7 +187,7 @@ export async function notifyOwnerOfBriefing(business: Business, briefing: Briefi
     if (status === 'no_owner_phone') return 'skipped_no_owner_phone';
     if (status === 'unverified') return 'skipped_owner_unverified';
     if (inQuietHours(now, business.timezone)) return 'skipped_quiet_hours';
-    const body = `Your end-of-day briefing for ${briefing.date} is ready: ${appBaseUrl()}/dashboard/briefings`;
+    const body = makeT(await ownerLocaleFor(business))('alert.briefing', { date: briefing.date, url: `${appBaseUrl()}/dashboard/briefings` });
     const allowed = await checkSmsAllowed(business.id, now, smsSegments(body));
     if (!allowed.ok) return 'skipped_cap';
     const res = await alertOwner(business, body);
@@ -323,13 +331,14 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
 
 /** What the cleanup job would delete right now (read-only counts). */
 export async function previewCleanup(now: Date = new Date()): Promise<Record<string, number>> {
-  const [sessions, tokens, events, buckets] = await Promise.all([
+  const [sessions, tokens, events, buckets, challenges] = await Promise.all([
     prisma.userSession.count({ where: { expiresAt: { lt: now } } }),
     prisma.emailToken.count({ where: { expiresAt: { lt: new Date(now.getTime() - EMAIL_TOKEN_GRACE_MS) } } }),
     prisma.processedEvent.count({ where: { createdAt: { lt: new Date(now.getTime() - PROCESSED_EVENTS_RETENTION_MS) } } }),
     prisma.rateLimitBucket.count({ where: { windowStart: { lt: new Date(now.getTime() - CLEANUP_HORIZON_MS) } } }),
+    prisma.webauthnChallenge.count({ where: { expiresAt: { lt: new Date(now.getTime() - WEBAUTHN_CHALLENGE_GRACE_MS) } } }),
   ]);
-  return { sessions, email_tokens: tokens, processed_events: events, rate_limit_buckets: buckets };
+  return { sessions, email_tokens: tokens, processed_events: events, rate_limit_buckets: buckets, webauthn_challenges: challenges };
 }
 
 export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
@@ -347,6 +356,7 @@ export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
       email_tokens: await deleteExpiredEmailTokens(now),
       processed_events: await cleanupProcessedEvents(now, true),
       rate_limit_buckets: await cleanupRateLimitBuckets(now),
+      webauthn_challenges: await deleteExpiredWebauthnChallenges(now), // expired passkey challenges (kept a day for forensics); no longer a random 2% side effect of issuing one
     }));
     if (!run.acquired) { report.items.push({ outcome: 'busy' }); return report; }
     report.counts = run.value;
@@ -409,6 +419,24 @@ export async function runRecordingDeletions(opts: RunOptions & { fetchImpl?: typ
   return report;
 }
 
+// ---- Google Calendar (logic in ./calendar) ------------------------------------------------------
+
+export async function runGoogleCalendarJob(opts: RunOptions = {}): Promise<JobReport> {
+  const now = opts.now ?? new Date();
+  const report: JobReport = { job: 'google_calendar', dry_run: opts.dryRun === true, at: now.toISOString(), processed: 0, errors: 0, items: [] };
+  if (opts.dryRun) return report;
+  try {
+    const r = await runGoogleCalendarWork({ now, force: opts.force });
+    report.processed = r.processed; report.errors = r.errors; report.items = r.items; report.counts = r.counts;
+    if (r.errors > 0) await auditRun(report);
+  } catch (err) {
+    report.errors++;
+    report.items.push({ outcome: 'error', detail: { error: err instanceof Error ? err.message : String(err) } });
+    log.error('google_calendar.failed', { err });
+  }
+  return report;
+}
+
 // ---- dispatch, tick, runner -------------------------------------------------------------------
 
 /** Run one job by name now (admin endpoint and tests). */
@@ -419,6 +447,9 @@ export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> 
     case 'cleanup': return runCleanup(opts);
     case 'retention': return runRetentionJob(opts);
     case 'recording_deletions': return runRecordingDeletions(opts);
+    case 'reconcile': return runReconcileJob({ now: opts.now, dryRun: opts.dryRun, env: opts.env }) as Promise<JobReport>;
+    case 'usage_warnings': return runUsageWarningsJob({ now: opts.now, dryRun: opts.dryRun, businessId: opts.businessId }) as Promise<JobReport>;
+    case 'google_calendar': return runGoogleCalendarJob(opts);
   }
 }
 
@@ -445,8 +476,13 @@ export async function runJobTick(opts: { now?: Date; env?: NodeJS.ProcessEnv; jo
       } else if (job === 'retention') {
         const last = await lastRunAt('retention');
         if (last && now.getTime() - last.getTime() < RETENTION_EVERY_MS) continue;
+      } else if (job === 'usage_warnings') {
+        // A safety net (the inline trigger sends the warnings): 3 queries per live business, so not every 60 s tick.
+        const last = await lastRunAt('usage_warnings');
+        if (last && now.getTime() - last.getTime() < USAGE_WARNINGS_EVERY_MS) continue;
       }
       reports.push(await runJob(job, { now, deps: opts.deps, env }));
+      if (job === 'usage_warnings') await markRun('usage_warnings', now);
     } catch (err) {
       log.error('tick.job_failed', { job, err });
     }
@@ -504,6 +540,13 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
       const status = await recordingDeletionStatus();
       next = now;
       note = `${status.pending} recording(s) queued for provider-side deletion${status.stuck > 0 ? `, ${status.stuck} NOT draining (alerted): check the runbook` : ''}`;
+    } else if (name === 'google_calendar') {
+      next = now;
+      note = `fallback poll every ${GOOGLE_POLL_EVERY_MS / 60_000} min per connection`;
+    } else if (name === 'usage_warnings') {
+      next = last ? new Date(Math.max(now.getTime(), last.getTime() + USAGE_WARNINGS_EVERY_MS)) : now;
+    } else if (name === 'reconcile') {
+      next = now;
     } else {
       next = retentionJobEnabled(env.RETENTION_JOB)
         ? (last ? new Date(Math.max(now.getTime(), last.getTime() + RETENTION_EVERY_MS)) : now)

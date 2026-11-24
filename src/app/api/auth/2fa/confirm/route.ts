@@ -45,7 +45,7 @@ export async function POST(req: Request) {
       actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.2fa_enabled', target: `user:${user.id}`,
       ip: auditIp(req), meta: { other_sessions_revoked: revoked },
     });
-    await afterResponse('2fa.notice', () => sendTwoFactorNotice(user.email, true));
+    await afterResponse('2fa.notice', () => sendTwoFactorNotice(user.email, true, user.locale));
     return NextResponse.json({ ok: true, data: { enabled: true, recovery_codes: codes } }, { headers: { 'cache-control': 'no-store' } });
   } catch (err) {
     log.error('error', { err });

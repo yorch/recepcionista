@@ -6,8 +6,9 @@ import { areaCodeForBusiness } from '@/lib/phone';
 import crypto from 'node:crypto';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
+import { readinessOf } from '@/lib/kb/readiness';
 import { isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
-import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
+import { syncAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
 import { limitRequest } from '@/lib/ratelimit';
@@ -51,7 +52,7 @@ function kbIsStale(kb: KnowledgeBase, business: Business): boolean {
  * A correct curated prompt is left untouched so owner edits survive re-runs.
  */
 function kbNeedsRegen(kb: KnowledgeBase, business: Business): boolean {
-  return promptIsDeficient(kb.system_prompt) || kbIsStale(kb, business);
+  return promptIsDeficient(kb.system_prompt, business.vertical) || kbIsStale(kb, business);
 }
 
 /**
@@ -200,15 +201,28 @@ async function provision(
         if (business.url) {
           // A real URL that cannot be scraped must fail loudly — the user
           // needs to know their agent would be talking about the wrong trade.
-          const extraction = await extractFromUrl(business.url);
+          const extraction = await extractFromUrl(business.url, business.vertical);
           generated = generateKnowledgeBase(extraction, business);
         } else {
-          generated = generateKnowledgeBase(templateResult(business.name), business);
+          generated = generateKnowledgeBase(templateResult(business.name, business.vertical, business.locale_default === 'es' ? 'es' : 'en'), business);
         }
       }
       kb = await upsertKnowledgeBase(id, generated);
       regenerated = true;
       log.info('knowledge_base.ready', { business: id, force, kept_services: Boolean(keepServices) });
+    }
+
+    // Minimum content checks (docs: kb readiness): a business whose KB is too thin to answer calls does not get a paid number or agent.
+    // Admins may override (they can see the same list in the response). Checked before ANY paid step.
+    if (principal.kind !== 'admin') {
+      const readiness = readinessOf(kb, (await getBusiness(id)) ?? business);
+      if (!readiness.ready) {
+        log.info('kb_incomplete', { business: id, blockers: readiness.blockers.map((b) => b.key) });
+        return NextResponse.json({
+          ok: false, error: 'Add the missing details before turning your receptionist on.', code: 'kb_incomplete',
+          blockers: readiness.blockers, warnings: readiness.warnings, score: readiness.score,
+        }, { status: 422 }) as unknown as ReturnType<typeof fail>;
+      }
     }
 
     // Preserve the business's existing line: CONTRACTS.md documents the demo
@@ -302,7 +316,7 @@ async function provision(
     let agentFailure: string | null = null;
     lostLeaseCheck(signal);
     try {
-      const agent = await createOrUpdateAgent({ business: updated, kb });
+      const agent = await syncAgent({ business: updated, kb });
       agentId = agent.agent_id;
       agentMock = agent.mock;
       if (agent.error) agentFailure = `agent registration failed (${agent.error})`;

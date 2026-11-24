@@ -28,6 +28,9 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `TRUSTED_PROXY_HOPS` | no | `1` | proxies appending to `X-Forwarded-For` (2 behind a CDN plus Traefik) | no |
 | `APP_SECRET_KEY` | prod | insecure fixed key outside production | AES-256-GCM key for TOTP secrets: 32 random bytes, base64 (`openssl rand -base64 32`). deploy.sh validates the length | yes |
 | `REQUIRE_2FA_FOR_ADMINS` | no | `false` | DB admin users must enrol in 2FA first | no |
+| `WEBAUTHN_RP_ID` | no | host of `PUBLIC_BASE_URL`/`APP_URL` | passkey relying-party id; set to a registrable parent domain to share passkeys across subdomains. Changing it later orphans registered passkeys (docs/auth.md) | no |
+| `WEBAUTHN_ORIGINS` | no | `PUBLIC_BASE_URL`/`APP_URL` origin | extra exact origins allowed to use passkeys, comma separated (staging); `https` only (`http` for localhost), each host must be the rpID or a subdomain. Production without any configured origin answers `503 passkeys_not_configured` | no |
+| `MAX_BUSINESSES_PER_USER` | no | `10` | most businesses one account may own (owner memberships; "Add another location", `POST /api/businesses/mine`), 1-100 | no |
 | `ALLOWED_DEV_ORIGINS` | no | none | `next dev` behind a tunnel (dev only) | no |
 | `DEMO_MODE` | never in prod | unset | `/api/demo/*`, `/api/pay/mock-complete`, mock Stripe checkout (`/api/billing/mock-activate`). compose forces `false`; deploy.sh refuses `true` | no |
 | `CSP_REPORT_ONLY` | no | unset | `true`: enforce the moderate CSP and only report violations of the strict nonce policy (docs/security-headers.md) | no |
@@ -55,6 +58,8 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | prod (with the secret) | none | Turnstile widget (build time) | no |
 | `SIGNUP_ALLOW_WITHOUT_CAPTCHA` | no | unset | exactly `true` lets production run open signup with no captcha (startup logs a loud warning, deploy.sh prints a banner). NOT recommended; without it and without the Turnstile pair deploy.sh fails | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | price text on the plan step (build time) | no |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES` | no | falls back to the English text | Spanish price texts for the landing page, onboarding and billing (build time) | no |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | no | none | annual plan price text on the Billing page's plan choice (build time; shown only when the annual plan is configured) | no |
 | `CREATE_USER_PASSWORD` | no | none | `scripts/create-user.ts` non-interactive password (the script refuses `--password`) | yes |
 
 ## Billing and plan limits (docs/billing.md)
@@ -64,6 +69,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `BILLING_ENFORCED` | prod: yes (`true` or `false`) | production: enforced unless exactly `false` (FAIL CLOSED); dev/test: off unless `true` | refuses provisioning, texts and calls for businesses without an active plan. deploy.sh and compose.production.yaml refuse an unset/invalid value and banner `false`; non-admin provisioning always needs a plan in production. Comp existing tenants first (`scripts/grandfather-existing.ts --before <iso>`) | no |
 | `STRIPE_SECRET_KEY` | cond (`BILLING_ENFORCED=true`, deposits) | unset: mock checkout and mock deposit links (not in production) | Stripe API: subscriptions and deposit payment links | yes |
 | `STRIPE_PRICE_ID` | cond (`BILLING_ENFORCED=true`) | none | recurring monthly price | no |
+| `STRIPE_PRICE_ID_ANNUAL` | no | none | optional recurring ANNUAL price (`price_...`): checkout accepts `interval: 'year'` only when this and `STRIPE_SECRET_KEY` are set; the subscription webhook maps the price to `billing_interval`. deploy.sh checks the format | no |
 | `STRIPE_BILLING_WEBHOOK_SECRET` | cond (`BILLING_ENFORCED=true`) | none | signs `/api/billing/webhook` (a different secret from the deposit webhook) | yes |
 | `STRIPE_WEBHOOK_SECRET` | prod | none | signs `/api/payments/webhook` (deposits) | yes |
 | `STRIPE_ALLOW_UNSIGNED` | never in prod | unset | dev: accept unsigned deposit webhooks (also needs `ALLOW_INSECURE_DEV`) | no |
@@ -74,6 +80,8 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `PLAN_SMS_CAP` | no | `500` | monthly SMS SEGMENTS per business (a text is metered as its real segment count: GSM-7 160/153, UCS-2 70/67; a text that would not fit in what is left is blocked). Per-business overrides win | no |
 | `PLAN_CALL_MINUTES_CAP` | no | `300` | monthly call minutes per business | no |
 | `OWNER_ALERT_HOURLY_LIMIT` | no | `6` | owner texts a CALLER can trigger (`flag_emergency`, `handoff_to_human`) per business per hour, counted in a budget SEPARATE from the plan SMS cap (those alerts are exempt from the cap). Identical alerts for one call are sent once. The FIRST emergency of a call is never starved by a spent budget, up to a hard ceiling of 2x this number per hour; the rest answer honestly that the owner could not be reached. Alert text is cut to 320 GSM-safe characters. Whole number >= 1 (deploy.sh checks) | no |
+| `OWNER_CALLIN_ENABLED` | no | `true` | owner call-in (docs/owner-call-in.md): the verified owner phones the business line to update what the AI knows; every change still needs an SMS reply from the owner phone. `false` turns it off (the owner is then served like any caller, and the agent override that carries the owner prompt is not enabled) | no |
+| `OWNER_CALL_MAX_SECONDS` | no | `300` | hard length of an owner call-in session: 30-300 seconds. A value above 300 is clamped to 300; a missing, non-integer or under-30 value falls back to 300 (never more than 5 minutes) | no |
 | `TRIAL_SMS_CAP` | no | `50` | monthly SMS segments while `billing_status='trialing'` (never above `PLAN_SMS_CAP`; per-business overrides win). Applies only while billing is enforced | no |
 | `TRIAL_CALL_MINUTES_CAP` | no | `30` | monthly call minutes while `billing_status='trialing'` (never above `PLAN_CALL_MINUTES_CAP`; overrides win) | no |
 
@@ -98,7 +106,8 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `ELEVENLABS_WEBHOOK_SECRET` | prod when `ELEVENLABS_API_KEY` is set | none | HMAC for the post-call webhook; shown once by provisioning | yes |
 | `ELEVENLABS_AGENT_ID` | no | none | bootstrap for a single-business install only | no |
 | `ELEVENLABS_PHONE_NUMBER_ID` | no | none | `phnum_...` id used to bind a number to an agent | no |
-| `ELEVENLABS_VOICE_ID` | no | `PStJ2DzQnh8zxG5PDf1s` | voice for briefings and the agent prompt | no |
+| `ELEVENLABS_VOICE_ID` | no | `PStJ2DzQnh8zxG5PDf1s` | voice for briefings and the agent default (a business's own pick, `voice_id`, wins for its agent) | no |
+| `ELEVENLABS_VOICE_ALLOWLIST` | no | provider premade voices | voices an owner may choose in Settings: comma separated ids, each optionally `id:Display Name`; ids outside it are refused (422) | no |
 | `ELEVENLABS_INITIATION_WEBHOOK` | no | `auto` | `off` stops provisioning from configuring the initiation webhook by API | no |
 | `OPENAI_API_KEY` | no | unset: templates | extraction and briefings | yes |
 | `LLM_MODEL` | no | `gpt-4o-mini` | OpenAI model | no |
@@ -132,5 +141,16 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `FORWARD_MAX_CONCURRENT` | no | `3` | forwarded calls one business may have in progress at once; strangers may hold at most this minus one (one slot is kept for known customers). Live forwards also RESERVE their time limit against the forward minutes cap (table `forward_leases`, expires by itself) |
 | `FORWARD_MIN_ANSWERED_SECONDS` | no | `6` | a forwarded leg that "completed" in fewer seconds, or that Twilio flags `AnsweredBy=machine*`, counts as NOT answered (the owner's carrier voicemail): the caller is offered our voicemail. `0` turns it off |
 | `FORWARD_RING_SECONDS` | no | `20` | how long the owner's phone rings (`<Dial timeout>`), 10-40. Keep it under your carrier's voicemail pickup (about 25 s) so it does not answer and get bridged |
+| `NATIVE_TRANSFER` | no | `off` | `on` lets the AI transfer a live call to the business's VERIFIED forward number on the native ElevenLabs line (transfer-to-number system tool, destination set per call by the initiation webhook; call mode Forward then works there, and the `transfer_to_human` tool is registered). Provider behaviour is unverified until the live transfer test in docs/runbook.md section 8 has passed. `off` keeps the honest paused script. deploy.sh needs `ELEVENLABS_TOOL_SECRET` when on |
+| `STIR_TRUST` | no | `on` | `on`: only STIR/SHAKEN attestation-A callers (Twilio `StirVerstat`) get a per-caller budget and the known-customer reserved share; B, C, unverified, and the native path (no verstat) share the stranger bucket, and a failed attestation gets a stricter one. `off` (callers mostly outside US/Canada) restores caller-id identity |
+| `LANGUAGE_DETECTION` | no | `on` | the ElevenLabs language-detection system tool plus a Spanish language preset (English/Spanish switching) on provisioning. `off` omits both. A provider that rejects the language fields is retried once without them |
+| `LIVE_MAX_PER_USER` / `LIVE_MAX_PER_BUSINESS` | no | `3` / `20` | concurrent live-transcript SSE streams per person / per business, per app instance (a 429 beyond that; the page then polls) |
+| `LIVE_MAX_POLLS_PER_CALL` | no | `600` | upstream ElevenLabs polls per call for the live transcript (one per ~2 s however many people watch; about 20 minutes) |
+| `RECONCILE_AFTER_MINUTES` / `RECONCILE_MAX_ATTEMPTS` | no | `20` / `5` | metering reconciliation: a call (customer OR owner line: both use AI minutes) with no post-call minutes after this long is fetched from ElevenLabs and metered once; gives up (audit row `voice.reconcile_gave_up` plus an error log) after this many tries, with exponential backoff |
 | `ELEVENLABS_PAUSED_PROMPT_OVERRIDE` | no | off | `true`: a paused call on the AI line also overrides the agent PROMPT (`conversation_config_override.agent.prompt`), in addition to the first message. UNVERIFIED API field: needs the prompt override enabled on the agent (re-provision with this set). The tools are refused while paused whatever this is set to |
 | `LOG_PII` | no | unset | `true` stops masking phone numbers and emails in logs (credentials are always masked); debugging only |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | with Google Calendar | unset (feature off) | OAuth client (Web application) for the Google Calendar integration. Required together; deploy.sh refuses a client id without the secret or without an https `APP_URL`. See docs/integrations/google-calendar.md |
+| `GOOGLE_OAUTH_REDIRECT_URI` | no | `${APP_URL}/api/integrations/google/callback` | the redirect URI registered in the Google console; must match exactly |
+| `GOOGLE_WEBHOOK_SECRET` | no | derived from `APP_SECRET_KEY` | HMAC key of the push-channel tokens (`X-Goog-Channel-Token`). Rotating it only breaks live channels until their next renewal (the 15-minute poll covers the gap) |
+| `GOOGLE_OAUTH_MOCK` | no | unset | `true`: in-memory fake Google for local development / e2e (also enables `POST /api/integrations/google/mock-event`, which plays "the owner added an event in Google"; both are inert in production, and a PRODUCTION BUILD refuses every mock provider by design, so mock-provider end-to-end runs need `next dev`). IGNORED in production (boot logs an error; deploy.sh refuses it) |
+| `PRISMA_QUERY_EVENTS` | never in prod | unset | `1`: the Prisma client emits query events so tests can count SQL statements (`recordQueries`). Set by tests/helpers/preload.ts only | no |

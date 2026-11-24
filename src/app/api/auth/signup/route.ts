@@ -3,13 +3,14 @@ import { checkSameOrigin, clientKey } from '@/lib/auth';
 import {
   afterResponse, allowPerEmail, auditIp, limitIp, sendSignupExistsNotice, sendVerificationEmail,
 } from '@/lib/account-flows';
-import { recordAudit } from '@/lib/db';
+import { getUserByEmail, recordAudit } from '@/lib/db';
 import { emailConfigured } from '@/lib/email';
 import { accountId } from '@/lib/login-throttle';
 import { hashPassword } from '@/lib/password';
 import { rateLimit } from '@/lib/ratelimit';
 import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, captchaRequired, signupAvailability, verifyTurnstile } from '@/lib/signup';
 import { logger } from '@/lib/log';
+import { localeOfRequest } from '@/lib/i18n/core';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -71,12 +72,17 @@ export async function POST(req: Request) {
 
   try {
     const passwordHash = await hashPassword(input.password); // always: same CPU cost for new and existing addresses
-    const created = await createSignupAccount({ email: input.email, passwordHash, businessName: input.businessName });
+    const created = await createSignupAccount({ email: input.email, passwordHash, businessName: input.businessName, locale: localeOfRequest(req.headers) });
     if (!created) {
       // Existing address: no account is touched. One notice per hour at most.
       const may = await rateLimit(`auth/signup:notice:${accountId(input.email)}`, 1, 60 * 60_000);
       await afterResponse('signup.exists_notice', async () => {
-        if (may.allowed) await sendSignupExistsNotice(input.email);
+        // The warning goes to the account OWNER, in THEIR language (users.locale), not in the requester's: an attacker probing an address must
+        // not be able to make the notice arrive in a language its owner does not read. Looked up here (after the response) so the timing is constant.
+        if (may.allowed) {
+          const existing = await getUserByEmail(input.email).catch(() => null);
+          await sendSignupExistsNotice(input.email, existing?.locale ?? localeOfRequest(req.headers));
+        }
       });
       return accepted();
     }

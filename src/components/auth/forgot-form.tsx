@@ -1,8 +1,10 @@
 'use client';
 import { useState } from 'react';
+import { useT } from '@/lib/i18n/client';
 import { Field, FormError, FormNotice, SubmitButton, friendly, sendJson } from './auth-ui';
 
 export function ForgotPasswordForm() {
+  const t = useT();
   const [email, setEmail] = useState('');
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -15,15 +17,15 @@ export function ForgotPasswordForm() {
     const r = await sendJson('/api/auth/forgot-password', { email });
     setBusy(false);
     if (r.ok) setDone(true);
-    else setError(friendly(r.error));
+    else setError(friendly(t, r.error));
   }
 
   return (
     <form onSubmit={submit}>
-      <Field label="Email" type="email" name="email" autoComplete="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
+      <Field label={t('auth.login.email')} type="email" name="email" autoComplete="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
       <FormError message={error} />
-      {done ? <FormNotice>If that address has an account, we sent a link to choose a new password. It works once for one hour.</FormNotice> : null}
-      <SubmitButton busy={busy}>{busy ? 'Sending...' : 'Send reset link'}</SubmitButton>
+      {done ? <FormNotice>{t('auth.forgot.sent')}</FormNotice> : null}
+      <SubmitButton busy={busy}>{busy ? t('common.sending') : t('auth.forgot.submit')}</SubmitButton>
     </form>
   );
 }

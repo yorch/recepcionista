@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     const gate = await checkPair(key);
     if (!gate.ok) return verdictResponse(gate);
     const body = (await req.json().catch(() => ({}))) as { code?: unknown };
-    const result = await verifySecondFactor(user.id, { code: body.code }, { allowRecovery: false, account: { email: user.email, businessId: user.business_id, ip: auditIp(req) } });
+    const result = await verifySecondFactor(user.id, { code: body.code }, { allowRecovery: false, account: { email: user.email, businessId: user.business_id, ip: auditIp(req), locale: user.locale } });
     if (!result.ok && result.locked) return verdictResponse(result.locked);
     if (!result.ok) {
       await recordFailure(key, accountId(user.id));

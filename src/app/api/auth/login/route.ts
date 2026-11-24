@@ -12,6 +12,7 @@ import {
   createAdminSession, createSession, deleteSession, getUserByEmail, normalizeEmail, recordAudit, SESSION_TTL_MS, upgradePasswordHash,
 } from '@/lib/db';
 import { MFA_PENDING_TTL_MS } from '@/lib/mfa';
+import { accountHasAccess, signedInData } from '@/lib/login-session';
 import { hashPassword, needsRehash, verifyPasswordOrDummy } from '@/lib/password';
 import { logger } from '@/lib/log';
 
@@ -97,7 +98,7 @@ export async function POST(req: Request) {
   try {
     const user = await getUserByEmail(email);
     const valid = await verifyPasswordOrDummy(body.password, user?.password_hash);
-    if (!user || !valid || user.disabled_at) {
+    if (!user || !valid || user.disabled_at || !(await accountHasAccess(user))) {
       log.warn('failed', { acct: account.slice(0, 8) });
       await recordFailure(key, account);
       // Only known accounts are audited (unknown addresses would let junk traffic fill the table); written after
@@ -105,7 +106,7 @@ export async function POST(req: Request) {
       if (user) {
         await afterResponse('audit.login_failed', () => recordAudit({
           actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.login_failed',
-          target: `user:${user.id}`, ip, meta: { reason: user.disabled_at ? 'disabled' : 'bad_password' },
+          target: `user:${user.id}`, ip, meta: { reason: user.disabled_at ? 'disabled' : valid ? 'no_membership' : 'bad_password' },
         }));
       }
       return fail(401, INVALID);
@@ -130,10 +131,7 @@ export async function POST(req: Request) {
       ok: true,
       data: mfaPending
         ? { authenticated: false, mfa_required: true }
-        : {
-            authenticated: true, kind: 'user', email: user.email, role: user.role, business_id: user.business_id,
-            email_verified: user.email_verified_at !== null,
-          },
+        : await signedInData(user),
     });
     setSessionCookie(res, USER_SESSION_COOKIE, token, Math.floor((mfaPending ? MFA_PENDING_TTL_MS : SESSION_TTL_MS) / 1000));
     // The admin cookie outranks a user session: drop it so the account just signed in is the one acting.

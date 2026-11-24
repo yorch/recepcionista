@@ -13,6 +13,7 @@ import type {
 import { prisma, type DbClient } from './client';
 import { clampLimit, encodeTimeCursor, MAX_LIST, parseTimeCursor, toPage, type Page } from './paging';
 import { logger } from '@/lib/log';
+import { closedDatesOf, normalizeClosedDates } from '@/lib/closures';
 import { dayRange as zonedDayRange, localDateKey, tzOf, DEFAULT_TIMEZONE, isValidTimeZone } from '@/lib/time';
 import {
   bookingInterval, clampDuration, intervalsOverlap, validateSlot, MAX_DURATION_MIN,
@@ -24,8 +25,12 @@ import { countryForBusiness, phoneIdent } from './compliance';
 import { enqueueRecordingDeletions } from './recording-deletions';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
-  Service, FAQ, BriefingStats, ConsentStatus, BillingStatus, CallMode,
+  Service, FAQ, BriefingStats, ConsentStatus, BillingStatus, CallMode, CallKind, TransferStatus, RefundStatus, DisputeStatus,
+  Locale, Vertical, RefundPolicy, BillingInterval,
 } from '@/lib/types';
+import { BILLING_INTERVALS, LOCALES, REFUND_POLICIES, REFUND_POLICY_TEXT_MAX, TRANSFER_STATUSES, VERTICALS } from '@/lib/types';
+import { sanitizeAuditMeta } from './audit';
+import { calendarBusyConflict } from '@/lib/integrations/google/busy';
 
 const MAX_PAGE_SIZE_RANGE = 500;
 
@@ -43,6 +48,12 @@ export * from './audit';
 export * from './usage';
 export * from './call-mode';
 export * from './paging';
+export * from './calendar';
+export * from './owner-kb';
+export * from './transcript';
+export * from './call-trust';
+export * from './passkeys';
+export * from './memberships';
 
 /** Every write logs what changed; reads stay quiet (they are the hot path). */
 const log = logger('db');
@@ -72,6 +83,7 @@ function toBusiness(row: BusinessRow): Business {
     owner_phone: row.ownerPhone ?? null,
     owner_name: row.ownerName ?? null,
     hours: (row.hours ?? DEFAULT_HOURS) as unknown as Hours,
+    closed_dates: closedDatesOf(row.closedDates),
     service_area: (row.serviceArea ?? []) as string[],
     status: row.status as Business['status'],
     agent_id: row.agentId ?? null,
@@ -97,6 +109,13 @@ function toBusiness(row: BusinessRow): Business {
     forward_number_e164: row.forwardNumberE164 ?? null,
     forward_number_verified_at: iso(row.forwardNumberVerifiedAt),
     forward_during_hours: row.forwardDuringHours ?? false,
+    locale_default: (row.localeDefault === 'es' ? 'es' : 'en') as Locale,
+    vertical: (VERTICALS.includes(row.vertical as Vertical) ? row.vertical : 'hvac') as Vertical,
+    voice_id: row.voiceId ?? null,
+    voice_name: row.voiceName ?? null,
+    refund_policy: (REFUND_POLICIES.includes(row.refundPolicy as RefundPolicy) ? row.refundPolicy : 'full_24h') as RefundPolicy,
+    refund_policy_text: row.refundPolicyText ?? null,
+    billing_interval: (row.billingInterval === 'year' ? 'year' : 'month') as BillingInterval,
   };
 }
 
@@ -133,6 +152,12 @@ function toCall(row: CallRow): Call {
     flagged_reason: row.flaggedReason ?? null,
     recording_disclosed: row.recordingDisclosed ?? false,
     consent_status: (row.consentStatus ?? 'unknown') as ConsentStatus,
+    kind: (row.kind === 'owner' ? 'owner' : 'customer') as CallKind,
+    transfer_status: (TRANSFER_STATUSES.includes(row.transferStatus as TransferStatus) ? row.transferStatus : 'none') as TransferStatus,
+    stir_status: row.stirStatus ?? null,
+    caller_verified: row.callerVerified ?? null,
+    metered_at: iso(row.meteredAt),
+    reconcile_attempts: row.reconcileAttempts ?? 0,
   };
 }
 
@@ -155,6 +180,18 @@ function toBooking(row: BookingRow): Booking {
     anonymized_at: iso(row.anonymizedAt),
     followup_consent_at: iso(row.followupConsentAt),
     followup_consent_source: row.followupConsentSource ?? null,
+    rescheduled_from_id: row.rescheduledFromId ?? null,
+    reschedule_count: row.rescheduleCount ?? 0,
+    cancelled_at: iso(row.cancelledAt),
+    cancel_reason: row.cancelReason ?? null,
+    customer_notified_at: iso(row.customerNotifiedAt),
+    stripe_payment_intent_id: row.stripePaymentIntentId ?? null,
+    stripe_checkout_session_id: row.stripeCheckoutSessionId ?? null,
+    refund_status: (row.refundStatus ?? 'none') as RefundStatus,
+    refund_amount_cents: row.refundAmountCents ?? null,
+    stripe_refund_id: row.stripeRefundId ?? null,
+    refunded_at: iso(row.refundedAt),
+    dispute_status: (['open', 'won', 'lost'].includes(row.disputeStatus) ? row.disputeStatus : 'none') as DisputeStatus,
   };
 }
 
@@ -204,6 +241,8 @@ function callPatch(patch: Partial<Call>) {
   if (patch.flagged_reason !== undefined) out.flaggedReason = patch.flagged_reason;
   if (patch.recording_disclosed !== undefined) out.recordingDisclosed = patch.recording_disclosed;
   if (patch.consent_status !== undefined) out.consentStatus = patch.consent_status;
+  if (patch.kind !== undefined && (patch.kind === 'customer' || patch.kind === 'owner')) out.kind = patch.kind;
+  if (patch.transfer_status !== undefined && TRANSFER_STATUSES.includes(patch.transfer_status)) out.transferStatus = patch.transfer_status;
   return out;
 }
 
@@ -222,6 +261,10 @@ function bookingPatch(patch: Partial<Booking>) {
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.followup_consent_at !== undefined) out.followupConsentAt = patch.followup_consent_at ? new Date(patch.followup_consent_at) : null;
   if (patch.followup_consent_source !== undefined) out.followupConsentSource = patch.followup_consent_source;
+  if (patch.customer_notified_at !== undefined) out.customerNotifiedAt = patch.customer_notified_at ? new Date(patch.customer_notified_at) : null;
+  if (patch.stripe_payment_intent_id !== undefined) out.stripePaymentIntentId = patch.stripe_payment_intent_id;
+  if (patch.stripe_checkout_session_id !== undefined) out.stripeCheckoutSessionId = patch.stripe_checkout_session_id;
+  if (patch.cancel_reason !== undefined) out.cancelReason = patch.cancel_reason ? patch.cancel_reason.slice(0, 500) : null;
   return out;
 }
 
@@ -235,11 +278,22 @@ function businessPatch(patch: Partial<Business>, country: string = defaultPhoneC
   if (patch.owner_name !== undefined) out.ownerName = patch.owner_name;
   if (patch.hours !== undefined) out.hours = patch.hours as Prisma.InputJsonObject;
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
+  if (patch.closed_dates !== undefined) { const c = normalizeClosedDates(patch.closed_dates); if (c) out.closedDates = c as unknown as Prisma.InputJsonValue; }
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.agent_id !== undefined) out.agentId = patch.agent_id;
   if (patch.retention_days !== undefined && Number.isInteger(patch.retention_days)
       && patch.retention_days >= 1 && patch.retention_days <= 3650) out.retentionDays = patch.retention_days;
   if (patch.recording_disclosure_text !== undefined) out.recordingDisclosureText = patch.recording_disclosure_text;
+  // Enumerated settings: an unknown value is ignored (the database CHECKs would reject it anyway).
+  if (patch.locale_default !== undefined && LOCALES.includes(patch.locale_default)) out.localeDefault = patch.locale_default;
+  if (patch.vertical !== undefined && VERTICALS.includes(patch.vertical)) out.vertical = patch.vertical;
+  if (patch.voice_id !== undefined) out.voiceId = patch.voice_id ? String(patch.voice_id).slice(0, 100) : null;
+  if (patch.voice_name !== undefined) out.voiceName = patch.voice_name ? String(patch.voice_name).slice(0, 100) : null;
+  if (patch.refund_policy !== undefined && REFUND_POLICIES.includes(patch.refund_policy)) out.refundPolicy = patch.refund_policy;
+  if (patch.refund_policy_text !== undefined && (patch.refund_policy_text === null || patch.refund_policy_text.length <= REFUND_POLICY_TEXT_MAX)) {
+    out.refundPolicyText = patch.refund_policy_text && patch.refund_policy_text.trim() ? patch.refund_policy_text : null;
+  }
+  if (patch.billing_interval !== undefined && BILLING_INTERVALS.includes(patch.billing_interval)) out.billingInterval = patch.billing_interval;
   return out;
 }
 
@@ -444,6 +498,10 @@ export async function createBusiness(
       status: input.status ?? 'onboarding',
       ...(input.retention_days ? { retentionDays: input.retention_days } : {}),
       recordingDisclosureText: input.recording_disclosure_text ?? null,
+      ...(input.locale_default && LOCALES.includes(input.locale_default) ? { localeDefault: input.locale_default } : {}),
+      ...(input.vertical && VERTICALS.includes(input.vertical) ? { vertical: input.vertical } : {}),
+      ...(input.voice_id ? { voiceId: input.voice_id.slice(0, 100) } : {}),
+      ...(input.voice_name ? { voiceName: input.voice_name.slice(0, 100) } : {}),
     },
   });
   log.info('business.created', { id: row.id, name: row.name, url: row.url });
@@ -563,6 +621,10 @@ export async function createCall(input: Partial<Call> & { business_id: ID }): Pr
       flaggedReason: input.flagged_reason ?? null,
       recordingDisclosed: input.recording_disclosed ?? false,
       consentStatus: input.consent_status ?? 'unknown',
+      kind: input.kind === 'owner' ? 'owner' : 'customer',
+      ...(input.transfer_status && TRANSFER_STATUSES.includes(input.transfer_status) ? { transferStatus: input.transfer_status } : {}),
+      stirStatus: input.stir_status ?? null,
+      callerVerified: input.caller_verified ?? null,
     },
   });
   log.info('call.created', {
@@ -696,6 +758,7 @@ export async function listCalls(
 ): Promise<Call[]> {
   const rows = await prisma.call.findMany({
     where: {
+      kind: 'customer', // owner call-in sessions (voice/owner) are not customer calls
       ...(businessId ? { businessId } : {}),
       ...(date ? { startedAt: dayRange(date, tz) } : {}),
       ...(opts.flaggedSince ? { flaggedReason: { not: null }, startedAt: { gte: opts.flaggedSince } } : {}),
@@ -708,7 +771,7 @@ export async function listCalls(
 
 /** How many calls the business has logged (a count, not a list). */
 export async function countCalls(businessId: ID): Promise<number> {
-  return prisma.call.count({ where: { businessId } });
+  return prisma.call.count({ where: { businessId, kind: 'customer' } });
 }
 
 /** Cursor-paginated calls, newest first. */
@@ -717,7 +780,7 @@ export async function listCallsPage(businessId: ID, opts: { limit?: number; curs
   const cur = parseTimeCursor(opts.cursor);
   const rows = await prisma.call.findMany({
     where: {
-      businessId,
+      businessId, kind: 'customer',
       // A voicemail is a call whose Twilio recording is stored (the URL is only ever written after the recording notice was spoken).
       ...(opts.voicemailOnly ? { recordingUrl: { startsWith: 'https://api.twilio.com/2010-04-01/Accounts/' } } : {}),
       ...(cur ? { OR: [{ startedAt: { lt: cur.at } }, { startedAt: cur.at, id: { lt: cur.id } }] } : {}),
@@ -729,7 +792,7 @@ export async function listCallsPage(businessId: ID, opts: { limit?: number; curs
 }
 
 // ---------- bookings ----------
-export type BookingRejection = SlotRejection | 'call_cap' | 'no_call' | 'slot_taken' | 'invalid_time' | 'business_not_found';
+export type BookingRejection = SlotRejection | 'call_cap' | 'no_call' | 'slot_taken' | 'invalid_time' | 'business_not_found' | 'booking_not_found' | 'not_reschedulable' | 'calendar_busy';
 
 /** Thrown by createBooking when the slot cannot be booked; `reason` is machine-readable. */
 export class BookingRejectedError extends Error {
@@ -787,7 +850,7 @@ export async function createBooking(
       }
 
       if (enforce) {
-        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now());
+        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(), 0, closedDatesOf(biz.closedDates));
         if (!v.ok) throw new BookingRejectedError(v.reason);
       }
 
@@ -807,6 +870,8 @@ export async function createBooking(
           scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes,
         })));
         if (clash) throw new BookingRejectedError('slot_taken');
+        // Owner's Google Calendar busy time (healthy connection + "block on busy" on); same transaction, same advisory lock.
+        if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
       }
 
       return tx.booking.create({
@@ -826,6 +891,9 @@ export async function createBooking(
           status,
           followupConsentAt: input.followup_consent_at ? new Date(input.followup_consent_at) : null,
           followupConsentSource: input.followup_consent_source ?? null,
+          rescheduledFromId: input.rescheduled_from_id ?? null,
+          stripePaymentIntentId: input.stripe_payment_intent_id ?? null,
+          stripeCheckoutSessionId: input.stripe_checkout_session_id ?? null,
         },
       });
     });
@@ -963,7 +1031,7 @@ export type TransitionResult =
  * Cancelling frees the slot (cancelled bookings never block anything).
  */
 export async function transitionBooking(
-  businessId: ID, bookingId: ID, to: BookingTransition, now: Date = new Date(),
+  businessId: ID, bookingId: ID, to: BookingTransition, now: Date = new Date(), opts: { reason?: string | null } = {},
 ): Promise<TransitionResult> {
   const row = await prisma.booking.findFirst({ where: { id: bookingId, businessId } });
   if (!row) return { ok: false, reason: 'not_found' };
@@ -971,7 +1039,10 @@ export async function transitionBooking(
   if (previous === to) return { ok: true, booking: toBooking(row), changed: false, previous };
   if (previous !== 'pending' && previous !== 'confirmed') return { ok: false, reason: 'invalid_transition', current: previous };
   if (to === 'completed' && row.scheduledAt.getTime() > now.getTime()) return { ok: false, reason: 'not_started', current: previous };
-  const res = await prisma.booking.updateMany({ where: { id: bookingId, businessId, status: previous }, data: { status: to } });
+  const res = await prisma.booking.updateMany({
+    where: { id: bookingId, businessId, status: previous },
+    data: to === 'cancelled' ? { status: to, cancelledAt: now, cancelReason: opts.reason ? opts.reason.slice(0, 500) : null } : { status: to },
+  });
   const fresh = await prisma.booking.findFirst({ where: { id: bookingId, businessId } });
   if (!fresh) return { ok: false, reason: 'not_found' };
   if (res.count === 0) {
@@ -1069,6 +1140,204 @@ export async function markDepositPaid(bookingId: string, amountCents: number): P
   const updated = paid.count > 0 || confirmed.count > 0;
   if (updated) log.info('deposit.paid', { booking: bookingId, amount_cents: amountCents, confirmed: confirmed.count > 0 });
   return { updated };
+}
+
+// ---------- reschedule, notification and refunds ----------
+
+export interface RescheduleInput {
+  business_id: ID;
+  booking_id: ID;
+  /** The new start (ISO). */
+  scheduled_at: string;
+  /** The new length; default: keep the current one. */
+  duration_minutes?: number;
+  /** Who moved it (recorded in the audit event). Default: system. */
+  actor?: { kind?: 'user' | 'admin_token' | 'system' | 'webhook'; user_id?: string | null; ip?: string | null; reason?: string | null };
+}
+
+export interface RescheduleResult {
+  booking: Booking;
+  /** What it was before the move. */
+  previous: { scheduled_at: string; duration_minutes: number };
+  /** False when the new time and length equal the old ones (nothing was written). */
+  changed: boolean;
+}
+
+/**
+ * Move a booking to a new time ATOMICALLY: under the same per-business advisory lock as createBooking it re-validates the new slot
+ * (not in the past, inside opening hours; skip with `{ enforce: false }`), checks the overlap against every OTHER non-cancelled booking
+ * and updates the row in place (the `bookings_no_overlap` exclusion constraint is the backstop). It bumps `reschedule_count`, clears
+ * `customer_notified_at` (the customer must be told again) and writes an audit event `booking.rescheduled` whose meta holds the previous
+ * and new time, all in the same transaction.
+ * Throws BookingRejectedError: 'booking_not_found' (also another business's booking), 'not_reschedulable' (only pending/confirmed move),
+ * 'invalid_time', a SlotRejection (past / outside hours), or 'slot_taken'.
+ */
+export async function rescheduleBooking(input: RescheduleInput, opts: { enforce?: boolean } = {}): Promise<RescheduleResult> {
+  const enforce = opts.enforce ?? true;
+  const start = new Date(input.scheduled_at);
+  if (Number.isNaN(start.getTime())) throw new BookingRejectedError('invalid_time');
+  let result: RescheduleResult;
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.business_id}))`;
+      const biz = await tx.business.findUnique({ where: { id: input.business_id } });
+      if (!biz) throw new BookingRejectedError('business_not_found');
+      const cur = await tx.booking.findFirst({ where: { id: input.booking_id, businessId: input.business_id } });
+      if (!cur) throw new BookingRejectedError('booking_not_found');
+      if (cur.status !== 'pending' && cur.status !== 'confirmed') throw new BookingRejectedError('not_reschedulable');
+      const duration = clampDuration(input.duration_minutes ?? cur.durationMinutes);
+      const previous = { scheduled_at: cur.scheduledAt.toISOString(), duration_minutes: cur.durationMinutes };
+      if (cur.scheduledAt.getTime() === start.getTime() && cur.durationMinutes === duration) return { booking: toBooking(cur), previous, changed: false };
+      const candidate: Interval = { start: start.getTime(), end: start.getTime() + duration * 60_000 };
+      if (enforce) {
+        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(), 0, closedDatesOf(biz.closedDates));
+        if (!v.ok) throw new BookingRejectedError(v.reason);
+      }
+      const near = await tx.booking.findMany({
+        where: {
+          businessId: input.business_id, status: { not: 'cancelled' }, id: { not: cur.id },
+          scheduledAt: { gte: new Date(candidate.start - MAX_DURATION_MIN * 60_000), lt: new Date(candidate.end) },
+        },
+        select: { scheduledAt: true, durationMinutes: true },
+      });
+      if (near.some((b) => intervalsOverlap(candidate, bookingInterval({ scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes })))) {
+        throw new BookingRejectedError('slot_taken');
+      }
+      if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
+      const row = await tx.booking.update({
+        where: { id: cur.id },
+        data: { scheduledAt: start, durationMinutes: duration, rescheduleCount: { increment: 1 }, customerNotifiedAt: null },
+      });
+      await tx.auditEvent.create({
+        data: {
+          actorKind: input.actor?.kind ?? 'system', actorUserId: input.actor?.user_id ?? null, businessId: input.business_id,
+          action: 'booking.rescheduled', target: `booking:${cur.id}`, ip: input.actor?.ip ? input.actor.ip.slice(0, 64) : null,
+          meta: sanitizeAuditMeta({
+            from: previous.scheduled_at, to: row.scheduledAt.toISOString(), previous_duration_minutes: previous.duration_minutes,
+            duration_minutes: row.durationMinutes, reschedule_count: row.rescheduleCount, reason: input.actor?.reason ?? null,
+          }) as object,
+        },
+      });
+      return { booking: toBooking(row), previous, changed: true };
+    });
+  } catch (err) {
+    if (err instanceof BookingRejectedError) throw err;
+    if (isOverlapViolation(err)) throw new BookingRejectedError('slot_taken');
+    throw err;
+  }
+  if (result.changed) log.info('booking.rescheduled', { id: input.booking_id, business: input.business_id, from: result.previous.scheduled_at, to: result.booking.scheduled_at });
+  return result;
+}
+
+/** The customer was told about a cancel/reschedule. First stamp wins unless `force`. Returns whether a row changed. */
+export async function markCustomerNotified(bookingId: ID, at: Date = new Date(), opts: { force?: boolean } = {}): Promise<boolean> {
+  const res = await prisma.booking.updateMany({ where: { id: bookingId, ...(opts.force ? {} : { customerNotifiedAt: null }) }, data: { customerNotifiedAt: at } });
+  return res.count === 1;
+}
+
+/** Remember the Stripe ids a payment was made with (webhook). Only the ids given are written; never blanks one. */
+export async function setBookingStripeRefs(bookingId: ID, refs: { payment_intent_id?: string | null; checkout_session_id?: string | null }): Promise<boolean> {
+  const data: Prisma.BookingUncheckedUpdateManyInput = {};
+  if (refs.payment_intent_id) data.stripePaymentIntentId = refs.payment_intent_id.slice(0, 255);
+  if (refs.checkout_session_id) data.stripeCheckoutSessionId = refs.checkout_session_id.slice(0, 255);
+  if (Object.keys(data).length === 0) return false;
+  const res = await prisma.booking.updateMany({ where: { id: bookingId }, data });
+  return res.count === 1;
+}
+
+/** Remember the Payment Link texted for the booking's deposit (so a cancellation can deactivate it). */
+export async function setBookingPaymentLink(bookingId: ID, linkId: string | null | undefined): Promise<boolean> {
+  if (!linkId || !/^plink_[A-Za-z0-9]{6,100}$/.test(linkId)) return false; // mock links ("mock_...") have nothing to deactivate
+  return (await prisma.booking.updateMany({ where: { id: bookingId }, data: { stripePaymentLinkId: linkId } })).count === 1;
+}
+
+/**
+ * Store a NEW Payment Link id for the booking and return the one it replaced (null when none), atomically (row lock), so the caller can
+ * deactivate the older link: only the latest id is stored, and an older live link would stay payable after a cancellation.
+ */
+export async function replaceBookingPaymentLink(bookingId: ID, linkId: string): Promise<{ stored: boolean; previous: string | null }> {
+  if (!/^plink_[A-Za-z0-9]{6,100}$/.test(linkId)) return { stored: false, previous: null };
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<{ stripe_payment_link_id: string | null }[]>`SELECT "stripe_payment_link_id" FROM "bookings" WHERE "id" = ${bookingId} FOR UPDATE`;
+    if (rows.length !== 1) return { stored: false, previous: null };
+    await tx.booking.update({ where: { id: bookingId }, data: { stripePaymentLinkId: linkId } });
+    const prev = rows[0].stripe_payment_link_id;
+    return { stored: true, previous: prev && prev !== linkId ? prev : null };
+  });
+}
+
+export async function getBookingPaymentLinkId(bookingId: ID): Promise<string | null> {
+  return (await prisma.booking.findUnique({ where: { id: bookingId }, select: { stripePaymentLinkId: true } }))?.stripePaymentLinkId ?? null;
+}
+
+/** The booking a Stripe payment intent or checkout session belongs to (refund / dispute webhooks). */
+export async function getBookingByStripeRef(ref: { payment_intent_id?: string; checkout_session_id?: string }): Promise<Booking | null> {
+  const or: Prisma.BookingWhereInput[] = [];
+  if (ref.payment_intent_id) or.push({ stripePaymentIntentId: ref.payment_intent_id });
+  if (ref.checkout_session_id) or.push({ stripeCheckoutSessionId: ref.checkout_session_id });
+  if (or.length === 0) return null;
+  const row = await prisma.booking.findFirst({ where: { OR: or }, orderBy: { createdAt: 'desc' } });
+  return row ? toBooking(row) : null;
+}
+
+export interface RecordRefundInput {
+  /** INTEGER CENTS, > 0. */
+  amount_cents: number;
+  stripe_refund_id?: string | null;
+  /** 'refunded' (default) once Stripe confirms; 'pending' while it is being processed. */
+  status?: 'pending' | 'refunded';
+  at?: Date;
+}
+
+/**
+ * Record a refund of the deposit. Idempotent and monotonic: once a booking is 'refunded' nothing changes it again (a duplicate webhook
+ * is `updated: false`); 'pending' may be recorded again or turn into 'refunded'/'failed'. Returns the booking as it is now.
+ */
+export async function recordRefund(bookingId: ID, input: RecordRefundInput): Promise<{ updated: boolean; booking: Booking | null }> {
+  if (!Number.isInteger(input.amount_cents) || input.amount_cents <= 0) {
+    log.warn('refund.invalid_amount', { booking: bookingId, amount_cents: input.amount_cents });
+    return { updated: false, booking: await getBooking(bookingId) };
+  }
+  const status = input.status ?? 'refunded';
+  const at = input.at ?? new Date();
+  const res = await prisma.booking.updateMany({
+    where: { id: bookingId, refundStatus: status === 'refunded' ? { not: 'refunded' } : { in: ['none', 'pending', 'failed'] } },
+    data: {
+      refundStatus: status, refundAmountCents: input.amount_cents, ...(input.stripe_refund_id ? { stripeRefundId: input.stripe_refund_id.slice(0, 255) } : {}),
+      refundedAt: status === 'refunded' ? at : null,
+    },
+  });
+  if (res.count === 1) log.info('refund.recorded', { booking: bookingId, status, amount_cents: input.amount_cents });
+  return { updated: res.count === 1, booking: await getBooking(bookingId) };
+}
+
+/**
+ * The refund could not be made. Never downgrades a 'refunded' booking. `reason` is logged only (it can quote provider text).
+ * With `onlyRefundId` (an ASYNCHRONOUS failure event) the row changes only while THAT refund is the booking's current one and still
+ * 'pending': a late or replayed failure of an OLDER refund must not mark the current one failed (and bump the retry counter).
+ */
+export async function markRefundFailed(bookingId: ID, reason?: string, opts: { onlyRefundId?: string } = {}): Promise<{ updated: boolean; booking: Booking | null }> {
+  const where = opts.onlyRefundId
+    ? { id: bookingId, refundStatus: 'pending', stripeRefundId: opts.onlyRefundId }
+    : { id: bookingId, refundStatus: { in: ['none', 'pending', 'failed'] } };
+  const res = await prisma.booking.updateMany({ where, data: { refundStatus: 'failed', refundedAt: null } });
+  if (res.count === 1) log.warn('refund.failed', { booking: bookingId, reason: reason ? reason.slice(0, 200) : null });
+  return { updated: res.count === 1, booking: await getBooking(bookingId) };
+}
+
+/**
+ * Record a card dispute's state on the booking. Monotonic: a settled dispute ('won' / 'lost') is never reopened by an out-of-order
+ * event; 'won' <-> 'lost' may still be corrected (funds reinstated after a loss). Returns whether the row changed.
+ */
+export async function setDisputeStatus(bookingId: ID, status: Exclude<DisputeStatus, 'none'>): Promise<boolean> {
+  const where = status === 'open' ? { id: bookingId, disputeStatus: 'none' } : { id: bookingId, disputeStatus: { not: status } };
+  return (await prisma.booking.updateMany({ where, data: { disputeStatus: status } })).count === 1;
+}
+
+/** No refund is owed (no paid deposit, or the policy says none). Only from 'none'. */
+export async function markRefundNotApplicable(bookingId: ID): Promise<boolean> {
+  const res = await prisma.booking.updateMany({ where: { id: bookingId, refundStatus: 'none' }, data: { refundStatus: 'not_applicable' } });
+  return res.count === 1;
 }
 
 // ---------- briefings ----------
@@ -1271,8 +1540,8 @@ export async function getDashboardStats(businessId: ID, tz: string, now: Date = 
   const weekAgo = new Date(now.getTime() - 7 * 24 * 3600_000);
   const upcomingFloor = new Date(now.getTime() - MAX_DURATION_MIN * 60_000);
   const [callsToday, bilingual, upcomingRows, deposits, revenue, flagged] = await Promise.all([
-    prisma.call.count({ where: { businessId, startedAt: day } }),
-    prisma.call.count({ where: { businessId, startedAt: day, language: { in: ['es', 'mixed'] } } }),
+    prisma.call.count({ where: { businessId, kind: 'customer', startedAt: day } }),
+    prisma.call.count({ where: { businessId, kind: 'customer', startedAt: day, language: { in: ['es', 'mixed'] } } }),
     prisma.booking.findMany({
       where: { businessId, status: { not: 'cancelled' }, scheduledAt: { gte: upcomingFloor } },
       select: { scheduledAt: true, durationMinutes: true },
@@ -1280,7 +1549,7 @@ export async function getDashboardStats(businessId: ID, tz: string, now: Date = 
     }),
     prisma.booking.aggregate({ _sum: { depositAmount: true }, where: { businessId, depositPaid: true, scheduledAt: month } }),
     prisma.booking.aggregate({ _sum: { priceEstimate: true }, where: { businessId, status: { in: ['confirmed', 'completed'] }, createdAt: month } }),
-    prisma.call.count({ where: { businessId, startedAt: { gte: weekAgo }, flaggedReason: { not: null } } }),
+    prisma.call.count({ where: { businessId, kind: 'customer', startedAt: { gte: weekAgo }, flaggedReason: { not: null } } }),
   ]);
   const nowMs = now.getTime();
   return {
@@ -1302,27 +1571,56 @@ export async function isKnownContact(businessId: ID, phone: string): Promise<boo
   if (biz.ownerPhoneE164 === e164) return true;
   const [booking, call] = await Promise.all([
     prisma.booking.findFirst({ where: { businessId, phoneE164: e164 }, select: { id: true } }),
-    prisma.call.findFirst({ where: { businessId, callerE164: e164 }, select: { id: true } }),
+    prisma.call.findFirst({ where: { businessId, kind: 'customer', callerE164: e164 }, select: { id: true } }),
   ]);
   return Boolean(booking || call);
 }
 
 // ---------- lifecycle ----------
-/** Deletes every row. Used by the seed script and the demo reset. */
+/**
+ * Wipes the tenant data for the seed script and the demo reset: EVERY table is emptied except
+ *   - `_prisma_migrations` (schema history),
+ *   - `pending_recording_deletions` (the queue the recordings above were just added to: provider-side audio must still be deleted),
+ *   - admin accounts (role 'admin') with their sessions, recovery codes and passkeys (the operator must still be able to sign in).
+ * Tables with no foreign key to a business (audit events, forward leases, rate limits, processed events, provision locks, trial
+ * fingerprints, WebAuthn challenges, email tokens) are deleted explicitly: they would otherwise outlive the business they describe.
+ * tests/db/clear-all.test.ts fills every table and fails when a new table is neither wiped nor listed above.
+ */
 export async function clearAll(): Promise<void> {
   // Destructive and reachable over HTTP (POST /api/demo/reset): always warn,
   // even at info-level logging, so a wiped database is never a mystery.
   log.warn('clear_all');
   await prisma.$transaction(async (tx) => {
     // The recordings at the provider must not outlive the only rows pointing at them: queue them first (same transaction).
-    const withRecording = await tx.call.findMany({ where: { recordingUrl: { not: null } }, select: { recordingUrl: true, businessId: true } });
-    await enqueueRecordingDeletions(tx, withRecording.map((c) => ({ url: c.recordingUrl, businessId: c.businessId })));
+    const withRecording = await tx.call.findMany({ where: { OR: [{ recordingUrl: { not: null } }, { conversationId: { not: null } }] }, select: { recordingUrl: true, businessId: true, conversationId: true } });
+    await enqueueRecordingDeletions(tx, withRecording.map((c) => ({ url: c.recordingUrl, businessId: c.businessId, conversationId: c.conversationId })));
+    // Leaves first (explicit, so the order does not depend on cascade rules), then the parents.
+    await tx.callTranscriptEvent.deleteMany();
+    await tx.calendarBusyBlock.deleteMany();
+    await tx.calendarEventLink.deleteMany();
+    await tx.calendarConnection.deleteMany();
+    await tx.ownerKbChange.deleteMany();
     await tx.smsLog.deleteMany();
+    await tx.smsOptOut.deleteMany();
     await tx.briefing.deleteMany();
     await tx.booking.deleteMany();
     await tx.call.deleteMany();
+    await tx.usageCounter.deleteMany();
+    await tx.forwardLease.deleteMany();
     await tx.knowledgeBase.deleteMany();
-    await tx.business.deleteMany();
+    await tx.emailToken.deleteMany();
+    await tx.webauthnChallenge.deleteMany();
+    await tx.auditEvent.deleteMany();
+    await tx.processedEvent.deleteMany();
+    await tx.rateLimitBucket.deleteMany();
+    await tx.provisionLock.deleteMany();
+    await tx.trialFingerprint.deleteMany();
+    // Memberships first: the database trigger that keeps a person with SEVERAL businesses alive when one is deleted would otherwise try to
+    // re-point them to another business that this same statement is deleting (foreign key violation on a multi-business account).
+    await tx.membership.deleteMany();
+    await tx.user.deleteMany({ where: { role: { not: 'admin' } } }); // cascades their sessions, recovery codes, passkeys
+    await tx.userSession.updateMany({ where: { activeBusinessId: { not: null } }, data: { activeBusinessId: null } });
+    await tx.business.deleteMany(); // cascades anything left
   });
 }
 

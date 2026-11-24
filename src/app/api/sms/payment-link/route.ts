@@ -50,6 +50,7 @@ export async function POST(req: Request) {
     const booking = await getBooking(body.booking_id);
     if (!booking || booking.business_id !== business.id) return fail('booking not found', 404);
     if (booking.anonymized_at || !booking.customer_phone) return fail('booking has no customer phone on file', 422);
+    if (booking.status === 'cancelled') return fail('the booking is cancelled; a deposit link cannot be created for it', 409);
     const { sms, body: text, link } = await createAndSendPaymentLink({
       business,
       booking,

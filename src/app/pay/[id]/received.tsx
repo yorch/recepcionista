@@ -1,3 +1,4 @@
+import type { Locale, TFunction } from '@/lib/i18n/core';
 import { formatMoney } from './money';
 
 /**
@@ -13,10 +14,12 @@ export interface PaymentReceivedProps {
   last4: string;
   /** Display string for when it was paid (formatted by the caller, in the customer's zone). */
   paidAt?: string;
+  t: TFunction;
+  locale: Locale;
 }
 
 export function PaymentReceived({
-  reference, amountCents, label, businessName, last4, paidAt,
+  reference, amountCents, label, businessName, last4, paidAt, t, locale,
 }: PaymentReceivedProps) {
   const knownCard = /^\d{4}$/.test(last4);
   return (
@@ -24,22 +27,22 @@ export function PaymentReceived({
       <div aria-hidden="true" className="live-dot grid h-16 w-16 place-items-center rounded-full bg-mint/15 text-3xl text-mint">
         ✓
       </div>
-      <h1 className="mt-6 text-[26px] font-semibold tracking-[-0.02em] text-white">Payment received</h1>
+      <h1 className="mt-6 text-[26px] font-semibold tracking-[-0.02em] text-white">{t('pay.received')}</h1>
       <p role="status" className="mt-2 text-[15px] leading-relaxed text-body">
-        Your tech is confirmed. We texted you the details.
+        {t('pay.confirmed')}
       </p>
 
       <dl className="mt-7 w-full rounded-2xl border border-line bg-panel p-5 text-left">
-        <Row label="Paid to" value={businessName} />
-        <Row label="Amount" value={formatMoney(amountCents)} strong />
-        <Row label="For" value={label} />
-        {knownCard ? <Row label="Card" value={`•••• ${last4}`} /> : null}
-        {paidAt ? <Row label="Date" value={paidAt} /> : null}
-        <Row label="Reference" value={reference} mono />
+        <Row label={t('pay.row.paidTo')} value={businessName} />
+        <Row label={t('pay.row.amount')} value={formatMoney(amountCents, locale)} strong />
+        <Row label={t('pay.row.for')} value={label} />
+        {knownCard ? <Row label={t('pay.row.card')} value={`•••• ${last4}`} /> : null}
+        {paidAt ? <Row label={t('pay.row.date')} value={paidAt} /> : null}
+        <Row label={t('pay.row.reference')} value={reference} mono />
       </dl>
 
       <p className="mt-5 text-xs leading-relaxed text-dim">
-        A receipt is on its way by text from {businessName}. Keep the reference above if you need to contact them about this payment.
+        {t('pay.receiptNote', { business: businessName })}
       </p>
     </main>
   );
