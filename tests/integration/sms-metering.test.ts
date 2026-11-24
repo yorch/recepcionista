@@ -1,7 +1,7 @@
 /** Caps count SMS segments (not sends), block a text that would not fit, and trials get the lower cap. */
 import { integration, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { cleanup, loadDb, loadPrisma, newBusiness, phone } from '../helpers/fixtures';
+import { cleanup, loadDb, loadPrisma, newBusiness, phone, quietTimezone } from '../helpers/fixtures';
 import { smsSegments, withStopFooter } from '../../src/lib/messaging/policy';
 
 integration('sms metering in segments (postgres)', () => {
@@ -20,7 +20,9 @@ integration('sms metering in segments (postgres)', () => {
   const send = (id: string, body: string) => messaging.sendAndLog({ business_id: id, to: phone(), body, kind: 'confirmation' });
   async function biz(billingStatus: string, over: Record<string, unknown> = {}) {
     const b = await newBusiness();
-    await prisma.business.update({ where: { id: b.id }, data: { billingStatus, ...over } });
+    // Night in the business zone right now: outside quiet hours, crossing 80% / 100% of a cap texts the owner a usage warning that is metered too
+    // (src/lib/billing/warnings.ts), which would add segments to the exact counts asserted here. Quiet hours defer it, whatever hour the suite runs at.
+    await prisma.business.update({ where: { id: b.id }, data: { billingStatus, timezone: quietTimezone(), ...over } });
     return b;
   }
 

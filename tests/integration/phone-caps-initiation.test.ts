@@ -4,7 +4,8 @@
  */
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { cleanup, elevenLabsSignature, loadDb, loadPrisma, newBusiness, phone, toolRequest, twilioSignature, uniq } from '../helpers/fixtures';
+import { cleanup, elevenLabsSignature, loadDb, loadPrisma, newBusiness, phone, quietTimezone, toolRequest, twilioSignature, uniq } from '../helpers/fixtures';
+import { zonedTimeToUtc } from '../../src/lib/time';
 import { DEFAULT_DISCLOSURE } from '../../src/lib/kb/disclosure';
 
 integration('caps, initiation webhook and follow-up consent (postgres)', () => {
@@ -36,7 +37,9 @@ integration('caps, initiation webhook and follow-up consent (postgres)', () => {
   // ------------------------------------------------------------------ SMS caps
 
   test('SMS cap: customer texts stop at the cap (blocked_cap, logged); owner alerts and verification codes are not blocked but ARE counted', async () => {
-    const biz = await newBusiness();
+    // Night in the business zone right now: outside quiet hours the 80% / 100% cap-warning text to the owner is sent and metered too (src/lib/billing/warnings.ts), which would change the counts below.
+    const tz = quietTimezone();
+    const biz = await newBusiness({ timezone: tz });
     await db.setBillingState(biz.id, { billing_status: 'active', sms_cap_override: 2 });
     await withEnv(ENFORCED, async () => {
       const a = await msg.sendAndLog({ business_id: biz.id, to: phone(), body: 'one', kind: 'other' });
@@ -53,7 +56,7 @@ integration('caps, initiation webhook and follow-up consent (postgres)', () => {
       expect(code.blocked).toBeUndefined();
       expect((await db.getUsage(biz.id))?.sms_count).toBe(4);
       // gratitude (marketing class) is capped too
-      const g = await msg.sendAndLog({ business_id: biz.id, to: phone(), body: 'how was it', kind: 'gratitude', consent_basis: 'booking_followup', now: new Date('2026-07-01T12:00:00-04:00') });
+      const g = await msg.sendAndLog({ business_id: biz.id, to: phone(), body: 'how was it', kind: 'gratitude', consent_basis: 'booking_followup', now: zonedTimeToUtc('2026-07-01', '12:00', tz) });
       expect(g.blocked).toBe('blocked_cap');
     });
   });

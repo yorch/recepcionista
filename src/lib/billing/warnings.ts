@@ -3,7 +3,9 @@
  * and ONE text per kind per level per period. "Exactly once" is a database claim (`markWarned`: a single UPDATE .. WHERE col IS NULL), so
  * concurrent requests, jobs and instances send one. A warning that could not be delivered anywhere gives its claim back (`unmarkWarned`)
  * and is retried by the safety-net job. The text goes only to a VERIFIED owner phone, never in quiet hours (9pm-8am local: the warning
- * is simply attempted again later), through the owner-alert channel (its own rate limit, NOT counted against the SMS cap).
+ * is simply attempted again later), through the owner-alert channel (its own rate limit). NOTE: that warning text IS real SMS traffic and
+ * its segments ARE counted in usage (owner alerts are never blocked by the cap but are metered), so while billing is enforced the segment
+ * count after a usage write depends on the business-local hour: daytime sends the warning, night defers it. Tests must pin the clock.
  * A new month is a new usage row, so warnings re-arm themselves.
  */
 import {

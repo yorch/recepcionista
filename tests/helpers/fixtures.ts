@@ -132,3 +132,15 @@ export function toolRequest(tool: string, body: Record<string, unknown>, headers
     body: JSON.stringify(body),
   });
 }
+
+/**
+ * An IANA zone in which it is ~02:00 right now (and stays inside the 9pm-8am quiet window for hours), for tests that meter SMS segments with
+ * billing enforced: outside quiet hours a usage write that crosses 80% / 100% of a cap also texts the owner a usage warning (src/lib/billing/warnings.ts),
+ * and that text is itself metered, so exact segment counts would depend on the hour the suite runs at. In quiet hours the warning is deferred.
+ * Uses the real clock (no setSystemTime), so DB-timestamp windows such as the owner-alert hourly limit are unaffected.
+ */
+export function quietTimezone(now: Date = new Date()): string {
+  let n = (now.getUTCHours() - 2 + 24) % 24; // local = utc - n  =>  Etc/GMT+n
+  if (n > 12) n -= 24;
+  return n === 0 ? 'Etc/GMT' : n > 0 ? `Etc/GMT+${n}` : `Etc/GMT-${-n}`;
+}
