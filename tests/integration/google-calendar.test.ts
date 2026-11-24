@@ -313,9 +313,13 @@ integration('google calendar (postgres, fake google)', () => {
 
     // switch off
     const { setBlockOnBusy } = await import('@/lib/integrations/google/settings');
-    await setBlockOnBusy(biz.id, false, { kind: 'admin_token', user_id: null });
+    expect(await setBlockOnBusy(biz.id, false, { kind: 'admin_token', user_id: null })).toBe(true);
+    expect((await prisma.calendarConnection.findUniqueOrThrow({ where: { id: conn.id } })).blockOnBusy).toBe(false); // a real column, not an audit-derived value
+    expect(await busy.getBlockOnBusy(biz.id)).toBe(false);
     expect((await book(biz.id, '10:00')).status).toBeDefined();
-    await setBlockOnBusy(biz.id, true, { kind: 'admin_token', user_id: null });
+    expect(await setBlockOnBusy(biz.id, true, { kind: 'admin_token', user_id: null })).toBe(true);
+    expect(await busy.getBlockOnBusy(biz.id)).toBe(true);
+    expect(await setBlockOnBusy(`nobody-${biz.id}`, false, { kind: 'admin_token', user_id: null })).toBe(false); // no connection: nothing to switch
     expect(await busy.calendarBusyIntervals(biz.id, at('00:00').getTime(), at('23:00').getTime())).toHaveLength(1);
     // unhealthy connection: ignored
     await cal.setCalendarConnectionStatus(conn.id, 'needs_reauth', 'x');

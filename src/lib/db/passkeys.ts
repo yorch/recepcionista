@@ -148,10 +148,13 @@ export async function consumeWebauthnChallenge(
   return rows.length === 1;
 }
 
-/** Delete challenges that expired more than a day ago. Never throws; returns the count. */
+/** Expired challenges are kept this long (forensics) before the hourly cleanup job deletes them. */
+export const WEBAUTHN_CHALLENGE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/** Delete challenges that expired more than a day ago (called by the hourly cleanup job, src/lib/jobs). Never throws; returns the count. */
 export async function deleteExpiredWebauthnChallenges(now: Date = new Date()): Promise<number> {
   try {
-    const res = await prisma.webauthnChallenge.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - 24 * 60 * 60 * 1000) } } });
+    const res = await prisma.webauthnChallenge.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - WEBAUTHN_CHALLENGE_GRACE_MS) } } });
     return res.count;
   } catch {
     return 0;

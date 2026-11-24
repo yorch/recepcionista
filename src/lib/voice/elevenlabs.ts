@@ -262,9 +262,11 @@ export function toolRequestHeaders(): Record<string, string | { secret_id: strin
   return out;
 }
 
+const wireNameOf = (name: string): string => name.replace(/_/g, '-').slice(0, 64);
+
 async function upsertTool(name: ToolName | OwnerToolName): Promise<string | null> {
   const spec = (TOOL_SPECS as Record<string, { description: string; properties: Record<string, unknown>; required: string[] }>)[name] ?? OWNER_TOOL_SPECS[name as OwnerToolName];
-  const wireName = name.replace(/_/g, '-').slice(0, 64);
+  const wireName = wireNameOf(name);
   const toolUrl = `${appUrl()}/api/voice/tools/${name}`;
   const existingId = await findToolByName(wireName, toolUrl);
   const toolConfig = {
@@ -343,14 +345,28 @@ const toolIdCache = new Map<string, { id: string; at: number }>();
 export const clearToolIdCache = (): void => toolIdCache.clear();
 const cachedToolIds = (): boolean => [...toolIdCache.values()].some((e) => Date.now() - e.at < TOOL_ID_TTL_MS);
 
+/**
+ * The voice tools every agent must carry, by name: the customer tools (transfer_to_human only with NATIVE_TRANSFER=on) and, with owner call-in
+ * enabled, the owner-line tools (tools are per AGENT, not per call; the tool route refuses the owner ones on every call that is not kind 'owner').
+ */
+export function expectedToolNames(): (ToolName | OwnerToolName)[] {
+  return [...TOOL_NAMES.filter((n) => n !== 'transfer_to_human' || nativeTransferEnabled()), ...(ownerCallinEnabled() ? OWNER_TOOL_NAMES : [])];
+}
+
+/** Concurrent syncs in one process share one registration per tool (two agents syncing at once must not create duplicate workspace tools). */
+const toolInflight = new Map<string, Promise<string | null>>();
+
 async function ensureToolIds(opts: { fresh?: boolean } = {}): Promise<string[]> {
   if (opts.fresh) toolIdCache.clear();
-  // The owner-line tools are registered on the same agent (tools are per agent, not per call); the tool route refuses them on every call that is not kind 'owner'.
-  const names: (ToolName | OwnerToolName)[] = [...TOOL_NAMES.filter((n) => n !== 'transfer_to_human' || nativeTransferEnabled()), ...(ownerCallinEnabled() ? OWNER_TOOL_NAMES : [])];
-  const ids = await Promise.all(names.map(async (name) => {
+  const ids = await Promise.all(expectedToolNames().map(async (name) => {
     const cached = toolIdCache.get(name);
     if (cached && Date.now() - cached.at < TOOL_ID_TTL_MS) return cached.id;
-    const id = await upsertTool(name);
+    let pending = toolInflight.get(name);
+    if (!pending) {
+      pending = upsertTool(name).finally(() => { toolInflight.delete(name); });
+      toolInflight.set(name, pending);
+    }
+    const id = await pending;
     if (id) toolIdCache.set(name, { id, at: Date.now() });
     else toolIdCache.delete(name);
     return id;
@@ -481,6 +497,9 @@ export const initiationWebhookUrl = (): string => `${appUrl()}/api/voice/initiat
 let initiationWorkspaceDone = false;
 const initiationAgentsDone = new Set<string>();
 
+/** Forget which workspace / agents were already configured by this process, so the next syncAgent writes the webhook + override flags again. */
+export function resetInitiationCache(): void { initiationWorkspaceDone = false; initiationAgentsDone.clear(); }
+
 /** Headers ElevenLabs sends with the initiation webhook: only the shared secret (same value/reference as the tools). */
 export function initiationRequestHeaders(): Record<string, string | { secret_id: string }> {
   const { ['content-type']: _ct, ...rest } = toolRequestHeaders();
@@ -543,13 +562,20 @@ export interface AgentResult {
   mock: boolean;
   created?: boolean;
   error?: string;
+  /** Wire names of the tools the agent was synced with (expectedToolNames). */
+  tools?: string[];
 }
 
 /**
- * Create the agent, or push the current KB to the existing one.
+ * THE one way an agent is created or brought up to date (provision, voice change, settings, owner KB change, incoming-call repair, the seed
+ * script and POST /api/admin/resync-agents all call it). Everything the agent needs is part of one config body, rebuilt from the database on
+ * every call: the prompt (KB, hours, compliance, transfer rules), ALL workspace tools (customer + owner line; created once by name+URL, refreshed
+ * in place, never duplicated) as `tool_ids`, system tools (language detection, transfer_to_number), the language preset, the voice id, the dynamic
+ * variable placeholders (business_id, call_sid, caller_phone, transfer_mode, transfer_destination, owner_mode, ...), and then the initiation-webhook
+ * + per-call override flags. Idempotent: running it again changes nothing that is already right (PATCH of the same body, tools matched by name).
  * Stores the id on the business so the next call reuses it.
  */
-export async function createOrUpdateAgent(
+export async function syncAgent(
   input: { business: Business; kb: KnowledgeBase | null; agent_id?: string },
 ): Promise<AgentResult> {
   const { business, kb } = input;
@@ -608,7 +634,7 @@ export async function createOrUpdateAgent(
             ms: Date.now() - started,
           });
           await ensureInitiationWebhook(existing);
-          return { agent_id: existing, mock: false, created: false };
+          return { agent_id: existing, mock: false, created: false, tools: expectedToolNames().map(wireNameOf) };
         }
         if (retryWithFreshTools(res.status, 'update') || retryWithoutLanguage(res.status, 'update', await res.clone().text().catch(() => ''))) continue;
         log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
@@ -641,7 +667,7 @@ export async function createOrUpdateAgent(
         ms: Date.now() - started,
       });
       await ensureInitiationWebhook(agentId);
-      return { agent_id: agentId, mock: false, created: true };
+      return { agent_id: agentId, mock: false, created: true, tools: expectedToolNames().map(wireNameOf) };
     } catch (err) {
       return {
         agent_id: existing || `mock_agent_${business.id}`,
@@ -651,6 +677,9 @@ export async function createOrUpdateAgent(
     }
   }
 }
+
+/** @deprecated the old name of {@link syncAgent}; kept so existing imports keep working. */
+export const createOrUpdateAgent = syncAgent;
 
 export interface SignedUrlResult {
   signed_url: string | null;

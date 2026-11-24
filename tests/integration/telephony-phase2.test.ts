@@ -435,7 +435,7 @@ integration('telephony phase 2 (postgres)', () => {
 
   // ============================================================ 5. reconcile
   const conversation = (secs: number, status = 'done') => ({ ok: true as const, snapshot: { status: status as 'done', durationSecs: secs, startUnixSecs: null, language: null, turns: [] } });
-  test('reconcile: meters an unmetered call once (idempotent), AI seconds only, owner calls excluded', async () => {
+  test('reconcile: meters an unmetered call once (idempotent), AI seconds only; owner-line calls are metered too', async () => {
     const biz = await newBusiness();
     const old = new Date(Date.now() - 3 * 3600_000);
     const call = await newCall(biz, { startedAt: old });
@@ -447,10 +447,43 @@ integration('telephony phase 2 (postgres)', () => {
     expect(r1.items.filter((i) => i.call_id === call.id)[0].outcome).toBe('metered');
     const r2 = await reconcile.reconcileUnmeteredCalls(deps);
     expect(r2.items.filter((i) => i.call_id === call.id).length).toBe(0); // already metered: no longer listed
-    expect((await db.getUsage(biz.id))!.call_seconds).toBe(120);
-    expect((await prisma.call.findUnique({ where: { id: owner.id } }))!.meteredAt).toBeNull();
+    // owner-line calls use AI minutes like any other call (owner decision): metered, never blocked by the caps
+    expect(r1.items.filter((i) => i.call_id === owner.id)[0].outcome).toBe('metered');
+    expect((await prisma.call.findUnique({ where: { id: owner.id } }))!.meteredAt).not.toBeNull();
+    expect((await db.getUsage(biz.id))!.call_seconds).toBe(240); // customer 120 + owner 120
     expect((await prisma.call.findUnique({ where: { id: fresh.id } }))!.meteredAt).toBeNull();
     expect(fetches).toBeGreaterThanOrEqual(1);
+  });
+
+  test('owner-line calls: post-call webhook and reconcile race -> the minutes are added exactly once, and the owner call stays out of stats/lists', async () => {
+    for (let round = 0; round < 3; round++) {
+      const biz = await newBusiness({ agent_id: uniq('agent') });
+      const call = await newCall(biz, { startedAt: new Date(Date.now() - 2 * 3600_000), kind: 'owner' });
+      const envelope = { type: 'post_call_transcription', data: {
+        conversation_id: call.conversationId!, agent_id: biz.agent_id!, call_sid: call.callSid!, transcript: turns(['agent', 'Hi'], ['user', 'Change my hours']),
+        metadata: { call_duration_secs: 75 }, analysis: { transcript_summary: 's' },
+      } };
+      await Promise.all([
+        reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => conversation(75) }),
+        postcall.processPostCall(envelope as never),
+        reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => conversation(75) }),
+      ]);
+      expect((await db.getUsage(biz.id))!.call_seconds).toBe(75);
+      const row = (await prisma.call.findUnique({ where: { id: call.id } }))!;
+      expect(row.meteredAt).not.toBeNull();
+      expect(row.transcript).toBeNull(); // nothing kept
+      expect((await db.listCallsPage(biz.id, { limit: 10 })).items.some((c: { id: string }) => c.id === call.id)).toBe(false); // lists exclude owner calls
+    }
+  });
+
+  test('reconcile: an owner call whose provider conversation was already deleted is settled (0 s), not retried and "given up" noisily', async () => {
+    const biz = await newBusiness();
+    const call = await newCall(biz, { startedAt: new Date(Date.now() - 5 * 3600_000), kind: 'owner' });
+    const gone = { fetchConversation: async () => ({ ok: false as const, status: 404, notFound: true, error: 'not found' }) };
+    const r = await reconcile.reconcileUnmeteredCalls(gone);
+    expect(r.items.find((i) => i.call_id === call.id)?.outcome).toBe('already_metered');
+    expect((await prisma.call.findUnique({ where: { id: call.id } }))!.meteredAt).not.toBeNull();
+    expect(await prisma.auditEvent.count({ where: { action: 'voice.reconcile_gave_up', target: `call:${call.id}` } })).toBe(0);
   });
 
   test('reconcile vs a late post-call webhook: the minutes are added exactly once, whichever wins', async () => {

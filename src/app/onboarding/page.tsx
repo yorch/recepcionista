@@ -2,7 +2,8 @@ import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { getBusiness, listBusinesses } from '@/lib/db';
 import { getServerPrincipal } from '@/lib/session';
-import { planPriceDisplay } from '@/app/site-config';
+import { planPriceDisplay, planPriceDisplayAnnual } from '@/app/site-config';
+import { annualAvailable } from '@/lib/providers/stripe-billing';
 import { OnboardingFlow } from './flow';
 import { STEP_IDS, type StepId } from './steps';
 
@@ -41,6 +42,8 @@ export default async function OnboardingPage({
       businessId={businessId}
       isAdmin={isAdmin}
       priceDisplay={planPriceDisplay()}
+      annualAvailable={annualAvailable()}
+      annualDisplay={planPriceDisplayAnnual()}
       requestedStep={STEP_IDS.includes(step as StepId) ? (step as StepId) : null}
       checkout={checkout === 'success' || checkout === 'cancel' ? checkout : null}
       resumable={resumable}

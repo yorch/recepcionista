@@ -404,6 +404,52 @@ suite('migrations (postgres)', () => {
     }
   }, 120_000);
 
+  test('integration-gaps migration on an old-schema database with data: block_on_busy backfilled from the audit trail, defaults, CHECKs, re-runnable', async () => {
+    const GAPS = '20261202120000_integration_gaps';
+    const name = await newDb('gaps');
+    const before = historyUpTo('before-gaps', dirs().filter((d) => d < GAPS).at(-1)!);
+    expect(prisma(['migrate', 'deploy'], dbUrl(name), before).code).toBe(0);
+    const c = client(name);
+    try {
+      for (const q of [
+        `INSERT INTO businesses(id,name,status) VALUES ('b1','A','live'),('b2','B','live'),('b3','C','live')`,
+        `INSERT INTO calendar_connections(id,business_id,account_email,status) VALUES ('c1','b1','a@x.com','revoked'),('c2','b2','b@x.com','revoked'),('c3','b3','c@x.com','revoked')`,
+        // b1: off then on again (latest wins -> true); b2: on then off (-> false); b3: never set (-> default true)
+        `INSERT INTO audit_events(id,at,actor_kind,business_id,action,meta) VALUES
+           ('a1','2027-01-01 10:00','user','b1','calendar.settings_changed','{"block_on_busy": false}'),
+           ('a2','2027-01-02 10:00','user','b1','calendar.settings_changed','{"block_on_busy": true}'),
+           ('a3','2027-01-01 10:00','user','b2','calendar.settings_changed','{"block_on_busy": true}'),
+           ('a4','2027-01-03 10:00','user','b2','calendar.settings_changed','{"block_on_busy": false}')`,
+        `INSERT INTO bookings(id,business_id,customer_name,customer_phone,service,scheduled_at) VALUES ('k1','b1','x','1','s','2027-02-01 10:00')`,
+      ]) await c.$executeRawUnsafe(q);
+      const r = prisma(['migrate', 'deploy'], dbUrl(name));
+      expect(r.out).toContain(GAPS);
+      expect(r.code).toBe(0);
+      const one = async (sql: string) => (await c.$queryRawUnsafe(sql)) as any[];
+      expect(await one(`SELECT business_id, block_on_busy FROM calendar_connections ORDER BY business_id`)).toEqual([
+        { business_id: 'b1', block_on_busy: true }, { business_id: 'b2', block_on_busy: false }, { business_id: 'b3', block_on_busy: true },
+      ]);
+      expect(await one(`SELECT closed_dates FROM businesses WHERE id = 'b1'`)).toEqual([{ closed_dates: [] }]);
+      expect(await one(`SELECT dispute_status FROM bookings WHERE id = 'k1'`)).toEqual([{ dispute_status: 'none' }]);
+      expect(await one(`SELECT 1 FROM pg_constraint WHERE contype='c' AND NOT convalidated`)).toEqual([]);
+      const bad = async (sql: string) => { try { await c.$executeRawUnsafe(sql); return 'accepted'; } catch { return 'rejected'; } };
+      expect(await bad(`UPDATE bookings SET dispute_status = 'maybe' WHERE id = 'k1'`)).toBe('rejected');
+      expect(await bad(`UPDATE bookings SET dispute_status = 'open' WHERE id = 'k1'`)).toBe('accepted');
+      expect(await bad(`UPDATE businesses SET closed_dates = '{"a":1}' WHERE id = 'b1'`)).toBe('rejected');
+      expect(await bad(`UPDATE businesses SET closed_dates = (SELECT jsonb_agg(to_char(d, 'YYYY-MM-DD')) FROM generate_series('2027-01-01'::date, '2028-01-02'::date, '1 day') d) WHERE id = 'b1'`)).toBe('rejected'); // 367 dates
+      expect(await bad(`UPDATE businesses SET closed_dates = '["2027-12-25"]' WHERE id = 'b1'`)).toBe('accepted');
+      // the whole migration can be applied again
+      const rerun = rawPrisma(['db', 'execute', '--file', path.join(MIGRATIONS, GAPS, 'migration.sql'), '--schema', path.join(ROOT, 'prisma/schema.prisma')], dbUrl(name));
+      expect(rerun.out).toContain('Script executed successfully');
+      expect(rerun.code).toBe(0);
+      expect(await one(`SELECT business_id, block_on_busy FROM calendar_connections ORDER BY business_id`)).toEqual([
+        { business_id: 'b1', block_on_busy: true }, { business_id: 'b2', block_on_busy: false }, { business_id: 'b3', block_on_busy: true },
+      ]);
+    } finally {
+      await c.$disconnect();
+    }
+  }, 240_000);
+
   test('no drift between prisma/migrations and schema.prisma', async () => {
     const shadow = await newDb('shadow');
     const r = rawPrisma(['migrate', 'diff', '--from-migrations', MIGRATIONS, '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--shadow-database-url', dbUrl(shadow), '--exit-code'], dbUrl(shadow));

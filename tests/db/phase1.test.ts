@@ -420,7 +420,8 @@ suite('phase 1 data layer (postgres)', () => {
       const ids = () => db.listCallsNeedingReconcile({ olderThan: new Date(Date.now() - 600_000), limit: 500 }).then((r: any[]) => r.map((x) => x.id));
       let list = await ids();
       expect(list).toContain(u.id);
-      for (const skip of [c.id, owner.id, noConv.id, fresh.id]) expect(list).not.toContain(skip); // metered / owner call / no key / too recent
+      expect(list).toContain(owner.id); // owner-line calls use AI minutes too: reconciled like any other call
+      for (const skip of [c.id, noConv.id, fresh.id]) expect(list).not.toContain(skip); // metered / no key / too recent
       expect(await db.bumpReconcileAttempt(u.id)).toBe(1);
       expect(await db.bumpReconcileAttempt(u.id)).toBe(2);
       list = await db.listCallsNeedingReconcile({ olderThan: new Date(Date.now() - 600_000), maxAttempts: 2, limit: 500 }).then((r: any[]) => r.map((x) => x.id));

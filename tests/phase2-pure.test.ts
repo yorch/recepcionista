@@ -173,9 +173,11 @@ describe('annual plan mapping', () => {
     expect(intervalOfSubscription(sub({ id: 'price_other' }), env)).toBeNull();
     expect(intervalOfSubscription({}, env)).toBeNull();
   });
-  test('annual is offered only when its price AND the Stripe key are set; interval parsing is strict', () => {
+  test('annual is offered only when its price is set AND billing works (the Stripe key, or the non-production mock checkout); interval parsing is strict', () => {
     expect(annualAvailable(env)).toBe(true);
-    expect(annualAvailable({ STRIPE_PRICE_ID_ANNUAL: 'p' } as unknown as NodeJS.ProcessEnv)).toBe(false);
+    expect(annualAvailable({ STRIPE_PRICE_ID_ANNUAL: 'p', NODE_ENV: 'production' } as unknown as NodeJS.ProcessEnv)).toBe(false); // production never mocks
+    expect(annualAvailable({ STRIPE_PRICE_ID_ANNUAL: 'p', NODE_ENV: 'development' } as unknown as NodeJS.ProcessEnv)).toBe(true); // demo: mock checkout can exercise the choice
+    expect(annualAvailable({ NODE_ENV: 'development' } as unknown as NodeJS.ProcessEnv)).toBe(false); // no annual price configured
     expect(annualAvailable({ STRIPE_SECRET_KEY: 'sk' } as unknown as NodeJS.ProcessEnv)).toBe(false);
     expect(parseInterval(undefined)).toBe('month'); expect(parseInterval('year')).toBe('year'); expect(parseInterval('week')).toBe('invalid'); expect(parseInterval(1)).toBe('invalid');
   });

@@ -303,8 +303,17 @@ integration('job runner (postgres)', () => {
       const bucketKey = uniq('it-bucket');
       await prisma.rateLimitBucket.create({ data: { key: bucketKey, windowStart: new Date(Date.now() - 5 * 3600_000), count: 3 } });
       void token;
+      // expired passkey challenges are removed by THIS job (not by a random side effect of issuing a challenge); live and recently expired ones stay
+      const chal = (ageMs: number, ttlMs: number) => prisma.webauthnChallenge.create({
+        data: { purpose: 'login', challengeHash: uniq('ch'), expiresAt: new Date(Date.now() - ageMs + ttlMs), createdAt: new Date(Date.now() - ageMs) },
+      });
+      const oldChallenge = await chal(3 * 86_400_000, 60_000); // expired ~3 days ago
+      const recentChallenge = await chal(2 * 3600_000, 60_000); // expired 2 h ago: inside the one-day grace
+      const liveChallenge = await chal(1000, 5 * 60_000);
 
       const dry = await jobs.runCleanup({ dryRun: true });
+      expect(dry.counts!.webauthn_challenges).toBeGreaterThanOrEqual(1);
+      expect(await prisma.webauthnChallenge.count({ where: { id: oldChallenge.id } })).toBe(1);
       expect(dry.counts!.sessions).toBeGreaterThanOrEqual(1);
       expect(dry.counts!.processed_events).toBeGreaterThanOrEqual(1);
       expect(dry.counts!.rate_limit_buckets).toBeGreaterThanOrEqual(1);
@@ -316,6 +325,10 @@ integration('job runner (postgres)', () => {
       expect(await prisma.processedEvent.count({ where: { source: 'it-old', id: oldEvent } })).toBe(0);
       expect(await prisma.rateLimitBucket.count({ where: { key: bucketKey } })).toBe(0);
       expect(await prisma.userSession.count({ where: { userId: user.id } })).toBe(1); // the live session survives
+      expect(real.counts!.webauthn_challenges).toBeGreaterThanOrEqual(1);
+      expect(await prisma.webauthnChallenge.count({ where: { id: oldChallenge.id } })).toBe(0);
+      expect(await prisma.webauthnChallenge.count({ where: { id: { in: [recentChallenge.id, liveChallenge.id] } } })).toBe(2);
+      await prisma.webauthnChallenge.deleteMany({ where: { id: { in: [recentChallenge.id, liveChallenge.id] } } });
       void fresh;
 
       const tick = await jobs.runJobTick({ jobs: ['cleanup'] });

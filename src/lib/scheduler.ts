@@ -24,7 +24,7 @@ export async function slotsForDate(
     ...(await listBlockingIntervals(business.id, gte.getTime(), lt.getTime())),
     ...(await calendarBusyIntervals(business.id, gte.getTime(), lt.getTime())), // owner's Google Calendar (healthy connection + switch on)
   ];
-  return buildSlots(business.hours, dateStr, tz, duration, busy, { nowMs: Date.now() });
+  return buildSlots(business.hours, dateStr, tz, duration, busy, { nowMs: Date.now(), closedDates: business.closed_dates });
 }
 
 /** Next N available slots starting today, skipping past times (needs ~1h lead). */
@@ -42,7 +42,7 @@ export async function nextAvailable(business: Business, count = 3, durationMinut
 
   const out: TimeSlot[] = [];
   for (const dateKey of days) {
-    for (const slot of buildSlots(business.hours, dateKey, tz, duration, busy, { nowMs, leadMin: 60 })) {
+    for (const slot of buildSlots(business.hours, dateKey, tz, duration, busy, { nowMs, leadMin: 60, closedDates: business.closed_dates })) {
       if (slot.available) {
         out.push(slot);
         if (out.length >= count) return out;
@@ -59,6 +59,6 @@ export function isWithinHours(
   durationMinutes = 60,
 ): { ok: true } | { ok: false; reason: SlotRejection } {
   return validateSlot(
-    business.hours, new Date(iso).getTime(), clampDuration(durationMinutes), tzOf(business), Date.now(),
+    business.hours, new Date(iso).getTime(), clampDuration(durationMinutes), tzOf(business), Date.now(), 0, business.closed_dates,
   );
 }

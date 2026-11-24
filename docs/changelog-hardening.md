@@ -310,3 +310,31 @@ One new migration, `20261130120000_review6_split_counters_recording_queue` (hand
 | Suspicion: Dial-action retries on caller hang-up | Fixed | covered by charge-once per CallSid; `canceled` takes no voicemail unit | `forward-metering.ts` (`classifyDial`), tests |
 | Suspicion: `claimEvent` claims never completed | Not an issue | claims carry a lease (`CLAIM_LEASE_MS`, 5 min): a crashed worker's claim is taken over by the next retry | `src/lib/db/events.ts` |
 | Suspicion: audit-write failure leaves `upstream.body` unread | Open | unchanged (minor, not measured) | |
+
+## Phase: features (previously "not built" items, now built) and the integration pass
+
+Migrations: `20261201120000_phase1_calendar_kb_transcript_passkeys_memberships` (all new tables and columns of the feature set) and `20261202120000_integration_gaps` (hand-written, zero drift, applied to an old-schema database with data in `tests/db/migration.test.ts`): `businesses.closed_dates`, `owner_kb_changes.base`, `calendar_connections.block_on_busy` (back-filled from the audit trail), `bookings.dispute_status` (CHECKed).
+
+| Item that was "not built" | Implementation | Evidence |
+| --- | --- | --- |
+| Google Calendar two-way sync (PRD roadmap) | OAuth connect, busy blocks (times only), push of bookings, incremental sync + watch channels, needs-reauth handling, `block_on_busy` column, Today notices | `src/lib/integrations/google/*`, `src/lib/db/calendar.ts`, `tests/integration/google-calendar.test.ts`, `tests/google-calendar-pure.test.ts`, e2e run (busy block refused a slot; event pushed; external delete noticed) |
+| Owner correction of the KB by voice | propose -> read-back -> SMS YES code -> apply -> undo; hours / closed dates / service area are REAL fields written in the same transaction (this pass) | `src/lib/voice/owner/*`, `src/lib/db/owner-kb.ts`, `src/lib/kb-patch.ts`, `tests/owner-callin-pure.test.ts`, `tests/integration/owner-callin.test.ts` |
+| Live transcript during a call | push endpoint + polling source, SSE, consent-gated purge | `src/lib/voice/live-transcript.ts`, `tests/integration/telephony-phase2.test.ts`, e2e run (lines appeared on the call page) |
+| Live human transfer | `transfer_to_human` + transfer-to-number system tool behind `NATIVE_TRANSFER`; call screening on the webhook line | `src/lib/voice/transfer.ts`, `screening.ts`, `tests/integration/telephony-phase2.test.ts` |
+| STIR/SHAKEN caller trust, metering reconcile, 80/100% cap warnings, language detection | `call-trust.ts`, `reconcile.ts`, `billing/warnings.ts`, `LANGUAGE_DETECTION`; owner-line calls are metered consistently (this pass) | `tests/integration/telephony-phase2.test.ts` (race: post-call vs reconcile, owner kind included) |
+| Passkeys (WebAuthn), multi-business | `passkey_credentials`, `memberships`, switcher, "add another location" | `tests/db/passkeys.test.ts`, `tests/db/multi-business.test.ts`, e2e run (CDP virtual authenticator registered and signed in; second location + switcher) |
+| Reschedule, refunds, dispute flag, recording player, voice selection, readiness gate, annual plan | `bookings/:id/reschedule|refund`, `refund-events.ts` (+ `dispute_status`), `recording-audio.ts`, `voices.ts`, `kb/readiness.ts`, annual interval in checkout and onboarding | `tests/integration/phase2.test.ts`, `tests/phase2-pure.test.ts`, `tests/integration/billing-routes.test.ts` |
+
+Integration gaps found and fixed in the integration pass (each with a test):
+
+| Gap | Fix | Evidence |
+| --- | --- | --- |
+| Test scanned the last 20 GLOBAL audit events | assertions scoped by action + actor kind + timestamp; sweep found no other global-state scans (rate-limit buckets are cleared by prefix per file) | `tests/db/auth-mfa.test.ts` |
+| Owner hours / closures / service area were FAQ notices that never changed availability | structured operations applied to the real fields, validated, transactional, undoable with `changed_since`, stale-checked; `closed_dates` honoured by `slotsForDate`, `nextAvailable`, `createBooking`, reschedule, forward-during-hours | `src/lib/closures.ts`, `src/lib/availability.ts`, `tests/integration/owner-callin.test.ts` |
+| Owner calls skipped by reconcile but counted by post-call | one rule: owner calls are metered (never blocked); a deleted provider conversation settles instead of "giving up" | `tests/integration/telephony-phase2.test.ts` |
+| "Reply C to cancel" was not handled | `src/lib/messaging/sms-cancel.ts` in `/api/sms/inbound` | `tests/integration/sms-cancel.test.ts` |
+| Block-on-busy lived in the audit trail; no dispute flag; no dashboard notice | real column (+ backfill), `dispute_status`, `CalendarNotice` on Today; `usage_warnings` named consistently | `tests/integration/google-calendar.test.ts`, `tests/integration/phase2.test.ts`, `tests/integration/billing-routes.test.ts` |
+| Onboarding offered monthly only; reauth copy named call mode; challenge cleanup was a 2% side effect; `clearAll` missed new tables | Monthly/Annual in onboarding, generic step-up copy, cleanup in the hourly job, `clearAll` covers every table (test fills all of them) | `tests/integration/jobs.test.ts`, `tests/db/clear-all.test.ts` |
+| Agent tools registered through scattered paths | one `syncAgent`, in-flight tool dedupe, `POST /api/admin/resync-agents` | `tests/integration/agent-sync.test.ts` (fake ElevenLabs holds the final config) |
+| Found by the mock end-to-end run | the booking-hook registry and the mock Google store were per-bundle singletons (bookings never reached Google); the mock OAuth token carried no scopes (connect always failed); onboarding showed raw `email_not_verified` | `tests/booking-hooks.test.ts`, `src/lib/integrations/google/mock.ts`, `src/app/onboarding/step-verify.tsx` |
+

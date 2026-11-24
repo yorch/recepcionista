@@ -14,6 +14,7 @@ import { Card, CardHead } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty';
 import { Stat } from '@/components/ui/stat';
 import { VoicePlayer } from '@/components/ui/audio';
+import { CalendarNotice } from '@/components/dashboard/calendar-notice';
 
 export const metadata: Metadata = { title: 'Today' };
 
@@ -72,6 +73,8 @@ export default async function TodayPage() {
           {biz.phone ? <CallModeSwitch businessId={biz.id} initial={mode} canManage={isOwner} compact /> : null}
         </div>
       </header>
+
+      <CalendarNotice business={biz} canManage={isOwner} />
 
       {!hasActivity ? (
         <div className="mt-6">

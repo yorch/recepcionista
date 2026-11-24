@@ -516,6 +516,7 @@ async function rejectionResult(
         `That job would run past our closing time. ${alt}`,
         `Ese trabajo terminaría después de nuestra hora de cierre. ${alt}`) };
     case 'closed_day':
+    case 'closed_date':
     case 'before_open':
       return { ok: false, data, message: say(lang,
         `That is outside our hours. ${alt}`, `Eso está fuera de nuestro horario. ${alt}`) };

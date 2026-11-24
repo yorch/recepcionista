@@ -25,5 +25,5 @@ export async function slotsForMove(business: Business, booking: Booking, dateKey
     const i = busy.findIndex((b) => b.start === own.start && b.end === own.end);
     if (i >= 0) busy.splice(i, 1); // exactly one: the booking itself
   }
-  return buildSlots(business.hours, dateKey, tz, duration, busy, { nowMs }).map((s) => ({ ...s, current: new Date(s.start).getTime() === own.start }));
+  return buildSlots(business.hours, dateKey, tz, duration, busy, { nowMs, closedDates: business.closed_dates }).map((s) => ({ ...s, current: new Date(s.start).getTime() === own.start }));
 }

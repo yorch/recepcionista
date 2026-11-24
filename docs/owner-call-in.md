@@ -11,9 +11,9 @@ The business owner calls the business line from their **verified** phone and tal
 
 Spanish works the same (`SI <code>`, `DESHACER <code>`); the language follows the business default.
 
-What the assistant can change: **services** (add, remove, price, duration, description), **hours / closed days / service area** (as notices the assistant tells callers; closures add up, hours and service area replace the previous notice), **FAQs** (add, replace, remove) and **pricing notes** (append a line).
+What the assistant can change: **services** (add, remove, price, duration, description), **opening hours** (`set_hours`: days plus open and close time, or closed those days), **holiday closures** (`add_closed_dates` / `remove_closed_dates`: exact dates) and the **service area** (`set_service_area`: the full list), all applied to the REAL business fields that booking availability, the scheduler, `createBooking` and reschedule read (a closed date has no slots and refuses bookings), plus informational **notices** (`set_notice`, closure wording only: never for hours or the service area), **FAQs** (add, replace, remove) and **pricing notes** (append a line).
 
-What it cannot do (it says so and points to the dashboard): change the assistant's instructions or system prompt, change the call script, edit the real opening hours used for booking availability (a "closed Monday" notice informs callers but the calendar still follows Settings hours), touch phone numbers, web addresses or emails, payments, bookings, customers' data, or anything about other businesses.
+What it cannot do (it says so and points to the dashboard): change the assistant's instructions or system prompt, change the call script, touch phone numbers, web addresses or emails, payments, bookings, customers' data, or anything about other businesses.
 
 ## Security model
 
@@ -40,4 +40,4 @@ Owner calls keep **no transcript, summary, recording or language**; the provider
 
 ## Limits and non-goals
 
-One change per proposal. Hours used for **booking availability** are not editable by phone (notices only). No multi-owner support beyond the single verified owner phone; a shared phone means anyone with that phone can confirm texts. Turning the feature off: `OWNER_CALLIN_ENABLED=false`.
+One change per proposal. Hours, closures and the service area are written in the SAME transaction as the knowledge-base change, captured in `previous` for undo (refused with the changed fields listed when someone edited them since) and checked against their values at proposal time (`owner_kb_changes.base`; edited since = refused as stale). Overnight hours, several windows per day and closing the whole week are not supported by phone. No multi-owner support beyond the single verified owner phone; a shared phone means anyone with that phone can confirm texts. Turning the feature off: `OWNER_CALLIN_ENABLED=false`.

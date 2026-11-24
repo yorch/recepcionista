@@ -600,6 +600,34 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
     expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'payment.dispute_created' } })).toBe(1);
   });
 
+  test('webhook: charge.dispute.* sets bookings.dispute_status (open -> won / lost), monotonic and replay-safe', async () => {
+    const biz = await newBusiness();
+    const b = await paidBooking(biz);
+    const lost = await paidBooking(biz);
+    const pi = (await db.getBooking(b.id))!.stripe_payment_intent_id!;
+    const piLost = (await db.getBooking(lost.id))!.stripe_payment_intent_id!;
+    const d = (type: string, payment_intent: string, status: string) => post({ id: eventId(), type, data: { object: { id: 'dp_x', payment_intent, amount: 5000, status, reason: 'general' } } });
+    expect((await db.getBooking(b.id))!.dispute_status).toBe('none');
+    await d('charge.dispute.created', pi, 'needs_response');
+    expect((await db.getBooking(b.id))!.dispute_status).toBe('open');
+    await d('charge.dispute.updated', pi, 'under_review');
+    expect((await db.getBooking(b.id))!.dispute_status).toBe('open');
+    await d('charge.dispute.closed', pi, 'won');
+    expect((await db.getBooking(b.id))!.dispute_status).toBe('won');
+    await d('charge.dispute.updated', pi, 'needs_response'); // a late, reordered event never reopens a settled dispute
+    expect((await db.getBooking(b.id))!.dispute_status).toBe('won');
+    expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'payment.dispute_updated', target: `booking:${b.id}` } })).toBe(1);
+
+    await d('charge.dispute.created', piLost, 'needs_response');
+    const alerts = await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'owner_alert' } });
+    await d('charge.dispute.closed', piLost, 'lost');
+    expect((await db.getBooking(lost.id))!.dispute_status).toBe('lost');
+    expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'owner_alert' } })).toBe(alerts + 1); // a loss is worth a text
+    // the other booking's dispute is untouched, and the unknown payment is ignored
+    expect((await db.getBooking(b.id))!.dispute_status).toBe('won');
+    expect((await d('charge.dispute.closed', 'pi_unknown', 'lost')).status).toBe(200);
+  });
+
   // ---------------------------------------------------------------- recording proxy
 
   test('recording proxy: consent, tenant, auth, Range, no raw provider URL, audit, no key -> 503', async () => {

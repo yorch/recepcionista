@@ -8,7 +8,7 @@ import {
   type KbChangeResult,
 } from '@/lib/db';
 import { buildSystemPrompt } from '@/lib/kb';
-import { createOrUpdateAgent, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { syncAgent, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { logger } from '@/lib/log';
 import type { AuditActorKind, OwnerKbChange, OwnerKbSource } from '@/lib/types';
 
@@ -41,7 +41,7 @@ export async function resyncAfterKbChange(businessId: string): Promise<{ prompt:
     const fresh = await upsertKnowledgeBase(businessId, { system_prompt: buildSystemPrompt(business, { services: kb.services, faqs: kb.faqs, pricing_notes: kb.pricing_notes }) });
     if (!hasElevenLabs() || !business.agent_id) return { prompt: true, agent: 'skipped' };
     try {
-      const res = await createOrUpdateAgent({ business, kb: fresh });
+      const res = await syncAgent({ business, kb: fresh });
       return { prompt: true, agent: res.mock ? 'failed' : 'synced' };
     } catch (err) {
       log.warn('agent_resync_failed', { business: businessId, err });
@@ -73,6 +73,10 @@ export async function applyOwnerChange(businessId: string, changeId: string, act
     }
   }
   const res = await applyKbChange(businessId, changeId);
+  if (!res.ok && res.reason === 'stale') {
+    await auditOwnerKb('stale', businessId, actor, change); // a business field (hours / closures / area) was edited after the proposal
+    return { ok: false, reason: 'stale' };
+  }
   if (res.ok && res.changed) {
     await auditOwnerKb('applied', businessId, actor, res.change);
     const sync = await resyncAfterKbChange(businessId);

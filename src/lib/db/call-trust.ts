@@ -51,11 +51,12 @@ export interface UnmeteredCall {
 
 /**
  * Calls that started before `olderThan`, were never metered, and have fewer than `maxAttempts` reconcile tries (oldest first).
- * Owner calls (kind 'owner') and calls without a conversation id are skipped: there is nothing to fetch for them.
+ * Owner-line calls (kind 'owner') ARE listed: they use AI minutes like any other call (they are only exempt from the cap BLOCK). Calls without a
+ * conversation id are skipped: there is nothing to fetch for them.
  */
 export async function listCallsNeedingReconcile(opts: { olderThan: Date; maxAttempts?: number; limit?: number }): Promise<UnmeteredCall[]> {
   const rows = await prisma.call.findMany({
-    where: { meteredAt: null, kind: 'customer', conversationId: { not: null }, startedAt: { lt: opts.olderThan }, reconcileAttempts: { lt: opts.maxAttempts ?? 5 } },
+    where: { meteredAt: null, conversationId: { not: null }, startedAt: { lt: opts.olderThan }, reconcileAttempts: { lt: opts.maxAttempts ?? 5 } },
     orderBy: { startedAt: 'asc' }, take: Math.min(Math.max(opts.limit ?? 50, 1), 500),
     select: { id: true, businessId: true, conversationId: true, callSid: true, startedAt: true, reconcileAttempts: true },
   });

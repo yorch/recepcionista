@@ -16,9 +16,9 @@ export const DEFAULT_TRIAL_DAYS = 7;
 
 export type BillingIntervalChoice = 'month' | 'year';
 
-/** The optional annual price id (STRIPE_PRICE_ID_ANNUAL). Offered only when set AND real Stripe billing is configured. */
+/** The optional annual price id (STRIPE_PRICE_ID_ANNUAL). Offered only when set AND billing is configured: real Stripe, or the non-production mock checkout (so the demo can exercise the choice). */
 export const annualPriceId = (env: NodeJS.ProcessEnv = process.env): string | null => env.STRIPE_PRICE_ID_ANNUAL?.trim() || null;
-export const annualAvailable = (env: NodeJS.ProcessEnv = process.env): boolean => Boolean(annualPriceId(env)) && Boolean(env.STRIPE_SECRET_KEY?.trim());
+export const annualAvailable = (env: NodeJS.ProcessEnv = process.env): boolean => Boolean(annualPriceId(env)) && (Boolean(env.STRIPE_SECRET_KEY?.trim()) || !isProd(env));
 
 /** Validate a client-supplied interval: only 'month' or 'year' (anything else, or absent, is monthly). */
 export function parseInterval(raw: unknown): BillingIntervalChoice | 'invalid' {

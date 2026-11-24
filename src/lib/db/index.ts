@@ -13,6 +13,7 @@ import type {
 import { prisma, type DbClient } from './client';
 import { clampLimit, encodeTimeCursor, MAX_LIST, parseTimeCursor, toPage, type Page } from './paging';
 import { logger } from '@/lib/log';
+import { closedDatesOf, normalizeClosedDates } from '@/lib/closures';
 import { dayRange as zonedDayRange, localDateKey, tzOf, DEFAULT_TIMEZONE, isValidTimeZone } from '@/lib/time';
 import {
   bookingInterval, clampDuration, intervalsOverlap, validateSlot, MAX_DURATION_MIN,
@@ -24,7 +25,7 @@ import { countryForBusiness, phoneIdent } from './compliance';
 import { enqueueRecordingDeletions } from './recording-deletions';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
-  Service, FAQ, BriefingStats, ConsentStatus, BillingStatus, CallMode, CallKind, TransferStatus, RefundStatus,
+  Service, FAQ, BriefingStats, ConsentStatus, BillingStatus, CallMode, CallKind, TransferStatus, RefundStatus, DisputeStatus,
   Locale, Vertical, RefundPolicy, BillingInterval,
 } from '@/lib/types';
 import { BILLING_INTERVALS, LOCALES, REFUND_POLICIES, REFUND_POLICY_TEXT_MAX, TRANSFER_STATUSES, VERTICALS } from '@/lib/types';
@@ -82,6 +83,7 @@ function toBusiness(row: BusinessRow): Business {
     owner_phone: row.ownerPhone ?? null,
     owner_name: row.ownerName ?? null,
     hours: (row.hours ?? DEFAULT_HOURS) as unknown as Hours,
+    closed_dates: closedDatesOf(row.closedDates),
     service_area: (row.serviceArea ?? []) as string[],
     status: row.status as Business['status'],
     agent_id: row.agentId ?? null,
@@ -189,6 +191,7 @@ function toBooking(row: BookingRow): Booking {
     refund_amount_cents: row.refundAmountCents ?? null,
     stripe_refund_id: row.stripeRefundId ?? null,
     refunded_at: iso(row.refundedAt),
+    dispute_status: (['open', 'won', 'lost'].includes(row.disputeStatus) ? row.disputeStatus : 'none') as DisputeStatus,
   };
 }
 
@@ -275,6 +278,7 @@ function businessPatch(patch: Partial<Business>, country: string = defaultPhoneC
   if (patch.owner_name !== undefined) out.ownerName = patch.owner_name;
   if (patch.hours !== undefined) out.hours = patch.hours as Prisma.InputJsonObject;
   if (patch.service_area !== undefined) out.serviceArea = patch.service_area;
+  if (patch.closed_dates !== undefined) { const c = normalizeClosedDates(patch.closed_dates); if (c) out.closedDates = c as unknown as Prisma.InputJsonValue; }
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.agent_id !== undefined) out.agentId = patch.agent_id;
   if (patch.retention_days !== undefined && Number.isInteger(patch.retention_days)
@@ -846,7 +850,7 @@ export async function createBooking(
       }
 
       if (enforce) {
-        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now());
+        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(), 0, closedDatesOf(biz.closedDates));
         if (!v.ok) throw new BookingRejectedError(v.reason);
       }
 
@@ -1186,7 +1190,7 @@ export async function rescheduleBooking(input: RescheduleInput, opts: { enforce?
       if (cur.scheduledAt.getTime() === start.getTime() && cur.durationMinutes === duration) return { booking: toBooking(cur), previous, changed: false };
       const candidate: Interval = { start: start.getTime(), end: start.getTime() + duration * 60_000 };
       if (enforce) {
-        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now());
+        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(), 0, closedDatesOf(biz.closedDates));
         if (!v.ok) throw new BookingRejectedError(v.reason);
       }
       const near = await tx.booking.findMany({
@@ -1287,6 +1291,15 @@ export async function markRefundFailed(bookingId: ID, reason?: string): Promise<
   const res = await prisma.booking.updateMany({ where: { id: bookingId, refundStatus: { in: ['none', 'pending', 'failed'] } }, data: { refundStatus: 'failed', refundedAt: null } });
   if (res.count === 1) log.warn('refund.failed', { booking: bookingId, reason: reason ? reason.slice(0, 200) : null });
   return { updated: res.count === 1, booking: await getBooking(bookingId) };
+}
+
+/**
+ * Record a card dispute's state on the booking. Monotonic: a settled dispute ('won' / 'lost') is never reopened by an out-of-order
+ * event; 'won' <-> 'lost' may still be corrected (funds reinstated after a loss). Returns whether the row changed.
+ */
+export async function setDisputeStatus(bookingId: ID, status: Exclude<DisputeStatus, 'none'>): Promise<boolean> {
+  const where = status === 'open' ? { id: bookingId, disputeStatus: 'none' } : { id: bookingId, disputeStatus: { not: status } };
+  return (await prisma.booking.updateMany({ where, data: { disputeStatus: status } })).count === 1;
 }
 
 /** No refund is owed (no paid deposit, or the policy says none). Only from 'none'. */
@@ -1532,7 +1545,15 @@ export async function isKnownContact(businessId: ID, phone: string): Promise<boo
 }
 
 // ---------- lifecycle ----------
-/** Deletes every row. Used by the seed script and the demo reset. */
+/**
+ * Wipes the tenant data for the seed script and the demo reset: EVERY table is emptied except
+ *   - `_prisma_migrations` (schema history),
+ *   - `pending_recording_deletions` (the queue the recordings above were just added to: provider-side audio must still be deleted),
+ *   - admin accounts (role 'admin') with their sessions, recovery codes and passkeys (the operator must still be able to sign in).
+ * Tables with no foreign key to a business (audit events, forward leases, rate limits, processed events, provision locks, trial
+ * fingerprints, WebAuthn challenges, email tokens) are deleted explicitly: they would otherwise outlive the business they describe.
+ * tests/db/clear-all.test.ts fills every table and fails when a new table is neither wiped nor listed above.
+ */
 export async function clearAll(): Promise<void> {
   // Destructive and reachable over HTTP (POST /api/demo/reset): always warn,
   // even at info-level logging, so a wiped database is never a mystery.
@@ -1541,15 +1562,33 @@ export async function clearAll(): Promise<void> {
     // The recordings at the provider must not outlive the only rows pointing at them: queue them first (same transaction).
     const withRecording = await tx.call.findMany({ where: { recordingUrl: { not: null } }, select: { recordingUrl: true, businessId: true } });
     await enqueueRecordingDeletions(tx, withRecording.map((c) => ({ url: c.recordingUrl, businessId: c.businessId })));
+    // Leaves first (explicit, so the order does not depend on cascade rules), then the parents.
+    await tx.callTranscriptEvent.deleteMany();
+    await tx.calendarBusyBlock.deleteMany();
+    await tx.calendarEventLink.deleteMany();
+    await tx.calendarConnection.deleteMany();
+    await tx.ownerKbChange.deleteMany();
     await tx.smsLog.deleteMany();
+    await tx.smsOptOut.deleteMany();
     await tx.briefing.deleteMany();
     await tx.booking.deleteMany();
     await tx.call.deleteMany();
+    await tx.usageCounter.deleteMany();
+    await tx.forwardLease.deleteMany();
     await tx.knowledgeBase.deleteMany();
+    await tx.emailToken.deleteMany();
+    await tx.webauthnChallenge.deleteMany();
+    await tx.auditEvent.deleteMany();
+    await tx.processedEvent.deleteMany();
+    await tx.rateLimitBucket.deleteMany();
+    await tx.provisionLock.deleteMany();
+    await tx.trialFingerprint.deleteMany();
     // Memberships first: the database trigger that keeps a person with SEVERAL businesses alive when one is deleted would otherwise try to
     // re-point them to another business that this same statement is deleting (foreign key violation on a multi-business account).
     await tx.membership.deleteMany();
-    await tx.business.deleteMany(); // cascades connections, busy blocks, KB changes, memberships, transcript events
+    await tx.user.deleteMany({ where: { role: { not: 'admin' } } }); // cascades their sessions, recovery codes, passkeys
+    await tx.userSession.updateMany({ where: { activeBusinessId: { not: null } }, data: { activeBusinessId: null } });
+    await tx.business.deleteMany(); // cascades anything left
   });
 }
 

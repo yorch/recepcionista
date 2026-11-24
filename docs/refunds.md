@@ -43,9 +43,10 @@ must review it (with counsel where required) before launch**.
      Stripe dashboard (audit `booking.refund_reconciled`). Monotonic: a `refunded` booking is never downgraded; replays and reordering converge. A failed
      refund alerts the owner.
    - `charge.dispute.created`: audit `payment.dispute_created` (dispute id, amount, reason) and a text to the VERIFIED owner phone. Nothing is refunded or
-     contested automatically; answering a dispute is done in Stripe. There is no dispute flag on the booking row (a schema change was out of scope):
-     the audit log and the alert are the flag.
-   Add these event types to the deposit webhook endpoint in Stripe: `charge.refunded`, `refund.created`, `refund.updated`, `refund.failed`, `charge.dispute.created`
+     contested automatically; answering a dispute is done in Stripe. `charge.dispute.created / updated / closed / funds_withdrawn / funds_reinstated` also set
+     `bookings.dispute_status` (`none | open | won | lost`, monotonic: a settled dispute is never reopened by a late event), shown in the calendar panel and the agenda; a loss is texted too.
+   - **Customer text `C`** (the confirmation footer says "Reply C to cancel"): `/api/sms/inbound` cancels the sender's ONLY upcoming booking of the business the number belongs to, replies with the refund-policy verdict text (en/es) and emits the usual booking hooks; with several upcoming bookings it asks them to call. `CANCEL`, `STOP`, `END`, `QUIT` ... are opt-outs and keep precedence. Rate limited, deduplicated by MessageSid; a sender who opted out gets the cancellation but no reply text.
+   Add these event types to the deposit webhook endpoint in Stripe: `charge.refunded`, `refund.created`, `refund.updated`, `refund.failed`, `charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`, `charge.dispute.funds_withdrawn`, `charge.dispute.funds_reinstated`
    (plus the three deposit events it already receives).
 
 ## Customer texts about a change

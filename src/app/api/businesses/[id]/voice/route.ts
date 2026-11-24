@@ -2,7 +2,7 @@ import { fail, ok, readJson } from '@/lib/http';
 import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { clientKey } from '@/lib/auth';
 import { getBusiness, getKnowledgeBase, recordAudit, updateBusiness } from '@/lib/db';
-import { createOrUpdateAgent, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { syncAgent, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { findAllowedVoice, listAllowedVoices, type VoiceOption } from '@/lib/voice/voices';
 import { limitRequest } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
@@ -75,7 +75,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     let synced = false;
     if (updated.agent_id) {
       try {
-        const r = await createOrUpdateAgent({ business: updated, kb: await getKnowledgeBase(id) });
+        const r = await syncAgent({ business: updated, kb: await getKnowledgeBase(id) });
         synced = !r.mock && !r.error;
       } catch (err) {
         log.warn('agent_resync_failed', { business: id, err });

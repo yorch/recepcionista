@@ -42,7 +42,7 @@ export async function transferTargetNow(business: Business, ctx: TransferContext
   if (!nativeTransferEnabled(env)) return { ok: false, why: 'disabled' };
   const t = forwardTarget(business);
   if (!t.ok) return { ok: false, why: t.why === 'none' ? 'no_number' : t.why === 'rejected' ? 'rejected' : 'unverified', error: t.error };
-  if (business.forward_during_hours && !isOpenNow(business.hours, tzOf(business.timezone), ctx.now ?? new Date())) return { ok: false, why: 'outside_hours' };
+  if (business.forward_during_hours && !isOpenNow(business.hours, tzOf(business.timezone), ctx.now ?? new Date(), business.closed_dates)) return { ok: false, why: 'outside_hours' };
   const vet = await vetForwardNumber(business, t.to);
   if (!vet.ok) return { ok: false, why: 'rejected', error: vet.error };
   return { ok: true, to: vet.e164 };

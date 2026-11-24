@@ -13,17 +13,19 @@ import { prisma } from '@/lib/db/client';
 export const HEALTHY = ['active', 'error'] as const;
 export const SETTINGS_ACTION = 'calendar.settings_changed';
 
-/** The switch lives in the audit trail (latest `calendar.settings_changed` wins): the schema has no settings column and Phase 1 forbids new migrations. */
+/**
+ * The switch is the `calendar_connections.block_on_busy` column (it used to be derived from the latest `calendar.settings_changed` audit
+ * event; the integration-gaps migration moved and backfilled it). No connection = the default (on). Every change is still audited.
+ */
 export async function getBlockOnBusy(businessId: string, db: DbClient = prisma): Promise<boolean> {
-  const row = await db.auditEvent.findFirst({ where: { businessId, action: SETTINGS_ACTION }, orderBy: { at: 'desc' }, select: { meta: true } });
-  const v = (row?.meta as { block_on_busy?: unknown } | null)?.block_on_busy;
-  return typeof v === 'boolean' ? v : true;
+  const conn = await db.calendarConnection.findUnique({ where: { businessId_provider: { businessId, provider: 'google' } }, select: { blockOnBusy: true } });
+  return conn?.blockOnBusy ?? true;
 }
 
 async function effective(businessId: string, db: DbClient): Promise<{ id: string } | null> {
-  const conn = await db.calendarConnection.findUnique({ where: { businessId_provider: { businessId, provider: 'google' } }, select: { id: true, status: true } });
+  const conn = await db.calendarConnection.findUnique({ where: { businessId_provider: { businessId, provider: 'google' } }, select: { id: true, status: true, blockOnBusy: true } });
   if (!conn || !(HEALTHY as readonly string[]).includes(conn.status)) return null;
-  return (await getBlockOnBusy(businessId, db)) ? { id: conn.id } : null;
+  return conn.blockOnBusy ? { id: conn.id } : null;
 }
 
 /** Busy [start,end) ms intervals of the owner's calendar intersecting the range (opaque events only). Empty when not applicable. */

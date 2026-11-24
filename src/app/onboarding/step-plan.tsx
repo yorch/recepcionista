@@ -16,8 +16,9 @@ const POLL_MS = 2500;
 const POLL_MAX_MS = 90_000;
 
 export function PlanStep({
-  businessId, status, isAdmin, go, refresh, priceDisplay, checkout, clearCheckout,
-}: StepProps & { priceDisplay: string; checkout: 'success' | 'cancel' | null; clearCheckout: () => void }) {
+  businessId, status, isAdmin, go, refresh, priceDisplay, annualAvailable = false, annualDisplay = null, checkout, clearCheckout,
+}: StepProps & { priceDisplay: string; annualAvailable?: boolean; annualDisplay?: string | null; checkout: 'success' | 'cancel' | null; clearCheckout: () => void }) {
+  const [interval, setInterval] = useState<'month' | 'year'>('month');
   const { busy, request } = useApi();
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(checkout === 'success' && !status.provisioning_allowed);
@@ -54,7 +55,7 @@ export function PlanStep({
   async function startTrial() {
     setError(null);
     try {
-      const res = await request<{ url?: string }>('/api/billing/checkout', { method: 'POST', body: { business_id: businessId, return_path: '/onboarding' } });
+      const res = await request<{ url?: string }>('/api/billing/checkout', { method: 'POST', body: { business_id: businessId, return_path: '/onboarding', ...(annualAvailable ? { interval } : {}) } });
       if (!res.url) throw new Error('Checkout did not return a link. Please try again.');
       window.location.assign(res.url);
     } catch (err) {
@@ -75,7 +76,21 @@ export function PlanStep({
 
       <Card className="mt-6 p-5">
         <p className="text-xs font-medium uppercase tracking-wider text-dim">Recepcionista</p>
-        <p className="mt-1.5 text-[22px] font-semibold text-white">{priceDisplay}</p>
+        {annualAvailable && !ok ? (
+          <fieldset className="mt-2">
+            <legend className="sr-only">Billing period</legend>
+            <div role="radiogroup" className="grid gap-2 sm:grid-cols-2">
+              {([['month', 'Monthly', priceDisplay], ['year', 'Annual', annualDisplay]] as const).map(([v, label, price]) => (
+                <label key={v} className="flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-line-3 px-3 py-2 has-[:checked]:border-brand has-[:checked]:bg-raised">
+                  <input type="radio" name="interval" value={v} checked={interval === v} onChange={() => setInterval(v)} className="h-4 w-4 accent-[#ff6b35]" />
+                  <span className="text-[13px] text-soft">{label}{price ? <span className="block text-xs text-dim">{price}</span> : null}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        ) : (
+          <p className="mt-1.5 text-[22px] font-semibold text-white">{priceDisplay}</p>
+        )}
         <ul className="mt-4 space-y-2.5">
           {INCLUDED.map((x) => (
             <li key={x} className="flex gap-2.5 text-[13px] leading-relaxed text-soft">

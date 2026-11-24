@@ -81,6 +81,9 @@ Public (no session; each verifies its own secret/signature or is rate limited an
 | `GET/POST /api/privacy/export`, `/erase` | owner | `business_id` forced to own |
 | `POST /api/demo/reset`, `/api/demo/simulate-call`, `GET simulate-call` | admin | n/a |
 | `POST /api/admin/users` | admin | n/a |
+| `POST /api/admin/resync-agents` | admin (Bearer or admin session); rate limited 6/min | all businesses that have an agent; `dry_run` defaults to true; audited `admin.resync_agents` (docs/runbook.md section 11) |
+| `POST /api/integrations/google/mock-event` | owner; 404 unless `GOOGLE_OAUTH_MOCK=true` outside production | the caller's own business only (admins pass `?business_id=`); local / e2e only |
+| `POST /api/sms/inbound` (bare `C` reply) | Twilio signature (no session) | the business that OWNS the number texted; only the sender's own bookings (E.164 match); STOP-class keywords first |
 | `GET /api/auth/me`, `GET /api/auth/sessions`, `DELETE /api/auth/sessions/:id`, `POST /api/auth/sessions/revoke-others` | staff | own sessions only (another user's session id is 404) |
 | `POST /api/auth/2fa/enroll`, `/confirm`, `/disable`, `/recovery-codes` | staff (a personal account) | own account; enroll and disable re-check the password |
 | `POST /api/auth/revoke-admin-sessions` | admin | all `admin_token` sessions |
@@ -89,6 +92,32 @@ Public (no session; each verifies its own secret/signature or is rate limited an
 | `POST /api/team/invites/:id/resend` (verified email), `DELETE /api/team/invites/:id` | owner | invitation must belong to the resolved business, else 404 |
 | `PATCH /api/team/users/:id` (`role`, `disabled`), `DELETE /api/team/users/:id`, `POST /api/team/users/:id/revoke-sessions` | owner | target must have a membership in the caller's active business (another business or an admin account = 404); all three act on **that membership only** (the account and its other businesses survive; `DELETE` deletes the account only when it was the last membership); last active owner protected; no self-disable/remove. Admins name `?business_id=` when the user is in several businesses (else 422) |
 | `GET /api/team/audit` | owner | owner: own business; admin: any business or all; cursor `before`, `limit` 1-100 |
+
+### Routes added by the features work (authorization at a glance)
+
+All `Min role` rows use the same `authenticate(req, { role })` gate as above (cookie requests are also CSRF-checked); "step-up" = `requireRecentAuth` (403 `reauth_required`, then password / TOTP / passkey at `/api/auth/reauth`). Tenant scope = the caller's active business (admins pass `business_id`); another business's id is 404.
+
+| Route | Min role | Notes |
+|---|---|---|
+| `GET /api/bookings`, `GET /api/bookings/:id` | staff | calendar range / agenda; own business |
+| `PATCH /api/bookings/:id`, `POST /api/bookings/:id/{reschedule,notify,resend-confirmation}`, `GET /api/bookings/:id/slots` | owner | own business; reschedule re-validates hours, closed dates, overlap and Google busy time under the booking lock |
+| `POST /api/bookings/:id/refund` | owner + step-up | amount <= the paid deposit; an out-of-policy refund needs `override:true` and is audited |
+| `GET/PUT /api/businesses/:id/refund-policy`, `GET/PUT /api/businesses/:id/voice`, `GET .../voice/preview` | GET staff, PUT owner | voice list from the operator allowlist / provider; audited |
+| `GET/PATCH /api/businesses/:id/call-mode`, `PUT/DELETE .../forward-number`, `POST .../forward-number/verify/{start,confirm}` | owner (GET staff) + step-up for changes | email + text notice on change |
+| `POST .../owner-phone/verify/{start,confirm}` | owner, verified email | per-account / per-business / global SMS limits |
+| `GET /api/businesses/:id/kb-changes`, `POST .../kb-changes/:changeId` | owner | apply / reject / undo of owner call-in proposals; hours, closed dates and service area are real fields |
+| `GET /api/businesses/:id/onboarding-status`, `PUT .../onboarding-status/knowledge` | owner | readiness gate for non-admins |
+| `GET /api/calls`, `GET /api/calls/:id/{transcript,live,audio,voicemail}` | staff | tenant scoped; owner-line calls never listed; transcript / audio only for `consent_status = 'disclosed'`; SSE limited per user and business |
+| `GET /api/integrations/google/{status,busy}` | staff | times only, never titles |
+| `POST /api/integrations/google/connect`, `PATCH .../calendar`, `GET .../calendars`, `DELETE .../disconnect`, `GET .../callback` | owner | callback verifies a signed, expiring, session-bound state; `block_on_busy` is `calendar_connections.block_on_busy` |
+| `POST /api/integrations/google/webhook` | none (Google) | `X-Goog-Channel-Token` HMAC + channel id match; the body is ignored, it only triggers a sync |
+| `POST /api/integrations/google/mock-event` | owner | 404 unless `GOOGLE_OAUTH_MOCK=true` outside production |
+| `POST /api/admin/resync-agents`, `POST /api/admin/jobs/run`, `GET /api/admin/jobs`, `POST /api/admin/billing` | admin | dry-run defaults; audited |
+| `GET /api/billing/status`, `POST /api/billing/{checkout,portal}` | staff / owner | status exposes `usage_warnings` (80% / 100% cap warnings), `billing_interval`, `annual_available` |
+| `POST /api/billing/webhook`, `POST /api/payments/webhook` | Stripe signature | replay-protected by `claimEvent` |
+| `POST /api/voice/{initiation,tools/:tool,transcript-event}` | shared tool secret (`x-recepcionista-tool-secret`) | tenant re-derived from agent id / call keys; owner tools only on `kind = 'owner'` calls |
+| `POST /api/voice/post-call` | ElevenLabs HMAC signature | idempotent per conversation |
+| `POST /api/voice/{incoming,screen,dial-status,voicemail}`, `POST /api/sms/inbound` | Twilio signature | business resolved from the number texted / called |
 
 Pages: `/dashboard/team`, `/dashboard/team/audit` are owner+ (staff get 404); `/dashboard/security` is for everyone. `/dashboard/*` use `getDashboardContext()` (validates the session in Node, resolves the business). `/dashboard/demo` is admin-only, `/dashboard/settings` owner+. `/onboarding` is admin-only unless the account is an owner finishing setup of its active business (layout redirects others to `/dashboard`). Admins pick the business with the sidebar switcher, which sets the `rc_business` cookie (a UI preference: the server checks it against the real business list on every render and falls back to the first business).
 

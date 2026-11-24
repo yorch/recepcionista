@@ -5,12 +5,16 @@
  * - `applyKbChange` claims the proposal and writes the knowledge base in ONE transaction, capturing the replaced values in `previous`.
  * - `revertKbChange` restores `previous` only if the touched fields still hold exactly what the change wrote (optimistic check);
  *   when someone edited them since, nothing is restored and the conflicting fields are reported.
- * Lock order is always change row, then knowledge-base row, so concurrent apply/revert never deadlock.
+ * A patch may also carry REAL business fields (hours, service_area, closed_dates): they are written to the businesses row in the SAME
+ * transaction as the knowledge-base write, captured in `previous`, checked against `base` (their values when the change was proposed: a
+ * change over a newer edit is refused as stale) and compared on revert exactly like the KB fields.
+ * Lock order is always change row, then knowledge-base row, then business row, so concurrent apply/revert never deadlock.
  */
 import { Prisma } from '@prisma/client';
 import { prisma, type DbClient } from './client';
 import { clampLimit, encodeTimeCursor, parseTimeCursor, toPage, type Page } from './paging';
-import { kbFieldsChangedSince, pickKbFields, validateKbPatch } from '@/lib/kb-patch';
+import { BUSINESS_PATCH_KEYS, hasBusinessFields, kbFieldsChangedSince, kbValuesEqual, pickKbFields, validateKbPatch, type PatchValues } from '@/lib/kb-patch';
+import { closedDatesOf } from '@/lib/closures';
 import type { KbPatch, KnowledgeBase, OwnerKbChange, OwnerKbSource, OwnerKbStatus } from '@/lib/types';
 import { OWNER_KB_SOURCES } from '@/lib/types';
 import type { OwnerKbChange as Row } from '@prisma/client';
@@ -33,6 +37,22 @@ function kbData(p: KbPatch): Prisma.KnowledgeBaseUncheckedUpdateInput {
   if (p.system_prompt !== undefined) d.systemPrompt = p.system_prompt;
   if (p.call_script !== undefined) d.callScript = p.call_script;
   return d;
+}
+
+/** Prisma column data for the business fields of a patch. */
+function businessData(p: KbPatch): Prisma.BusinessUncheckedUpdateInput {
+  const d: Prisma.BusinessUncheckedUpdateInput = {};
+  if (p.hours !== undefined) d.hours = p.hours as unknown as Prisma.InputJsonObject;
+  if (p.service_area !== undefined) d.serviceArea = p.service_area;
+  if (p.closed_dates !== undefined) d.closedDates = p.closed_dates as unknown as Prisma.InputJsonValue;
+  return d;
+}
+
+/** Lock the business row and return its patchable fields as stored. */
+async function lockBusiness(tx: DbClient, businessId: string): Promise<PatchValues> {
+  await tx.$queryRaw`SELECT "id" FROM "businesses" WHERE "id" = ${businessId} FOR UPDATE`;
+  const b = await tx.business.findUniqueOrThrow({ where: { id: businessId }, select: { hours: true, serviceArea: true, closedDates: true } });
+  return { hours: b.hours ?? {}, service_area: b.serviceArea ?? [], closed_dates: closedDatesOf(b.closedDates) };
 }
 
 /** Lock (creating an empty one when missing) the business's knowledge-base row and return its values. */
@@ -66,10 +86,18 @@ export async function proposeKbChange(input: ProposeKbChangeInput): Promise<Owne
   if (!summary) throw new KbChangeInvalidError('summary is required');
   const v = validateKbPatch(input.patch);
   if (!v.ok) throw new KbChangeInvalidError(v.error);
+  // The business fields the patch touches, as they are NOW: apply refuses when they changed in between (see applyKbChange).
+  let base: PatchValues | null = null;
+  if (hasBusinessFields(v.patch)) {
+    const b = await prisma.business.findUnique({ where: { id: input.business_id }, select: { hours: true, serviceArea: true, closedDates: true } });
+    if (!b) throw new KbChangeInvalidError('business not found');
+    const now: PatchValues = { hours: b.hours ?? {}, service_area: b.serviceArea ?? [], closed_dates: closedDatesOf(b.closedDates) };
+    base = Object.fromEntries(BUSINESS_PATCH_KEYS.filter((k) => k in v.patch).map((k) => [k, now[k]]));
+  }
   const row = await prisma.ownerKbChange.create({
     data: {
       businessId: input.business_id, callId: input.call_id ?? null, source: input.source, summary: summary.slice(0, 1000),
-      patch: v.patch as unknown as Prisma.InputJsonObject, createdBy: input.created_by ? input.created_by.slice(0, 200) : null,
+      patch: v.patch as unknown as Prisma.InputJsonObject, ...(base ? { base: base as unknown as Prisma.InputJsonObject } : {}), createdBy: input.created_by ? input.created_by.slice(0, 200) : null,
     },
   });
   return toChange(row);
@@ -82,7 +110,7 @@ export async function getKbChange(businessId: string, id: string): Promise<Owner
 
 export type KbChangeResult =
   | { ok: true; change: OwnerKbChange; changed: boolean }
-  | { ok: false; reason: 'not_found' | 'not_proposed' | 'not_applied' | 'changed_since'; current?: OwnerKbStatus; conflicts?: string[] };
+  | { ok: false; reason: 'not_found' | 'not_proposed' | 'not_applied' | 'changed_since' | 'stale'; current?: OwnerKbStatus; conflicts?: string[] };
 
 /**
  * Apply a proposed change: claims it (proposed -> applied), reads the current values of the touched fields into `previous` and
@@ -103,8 +131,16 @@ export async function applyKbChange(businessId: string, id: string, now: Date = 
     const change = await tx.ownerKbChange.findUniqueOrThrow({ where: { id } });
     const patch = (change.patch ?? {}) as KbPatch;
     const kb = await lockKb(tx, businessId);
-    const previous = pickKbFields(kb, Object.keys(patch));
-    await tx.knowledgeBase.update({ where: { businessId }, data: kbData(patch) });
+    const biz = hasBusinessFields(patch) ? await lockBusiness(tx, businessId) : {};
+    const base = (change.base ?? null) as PatchValues | null;
+    if (base && Object.keys(base).some((k) => !kbValuesEqual(biz[k], base[k]))) {
+      // The hours / closures / area were edited after this was proposed: applying a whole-list patch would silently undo that edit.
+      await tx.ownerKbChange.update({ where: { id }, data: { status: 'rejected', appliedAt: null } });
+      return { ok: false as const, reason: 'stale' as const };
+    }
+    const previous = pickKbFields({ ...kb, ...biz }, Object.keys(patch));
+    if (Object.keys(kbData(patch)).length > 0) await tx.knowledgeBase.update({ where: { businessId }, data: kbData(patch) });
+    if (Object.keys(businessData(patch)).length > 0) await tx.business.update({ where: { id: businessId }, data: businessData(patch) });
     const row = await tx.ownerKbChange.update({ where: { id }, data: { previous: previous as unknown as Prisma.InputJsonObject } });
     return { ok: true as const, change: toChange(row), changed: true };
   }, { timeout: 15_000 });
@@ -124,9 +160,11 @@ export async function revertKbChange(businessId: string, id: string, now: Date =
     const patch = (cur.patch ?? {}) as KbPatch;
     const previous = (cur.previous ?? {}) as KbPatch;
     const kb = await lockKb(tx, businessId);
-    const conflicts = kbFieldsChangedSince(kb, patch);
+    const biz = hasBusinessFields(patch) ? await lockBusiness(tx, businessId) : {};
+    const conflicts = kbFieldsChangedSince({ ...kb, ...biz }, patch);
     if (conflicts.length > 0) return { ok: false as const, reason: 'changed_since' as const, current: 'applied' as const, conflicts };
-    await tx.knowledgeBase.update({ where: { businessId }, data: kbData(previous) });
+    if (Object.keys(kbData(previous)).length > 0) await tx.knowledgeBase.update({ where: { businessId }, data: kbData(previous) });
+    if (Object.keys(businessData(previous)).length > 0) await tx.business.update({ where: { id: businessId }, data: businessData(previous) });
     const row = await tx.ownerKbChange.update({ where: { id }, data: { status: 'reverted', revertedAt: now } });
     return { ok: true as const, change: toChange(row), changed: true };
   }, { timeout: 15_000 });

@@ -33,7 +33,7 @@ Use of data received from Google APIs adheres to the Google API Services User Da
 | Access + refresh token | `calendar_connections`, AES-256-GCM envelopes (`APP_SECRET_KEY`, bound to the row id) | never returned by any API, never logged, never in audit meta or errors |
 | Busy blocks | `calendar_busy_blocks` | start, end, all-day flag, free/busy only. **No title, description, location or attendee is stored** (and the API request uses `fields=` so they are not even downloaded) |
 | Event links | `calendar_event_links` | booking id, Google event id, etag, hash of what we pushed |
-| "Block on busy" switch | audit trail (`calendar.settings_changed`, latest wins; the schema has no settings column) | default ON |
+| "Block on busy" switch | `calendar_connections.block_on_busy` (boolean, default true; migration `20261202120000_integration_gaps` moved it from the latest `calendar.settings_changed` audit event and back-filled it). Every change is still audited as `calendar.settings_changed`. It survives a disconnect/reconnect of the same business | default ON |
 
 Events we push live in the **owner's own calendar** and contain the customer's first name in the title and the customer's full name, phone, address and the call summary in the description (`<service> — <first name>`). Google's default reminders apply. Anyone the owner shares that calendar with can read them: tell owners.
 

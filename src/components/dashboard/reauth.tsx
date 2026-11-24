@@ -94,8 +94,8 @@ function ReauthPanel({ onCancel, onDone }: { onCancel: () => void; onDone: () =>
       className="mt-2 flex max-w-md flex-col gap-3 rounded-xl border border-line-3 bg-sunken p-4"
     >
       <div>
-        <h3 id={headingId} className="text-sm font-semibold text-white">Confirm it is you</h3>
-        <p className="mt-1 text-xs leading-relaxed text-dim">Changing how your business line is answered needs a fresh sign-in check. We will also tell you by email and text when it changes.</p>
+        <h3 id={headingId} className="text-sm font-semibold text-white">Confirm it&apos;s you to continue</h3>
+        <p className="mt-1 text-xs leading-relaxed text-dim">This is a sensitive change, so we need a fresh sign-in check first. It only takes a moment, and we keep a record of the change.</p>
       </div>
       <TextField
         label={useCode ? 'Authenticator code' : mode === 'token' ? 'Admin token' : 'Password'}

@@ -232,7 +232,7 @@ export async function rescheduleBookingTool(args: BookingToolArgs): Promise<Tool
 
 async function rejection(lang: Lang, business: Business, booking: Booking, reason: string): Promise<ToolOut> {
   const tz = tzOf(business);
-  if (reason === 'slot_taken' || reason === 'calendar_busy' || reason === 'past' || reason === 'closed_day' || reason === 'before_open' || reason === 'after_close') {
+  if (reason === 'slot_taken' || reason === 'calendar_busy' || reason === 'past' || reason === 'closed_day' || reason === 'closed_date' || reason === 'before_open' || reason === 'after_close') {
     // Offer real alternatives from the calendar: the next free slots within two weeks.
     const alts: string[] = [];
     for (const d of upcomingDateKeys(Date.now(), tz, 14)) {

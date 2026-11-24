@@ -94,6 +94,12 @@ export default async function KnowledgePage() {
           <Card className="h-fit p-5 lg:col-span-2">
             <h2 className="text-xs font-medium uppercase tracking-wider text-dim">Serving</h2>
             <p className="mt-1.5 text-[13px] leading-relaxed text-soft">{biz.service_area.join(' · ') || 'Not set'}</p>
+            {(biz.closed_dates ?? []).length > 0 && (
+              <>
+                <h2 className="mt-4 text-xs font-medium uppercase tracking-wider text-dim">Closed on</h2>
+                <p className="mt-1.5 text-[13px] leading-relaxed text-soft">{(biz.closed_dates ?? []).slice(0, 12).join(' · ')}{(biz.closed_dates ?? []).length > 12 ? ' …' : ''}</p>
+              </>
+            )}
             <h2 className="mt-4 text-xs font-medium uppercase tracking-wider text-dim">Number</h2>
             <p className="mt-1.5 font-mono text-[13px] text-soft">{biz.phone ?? 'not provisioned'}</p>
             <p className="mt-4 text-xs text-dim">Only the account owner can edit what she knows.</p>

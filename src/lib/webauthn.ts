@@ -13,7 +13,7 @@
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import {
-  consumeWebauthnChallenge, createWebauthnChallenge, deleteExpiredWebauthnChallenges, getPasskeyByCredentialId, listPasskeys, recordPasskeyUse,
+  consumeWebauthnChallenge, createWebauthnChallenge, getPasskeyByCredentialId, listPasskeys, recordPasskeyUse,
 } from '@/lib/db/passkeys';
 import type { PasskeySummary, WebauthnPurpose } from '@/lib/types';
 
@@ -62,7 +62,6 @@ export function webauthnConfigFor(req: Request): WebauthnConfig | null {
 const challengeUser = (purpose: WebauthnPurpose, userId?: string) => (purpose === 'login' ? undefined : userId);
 
 async function remember(purpose: WebauthnPurpose, challenge: string, userId?: string) {
-  if (Math.random() < 0.02) void deleteExpiredWebauthnChallenges();
   await createWebauthnChallenge({ purpose, challenge, user_id: challengeUser(purpose, userId) });
 }
 

@@ -25,6 +25,7 @@ export const RESCHEDULE_REJECTIONS: Partial<Record<BookingRejection, { status: n
   slot_taken: { status: 409, error: 'That time is no longer free. Pick another.' },
   past: { status: 422, error: 'That time is in the past.' },
   closed_day: { status: 422, error: 'The business is closed that day.' },
+  closed_date: { status: 422, error: 'The business is closed that date (holiday closure).' },
   before_open: { status: 422, error: 'That is before opening time.' },
   after_close: { status: 422, error: 'The job would run past closing time.' },
   invalid_time: { status: 422, error: 'That is not a valid date and time.' },

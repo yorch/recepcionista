@@ -81,6 +81,8 @@ model Business {
   refundPolicyText String? @map("refund_policy_text")
   /// Subscription billing cadence: 'month' | 'year' (CHECK).
   billingInterval  String  @default("month") @map("billing_interval")
+  /// Holiday closures: a list of YYYY-MM-DD dates in the business zone (<= 366; CHECK in the migration). A listed date has no slots.
+  closedDates      Json    @default("[]") @map("closed_dates")
 
   knowledgeBase KnowledgeBase?
   calls         Call[]
@@ -215,6 +217,8 @@ model Booking {
   refundAmountCents       Int?      @map("refund_amount_cents")
   stripeRefundId          String?   @map("stripe_refund_id")
   refundedAt              DateTime? @map("refunded_at") @db.Timestamptz(6)
+  /// 'none' | 'open' | 'won' | 'lost' (CHECK in the migration); set from charge.dispute.* events.
+  disputeStatus           String    @default("none") @map("dispute_status")
 
   business        Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
   call            Call?              @relation(fields: [callId], references: [id], onDelete: SetNull)
@@ -558,6 +562,8 @@ model CalendarConnection {
   watchExpiresAt    DateTime? @map("watch_expires_at") @db.Timestamptz(6)
   /// 'active' | 'needs_reauth' | 'revoked' | 'error' (CHECK in the migration)
   status            String    @default("active")
+  /// "Block the times my calendar shows as busy" switch (default on).
+  blockOnBusy       Boolean   @default(true) @map("block_on_busy")
   lastSyncAt        DateTime? @map("last_sync_at") @db.Timestamptz(6)
   lastError         String?   @map("last_error")
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -629,6 +635,8 @@ model OwnerKbChange {
   summary    String
   patch      Json      @default("{}")
   previous   Json?
+  /// The business fields (hours / service_area / closed_dates) the patch touches, as they were when it was proposed (stale check at apply).
+  base       Json?
   appliedAt  DateTime? @map("applied_at") @db.Timestamptz(6)
   revertedAt DateTime? @map("reverted_at") @db.Timestamptz(6)
   createdBy  String?   @map("created_by")

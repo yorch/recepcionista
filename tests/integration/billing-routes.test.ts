@@ -220,6 +220,12 @@ integration('billing routes (postgres)', () => {
       usage: { sms: { used: 3, cap: 10 }, call_minutes: { used: 2, used_seconds: 150, cap: 30 } }, // trialing: TRIAL_CALL_MINUTES_CAP (30); the SMS override (10) wins
     });
     expect(d.trial_ends_at).toBeTruthy();
+    // one stable field name for the cap warnings: `usage_warnings` (no `warnings` alias); SMS 3/10 = 30% -> none yet
+    expect(Array.isArray(d.usage_warnings)).toBe(true);
+    expect(d.warnings).toBeUndefined();
+    await db.recordSms(biz.id, 5); // 8/10 = 80%
+    const warned = (await json(await status(req('GET', '/api/billing/status', staff)))).data;
+    expect(warned.usage_warnings.map((w: { level: number }) => w.level)).toContain(80);
     await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
       await db.setBillingState(biz.id, { billing_status: 'canceled' });
       expect((await json(await status(req('GET', '/api/billing/status', staff)))).data).toMatchObject({
@@ -253,6 +259,32 @@ integration('billing routes (postgres)', () => {
       expect(r.billingStatus).toBe('trialing');
       expect(r.trialEndsAt!.getTime()).toBeGreaterThan(Date.now() + 6 * 86_400_000);
       expect((await mockActivate(req('GET', url, owner))).status).toBe(409); // already subscribed
+    });
+  });
+
+  test('annual choice in the mock checkout: offered only with STRIPE_PRICE_ID_ANNUAL, the interval travels to mock-activate and is recorded', async () => {
+    const biz = await newBusiness();
+    const owner = await login(biz.id, 'owner');
+    const body = (interval: string) => req('POST', '/api/billing/checkout', owner, { return_path: '/onboarding', interval });
+    expect((await checkout(body('year'))).status).toBe(422); // not configured: refused
+    await withEnv({ DEMO_MODE: 'true', STRIPE_PRICE_ID_ANNUAL: 'price_year_test' }, async () => {
+      expect((await checkout(body('week'))).status).toBe(422);
+      const res = await json(await checkout(body('year')));
+      expect(res.data.mock).toBe(true);
+      expect(res.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}&return_path=%2Fonboarding&interval=year`);
+      const act = await mockActivate(req('GET', res.data.url.replace('https://app.example.test', ''), owner));
+      expect(act.status).toBe(303);
+      const r = await row(biz.id);
+      expect(r.billingStatus).toBe('trialing');
+      expect(r.billingInterval).toBe('year');
+      const st = (await json(await status(req('GET', '/api/billing/status', owner)))).data;
+      expect(st).toMatchObject({ billing_interval: 'year', annual_available: true });
+    });
+    const monthly = await newBusiness();
+    const o2 = await login(monthly.id, 'owner');
+    await withEnv({ DEMO_MODE: 'true', STRIPE_PRICE_ID_ANNUAL: 'price_year_test' }, async () => {
+      await mockActivate(req('GET', `/api/billing/mock-activate?business_id=${monthly.id}`, o2));
+      expect((await row(monthly.id)).billingInterval).toBe('month');
     });
   });
 

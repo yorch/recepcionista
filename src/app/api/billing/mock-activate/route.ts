@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import { fail } from '@/lib/http';
 import { demoModeEnabled } from '@/lib/auth';
 import { authenticate, scopeBusinessId } from '@/lib/session';
-import { getBusiness, recordAudit, setBillingState } from '@/lib/db';
-import { checkoutReturnPath, returnBaseUrl, trialDays, planName } from '@/lib/providers/stripe-billing';
+import { getBusiness, recordAudit, setBillingState, updateBusiness } from '@/lib/db';
+import { annualAvailable, checkoutReturnPath, returnBaseUrl, trialDays, planName } from '@/lib/providers/stripe-billing';
 import { billingErrorResponse } from '@/lib/billing/http';
 
 export const dynamic = 'force-dynamic';
@@ -29,13 +29,15 @@ export async function GET(req: Request) {
     const status = business.billing_status ?? 'none';
     if (status === 'trialing' || status === 'active' || status === 'past_due') return fail('already subscribed', 409);
     const days = trialDays();
+    const wantsYear = new URL(req.url).searchParams.get('interval') === 'year' && annualAvailable();
+    if (wantsYear) await updateBusiness(business.id, { billing_interval: 'year' }); // the real flow learns this from the subscription's price
     await setBillingState(business.id, {
       billing_status: 'trialing', plan: planName(),
       trial_ends_at: new Date(Date.now() + days * 86_400_000), cancel_at_period_end: false,
     });
     await recordAudit({
       actor_kind: 'user', actor_user_id: auth.principal.kind === 'user' ? auth.principal.user.id : auth.principal.user?.id ?? null,
-      business_id: business.id, action: 'billing.mock_activated', target: `business:${business.id}`,
+      business_id: business.id, action: 'billing.mock_activated', target: `business:${business.id}`, meta: { interval: wantsYear ? 'year' : 'month' },
     });
     return NextResponse.redirect(`${returnBaseUrl()}${checkoutReturnPath(new URL(req.url).searchParams.get('return_path'))}?checkout=success`, 303);
   } catch (err) {

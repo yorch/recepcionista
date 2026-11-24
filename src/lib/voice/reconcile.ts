@@ -1,9 +1,8 @@
 /**
  * Metering reconciliation: a call whose post-call webhook never arrived (dropped, failed signature, provider outage) would otherwise never
- * count against the AI-minutes cap. For customer calls older than RECONCILE_AFTER_MINUTES (default 20; a call is capped at 15 min) with no
+ * count against the AI-minutes cap. For calls (customer AND owner-line: owner calls use AI minutes too, they are only never BLOCKED by the cap) older than RECONCILE_AFTER_MINUTES (default 20; a call is capped at 15 min) with no
  * `metered_at`, fetch the conversation duration/status from ElevenLabs and add it ONCE. Shares `claimCallMetering` with the post-call
- * webhook (voice/postcall.ts), so a late webhook and this job can never both add the minutes. Owner-kind calls are never listed
- * (listCallsNeedingReconcile), and only AI seconds are recorded (never forward / voicemail seconds). Retries back off exponentially
+ * webhook (voice/postcall.ts), so a late webhook and this job can never both add the minutes. Only AI seconds are recorded (never forward / voicemail seconds). Retries back off exponentially
  * (attempt n waits 2^n x 10 min after the base delay); after RECONCILE_MAX_ATTEMPTS the job gives up with an audit row and an error log.
  */
 import {
@@ -51,11 +50,18 @@ export async function reconcileUnmeteredCalls(deps: ReconcileDeps = {}): Promise
     try {
       // The post-call webhook may have landed since the list was read.
       const fresh = await getCall(c.id);
-      if (!fresh || fresh.kind === 'owner') continue;
+      if (!fresh) continue;
       const meteredAlready = await alreadyMetered(c.id);
       if (meteredAlready) { item('already_metered'); continue; }
 
       const conv = await get(c.conversation_id as string);
+      if (!conv.ok && conv.notFound && fresh.kind === 'owner') {
+        // By design the provider-side conversation of an owner call is deleted right after the post-call webhook (nothing is kept). If its
+        // duration never reached us there is nothing left to fetch: settle it (0 seconds) instead of retrying and "giving up" noisily.
+        await claimCallMetering(c.id, now);
+        item('already_metered');
+        continue;
+      }
       if (!conv.ok || conv.snapshot.status === 'in-progress' || conv.snapshot.status === 'initiated' || conv.snapshot.status === 'unknown') {
         const n = await bumpReconcileAttempt(c.id);
         const why = !conv.ok ? (conv.notFound ? 'not_found' : 'fetch_failed') : 'not_ready';

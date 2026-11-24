@@ -70,6 +70,7 @@ export function Agenda({ businessId, tz, initial }: { businessId: string; tz: st
               <div className="hidden w-20 shrink-0 text-right sm:block">
                 <p className="tabular-nums text-[13px] text-soft">{money(b.price_estimate)}</p>
                 {b.deposit_amount ? <p className={cn('text-xs', b.deposit_paid ? 'text-mint-text' : 'text-warn')}>{b.deposit_paid ? 'deposit paid' : `deposit ${money(b.deposit_amount)}`}</p> : null}
+                {b.dispute_status && b.dispute_status !== 'none' ? <p className={cn('text-xs', b.dispute_status === 'won' ? 'text-mint-text' : 'text-warn')}>{`dispute ${b.dispute_status}`}</p> : null}
               </div>
             </li>
           );

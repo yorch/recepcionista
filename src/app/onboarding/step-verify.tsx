@@ -12,6 +12,7 @@ import type { StepProps } from './flow';
 const RESEND_SECONDS = 30;
 
 function friendly(err: ApiError, what: 'send' | 'confirm'): string {
+  if (err.status === 403 && /email_not_verified/i.test(err.message)) return 'Confirm your email address first (check your inbox for our message), then come back and text yourself a code.';
   if (err.status === 429) return 'Too many attempts. Wait a few minutes, then try again.';
   if (err.status === 404 || err.status === 501) return 'Phone verification is not available yet. Please contact support.';
   if (err.status === 503) return 'We could not send a text right now. Try again in a minute.';

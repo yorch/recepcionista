@@ -36,6 +36,8 @@ export interface Business {
   owner_name?: string | null;
   hours: Hours;
   service_area: string[];
+  /** Holiday closures (YYYY-MM-DD in the business zone, at most 366): no slots on these dates whatever `hours` says. */
+  closed_dates?: string[];
   status: BusinessStatus;
   agent_id?: string | null;
   /** IANA zone, e.g. America/New_York. Defaults to America/New_York when absent. */
@@ -187,8 +189,11 @@ export interface Booking {
   refund_amount_cents?: number | null;
   stripe_refund_id?: string | null;
   refunded_at?: string | null;
+  /** Card dispute on the deposit (Stripe charge.dispute.* events): none | open | won | lost. */
+  dispute_status?: DisputeStatus;
 }
 
+export type DisputeStatus = 'none' | 'open' | 'won' | 'lost';
 export type RefundStatus = 'none' | 'pending' | 'refunded' | 'failed' | 'not_applicable';
 
 export interface BriefingStats {
@@ -397,7 +402,13 @@ export type OwnerKbStatus = 'proposed' | 'applied' | 'reverted' | 'rejected';
 export const OWNER_KB_SOURCES: readonly OwnerKbSource[] = ['owner_voice', 'owner_sms', 'dashboard'];
 
 /** The knowledge-base fields an owner change may touch (values are the NEW content). */
-export type KbPatch = Partial<Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes' | 'system_prompt' | 'call_script'>>;
+export type KbPatch = Partial<Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes' | 'system_prompt' | 'call_script'>> & {
+  /** BUSINESS fields an owner call-in change may set for real (applied to businesses.hours / service_area / closed_dates). */
+  hours?: Hours;
+  service_area?: string[];
+  /** Holiday closures: YYYY-MM-DD dates in the business zone (at most 366). */
+  closed_dates?: string[];
+};
 
 export interface OwnerKbChange {
   id: ID;

@@ -8,7 +8,7 @@ import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extractio
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
 import { readinessOf } from '@/lib/kb/readiness';
 import { isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
-import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
+import { syncAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
 import { limitRequest } from '@/lib/ratelimit';
@@ -316,7 +316,7 @@ async function provision(
     let agentFailure: string | null = null;
     lostLeaseCheck(signal);
     try {
-      const agent = await createOrUpdateAgent({ business: updated, kb });
+      const agent = await syncAgent({ business: updated, kb });
       agentId = agent.agent_id;
       agentMock = agent.mock;
       if (agent.error) agentFailure = `agent registration failed (${agent.error})`;

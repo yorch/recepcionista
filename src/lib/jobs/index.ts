@@ -23,7 +23,7 @@
  * RETENTION_JOB=on still works on its own (JOBS unset in development) and is off by default. JOBS=off turns everything off.
  */
 import {
-  claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, EMAIL_TOKEN_GRACE_MS,
+  claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, deleteExpiredWebauthnChallenges, WEBAUTHN_CHALLENGE_GRACE_MS, EMAIL_TOKEN_GRACE_MS,
   getBusiness, isProvisioningAllowed, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
   checkSmsAllowed, recordingDeletionStatus, withLease,
 } from '@/lib/db';
@@ -328,13 +328,14 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
 
 /** What the cleanup job would delete right now (read-only counts). */
 export async function previewCleanup(now: Date = new Date()): Promise<Record<string, number>> {
-  const [sessions, tokens, events, buckets] = await Promise.all([
+  const [sessions, tokens, events, buckets, challenges] = await Promise.all([
     prisma.userSession.count({ where: { expiresAt: { lt: now } } }),
     prisma.emailToken.count({ where: { expiresAt: { lt: new Date(now.getTime() - EMAIL_TOKEN_GRACE_MS) } } }),
     prisma.processedEvent.count({ where: { createdAt: { lt: new Date(now.getTime() - PROCESSED_EVENTS_RETENTION_MS) } } }),
     prisma.rateLimitBucket.count({ where: { windowStart: { lt: new Date(now.getTime() - CLEANUP_HORIZON_MS) } } }),
+    prisma.webauthnChallenge.count({ where: { expiresAt: { lt: new Date(now.getTime() - WEBAUTHN_CHALLENGE_GRACE_MS) } } }),
   ]);
-  return { sessions, email_tokens: tokens, processed_events: events, rate_limit_buckets: buckets };
+  return { sessions, email_tokens: tokens, processed_events: events, rate_limit_buckets: buckets, webauthn_challenges: challenges };
 }
 
 export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
@@ -352,6 +353,7 @@ export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
       email_tokens: await deleteExpiredEmailTokens(now),
       processed_events: await cleanupProcessedEvents(now, true),
       rate_limit_buckets: await cleanupRateLimitBuckets(now),
+      webauthn_challenges: await deleteExpiredWebauthnChallenges(now), // expired passkey challenges (kept a day for forensics); no longer a random 2% side effect of issuing one
     }));
     if (!run.acquired) { report.items.push({ outcome: 'busy' }); return report; }
     report.counts = run.value;

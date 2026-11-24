@@ -1,12 +1,21 @@
 /**
  * Pure helpers for owner knowledge-base changes: validate a patch, and compare KB values regardless of JSON key order.
  */
-import type { FAQ, KbPatch, KnowledgeBase, Service } from '@/lib/types';
+import { DAY_KEYS } from '@/lib/availability';
+import { normalizeClosedDates } from '@/lib/closures';
+import type { FAQ, Hours, KbPatch, KnowledgeBase, Service } from '@/lib/types';
 
 export const KB_PATCH_KEYS = ['services', 'faqs', 'pricing_notes', 'system_prompt', 'call_script'] as const;
 export type KbPatchKey = (typeof KB_PATCH_KEYS)[number];
+/** BUSINESS fields a change may set for real (businesses.hours / service_area / closed_dates), applied in the same transaction as the KB write. */
+export const BUSINESS_PATCH_KEYS = ['hours', 'service_area', 'closed_dates'] as const;
+export type BusinessPatchKey = (typeof BUSINESS_PATCH_KEYS)[number];
+export const ALL_PATCH_KEYS: readonly string[] = [...KB_PATCH_KEYS, ...BUSINESS_PATCH_KEYS];
+export const hasBusinessFields = (patch: object): boolean => BUSINESS_PATCH_KEYS.some((k) => k in patch);
+/** Current values a patch is compared against / captured from: the KB columns plus the business fields. */
+export type PatchValues = Record<string, unknown>;
 
-export const KB_LIMITS = { services: 200, faqs: 200, text: 20_000, name: 200, short: 2_000 } as const;
+export const KB_LIMITS = { services: 200, faqs: 200, text: 20_000, name: 200, short: 2_000, areas: 100, area: 100 } as const;
 
 /** JSON with object keys sorted, so two structurally equal values compare equal (jsonb does not keep key order). */
 export function canonicalJson(value: unknown): string {
@@ -40,12 +49,38 @@ function cleanFaq(v: unknown): FAQ | null {
   return { question: v.question.trim(), answer: v.answer };
 }
 
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** Validate opening hours: only the seven day keys, each null (closed) or { open, close } as HH:MM with open before close ("24:00" may only close). */
+export function validateHours(raw: unknown): Hours | null {
+  if (!isObj(raw)) return null;
+  const out: Hours = {};
+  for (const [day, v] of Object.entries(raw)) {
+    if (!(DAY_KEYS as readonly string[]).includes(day)) return null;
+    if (v === null) { out[day] = null; continue; }
+    if (!isObj(v) || typeof v.open !== 'string' || typeof v.close !== 'string') return null;
+    if (!HHMM.test(v.open) || !(HHMM.test(v.close) || v.close === '24:00') || v.open >= v.close) return null;
+    out[day] = { open: v.open, close: v.close };
+  }
+  return out;
+}
+
+export function validateServiceArea(raw: unknown): string[] | null {
+  if (!Array.isArray(raw) || raw.length > KB_LIMITS.areas) return null;
+  const out: string[] = [];
+  for (const a of raw) {
+    if (typeof a !== 'string' || !a.trim() || a.length > KB_LIMITS.area) return null;
+    out.push(a.trim());
+  }
+  return out;
+}
+
 export type KbPatchResult = { ok: true; patch: KbPatch } | { ok: false; error: string };
 
 /** Validate and normalise a patch: only known keys, bounded sizes, well-formed services/faqs. Empty patches are refused. */
 export function validateKbPatch(raw: unknown): KbPatchResult {
   if (!isObj(raw)) return { ok: false, error: 'patch must be an object' };
-  const unknown = Object.keys(raw).filter((k) => !(KB_PATCH_KEYS as readonly string[]).includes(k));
+  const unknown = Object.keys(raw).filter((k) => !ALL_PATCH_KEYS.includes(k));
   if (unknown.length) return { ok: false, error: `unknown field(s): ${unknown.join(', ')}` };
   const patch: KbPatch = {};
   if (raw.services !== undefined) {
@@ -60,6 +95,21 @@ export function validateKbPatch(raw: unknown): KbPatchResult {
     if (list.some((x) => x === null)) return { ok: false, error: 'a faq is malformed' };
     patch.faqs = list as FAQ[];
   }
+  if (raw.hours !== undefined) {
+    const h = validateHours(raw.hours);
+    if (!h) return { ok: false, error: 'hours must list days (sunday..saturday) as null or { open, close } in HH:MM with open before close' };
+    patch.hours = h;
+  }
+  if (raw.service_area !== undefined) {
+    const a = validateServiceArea(raw.service_area);
+    if (!a) return { ok: false, error: 'service_area must be a list of at most 100 short place names' };
+    patch.service_area = a;
+  }
+  if (raw.closed_dates !== undefined) {
+    const d = normalizeClosedDates(raw.closed_dates);
+    if (!d) return { ok: false, error: 'closed_dates must be a list of at most 366 valid YYYY-MM-DD dates' };
+    patch.closed_dates = d;
+  }
   for (const k of ['pricing_notes', 'system_prompt', 'call_script'] as const) {
     if (raw[k] === undefined) continue;
     if (typeof raw[k] !== 'string' || (raw[k] as string).length > KB_LIMITS.text) return { ok: false, error: `${k} must be text of at most 20000 characters` };
@@ -70,15 +120,15 @@ export function validateKbPatch(raw: unknown): KbPatchResult {
 }
 
 /** The current values of the fields a patch touches (what a revert would restore). */
-export function pickKbFields(kb: Pick<KnowledgeBase, KbPatchKey>, keys: readonly string[]): KbPatch {
+export function pickKbFields(values: PatchValues, keys: readonly string[]): KbPatch {
   const out: Record<string, unknown> = {};
-  for (const k of keys) if ((KB_PATCH_KEYS as readonly string[]).includes(k)) out[k] = kb[k as KbPatchKey];
+  for (const k of keys) if (ALL_PATCH_KEYS.includes(k)) out[k] = values[k];
   return out as KbPatch;
 }
 
 /** Fields of `patch` whose value in `kb` differs from the patch value. */
-export function kbFieldsChangedSince(kb: Pick<KnowledgeBase, KbPatchKey>, patch: KbPatch): string[] {
-  return Object.keys(patch).filter((k) => !kbValuesEqual(kb[k as KbPatchKey], patch[k as KbPatchKey]));
+export function kbFieldsChangedSince(values: PatchValues, patch: KbPatch): string[] {
+  return Object.keys(patch).filter((k) => !kbValuesEqual(values[k], (patch as PatchValues)[k]));
 }
 
 // ── Owner-driven (voice / SMS) patches: stricter than the dashboard editor ───────────────────────────────────────────────
@@ -88,15 +138,15 @@ export function kbFieldsChangedSince(kb: Pick<KnowledgeBase, KbPatchKey>, patch:
 // system prompt or the call script.
 
 export const OWNER_KB_LIMITS = {
-  services: 100, faqs: 100, serviceName: 80, serviceDescription: 200, question: 200, answer: 600, notes: 1_500, maxPrice: 50_000,
+  services: 100, faqs: 100, areas: 30, area: 60, serviceName: 80, serviceDescription: 200, question: 200, answer: 600, notes: 1_500, maxPrice: 50_000,
 } as const;
 
-export const OWNER_PATCH_KEYS = ['services', 'faqs', 'pricing_notes'] as const;
+export const OWNER_PATCH_KEYS = ['services', 'faqs', 'pricing_notes', 'hours', 'service_area', 'closed_dates'] as const;
 
 /** Tool / function names the agent knows: the owner has no reason to put them in business text. */
 const TOOL_WORDS = [
   'check_availability', 'create_booking', 'send_sms', 'create_payment_link', 'flag_emergency', 'get_pricing', 'handoff_to_human',
-  'propose_kb_change', 'list_recent_changes', 'undo_last_change',
+  'propose_kb_change', 'list_recent_changes', 'undo_last_change'
 ];
 
 /** Fold text for phrase matching: NFKC, accents and case folded, leetspeak digits mapped, punctuation to spaces. */
@@ -175,10 +225,12 @@ const FLAGGED: ReadonlySet<OwnerTextProblem> = new Set(['injection', 'tool_name'
  * different from what is stored are scanned (existing content is already trusted); counts and lengths are capped; the system prompt and
  * call script can never be touched.
  */
-export function validateOwnerKbPatch(raw: unknown, current: Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes'>): OwnerPatchResult {
+export function validateOwnerKbPatch(
+  raw: unknown, current: Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes'> & { service_area?: string[] },
+): OwnerPatchResult {
   if (isObj(raw)) {
     const extra = Object.keys(raw).filter((k) => !(OWNER_PATCH_KEYS as readonly string[]).includes(k));
-    if (extra.length) return { ok: false, error: `only services, FAQs and pricing notes can be changed by phone (not ${extra.join(', ')})`, flagged: extra.some((k) => k === 'system_prompt' || k === 'call_script') };
+    if (extra.length) return { ok: false, error: `only services, FAQs, pricing notes, hours, closed dates and the service area can be changed by phone (not ${extra.join(', ')})`, flagged: extra.some((k) => k === 'system_prompt' || k === 'call_script') };
   }
   const base = validateKbPatch(raw);
   if (!base.ok) return { ok: false, error: base.error, flagged: false };
@@ -209,6 +261,15 @@ export function validateOwnerKbPatch(raw: unknown, current: Pick<KnowledgeBase, 
       if (a) return bad('FAQ answer', a);
     }
   }
+  if (patch.service_area) {
+    if (patch.service_area.length === 0 || patch.service_area.length > OWNER_KB_LIMITS.areas) return { ok: false, error: 'the service area needs between 1 and 30 places', flagged: false };
+    for (const a of patch.service_area) {
+      if ((current.service_area ?? []).some((x) => x.toLowerCase() === a.toLowerCase())) continue;
+      const p = ownerTextProblem(a, OWNER_KB_LIMITS.area);
+      if (p) return bad('service area', p);
+    }
+  }
+  if (patch.hours && Object.values(patch.hours).every((d) => d === null)) return { ok: false, error: 'that would close every day; use the dashboard for that', flagged: false };
   if (patch.pricing_notes !== undefined && patch.pricing_notes !== current.pricing_notes) {
     const p = ownerTextProblem(patch.pricing_notes, OWNER_KB_LIMITS.notes);
     if (p) return bad('pricing notes', p);

@@ -147,6 +147,7 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
   const startMs = new Date(booking.scheduled_at).getTime();
   const endIso = new Date(startMs + (booking.duration_minutes ?? 60) * 60_000).toISOString();
   const actions = allowedActions(booking.status, startMs, openedAt);
+  const dispute = booking.dispute_status && booking.dispute_status !== 'none' ? booking.dispute_status : null;
   const depositLine = booking.deposit_amount
     ? `${money(booking.deposit_amount)} ${booking.deposit_paid ? 'paid' : 'requested, not paid yet'}`
     : 'No deposit';
@@ -186,6 +187,14 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
           <dd className="tabular-nums text-soft">{money(booking.price_estimate)} <span className="text-dim">estimate</span></dd>
           <dt className="text-dim">Deposit</dt>
           <dd className={booking.deposit_amount ? (booking.deposit_paid ? 'text-mint-text' : 'text-warn') : 'text-dim'}>{depositLine}</dd>
+          {dispute ? (
+            <>
+              <dt className="text-dim">Card dispute</dt>
+              <dd className={dispute === 'open' || dispute === 'lost' ? 'text-warn' : 'text-mint-text'}>
+                {dispute === 'open' ? 'Open: answer it in Stripe before the deadline' : dispute === 'won' ? 'Won' : 'Lost: the funds went back to the cardholder'}
+              </dd>
+            </>
+          ) : null}
           {booking.reschedule_count ? (<><dt className="text-dim">Moved</dt><dd className="text-soft">{booking.reschedule_count} {booking.reschedule_count === 1 ? 'time' : 'times'}</dd></>) : null}
           <dt className="text-dim">Call</dt>
           <dd>

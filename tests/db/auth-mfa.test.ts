@@ -14,6 +14,7 @@ suite('2FA, sessions and admin sessions (postgres)', () => {
   let db: any, s: any, pw: any, mail: ReturnType<typeof captureMail>, totp: any;
   let login: any, logout: any, mfa: any, enroll: any, confirm: any, disable: any, regen: any, reset: any, sessionsRoute: any, sessionRoute: any, others: any, revokeAdmin: any, bizRoute: any;
   const run = rid();
+  const suiteStart = new Date(Date.now() - 1000);
   const email = (n: string) => `${n}-${run}@example.test`;
   const bizId = `biz_mfa_${run}`;
   const userIds: string[] = [];
@@ -42,7 +43,7 @@ suite('2FA, sessions and admin sessions (postgres)', () => {
     mail.restore();
     await db.prisma.auditEvent.deleteMany({ where: { OR: [{ businessId: bizId }, { actorUserId: { in: userIds } }] } });
     await db.prisma.user.deleteMany({ where: { id: { in: userIds } } });
-    await db.prisma.userSession.deleteMany({ where: { kind: 'admin_token' } });
+    await db.prisma.userSession.deleteMany({ where: { kind: 'admin_token', createdAt: { gte: suiteStart } } });
     await db.prisma.business.deleteMany({ where: { id: bizId } });
     await clearLimiter(db, LIMITER);
     await db.prisma.$disconnect();
@@ -336,6 +337,7 @@ suite('2FA, sessions and admin sessions (postgres)', () => {
 
     test('login creates a server-side admin_token session in a random opaque cookie (12 h); no derived cookie', async () => {
       await clearLimiter(db, ['auth/login']);
+      const startedAt = new Date(Date.now() - 1000);
       const res = await adminLogin();
       expect(res.status).toBe(200);
       const raw = res.headers.getSetCookie().find((c: string) => c.startsWith('rc_session=') && !c.startsWith('rc_session=;')) as string;
@@ -352,7 +354,8 @@ suite('2FA, sessions and admin sessions (postgres)', () => {
       const r = await s.resolvePrincipal(new Headers({ cookie: `rc_session=${token}` }));
       expect(r.ok && r.principal.kind === 'admin' && r.principal.via).toBe('cookie');
       expect(r.ok && r.ambient).toBe(true);
-      expect((await db.listAuditEvents({ limit: 20 })).some((a: any) => a.action === 'auth.admin_login')).toBe(true);
+      // scoped by action + actor kind + timestamp (+ this session's own request), never "the last N global events"
+      expect(await db.prisma.auditEvent.count({ where: { action: 'auth.admin_login', actorKind: 'admin_token', at: { gte: startedAt } } })).toBeGreaterThanOrEqual(1);
     });
 
     test('a cookie that is not a live session (old HMAC value, random, user token in the admin slot) is refused', async () => {

@@ -11,6 +11,7 @@ import { alertOwner } from '@/lib/voice/owner-alert';
 import { rateLimit } from '@/lib/ratelimit';
 import { appSecretKey } from '@/lib/totp';
 import { logger } from '@/lib/log';
+import { tzOf } from '@/lib/time';
 import { detectOwnerCaller } from './detect';
 import {
   OWNER_BAD_PROPOSALS_LOCKOUT, OWNER_CONFIRM_SMS_PER_HOUR, OWNER_LOCKOUT_MS, OWNER_PREVIEW_TTL_MS, OWNER_PROPOSALS_PER_CALL, ownerCallMaxSeconds,
@@ -114,7 +115,7 @@ async function proposeTool(g: Extract<OwnerGate, { ok: true }>, args: Record<str
   }
   const kb = await getKnowledgeBase(business.id);
   if (!kb) return { ok: false, message: say(lang, 'The knowledge base is not set up yet, so I cannot change it.', 'La base de conocimiento aún no está configurada.') };
-  const built = buildOwnerChange(args, kb, lang);
+  const built = buildOwnerChange(args, kb, lang, { hours: business.hours, service_area: business.service_area, closed_dates: business.closed_dates ?? [], timezone: tzOf(business) });
   if (!built.ok) {
     if (built.flagged) {
       const locked = await strike(business, call, 'flagged');

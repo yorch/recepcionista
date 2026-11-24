@@ -27,7 +27,7 @@ export async function PATCH(req: Request) {
     const conn = await getCalendarConnection(r.s.businessId);
     if (!conn || conn.status === 'revoked') return fail('google calendar is not connected', 404);
 
-    if (typeof body.block_on_busy === 'boolean') await setBlockOnBusy(r.s.businessId, body.block_on_busy, r.s.actor);
+    if (typeof body.block_on_busy === 'boolean' && !(await setBlockOnBusy(r.s.businessId, body.block_on_busy, r.s.actor))) return fail('google calendar is not connected', 404);
     if (typeof body.calendar_id === 'string' && body.calendar_id !== conn.calendar_id) {
       const allowed = (await listCalendars(conn.id)).some((c) => c.id === body.calendar_id); // only a calendar this account can write
       if (!allowed) return fail('that calendar is not available on the connected account', 422);

@@ -1,6 +1,6 @@
 import { ok, fail } from '@/lib/http';
 import { getBusinessByPhone, listBusinesses, createCall, getCallBySid, updateCall } from '@/lib/db';
-import { createOrUpdateAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { syncAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { allowMissedCallAlert, callGate, outOfServiceFirstMessage, pausedFirstMessage } from '@/lib/voice/capacity';
 import { resolveCallRoute } from '@/lib/voice/call-mode';
@@ -111,7 +111,7 @@ export async function POST(req: Request) {
         let agentMock = true;
         let wsUrl: string | null = null;
         try {
-          const agent = await createOrUpdateAgent({ business, kb: null });
+          const agent = await syncAgent({ business, kb: null });
           agentId = agent.agent_id;
           agentMock = agent.mock;
           if (agentId) wsUrl = (await getSignedUrl(agentId)).signed_url ?? null;
@@ -227,7 +227,7 @@ export async function POST(req: Request) {
     let agentId = '';
     let agentMock = true;
     try {
-      const agent = await createOrUpdateAgent({ business, kb: null });
+      const agent = await syncAgent({ business, kb: null });
       agentId = agent.agent_id;
       agentMock = agent.mock;
       if (agentId && !agentMock) {

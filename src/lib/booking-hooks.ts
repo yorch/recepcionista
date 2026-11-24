@@ -9,7 +9,10 @@ export type BookingChangeKind = 'created' | 'updated' | 'cancelled' | 'reschedul
 
 export type BookingChangeHandler = (event: { bookingId: string; businessId?: string; kind: BookingChangeKind }) => Promise<void> | void;
 
-const handlers = new Map<string, BookingChangeHandler>();
+// On globalThis: the bundler may load this module once per entry point (the instrumentation hook that registers integrations, and each route
+// that emits), and a private Map per copy would silently drop every event (found by the end-to-end run: bookings never reached Google).
+const g = globalThis as { __recepcionistaBookingHandlers?: Map<string, BookingChangeHandler> };
+const handlers = (g.__recepcionistaBookingHandlers ??= new Map<string, BookingChangeHandler>());
 
 /** Register (or replace) a named handler. */
 export function onBookingChanged(name: string, handler: BookingChangeHandler): void {

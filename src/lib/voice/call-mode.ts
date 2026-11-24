@@ -22,7 +22,7 @@ import type { Business, CallMode, Hours } from '@/lib/types';
 export const CALL_MODES: readonly CallMode[] = ['ai', 'paused', 'forward'];
 export const isCallMode = (v: unknown): v is CallMode => typeof v === 'string' && (CALL_MODES as readonly string[]).includes(v);
 
-type ModeFields = Pick<Business, 'call_mode' | 'forward_number_e164' | 'forward_number_verified_at' | 'forward_during_hours' | 'owner_phone_e164' | 'owner_phone_verified_at' | 'hours' | 'timezone'>
+type ModeFields = Pick<Business, 'call_mode' | 'forward_number_e164' | 'forward_number_verified_at' | 'forward_during_hours' | 'owner_phone_e164' | 'owner_phone_verified_at' | 'hours' | 'timezone' | 'closed_dates'>
   & { phone_e164?: string | null };
 
 type TrustFields = Pick<ModeFields, 'forward_number_e164' | 'forward_number_verified_at' | 'owner_phone_e164' | 'owner_phone_verified_at' | 'phone_e164'>;
@@ -60,8 +60,8 @@ export function trustedForwardNumber(b: TrustFields): string | null {
 }
 
 /** Inside today's opening window in the business zone? (Closed days are closed.) */
-export function isOpenNow(hours: Hours | undefined | null, tz: string, now: Date = new Date()): boolean {
-  const w = openWindow(hours, localDateKey(now, tz), tz);
+export function isOpenNow(hours: Hours | undefined | null, tz: string, now: Date = new Date(), closedDates?: readonly string[] | null): boolean {
+  const w = openWindow(hours, localDateKey(now, tz), tz, closedDates);
   return Boolean(w) && now.getTime() >= w!.start && now.getTime() < w!.end;
 }
 
@@ -81,7 +81,7 @@ export function resolveCallRoute(b: ModeFields, now: Date = new Date(), line: Li
   if (mode !== 'forward') return { action: 'ai', why: 'mode_ai' };
   const target = forwardTarget(b);
   if (!target.ok) return { action: 'ai', why: target.why === 'rejected' ? 'forward_number_rejected' : 'forward_number_unverified' };
-  if (b.forward_during_hours && !isOpenNow(b.hours, tzOf(b.timezone), now)) return { action: 'ai', why: 'forward_outside_hours' };
+  if (b.forward_during_hours && !isOpenNow(b.hours, tzOf(b.timezone), now, b.closed_dates)) return { action: 'ai', why: 'forward_outside_hours' };
   if (!forwardingSupported(line)) return { action: 'paused', why: 'forward_unavailable_on_line' };
   return { action: 'forward', to: target.to };
 }

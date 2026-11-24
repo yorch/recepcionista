@@ -42,7 +42,8 @@ export async function POST(req: Request) {
 
     if (mode === 'mock') {
       const url = `${returnBaseUrl()}/api/billing/mock-activate?business_id=${encodeURIComponent(business.id)}`
-        + (returnPath === '/dashboard/billing' ? '' : `&return_path=${encodeURIComponent(returnPath)}`);
+        + (returnPath === '/dashboard/billing' ? '' : `&return_path=${encodeURIComponent(returnPath)}`)
+        + (interval === 'year' ? '&interval=year' : '');
       return ok({ url, mock: true });
     }
 
