@@ -61,14 +61,24 @@ export const withinTtl = (since: Date | string | null, now: Date = new Date()): 
 type Lang = 'en' | 'es';
 
 /** The confirmation text (<= 320 chars once the summary is cut to fit). Mentions all three commands, as the owner needs. */
-export function confirmationSms(summary: string, code: string, lang: Lang = 'en'): string {
+export function confirmationSms(summary: string, code: string, lang: Lang = 'en', callAt?: string): string {
   const s = summary.length > 150 ? `${summary.slice(0, 147)}...` : summary;
+  // Caller id can be spoofed: say where the request came from so the real owner can tell it was not them (and cancel it).
+  const from = callAt ? (lang === 'es' ? ` Pedido en una llamada a las ${callAt}. No fue usted? Responda NO ${code}.` : ` Requested on a call at ${callAt}. Not you? Reply NO ${code}.`) : '';
   return lang === 'es'
-    ? `Responda SI ${code} para aplicar: ${s}. Responda NO ${code} para cancelar. DESHACER ${code} para revertir. Vence en 30 min.`
-    : `Reply YES ${code} to apply: ${s}. Reply NO ${code} to cancel. UNDO ${code} to revert. Expires in 30 min.`;
+    ? `Responda SI ${code} para aplicar: ${s}. Responda NO ${code} para cancelar. DESHACER ${code} para revertir. Vence en 30 min.${from}`
+    : `Reply YES ${code} to apply: ${s}. Reply NO ${code} to cancel. UNDO ${code} to revert. Expires in 30 min.${from}`;
 }
 
-export function undoSms(summary: string, code: string, lang: Lang = 'en'): string {
+export function undoSms(summary: string, code: string, lang: Lang = 'en', callAt?: string): string {
   const s = summary.length > 150 ? `${summary.slice(0, 147)}...` : summary;
-  return lang === 'es' ? `Responda DESHACER ${code} para revertir: ${s}. Vence en 30 min.` : `Reply UNDO ${code} to revert: ${s}. Expires in 30 min.`;
+  const from = callAt ? (lang === 'es' ? ` Pedido en una llamada a las ${callAt}. No fue usted? Ignore este mensaje.` : ` Requested on a call at ${callAt}. Not you? Ignore this text.`) : '';
+  return lang === 'es' ? `Responda DESHACER ${code} para revertir: ${s}. Vence en 30 min.${from}` : `Reply UNDO ${code} to revert: ${s}. Expires in 30 min.${from}`;
+}
+
+/** "3:12 PM" in the business time zone, for the "requested on a call at" line (ASCII only: the text stays GSM-7). */
+export function callClock(at: Date | string, timeZone: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone }).format(new Date(at)).replace(/[\u202f\u00a0]/g, ' ');
+  } catch { return ''; }
 }

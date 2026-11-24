@@ -177,4 +177,28 @@ suite('language preference (postgres)', () => {
     expect(done.status).toBe(200);
     expect((await db.prisma.user.findUnique({ where: { email: guest } })).locale).toBe('es');
   });
+
+  test('R14 L5: the "account already exists" notice is in the ACCOUNT OWNER\'s language, not the requester\'s', async () => {
+    const { makeT } = await import('../../src/lib/i18n');
+    await db.prisma.user.update({ where: { id: ids.staff }, data: { locale: 'es' } });
+    await clearLimiter(db, ['auth/signup']);
+    await db.prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'auth/signup:notice:' } } });
+    mail.mails.length = 0;
+    // the requester (an attacker probing the address) asks in English; the notice must still arrive in the owner's Spanish
+    const res = await signup.POST(req('/api/auth/signup', { method: 'POST', json: { email: email('staff'), password: PASSWORD, business_name: `Probe ${run}` }, headers: { cookie: 'rc_locale=en', 'accept-language': 'en-US' } }));
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(mail.to(email('staff'))[0]?.subject).toBe(makeT('es')('mail.exists.subject'));
+    expect(makeT('es')('mail.exists.subject')).not.toBe(makeT('en')('mail.exists.subject'));
+    // a malformed cookie no longer breaks signup (it used to throw inside decodeURIComponent)
+    await clearLimiter(db, ['auth/signup']);
+    const addr = email('badcookie');
+    extraUsers.push(addr);
+    const bad = await signup.POST(req('/api/auth/signup', { method: 'POST', json: { email: addr, password: PASSWORD, business_name: `Cookie ${run}` }, headers: { cookie: 'rc_locale=%', 'accept-language': 'es' } }));
+    expect(bad.status).toBe(200);
+    const created = await db.prisma.user.findUnique({ where: { email: addr } });
+    expect(created.locale).toBe('es'); // fell through to Accept-Language
+    extraBiz.push(created.businessId);
+    await db.prisma.user.update({ where: { id: ids.staff }, data: { locale: 'en' } });
+  });
 });

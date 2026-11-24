@@ -52,7 +52,11 @@ export class ElevenLabsPollingSource implements LiveTranscriptSource {
     const r = await this.fetchConv(call.conversation_id);
     if (!r.ok) return { events: [], ended: false, unavailable: true };
     const s = r.snapshot;
-    return { events: snapshotToEvents(s, call.started_at), ended: s.status === 'done' || s.status === 'failed' || s.status === 'processing' };
+    const ended = s.status === 'done' || s.status === 'failed' || s.status === 'processing';
+    const events = snapshotToEvents(s, call.started_at);
+    // While the call runs, the LAST turn may still be growing (a caller mid-sentence): store it as interim so a later poll can replace it.
+    if (!ended && events.length > 0) events[events.length - 1] = { ...events[events.length - 1], is_final: false };
+    return { events, ended };
   }
 }
 
@@ -89,7 +93,8 @@ export async function requestPoll(callId: string, deps: { source?: LiveTranscrip
     const snap = await (deps.source ?? source).snapshot(call);
     if (snap.unavailable) return 'unavailable';
     const known = await lastTranscriptSeq(callId);
-    const fresh = snap.events.filter((e) => e.seq > known);
+    // seq >= known: the newest stored row may be an interim one whose text grew; a final row is immutable (the append leaves it alone).
+    const fresh = snap.events.filter((e) => e.seq >= known);
     if (fresh.length > 0) {
       // A caller who objects mid-call: sticky decline, purge, stop. Checked BEFORE anything new is stored.
       if (callerDeclinedRecording(fresh.filter((e) => e.role === 'caller').map((e) => ({ role: 'user', message: e.text })))) {

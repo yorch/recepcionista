@@ -16,7 +16,7 @@ import { detectOwnerCaller } from './detect';
 import {
   OWNER_BAD_PROPOSALS_LOCKOUT, OWNER_CONFIRM_SMS_PER_HOUR, OWNER_LOCKOUT_MS, OWNER_PREVIEW_TTL_MS, OWNER_PROPOSALS_PER_CALL, ownerCallMaxSeconds,
 } from './config';
-import { confirmationSms, ownerCode, undoBucket, undoScope, undoSms, withinTtl } from './code';
+import { callClock, confirmationSms, ownerCode, undoBucket, undoScope, undoSms, withinTtl } from './code';
 import { buildOwnerChange } from './ops';
 import { OWNER_TOOL_NAMES, type OwnerToolName } from './specs';
 import { auditOwnerKb, type ChangeActor } from './apply';
@@ -139,7 +139,7 @@ async function proposeTool(g: Extract<OwnerGate, { ok: true }>, args: Record<str
   }
   const change = await proposeKbChange({ business_id: business.id, source: 'owner_voice', summary: built.summary, patch: built.patch, call_id: call.id, created_by: 'owner_voice' });
   const code = ownerCode(appSecretKey(), business.id, change.id);
-  const sent = await alertOwner(business, confirmationSms(change.summary, code, lang), { class: 'notice' });
+  const sent = await alertOwner(business, confirmationSms(change.summary, code, lang, callClock(call.started_at, tzOf(business)) || undefined), { class: 'notice' });
   await auditOwnerKb('proposed', business.id, actor, change, { call: call.id, texted: sent.notified });
   if (!sent.notified) {
     await rejectKbChange(business.id, change.id);
@@ -157,7 +157,10 @@ async function proposeTool(g: Extract<OwnerGate, { ok: true }>, args: Record<str
 
 async function listTool(g: Extract<OwnerGate, { ok: true }>): Promise<OwnerToolResult> {
   const { business, lang } = g;
-  const page = await listKbChanges(business.id, { limit: 5 });
+  // Only changes that went live (applied / reverted): a caller who got past the caller-id check (spoofable) must not hear unpublished
+  // proposals or cancelled ones (prices, closures, removed services nobody confirmed).
+  const page = await listKbChanges(business.id, { limit: 25 });
+  page.items = page.items.filter((c) => c.status === 'applied' || c.status === 'reverted').slice(0, 5);
   if (page.items.length === 0) return { ok: true, message: say(lang, 'There are no changes yet.', 'Todavía no hay cambios.') };
   const word = (st: string) => (lang === 'es'
     ? ({ applied: 'aplicado', proposed: 'pendiente de confirmar', reverted: 'revertido', rejected: 'cancelado' } as Record<string, string>)[st]
@@ -177,7 +180,7 @@ async function undoTool(g: Extract<OwnerGate, { ok: true }>): Promise<OwnerToolR
   const now = new Date();
   const scope = withinTtl(last.applied_at, now) ? 'c' : undoScope(undoBucket(now));
   const code = ownerCode(appSecretKey(), business.id, last.id, scope);
-  const sent = await alertOwner(business, undoSms(last.summary, code, lang), { class: 'notice' });
+  const sent = await alertOwner(business, undoSms(last.summary, code, lang, callClock(call.started_at, tzOf(business)) || undefined), { class: 'notice' });
   await auditOwnerKb('undo_requested', business.id, actor, last, { call: call.id, texted: sent.notified });
   if (!sent.notified) return { ok: false, message: say(lang, 'I could not send the text to your phone, so nothing was reverted.', 'No pude enviar el mensaje a su teléfono, así que no se revirtió nada.') };
   return {

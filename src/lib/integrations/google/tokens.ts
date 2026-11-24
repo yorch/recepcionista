@@ -33,12 +33,12 @@ export async function postToken(params: Record<string, string>): Promise<TokenRe
   return j;
 }
 
-/** Flip an active connection to needs_reauth ONCE (audit + owner email). Never throws. */
+/** Flip an active (or failing, 'error') connection to needs_reauth ONCE (audit + owner email). Never throws. A revoked / already needs_reauth one is left alone. */
 export async function markNeedsReauth(connectionId: string, reason: string): Promise<void> {
   try {
     const conn = await getCalendarConnectionById(connectionId);
-    if (!conn || conn.status !== 'active') return;
-    await setCalendarConnectionStatus(connectionId, 'needs_reauth', reason);
+    if (!conn || (conn.status !== 'active' && conn.status !== 'error')) return;
+    if (!(await setCalendarConnectionStatus(connectionId, 'needs_reauth', reason))) return; // revoked meanwhile
     await recordAudit({ actor_kind: 'system', business_id: conn.business_id, action: 'calendar.needs_reauth', target: `calendar:${conn.id}`, meta: { reason } });
     const [biz, users] = await Promise.all([getBusiness(conn.business_id), listBusinessUsers(conn.business_id)]);
     const owners = users.filter((u) => u.role === 'owner' && u.email);

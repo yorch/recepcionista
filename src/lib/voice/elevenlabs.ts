@@ -637,7 +637,13 @@ export async function syncAgent(
           return { agent_id: existing, mock: false, created: false, tools: expectedToolNames().map(wireNameOf) };
         }
         if (retryWithFreshTools(res.status, 'update') || retryWithoutLanguage(res.status, 'update', await res.clone().text().catch(() => ''))) continue;
-        log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
+        if (res.status !== 404) {
+          // A transient failure (429, 5xx, a timeout-like gateway error) or a rejected body must NEVER create a second agent: the old one is
+          // still the one bound to the phone number and the post-call webhook, and an orphan would take over silently. Report the failure.
+          log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: false });
+          return { agent_id: existing, mock: true, error: `update ${res.status}` };
+        }
+        log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true, reason: 'agent not found at the provider' });
       }
 
       const res = await fetch(`${API}/convai/agents/create`, {

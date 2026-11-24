@@ -59,8 +59,8 @@ for what the EMERGENCIES section of the prompt lists, and always when anyone is 
 The compliance block (`complianceRules`, marker `## DISCLOSURE, CONSENT AND LIFE SAFETY`) is appended to every prompt of every vertical:
 a caller who mentions gas, carbon monoxide, fire, smoke, electrical sparking or any danger to life is told to call 911 first, even for a
 cleaning company. A pack can only add to this. For the same reason post-call urgency has a small universal list
-(`LIFE_SAFETY_STRONG`: gas smell, fire, carbon monoxide...) that marks a call urgent in any vertical, including those with no keywords of
-their own.
+(`LIFE_SAFETY_STRONG`: gas smell / "huele a gas" / gas leak / "fuga de gas", "on fire" / house fire / "incendio", smoke coming / "sale humo", sparks / "chispas", electrocution, carbon monoxide...) that marks a call urgent in any vertical, including those with no keywords of
+their own. Urgency is scored on what the CALLER said only (never on the agent's own triage question, which contains the pack's keywords on every call). Bare "fire" or "smoke" is deliberately not in the list (a smoke-detector install is not an emergency). A pack with emergency handling also puts its own 911 sentence (`emergency.call911`, English and Spanish) in the prompt's EMERGENCIES section: the agent says it first, before any tool.
 
 ## Choosing and changing the vertical
 
@@ -84,7 +84,7 @@ It resets nothing the owner entered. Services, FAQs and pricing notes are never 
 
 1. the stored system prompt is regenerated from the business (new vertical) and the existing services, FAQs and notes;
 2. the call script is regenerated only if it is still exactly the one generated for the previous vertical; an owner-edited script is kept;
-3. the voice agent is re-synced (`agent: synced | skipped | failed`; `failed` means the provider call failed and the next sync applies it);
+3. the voice agent is re-synced (`agent: synced | skipped | failed`). The whole step runs under a per-business lease and is built from the CURRENT business row, so two quick changes cannot leave the prompt of another trade. `failed` (a provider 5xx / timeout, or the prompt rebuild failed) is NOT silent: the PATCH response carries `vertical_sync` with `retry_queued: true`, the dashboard shows a warning instead of "saved", and the business is flagged (`processed_events` source `agent-dirty:<n>`) so the `reconcile` job re-syncs it every tick with exponential backoff (2 min doubling, 1 h cap) and gives up loudly after 8 attempts (`agent.resync_gave_up` audit row + error log: use `POST /api/admin/resync-agents`);
 4. an audit row `business.vertical_changed` records `from`, `to`, what was rebuilt and `kb_content_kept: true`.
 
 Seeds are used only for a **new** knowledge base (onboarding or provisioning a business with none). After a change the owner is told to

@@ -81,7 +81,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `PLAN_CALL_MINUTES_CAP` | no | `300` | monthly call minutes per business | no |
 | `OWNER_ALERT_HOURLY_LIMIT` | no | `6` | owner texts a CALLER can trigger (`flag_emergency`, `handoff_to_human`) per business per hour, counted in a budget SEPARATE from the plan SMS cap (those alerts are exempt from the cap). Identical alerts for one call are sent once. The FIRST emergency of a call is never starved by a spent budget, up to a hard ceiling of 2x this number per hour; the rest answer honestly that the owner could not be reached. Alert text is cut to 320 GSM-safe characters. Whole number >= 1 (deploy.sh checks) | no |
 | `OWNER_CALLIN_ENABLED` | no | `true` | owner call-in (docs/owner-call-in.md): the verified owner phones the business line to update what the AI knows; every change still needs an SMS reply from the owner phone. `false` turns it off (the owner is then served like any caller, and the agent override that carries the owner prompt is not enabled) | no |
-| `OWNER_CALL_MAX_SECONDS` | no | `300` | hard length of an owner call-in session, 30-300 seconds (never more than 5 minutes) | no |
+| `OWNER_CALL_MAX_SECONDS` | no | `300` | hard length of an owner call-in session: 30-300 seconds. A value above 300 is clamped to 300; a missing, non-integer or under-30 value falls back to 300 (never more than 5 minutes) | no |
 | `TRIAL_SMS_CAP` | no | `50` | monthly SMS segments while `billing_status='trialing'` (never above `PLAN_SMS_CAP`; per-business overrides win). Applies only while billing is enforced | no |
 | `TRIAL_CALL_MINUTES_CAP` | no | `30` | monthly call minutes while `billing_status='trialing'` (never above `PLAN_CALL_MINUTES_CAP`; overrides win) | no |
 

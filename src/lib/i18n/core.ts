@@ -4,7 +4,7 @@
  *  - Message keys are the keys of `en` (src/lib/i18n/en.ts); `es` must carry exactly the same keys and the same
  *    `{placeholders}` (tests/i18n-parity.test.ts).
  *  - Interpolation: `{name}`. Plural: `{count, plural, one {# item} other {# items}}` (`#` = the number, formatted).
- *  - Locale resolution: user.locale -> business.locale_default -> Accept-Language -> en (resolveLocale).
+ *  - Locale resolution: user.locale -> rc_locale cookie -> business.locale_default -> Accept-Language -> en (resolveLocale).
  */
 import type { en } from './en';
 import type { Locale } from '@/lib/types';
@@ -221,7 +221,10 @@ export function localeCookieFrom(cookieHeader: string | null | undefined): strin
   if (!cookieHeader) return undefined;
   for (const part of cookieHeader.split(';')) {
     const [k, ...rest] = part.trim().split('=');
-    if (k === LOCALE_COOKIE) return decodeURIComponent(rest.join('='));
+    if (k === LOCALE_COOKIE) {
+      // A malformed value ("%", from a sibling subdomain, a proxy, a broken browser) must not throw: signup and invitations call this.
+      try { return decodeURIComponent(rest.join('=')); } catch { return undefined; }
+    }
   }
   return undefined;
 }

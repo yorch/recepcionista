@@ -58,20 +58,14 @@ export type OwnerApplyResult =
   | { ok: false; reason: 'stale' };
 
 /**
- * proposed -> applied. Refuses (and cancels the proposal) when the knowledge base was saved after the change was proposed: a patch holds
- * whole lists, so applying it over newer edits would silently undo them.
+ * proposed -> applied. Refuses (and cancels the proposal) when a field the change touches was edited after it was proposed: a patch holds
+ * whole lists, so applying it over newer edits would silently undo them. Edits to OTHER fields (including the rebuilt prompt after another
+ * applied change) do not make it stale.
  */
 export async function applyOwnerChange(businessId: string, changeId: string, actor: ChangeActor): Promise<OwnerApplyResult> {
   const change = await getKbChange(businessId, changeId);
   if (!change) return { ok: false, reason: 'not_found' };
-  if (change.status === 'proposed') {
-    const kb = await getKnowledgeBase(businessId);
-    if (kb && Date.parse(kb.updated_at) > Date.parse(change.created_at)) {
-      await rejectKbChange(businessId, changeId);
-      await auditOwnerKb('stale', businessId, actor, change);
-      return { ok: false, reason: 'stale' };
-    }
-  }
+  // The stale check is per touched field and runs inside the apply transaction (applyKbChange compares the change's `base`).
   const res = await applyKbChange(businessId, changeId);
   if (!res.ok && res.reason === 'stale') {
     await auditOwnerKb('stale', businessId, actor, change); // a business field (hours / closures / area) was edited after the proposal

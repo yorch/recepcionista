@@ -165,3 +165,17 @@ the user themselves or a platform admin.
   past times are enforced in `rescheduleBooking`.
 - **Annual plan:** `billing_interval` is display-only and is learned from the subscription price in the webhook. The client `interval` is
   validated and refused when no annual price exists. The mock-activate path is non-production only.
+
+---
+
+## Resolution
+
+Tests: `tests/db/passkeys.test.ts` ("R14 H1"), `tests/integration/phase2.test.ts` (R14 H2 / M1 / L1), `tests/db/multi-business.test.ts` ("R14 L2"), `tests/db/migration.test.ts`.
+
+| Finding | Status | How / test, or why it stays |
+| --- | --- | --- |
+| H1 squatter passkey survives the password reset | **Fixed** | Both suggested fixes: passkey `register/options` and `register/verify` need a verified email (`403 email_not_verified`), and `reset-password` deletes the passkeys registered while the address was unverified or before `email_verified_at` (same rule as TOTP; audit `auth.passkeys_cleared_on_reset`, a "passkey removed" email each); passkeys registered after verification are kept. Test: "R14 H1" (planted credential signs in before the reset and is dead after it). Existing tests that registered a passkey on an unverified account now verify the address first. |
+| H2 different amount on a pending refund creates a second Stripe refund | **Fixed** | Under the claim, `refund_status = 'pending'` with a different `refund_amount_cents` answers 409 `in_progress` (only the exact replay with the same key goes out); the dashboard locks the amount while processing. Test: "R14 H2" (pending 2000 -> 3000 and the full amount are refused with ONE Stripe call; after the failure webhook 3000 goes out under a new key). Residual: a timed-out refund that never reached Stripe stays `pending` at its amount; a different amount must be refunded in Stripe (documented). |
+| M1 asynchronous refund failure keeps the first Idempotency-Key | **Fixed** | The webhook failure path writes `booking.refund_failed` (the counter the key suffix uses). Test: "R14 M1" (second attempt uses `-a1`). A persisted counter column was not needed. |
+| L1 deposit link payable after cancellation | **Fixed** | The Payment Link id is stored (`bookings.stripe_payment_link_id`, migration `20261203120000`), cancel deactivates it (`POST /v1/payment_links/{id} active=false`, audited `booking.payment_link_deactivated`), and a payment for a cancelled booking alerts the owner ("... for a CANCELLED booking ... Refund it"), audits `payment.paid_for_cancelled_booking` and reopens `refund_status` from `not_applicable` to `none`. Test: "R14 L1". Residual: links texted before the upgrade have no stored id (the alert still fires). |
+| L2 cross-business sign-out | **Fixed** | An owner's `revoke-sessions` deletes only the sessions working in that business (`revokeTeamUserSessions`, same selection as a role change); a platform admin still signs the account out everywhere. Test: "R14 L2". |

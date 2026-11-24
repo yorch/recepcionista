@@ -12,7 +12,7 @@
 
 import { appUrl } from '@/lib/providers/stripe';
 import { meterForwardedCall } from '@/lib/voice/forward-metering';
-import { transferOutcomeFromTranscript } from '@/lib/voice/transfer';
+import { transferOutcomeFromTranscript, transferStartSecs } from '@/lib/voice/transfer';
 import { logger } from '@/lib/log';
 import {
   claimEvent, completeEvent, createCall, getBusiness, getBusinessByAgentId, getCall, getCallByConversationId, getCallBySid,
@@ -242,6 +242,24 @@ function transcriptText(raw: unknown): string {
   return '';
 }
 
+/**
+ * ONLY what the caller said (role 'user'). The agent's own words must never be scored: its triage question ("any water leaking, a burning
+ * smell?") contains the pack's strong keywords on every call, which marked nearly every triaged call an emergency. A legacy string
+ * transcript keeps its non-agent lines.
+ */
+export function callerTranscriptText(raw: unknown): string {
+  if (typeof raw === 'string') return raw.split('\n').filter((l) => !/^\s*(agent|assistant|ai)\s*:/i.test(l)).join('\n');
+  if (!Array.isArray(raw)) return '';
+  return raw
+    .map((turn) => {
+      if (typeof turn === 'string') return /^\s*(agent|assistant|ai)\s*:/i.test(turn) ? '' : turn;
+      const t = turn as Turn;
+      return String(t.role ?? '').toLowerCase() === 'user' ? `${t.message ?? t.text ?? t.content ?? ''}`.trim() : '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
 const VULNERABLE_WORDS = ['baby', 'bebé', 'bebe', 'elderly', 'anciano', 'anciana', 'unwell', 'enfermo', 'enferma'];
 
 /**
@@ -376,8 +394,16 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
       }
       if (c.duration_sec && c.duration_sec > 0 && await claimCallMetering(c.id)) {
         try {
-          if (transferred) await meterForwardedCall(c.call_sid ?? conversationId, c.business_id, c.duration_sec);
-          else await recordCallSeconds(c.business_id, c.duration_sec);
+          if (transferred) {
+            // Only the time AFTER the agent invoked the transfer is forward time; what came before was the AI (AI minutes). When the
+            // transfer turn's time is unreadable the whole call stays forward time (documented limit).
+            const at = transferStartSecs(body.transcript);
+            const aiSecs = at !== null ? Math.min(c.duration_sec, at) : 0;
+            const forward = await meterForwardedCall(c.call_sid ?? conversationId, c.business_id, c.duration_sec - aiSecs);
+            // meterForwardedCall never throws: a failed write comes back as 'failed'. Give the claim back so the job / a retry can meter it.
+            if (forward === 'failed') throw new Error('forward metering failed');
+            if (aiSecs > 0) await recordCallSeconds(c.business_id, aiSecs);
+          } else await recordCallSeconds(c.business_id, c.duration_sec);
         } catch (err) {
           await releaseCallMetering(c.id);
           log.warn('usage.record_failed', { call: c.id, business: c.business_id, err });
@@ -506,7 +532,7 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
   const alreadyHandedOff = call.status === 'handed_off';
   const biz = business ?? (await getBusiness(call.business_id));
   const language = normalizeLanguage(body.language ?? body.metadata?.main_language, transcript, biz);
-  const urgency = inferUrgency(transcript, biz);
+  const urgency = inferUrgency(callerTranscriptText(body.transcript), biz);
 
   // OWNER CALL (kind 'owner', set server-side from the verified owner caller id): keep NO transcript, summary, recording or language, and delete
   // the provider-side conversation too. Only the duration is kept (minutes still count; owner calls are never blocked by the caps). Nothing here
@@ -517,7 +543,7 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
       duration_sec: duration != null && Number.isFinite(Number(duration)) ? Math.round(Number(duration)) : call.duration_sec,
       transcript: null, summary: null, recording_url: null, status: 'completed',
     });
-    if (conversationId) await deleteProviderConversation(conversationId);
+    if (conversationId) await deleteProviderConversation(conversationId, call.business_id);
     log.info('stored.owner_call', { call: call.id, business: call.business_id });
     return { status: 200, body: { call: updated } };
   }
@@ -549,7 +575,7 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
       recording_url: null,
       status: alreadyHandedOff ? 'handed_off' : 'completed',
     });
-    if (declined && conversationId) await deleteProviderConversation(conversationId);
+    if (declined && conversationId) await deleteProviderConversation(conversationId, call.business_id);
     log.info(declined ? 'stored.declined' : 'stored.consent_unconfirmed', { call: call.id, business: call.business_id, correlated });
     return { status: 200, body: { call: updated } };
   }
@@ -601,8 +627,11 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
   return { status: 200, body: { call: updated } };
 }
 
-/** Best-effort removal of the provider-side conversation (audio + transcript) for a declined call. */
-async function deleteProviderConversation(conversationId: string): Promise<void> {
+/**
+ * Removal of the provider-side conversation (audio + transcript) for a declined or owner call. Tried once inline; when that fails the
+ * conversation goes on the durable deletion queue (retried with backoff by the jobs runner, alert when stuck) instead of being forgotten.
+ */
+async function deleteProviderConversation(conversationId: string, businessId?: string | null): Promise<void> {
   if (!hasKey()) return;
   try {
     const res = await fetch(`${API}/convai/conversations/${encodeURIComponent(conversationId)}`, {
@@ -610,10 +639,15 @@ async function deleteProviderConversation(conversationId: string): Promise<void>
       headers: { 'xi-api-key': apiKey() },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) log.warn('provider_delete.failed', { conversation: conversationId, status: res.status });
+    if (res.ok || res.status === 404) return;
+    log.warn('provider_delete.failed', { conversation: conversationId, status: res.status });
   } catch (err) {
     log.warn('provider_delete.error', { conversation: conversationId, err });
   }
+  try {
+    const { prisma } = await import('@/lib/db/client');
+    await prisma.pendingRecordingDeletion.createMany({ data: [{ accountSid: 'elevenlabs', recordingSid: conversationId, provider: 'elevenlabs', businessId: businessId ?? null }], skipDuplicates: true });
+  } catch (err) { log.error('provider_delete.queue_failed', { conversation: conversationId, err }); }
 }
 
 /** Parse a webhook body (JSON, or form-encoded for legacy senders). */

@@ -6,6 +6,7 @@
  */
 import { prisma, updateCall } from '@/lib/db';
 import { logger } from '@/lib/log';
+import { attestationLevel } from '@/lib/stir';
 import { detectOwnerCaller } from './detect';
 import { ownerCallMaxSeconds, OWNER_SESSIONS_PER_DAY } from './config';
 import { ownerFirstMessage, ownerLimitMessage, ownerPrompt } from './prompt';
@@ -29,7 +30,7 @@ export async function ownerSessionsToday(businessId: string, exceptCallId: strin
  * closed like every other service. A spoofed caller id lands here too: it grants a conversation only, never a change (sms.ts).
  */
 export async function enterOwnerMode(
-  business: Business, call: Call | null, callerId: string | null | undefined, opts: { planLapsed?: boolean; promptOverride?: boolean } = {},
+  business: Business, call: Call | null, callerId: string | null | undefined, opts: { planLapsed?: boolean; promptOverride?: boolean; stirStatus?: string | null } = {},
 ): Promise<OwnerEntry | null> {
   const who = detectOwnerCaller(business, callerId);
   if (!who.owner) {
@@ -38,6 +39,14 @@ export async function enterOwnerMode(
   }
   if (!call) { log.warn('no_call_row', { business: business.id }); return null; } // without a row the tools could not be gated
   if (opts.planLapsed) return null;
+  // The carrier says the caller id FAILED validation: the owner number is being spoofed. Owner mode would grant cap-exempt minutes, burn
+  // the real owner's daily sessions and trip the lockout; serve the call as an ordinary (stranger) call instead. A line that reports
+  // no verdict at all is common and stays allowed (the SMS confirmation is the real control).
+  if (attestationLevel(opts.stirStatus) === 'failed') {
+    log.warn('owner_mode_refused_stir_failed', { business: business.id, call: call.id });
+    await auditOwnerKb('refused', business.id, { actor_kind: 'system', via: 'voice' }, null, { call: call.id, why: 'stir_failed' }).catch(() => {});
+    return null;
+  }
   const max = ownerCallMaxSeconds();
   const sessions = await ownerSessionsToday(business.id, call.id);
   const limited = sessions >= OWNER_SESSIONS_PER_DAY;

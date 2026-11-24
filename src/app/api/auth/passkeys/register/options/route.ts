@@ -16,7 +16,7 @@ const log = logger('auth/passkeys/register/options');
  * persistent credential): 403 `reauth_required` otherwise. At most 20 passkeys per account; the account's existing credentials are excluded.
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { allowEnrollment: true });
+  const auth = await authenticate(req, { allowEnrollment: true, verifiedEmail: true });
   if (!auth.ok) return auth.response;
   const user = accountOf(auth.principal);
   if (!user) return pkFail(403, 'passkeys belong to personal accounts');

@@ -206,7 +206,8 @@ integration('google calendar (postgres, fake google)', () => {
     const [a, b2] = await Promise.all([sync.syncConnection(conn.id), sync.syncConnection(conn.id)]);
     expect([a.outcome, b2.outcome].filter((o) => o === 'synced').length).toBeGreaterThanOrEqual(1);
     expect(fake.calls.filter((c) => c.path === '/token').length).toBe(1);
-    expect(await prisma.calendarBusyBlock.count({ where: { connectionId: conn.id } })).toBe(1);
+    // (the fake Google is shared: a booking event pushed by an earlier test's background push for ANOTHER business is a normal busy event here)
+    expect(await prisma.calendarBusyBlock.count({ where: { connectionId: conn.id, googleEventId: 'ev1' } })).toBe(1);
     expect((await cal.getDecryptedTokens(conn.id))!.access_token).toMatch(/^at-\d+$/);
 
     // revoked at Google
@@ -361,10 +362,12 @@ integration('google calendar (postgres, fake google)', () => {
     const { biz, conn } = await setup();
     const b = await book(biz.id, '09:00');
     await push.pushBooking(b.id);
-    fake.put({ id: 'orphan', start: { dateTime: at('11:00').toISOString() }, end: { dateTime: at('12:00').toISOString() }, extendedProperties: { private: { rc_booking: 'some-booking' } } });
+    // a booking of THIS business whose link was lost: the private marker alone identifies our event
+    const lost = await book(biz.id, '11:00');
+    fake.put({ id: 'orphan', start: { dateTime: at('11:00').toISOString() }, end: { dateTime: at('12:00').toISOString() }, extendedProperties: { private: { rc_booking: lost.id } } });
     fake.put(gEvent('real', '15:00', '16:00'));
     await sync.syncConnection(conn.id);
-    expect((await prisma.calendarBusyBlock.findMany({ where: { connectionId: conn.id } })).map((r) => r.googleEventId)).toEqual(['real']);
+    expect((await prisma.calendarBusyBlock.findMany({ where: { connectionId: conn.id } })).map((r) => r.googleEventId).filter((id) => ['orphan', 'real'].includes(id)).sort()).toEqual(['real']);
     // and the booking can still be re-booked-around / the slot stays bookable for the SAME business flow
     const slots = await sched.slotsForDate((await db.getBusiness(biz.id))!, day(), 60);
     expect(slots.find((s) => s.start === at('09:00').toISOString())!.available).toBe(false); // taken by the booking itself, not by a block
@@ -533,5 +536,150 @@ integration('google calendar (postgres, fake google)', () => {
     const connect = await import('@/app/api/integrations/google/connect/route');
     const r = await withEnv({ GOOGLE_OAUTH_MOCK: 'true', NODE_ENV: 'production' }, () => connect.GET(req('/api/integrations/google/connect', owner)));
     expect(r.status).toBe(503);
+  });
+
+  // ---------------------------------------------------------------- review 14 (report 11)
+  test('R14 M1: reconnecting the SAME account keeps the chosen calendar; a different account starts on primary and its old events are cleaned up', async () => {
+    const { biz, conn } = await setup();
+    await sync.syncConnection(conn.id);
+    const b = await book(biz.id, '09:00');
+    await push.pushBooking(b.id);
+    const { changeCalendar } = await import('@/lib/integrations/google/oauth');
+    await changeCalendar((await cal.getCalendarConnection(biz.id))!, 'work@group.calendar.google.com');
+    expect((await cal.getCalendarConnection(biz.id))!.calendar_id).toBe('work@group.calendar.google.com');
+    await push.pushBooking(b.id); // re-pushed to the new calendar (the switch removed the old link)
+    expect(await cal.getEventLinkByBooking(b.id)).not.toBeNull();
+
+    // same Google account reconnects (needs_reauth -> Reconnect): the callback passes calendar_id 'primary' as always
+    const again = await cal.upsertCalendarConnection({
+      business_id: biz.id, account_email: 'Owner@Example.test', calendar_id: 'primary', access_token: 'a2', refresh_token: 'r2', token_expires_at: new Date(Date.now() + 3600_000),
+    });
+    expect(again.id).toBe(conn.id);
+    expect(again.calendar_id).toBe('work@group.calendar.google.com'); // NOT silently moved back to primary
+    expect(await cal.getEventLinkByBooking(b.id)).not.toBeNull(); // links survive a same-account reconnect
+
+    // a DIFFERENT account: the old account's events are deleted through the old tokens, links and blocks dropped, primary again
+    fake.reset();
+    const { resetForNewAccount } = await import('@/lib/integrations/google/oauth');
+    expect(await resetForNewAccount(biz.id, 'someone-else@example.test')).toBe(0);
+    expect(fake.count('DELETE', '/events/')).toBe(1);
+    expect(await cal.getEventLinkByBooking(b.id)).toBeNull();
+    const other = await cal.upsertCalendarConnection({
+      business_id: biz.id, account_email: 'someone-else@example.test', calendar_id: 'primary', access_token: 'a3', refresh_token: 'r3', token_expires_at: new Date(Date.now() + 3600_000),
+    });
+    expect(other.calendar_id).toBe('primary');
+    expect(await resetForNewAccount(biz.id, 'someone-else@example.test')).toBeNull(); // same account: nothing to do
+  });
+
+  test('R14 M3: a sync / watch that finished for the OLD calendar is discarded; a calendar switch waits for a running sync', async () => {
+    const { biz, conn } = await setup();
+    // (a) conditional writes: the calendar was switched while the caller was working
+    await cal.updateCalendarSyncState(conn.id, { calendar_id: 'work@group.calendar.google.com' });
+    const r = await cal.replaceBusyBlocksIf(conn.id, [{ google_event_id: 'old', starts_at: at('10:00'), ends_at: at('11:00') }], { expectCalendarId: 'primary' });
+    expect(r).toEqual({ applied: false, stored: 0 });
+    expect(await prisma.calendarBusyBlock.count({ where: { connectionId: conn.id } })).toBe(0);
+    expect(await cal.updateCalendarSyncState(conn.id, { sync_token: 'fs:1:x' }, { expectCalendarId: 'primary' })).toBeNull();
+    expect((await cal.getCalendarConnection(biz.id))!.sync_token).toBeNull();
+    expect(await cal.upsertBusyBlock(conn.id, { google_event_id: 'old', starts_at: at('10:00'), ends_at: at('11:00') }, undefined, { expectCalendarId: 'primary' })).toBeNull();
+    const ok = await cal.replaceBusyBlocksIf(conn.id, [{ google_event_id: 'new', starts_at: at('10:00'), ends_at: at('11:00') }], { expectCalendarId: 'work@group.calendar.google.com' });
+    expect(ok).toEqual({ applied: true, stored: 1 });
+    await cal.updateCalendarSyncState(conn.id, { calendar_id: 'primary' });
+    await cal.replaceBusyBlocks(conn.id, []);
+
+    // (b) a channel created for the old calendar while the switch happened is stopped, never stored
+    let release!: () => void;
+    const gate = new Promise<void>((res) => { release = res; });
+    http.setGoogleFetch(async (url, init) => {
+      if (String(url).endsWith('/events/watch')) await gate;
+      return fake.fetch(String(url), init);
+    });
+    const watching = watch.ensureWatch(conn.id, { force: true });
+    await new Promise((res) => setTimeout(res, 50));
+    await cal.updateCalendarSyncState(conn.id, { calendar_id: 'work@group.calendar.google.com' }); // the owner picked another calendar meanwhile
+    release();
+    expect(await watching).toBe(false);
+    expect((await cal.getCalendarConnection(biz.id))!.watch_channel_id).toBeNull();
+    expect(fake.count('POST', '/channels/stop')).toBeGreaterThanOrEqual(1);
+    http.setGoogleFetch(fake.fetch);
+
+    // (c) the switch takes the sync lease: it waits for a running sync, whose (old calendar) write lands first and is then cleared
+    await cal.updateCalendarSyncState(conn.id, { calendar_id: 'primary' });
+    fake.put(gEvent('p1', '10:00', '11:00'));
+    let release2!: () => void;
+    const gate2 = new Promise<void>((res) => { release2 = res; });
+    http.setGoogleFetch(async (url, init) => {
+      if (String(url).includes('/events?') || /\/events$/.test(String(url).split('?')[0])) await gate2;
+      return fake.fetch(String(url), init);
+    });
+    const syncing = sync.syncConnection(conn.id);
+    await new Promise((res) => setTimeout(res, 100));
+    const { changeCalendar } = await import('@/lib/integrations/google/oauth');
+    const switching = changeCalendar((await cal.getCalendarConnection(biz.id))!, 'work@group.calendar.google.com');
+    await new Promise((res) => setTimeout(res, 300));
+    expect((await cal.getCalendarConnection(biz.id))!.calendar_id).toBe('primary'); // still waiting for the sync lease
+    release2();
+    await syncing; await switching;
+    http.setGoogleFetch(fake.fetch);
+    const after = (await cal.getCalendarConnection(biz.id))!;
+    expect(after.calendar_id).toBe('work@group.calendar.google.com');
+    expect(after.sync_token).toBeNull(); // primary's token did not survive the switch
+    expect(await prisma.calendarBusyBlock.count({ where: { connectionId: conn.id } })).toBe(0); // nor did primary's blocks
+  }, 30_000);
+
+  test('R14 L1: an in-flight refresh / sync / failure that lands after Disconnect cannot resurrect the connection', async () => {
+    const { biz, conn } = await setup();
+    const owner = await login(biz.id);
+    fake.put(gEvent('d1', '10:00', '11:00'));
+    await sync.syncConnection(conn.id);
+    const { DELETE } = await import('@/app/api/integrations/google/disconnect/route');
+    expect((await DELETE(req('/api/integrations/google/disconnect', owner, undefined, 'DELETE'))).status).toBe(200);
+    // (a) a refresh that returns now
+    expect(await cal.updateCalendarTokens(conn.id, { access_token: 'late', token_expires_at: new Date(Date.now() + 3600_000) })).toBe(false);
+    // (b) a sync that already fetched its last page
+    expect((await cal.replaceBusyBlocksIf(conn.id, [{ google_event_id: 'x', starts_at: at('10:00'), ends_at: at('11:00') }], { expectCalendarId: 'primary' })).applied).toBe(false);
+    expect(await cal.setCalendarConnectionStatus(conn.id, 'active', null)).toBe(false);
+    // (c) a timed-out fetch writing 'error'
+    expect(await cal.setCalendarConnectionStatus(conn.id, 'error', '[1] network_error')).toBe(false);
+    const row = await prisma.calendarConnection.findUnique({ where: { id: conn.id } });
+    expect(row).toMatchObject({ status: 'revoked', accessTokenEnc: null, refreshTokenEnc: null });
+    expect(await prisma.calendarBusyBlock.count({ where: { connectionId: conn.id } })).toBe(0);
+    expect((await sync.syncConnection(conn.id)).outcome).toBe('skipped');
+    // a refresh never changes the status of a live connection either
+    const live = await setup();
+    await cal.setCalendarConnectionStatus(live.conn.id, 'error', '[2] x');
+    await cal.updateCalendarTokens(live.conn.id, { access_token: 'fresh', token_expires_at: new Date(Date.now() + 3600_000) });
+    expect((await cal.getCalendarConnection(live.biz.id))!.status).toBe('error');
+  });
+
+  test('R14 L2: an event marked with a booking of ANOTHER business is a normal busy event; our own is not', async () => {
+    const mine = await setup();
+    const other = await newBusiness({ timezone: TZ, hours: ALL_WEEK });
+    const theirs = await book(other.id, '13:00');
+    const ours = await book(mine.biz.id, '11:00');
+    fake.put({ id: 'b-theirs', start: { dateTime: at('13:00').toISOString() }, end: { dateTime: at('14:00').toISOString() }, extendedProperties: { private: { rc_booking: theirs.id } } });
+    fake.put({ id: 'b-ours', start: { dateTime: at('11:00').toISOString() }, end: { dateTime: at('12:00').toISOString() }, extendedProperties: { private: { rc_booking: ours.id } } });
+    await sync.syncConnection(mine.conn.id);
+    const ids = (await prisma.calendarBusyBlock.findMany({ where: { connectionId: mine.conn.id } })).map((r) => r.googleEventId);
+    expect(ids).toContain('b-theirs'); // the other business really sold that slot
+    expect(ids).not.toContain('b-ours');
+  });
+
+  test('R14 L3: a 404 on a connection that is already in error ends in needs_reauth (stale blocks stop gating bookings)', async () => {
+    const { biz, conn } = await setup();
+    fake.put(gEvent('s1', '10:00', '11:00'));
+    await sync.syncConnection(conn.id);
+    fake.failStatus = 503;
+    expect((await sync.syncConnection(conn.id)).outcome).toBe('failed');
+    expect((await cal.getCalendarConnection(biz.id))!.status).toBe('error');
+    fake.failStatus = 404; // the calendar was deleted: the fake answers a notFound-looking body below
+    const realFetch = fake.fetch;
+    http.setGoogleFetch(async (url, init) => (String(url).includes('/events') && (init?.method ?? 'GET') === 'GET'
+      ? new Response(JSON.stringify({ error: { errors: [{ reason: 'notFound' }] } }), { status: 404, headers: { 'content-type': 'application/json' } })
+      : realFetch(String(url), init)));
+    fake.failStatus = null;
+    const r = await sync.syncConnection(conn.id);
+    expect(r.outcome).toBe('needs_reauth');
+    expect((await cal.getCalendarConnection(biz.id))!.status).toBe('needs_reauth');
+    http.setGoogleFetch(fake.fetch);
   });
 });

@@ -1,7 +1,8 @@
 import { getCall, listTranscriptEventsAfter } from '@/lib/db';
-import { authenticate, authErrorResponse, requireBusinessAccess, resolvePrincipal } from '@/lib/session';
+import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { acquireLiveSlot, createLiveStream, SSE_HEADERS } from '@/lib/voice/live-stream';
 import { isLive, requestPoll } from '@/lib/voice/live-transcript';
+import { mayStillViewCall } from '@/lib/voice/live-access';
 import { fail } from '@/lib/http';
 
 export const dynamic = 'force-dynamic';
@@ -39,8 +40,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         poll: (cid) => requestPoll(cid),
         listAfter: (cid, a) => listTranscriptEventsAfter(cid, a, 100, { businessId: call.business_id }),
         callState: async (cid) => { const c = await getCall(cid); return c ? { live: isLive(c), consent: c.consent_status ?? 'unknown' } : null; },
-        // The same credential check as the request, against the live headers of the connection.
-        reauth: async () => { try { const r = await resolvePrincipal(req.headers); return r.ok; } catch { return false; } },
+        // The same checks as the request, re-run against the live headers (see voice/live-access.ts).
+        reauth: () => mayStillViewCall(req.headers, call.business_id),
       },
     });
     return new Response(stream, { status: 200, headers: SSE_HEADERS });

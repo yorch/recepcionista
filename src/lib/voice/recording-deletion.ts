@@ -8,10 +8,12 @@
  *     (1 min, 2, 4 ... capped at 6 h). From RECORDING_DELETE_ALERT_ATTEMPTS failed attempts one loud alert fires per row (log.error
  *     + an audit row `recordings.deletion_stuck`), because a recording that cannot be deleted is a privacy problem someone must look at
  *     (for example TWILIO_ACCOUNT_SID no longer matches the account that owns the recording).
+ * Rows carry a `provider`: 'twilio' (voicemail recording) or 'elevenlabs' (the call's conversation: audio + transcript, DELETE /v1/convai/conversations/{id}).
  * Never throws; a database error ends the pass and the next tick retries.
  */
 import { prisma, recordAudit } from '@/lib/db';
 import { logger } from '@/lib/log';
+import { deleteConversation } from '@/lib/voice/conversations';
 import { deleteTwilioRecording } from '@/lib/voice/voicemail';
 
 const log = logger('voice/recording-deletion');
@@ -46,7 +48,7 @@ export interface DrainResult {
   pending_total: number;
 }
 
-type Claimed = { id: string; account_sid: string; recording_sid: string; attempts: number; business_id: string | null };
+type Claimed = { id: string; account_sid: string; recording_sid: string; provider: string; attempts: number; business_id: string | null };
 
 export async function drainRecordingDeletions(opts: DrainOptions = {}): Promise<DrainResult> {
   const now = opts.now ?? new Date();
@@ -58,14 +60,16 @@ export async function drainRecordingDeletions(opts: DrainOptions = {}): Promise<
       ? await prisma.$queryRaw<Claimed[]>`
           UPDATE "pending_recording_deletions" SET "next_attempt_at" = ${claimUntil}::timestamptz
            WHERE "id" IN (SELECT "id" FROM "pending_recording_deletions" WHERE "id" = ANY(${opts.ids}::text[]) ORDER BY "created_at" LIMIT ${limit} FOR UPDATE SKIP LOCKED)
-          RETURNING "id", "account_sid", "recording_sid", "attempts", "business_id"`
+          RETURNING "id", "account_sid", "recording_sid", "provider", "attempts", "business_id"`
       : await prisma.$queryRaw<Claimed[]>`
           UPDATE "pending_recording_deletions" SET "next_attempt_at" = ${claimUntil}::timestamptz
            WHERE "id" IN (SELECT "id" FROM "pending_recording_deletions" WHERE "next_attempt_at" <= ${now}::timestamptz ORDER BY "next_attempt_at" LIMIT ${limit} FOR UPDATE SKIP LOCKED)
-          RETURNING "id", "account_sid", "recording_sid", "attempts", "business_id"`;
+          RETURNING "id", "account_sid", "recording_sid", "provider", "attempts", "business_id"`;
     for (const row of rows) {
       out.attempted++;
-      const res = await deleteTwilioRecording({ accountSid: row.account_sid, recordingSid: row.recording_sid }, opts.fetchImpl);
+      const res = row.provider === 'elevenlabs'
+        ? await deleteConversation(row.recording_sid, { fetchImpl: opts.fetchImpl })
+        : await deleteTwilioRecording({ accountSid: row.account_sid, recordingSid: row.recording_sid }, opts.fetchImpl);
       if (res.ok) {
         await prisma.pendingRecordingDeletion.deleteMany({ where: { id: row.id } });
         out.deleted++;
@@ -87,10 +91,12 @@ export async function drainRecordingDeletions(opts: DrainOptions = {}): Promise<
       }
       if (claimed.count > 0) {
         out.alerted++;
-        log.error('recording_deletion_stuck', { recording: row.recording_sid, business: row.business_id, attempts, last_error: res.error, action: 'a voicemail recording could not be deleted at the provider; check TWILIO_ACCOUNT_SID / Twilio status (docs/runbook.md)' });
+        log.error('recording_deletion_stuck', { recording: row.recording_sid, business: row.business_id, attempts, last_error: res.error, action: row.provider === 'elevenlabs'
+          ? 'a call conversation (audio + transcript) could not be deleted at ElevenLabs; check ELEVENLABS_API_KEY / ElevenLabs status (docs/runbook.md)'
+          : 'a voicemail recording could not be deleted at the provider; check TWILIO_ACCOUNT_SID / Twilio status (docs/runbook.md)' });
         await recordAudit({
           actor_kind: 'system', business_id: row.business_id, action: 'recordings.deletion_stuck', target: `recording:${row.recording_sid}`,
-          meta: { attempts, last_error: res.error },
+          meta: { attempts, last_error: res.error, provider: row.provider },
         });
       }
     }

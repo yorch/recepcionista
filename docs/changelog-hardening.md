@@ -338,3 +338,21 @@ Integration gaps found and fixed in the integration pass (each with a test):
 | Agent tools registered through scattered paths | one `syncAgent`, in-flight tool dedupe, `POST /api/admin/resync-agents` | `tests/integration/agent-sync.test.ts` (fake ElevenLabs holds the final config) |
 | Found by the mock end-to-end run | the booking-hook registry and the mock Google store were per-bundle singletons (bookings never reached Google); the mock OAuth token carried no scopes (connect always failed); onboarding showed raw `email_not_verified` | `tests/booking-hooks.test.ts`, `src/lib/integrations/google/mock.ts`, `src/app/onboarding/step-verify.tsx` |
 
+
+## Review 14 (`docs/review/11-adv-calendar-owner.md`, `12-adv-voice-platform.md`, `13-adv-identity-money.md`, `14-adv-verticals-i18n-data.md`)
+
+Every finding was either fixed with a regression test or recorded as a residual (see the "Resolution" section at the end of each report; the
+residuals are collected under "Review 14 residuals" in `docs/known-limitations.md`). One hand-written migration,
+`20261203120000_review14_provider_deletions_consent_lock_metering` (re-runnable, row locks only, zero drift proven with
+`prisma migrate diff --from-migrations ... --shadow-database-url ... --exit-code`, and exercised on a populated old-schema database in
+`tests/db/migration.test.ts`): `pending_recording_deletions.provider` (+ provider-aware shape CHECK), the transcript consent guard taking
+`FOR SHARE` on the call row, the repair of the phase-1 `calls.metered_at` backfill, and `bookings.stripe_payment_link_id`.
+
+| Area | Fix | Evidence |
+| --- | --- | --- |
+| Identity H1 | passkey registration needs a verified email; a password reset deletes passkeys registered while the address was unverified / before it was verified (audit + notice) | `tests/db/passkeys.test.ts` |
+| Money H2, M1, L1, L2 | only the SAME amount may be re-sent while a refund is pending (UI locks it); asynchronous refund failures count as failed attempts (new key); cancel deactivates the deposit Payment Link and a payment for a cancelled booking alerts the owner and reopens the refund; revoke-sessions is scoped to the business (admin: everywhere) | `tests/integration/phase2.test.ts`, `tests/db/multi-business.test.ts` |
+| Calendar M1, M3, L1, L2, L3 | reconnect keeps the chosen calendar (different account: old events cleaned up first); calendar switch takes the sync lease, sync / watch writes are conditional on the calendar they read; revoked is terminal for in-flight refresh / sync / failure writes; the other business's `rc_booking` events are busy time; 403/404 from `error` ends in `needs_reauth` | `tests/integration/google-calendar.test.ts` |
+| Owner call-in M2, L4, L5, STIR | per-field stale check (confirming one proposal no longer stales the others); only applied / reverted changes are read out; confirmation text names the call; undo of any age validates; `TN-Validation-Failed` never enters owner mode | `tests/integration/owner-callin.test.ts` |
+| Voice M1-M3, L1-L7 | live stream re-check against the call's business; recording proxy bounded (streamed cap, single flight, byte-capped cache, 4 concurrent downloads, 503 + Retry-After); ElevenLabs conversations deleted by erasure / retention / demo reset through the durable queue; every playback audited per person+call+10 min; unreadable transfer = unknown; AI part of a transfer metered as AI; forward-metering failure releases the claim; null duration is not 0 seconds; interim last turn + re-check for a mid-call decline; `/transcript` rate limit | `tests/review14-pure.test.ts`, `tests/integration/telephony-phase2.test.ts` |
+| Verticals M1-M5, L1-L6 | urgency scored on caller turns only; failed agent sync after a vertical change is reported and retried (`agent-dirty`, `reconcile` job); consent guard `FOR SHARE`; only a 404 recreates an agent (+ bind / webhook for the new one); `metered_at` repair; malformed `rc_locale`; life-safety list; each pack's own 911 sentence in the prompt; vertical change serialised; signup notice in the account owner's language; `usage_warnings` every 10 min behind a lease | `tests/integration/review14-data.test.ts`, `tests/db/migration.test.ts`, `tests/db/locale.test.ts`, `tests/review14-pure.test.ts` |

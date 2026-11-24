@@ -1,7 +1,7 @@
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import { ok, fail } from '@/lib/http';
 import { insecureDevAllowed } from '@/lib/auth';
-import { getBooking, getBusiness, markDepositPaid, setBookingStripeRefs, claimEvent, completeEvent, releaseEvent } from '@/lib/db';
+import { getBooking, getBusiness, markDepositPaid, setBookingStripeRefs, claimEvent, completeEvent, releaseEvent, prisma, recordAudit } from '@/lib/db';
 import { handleRefundEvent, REFUND_EVENT_TYPES } from '@/lib/payments/refund-events';
 import { ownerAlertSms } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
@@ -120,13 +120,22 @@ async function handleEvent(
       if (updated) {
         await emitBookingChanged(booking.id, 'updated', booking.business_id);
         const business = await getBusiness(booking.business_id);
+        // Money arrived for a booking that is already CANCELLED (the link was still open): say so, and reopen the refund bookkeeping
+        // (cancel had closed it as 'not_applicable' because no deposit was paid then). The app never refunds by itself.
+        const lateForCancelled = booking.status === 'cancelled';
+        if (lateForCancelled) {
+          await prisma.booking.updateMany({ where: { id: booking.id, refundStatus: 'not_applicable' }, data: { refundStatus: 'none' } });
+          await recordAudit({ actor_kind: 'webhook', business_id: booking.business_id, action: 'payment.paid_for_cancelled_booking', target: `booking:${booking.id}`, meta: { amount_cents: amountCents, event: event.id ?? null } });
+        }
         if (business?.owner_phone) {
           await sendAndLog({
             business_id: business.id,
             to: business.owner_phone,
             body: ownerAlertSms({
               business,
-              text: `Deposit ${money(amountCents)} paid by ${booking.customer_name} for ${booking.service}.`,
+              text: lateForCancelled
+                ? `Deposit ${money(amountCents)} paid by ${booking.customer_name} for a CANCELLED booking (${booking.service}). Refund it from the booking in your dashboard.`
+                : `Deposit ${money(amountCents)} paid by ${booking.customer_name} for ${booking.service}.`,
             }),
             kind: 'owner_alert',
             booking_id: booking.id,

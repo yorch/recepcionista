@@ -583,4 +583,221 @@ integration('telephony phase 2 (postgres)', () => {
     await warnings.checkUsageWarnings(biz.id, m.deps, { force: true });
     expect(m.sent.email.length).toBe(1); expect(m.sent.sms.length).toBe(0);
   });
+
+  // ============================================================ review 14 (report 12)
+  test('R14 M1: a member removed from this business but still in ANOTHER one loses the open live stream at the next re-check', async () => {
+    const { mayStillViewCall } = await import('@/lib/voice/live-access');
+    const { addMembership, removeMembership } = await import('@/lib/db/memberships');
+    const a = await newBusiness(); const b = await newBusiness();
+    const staff = await login(a.id, 'staff');
+    await addMembership({ user_id: staff.userId, business_id: b.id, role: 'staff' });
+    const h = new Headers({ cookie: staff.cookie });
+    expect(await mayStillViewCall(h, a.id)).toBe(true);
+    expect(await mayStillViewCall(h, b.id)).toBe(false); // the session works in A: B's calls are a 404 for it
+    expect((await removeMembership(staff.userId, a.id)).ok).toBe(true); // the user keeps a valid session: it now resolves to B
+    expect(await mayStillViewCall(h, a.id)).toBe(false);
+    expect(await mayStillViewCall(new Headers({ cookie: 'rc_user_session=nope' }), a.id)).toBe(false);
+  });
+
+  test('R14 voice L1: every successful playback (any Range) is audited once per person, call and 10 minutes', async () => {
+    const { clearRecordingCache } = await import('@/lib/voice/recording-audio');
+    clearRecordingCache();
+    const audioRoute = (await import('@/app/api/calls/[id]/audio/route')).GET;
+    const biz = await newBusiness(); const other = await newBusiness();
+    const owner = await login(biz.id, 'owner'); const other2 = await login(biz.id, 'staff');
+    const call = await newCall(biz, { conversationId: `conv${uniq('a').replace(/[^A-Za-z0-9]/g, '')}`, status: 'completed' });
+    const saved = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(new Uint8Array(500).fill(3), { status: 200, headers: { 'content-type': 'audio/mpeg' } })) as typeof fetch;
+    const plays = () => prisma.auditEvent.count({ where: { businessId: biz.id, action: 'call.recording_played', target: `call:${call.id}` } });
+    try {
+      await withEnv({ ELEVENLABS_API_KEY: 'xi_test_key' }, async () => {
+        const go = (who: { cookie: string }, range?: string) => audioRoute(new Request(`https://app.example.test/api/calls/${call.id}/audio`, { headers: { cookie: who.cookie, ...(range ? { range } : {}) } }), ctx(call.id));
+        const r = await go(owner, 'bytes=-999999999'); // a suffix range pulled the whole file with no trace before
+        expect(r.status).toBe(206);
+        expect(await plays()).toBe(1);
+        expect((await go(owner, 'bytes=1-')).status).toBe(206);
+        expect((await go(owner, 'bytes=0-0')).status).toBe(206);
+        expect((await go(owner)).status).toBe(200);
+        expect(await plays()).toBe(1); // the same person, call and window: not logged again
+        expect((await go(other2, 'bytes=5-9')).status).toBe(206);
+        expect(await plays()).toBe(2); // another person is a separate row
+        expect(other.id).not.toBe(biz.id);
+      });
+    } finally { globalThis.fetch = saved; clearRecordingCache(); }
+  });
+
+  test('R14 voice M3: erasure and the retention purge queue the ElevenLabs conversation; the drain deletes it (404 = gone, failures retry, alert)', async () => {
+    const { eraseCustomerData, purgeExpiredData } = await import('@/lib/db/compliance');
+    const { drainRecordingDeletions, RECORDING_DELETE_ALERT_ATTEMPTS } = await import('@/lib/voice/recording-deletion');
+    const { fetchConversationAudio, clearRecordingCache, recordingCacheStats } = await import('@/lib/voice/recording-audio');
+    await withEnv({ ELEVENLABS_API_KEY: 'xi_test_key' }, async () => {
+      const biz = await newBusiness();
+      const caller = phone();
+      const conv = `conv${uniq('e').replace(/[^A-Za-z0-9]/g, '')}`;
+      await newCall(biz, { conversationId: conv, callerPhone: caller, callerE164: caller, status: 'completed' });
+      // the audio proxy cache holds this recording; erasure must drop it from memory too
+      clearRecordingCache();
+      await fetchConversationAudio(conv, null, (async () => new Response(new Uint8Array(100), { headers: { 'content-type': 'audio/mpeg' } })) as unknown as typeof fetch);
+      expect(recordingCacheStats().entries).toBe(1);
+      const res = await eraseCustomerData(biz.id, caller);
+      expect(res.calls).toBe(1);
+      expect(recordingCacheStats().entries).toBe(0);
+      const queued = await prisma.pendingRecordingDeletion.findFirst({ where: { recordingSid: conv } });
+      expect(queued).toMatchObject({ provider: 'elevenlabs', accountSid: 'elevenlabs', businessId: biz.id });
+      // the erase request already tried once (no network in tests: it failed and stays queued, never lost)
+      const seen: { url: string; method: string; key: string | null }[] = [];
+      const respond = (status: number) => (async (url: string, init?: RequestInit) => { seen.push({ url: String(url), method: init?.method ?? 'GET', key: new Headers(init?.headers).get('xi-api-key') }); return new Response('{}', { status }); }) as unknown as typeof fetch;
+      await prisma.pendingRecordingDeletion.update({ where: { id: queued!.id }, data: { nextAttemptAt: new Date(0) } });
+      const fail = await drainRecordingDeletions({ ids: [queued!.id], fetchImpl: respond(503) });
+      expect(fail).toMatchObject({ attempted: 1, deleted: 0, failed: 1 });
+      expect(seen[0]).toEqual({ url: `https://api.elevenlabs.io/v1/convai/conversations/${conv}`, method: 'DELETE', key: 'xi_test_key' });
+      expect((await prisma.pendingRecordingDeletion.findUnique({ where: { id: queued!.id } }))!.lastError).toBe('http_503');
+      await prisma.pendingRecordingDeletion.update({ where: { id: queued!.id }, data: { nextAttemptAt: new Date(0), attempts: RECORDING_DELETE_ALERT_ATTEMPTS - 1 } });
+      const stuck = await drainRecordingDeletions({ ids: [queued!.id], fetchImpl: respond(500) });
+      expect(stuck.alerted).toBe(1);
+      expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'recordings.deletion_stuck' } })).toBe(1);
+      await prisma.pendingRecordingDeletion.update({ where: { id: queued!.id }, data: { nextAttemptAt: new Date(0) } });
+      const gone = await drainRecordingDeletions({ ids: [queued!.id], fetchImpl: respond(404) });
+      expect(gone.deleted).toBe(1);
+      expect(await prisma.pendingRecordingDeletion.count({ where: { recordingSid: conv } })).toBe(0);
+
+      // retention purge: a call past the retention window
+      const old = `conv${uniq('p').replace(/[^A-Za-z0-9]/g, '')}`;
+      await prisma.business.update({ where: { id: biz.id }, data: { retentionDays: 30 } });
+      await newCall(biz, { conversationId: old, status: 'completed', startedAt: new Date(Date.now() - 90 * 86_400_000) });
+      await purgeExpiredData(new Date());
+      expect(await prisma.pendingRecordingDeletion.count({ where: { recordingSid: old, provider: 'elevenlabs' } })).toBe(1);
+      await prisma.pendingRecordingDeletion.deleteMany({ where: { recordingSid: old } });
+    });
+    // without a provider key there is nothing at the provider to delete: nothing is queued (and nothing can alert forever)
+    await withEnv({ ELEVENLABS_API_KEY: undefined }, async () => {
+      const biz = await newBusiness();
+      const caller = phone();
+      const conv = `conv${uniq('n').replace(/[^A-Za-z0-9]/g, '')}`;
+      await newCall(biz, { conversationId: conv, callerPhone: caller, callerE164: caller, status: 'completed' });
+      await eraseCustomerData(biz.id, caller);
+      expect(await prisma.pendingRecordingDeletion.count({ where: { recordingSid: conv } })).toBe(0);
+    });
+  });
+
+  test('R14 voice M3b: a declined call whose inline provider delete fails is queued, not forgotten', async () => {
+    const saved = globalThis.fetch;
+    globalThis.fetch = (async () => new Response('{}', { status: 503 })) as typeof fetch;
+    try {
+      await withEnv({ ELEVENLABS_API_KEY: 'xi_test_key' }, async () => {
+        const biz = await newBusiness({ agent_id: uniq('agent') });
+        const call = await newCall(biz, { consentStatus: 'declined' });
+        const out = await postcall.processPostCall({ type: 'post_call_transcription', data: {
+          conversation_id: call.conversationId!, agent_id: biz.agent_id!, call_sid: call.callSid!, transcript: turns(['agent', 'Recorded.'], ['user', 'I do not want to be recorded']),
+          metadata: { call_duration_secs: 10 },
+        } } as never);
+        expect(out.status).toBe(200);
+        expect(await prisma.pendingRecordingDeletion.count({ where: { recordingSid: call.conversationId!, provider: 'elevenlabs', businessId: biz.id } })).toBe(1);
+      });
+    } finally { globalThis.fetch = saved; }
+  });
+
+  test('R14 voice L2/L3: a transferred call is split into AI and forward seconds; a forward-metering failure gives the claim back', async () => {
+    const transferred = (conv: string, sid: string, biz: { agent_id?: string | null }, atSecs: number | null) => ({ type: 'post_call_transcription', data: {
+      conversation_id: conv, agent_id: biz.agent_id!, call_sid: sid,
+      transcript: [
+        { role: 'agent', message: 'Hello', time_in_call_secs: 0 }, { role: 'user', message: 'Connect me', time_in_call_secs: 5 },
+        { role: 'agent', message: 'Connecting', time_in_call_secs: atSecs ?? undefined, tool_calls: [{ tool_name: 'transfer_to_number' }], tool_results: [{ tool_name: 'transfer_to_number', result_value: 'ok' }] },
+      ],
+      metadata: { call_duration_secs: 100 }, analysis: { transcript_summary: 's' },
+    } });
+    // (a) the transfer turn time is known: 40 s of AI, 60 s of forward
+    const biz = await newBusiness({ agent_id: uniq('agent') });
+    const call = await newCall(biz, { transferStatus: 'attempted' });
+    expect((await postcall.processPostCall(transferred(call.conversationId!, call.callSid!, biz, 40) as never)).status).toBe(200);
+    const u = (await db.getUsage(biz.id))!;
+    expect([u.call_seconds, u.forward_seconds]).toEqual([40, 60]);
+    // (b) no readable result at all: unknown, so the whole call is AI time (never "connected" by default)
+    const biz2 = await newBusiness({ agent_id: uniq('agent') });
+    const call2 = await newCall(biz2, { transferStatus: 'attempted' });
+    const unreadable = transferred(call2.conversationId!, call2.callSid!, biz2, null);
+    (unreadable.data.transcript[2] as Record<string, unknown>).tool_results = undefined;
+    await postcall.processPostCall(unreadable as never);
+    const u2 = (await db.getUsage(biz2.id))!;
+    expect([u2.call_seconds, u2.forward_seconds]).toEqual([100, 0]);
+    expect((await prisma.call.findUnique({ where: { id: call2.id } }))!.transferStatus).toBe('attempted');
+    // (c) the forward write fails: meterForwardedCall returns 'failed' (it never throws); the claim must be released for the job / a retry
+    const biz3 = await newBusiness({ agent_id: uniq('agent') });
+    const call3 = await newCall(biz3, { transferStatus: 'attempted' });
+    await db.recordForwardSeconds(biz3.id, 1); // the usage row exists
+    await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters ADD CONSTRAINT r14_tmp_fail CHECK (forward_seconds < 30) NOT VALID`);
+    try {
+      await postcall.processPostCall(transferred(call3.conversationId!, call3.callSid!, biz3, 40) as never);
+    } finally { await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters DROP CONSTRAINT r14_tmp_fail`); }
+    expect((await prisma.call.findUnique({ where: { id: call3.id } }))!.meteredAt).toBeNull();
+    // the retry (a later post-call delivery, or the reconcile job) now meters it
+    await prisma.processedEvent.deleteMany({ where: { id: call3.conversationId! } });
+    await postcall.processPostCall(transferred(call3.conversationId!, call3.callSid!, biz3, 40) as never);
+    expect((await prisma.call.findUnique({ where: { id: call3.id } }))!.meteredAt).not.toBeNull();
+    expect((await db.getUsage(biz3.id))!.forward_seconds).toBe(61);
+  });
+
+  test('R14 voice L4: a provider conversation with no duration is retried, never closed with 0 seconds', async () => {
+    const biz = await newBusiness();
+    const call = await newCall(biz, { startedAt: new Date(Date.now() - 3 * 3600_000) });
+    const noDuration = { ok: true as const, snapshot: { status: 'processing' as const, durationSecs: null, startUnixSecs: null, language: null, turns: [] } };
+    const r = await reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => noDuration });
+    expect(r.items.find((i) => i.call_id === call.id)!.outcome).toBe('not_ready');
+    const row = await prisma.call.findUnique({ where: { id: call.id } });
+    expect(row!.meteredAt).toBeNull();
+    expect(row!.reconcileAttempts).toBe(1);
+    const done = { ok: true as const, snapshot: { status: 'done' as const, durationSecs: 90, startUnixSecs: null, language: null, turns: [] } };
+    await prisma.call.update({ where: { id: call.id }, data: { startedAt: new Date(Date.now() - 9 * 3600_000) } });
+    const r2 = await reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => done });
+    expect(r2.items.find((i) => i.call_id === call.id)!.outcome).toBe('metered');
+    expect((await db.getUsage(biz.id))!.call_seconds).toBe(90);
+  });
+
+  test('R14 voice L5: the turn still being spoken is stored as interim and replaced; an objection in its later text is caught', async () => {
+    const biz = await newBusiness(); const call = await newCall(biz);
+    let message = "I don't";
+    const source = new live.ElevenLabsPollingSource(async () => ({
+      ok: true as const, snapshot: { status: 'in-progress' as const, durationSecs: null, startUnixSecs: null, language: null, turns: [
+        { role: 'agent' as const, message: 'This call may be recorded', timeInCallSecs: 0 }, { role: 'user' as const, message, timeInCallSecs: 4 },
+      ] },
+    }));
+    expect(await live.requestPoll(call.id, { source, leaseMs: 1 })).toBe('polled');
+    let rows = await prisma.callTranscriptEvent.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } });
+    expect(rows.map((r) => [r.text, r.isFinal])).toEqual([['This call may be recorded', true], ["I don't", false]]);
+    await prisma.provisionLock.deleteMany({ where: { key: `live-transcript:${call.id}` } });
+    message = "I don't want to be recorded";
+    expect(await live.requestPoll(call.id, { source, leaseMs: 1 })).toBe('declined');
+    expect(await prisma.callTranscriptEvent.count({ where: { callId: call.id } })).toBe(0);
+    expect((await prisma.call.findUnique({ where: { id: call.id } }))!.consentStatus).toBe('declined');
+    // an ordinary growing turn is updated in place, and finalised when the call ends
+    const call2 = await newCall(biz);
+    let text = 'My AC';
+    let status: 'in-progress' | 'done' = 'in-progress';
+    const src2 = new live.ElevenLabsPollingSource(async () => ({ ok: true as const, snapshot: { status, durationSecs: 20, startUnixSecs: null, language: null, turns: [{ role: 'user' as const, message: text, timeInCallSecs: 1 }] } }));
+    await live.requestPoll(call2.id, { source: src2, leaseMs: 1 });
+    await prisma.provisionLock.deleteMany({ where: { key: `live-transcript:${call2.id}` } });
+    text = 'My AC stopped working'; 
+    await live.requestPoll(call2.id, { source: src2, leaseMs: 1 });
+    rows = await prisma.callTranscriptEvent.findMany({ where: { callId: call2.id } });
+    expect(rows.map((r) => [r.text, r.isFinal])).toEqual([['My AC stopped working', false]]);
+    await prisma.provisionLock.deleteMany({ where: { key: `live-transcript:${call2.id}` } });
+    status = 'done';
+    await live.requestPoll(call2.id, { source: src2, leaseMs: 1 });
+    rows = await prisma.callTranscriptEvent.findMany({ where: { callId: call2.id } });
+    expect(rows.map((r) => [r.text, r.isFinal])).toEqual([['My AC stopped working', true]]);
+  });
+
+  test('R14 voice L7: the /transcript polling fallback is rate limited per person', async () => {
+    const biz = await newBusiness(); const staff = await login(biz.id, 'staff');
+    const call = await newCall(biz, { consentStatus: 'unknown' });
+    const { LIVE_POLL_PER_MINUTE } = await import('@/app/api/calls/[id]/transcript/route');
+    const hit = () => transcriptRoute.GET(get(`/api/calls/${call.id}/transcript`, { cookie: staff.cookie }), ctx(call.id));
+    let last = 200;
+    for (let i = 0; i < LIVE_POLL_PER_MINUTE; i++) last = (await hit()).status;
+    expect(last).toBe(200);
+    const limited = await hit();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get('retry-after')).toBeTruthy();
+    await prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: `live-poll:user:${staff.userId}` } } });
+  });
 });

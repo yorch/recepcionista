@@ -104,6 +104,20 @@ export async function changeTeamRole(
 }
 
 /**
+ * Sign a member out of THIS business: only the sessions that are working in it (the same selection as a role change). A co-tenant
+ * owner has no authority over the person's sessions in their other businesses; "sign out everywhere" is for the person themselves
+ * and for platform admins (`everywhere`).
+ */
+export async function revokeTeamUserSessions(businessId: string, userId: string, opts: { everywhere?: boolean } = {}): Promise<number> {
+  if (opts.everywhere) return (await prisma.userSession.deleteMany({ where: { userId } })).count;
+  const primary = await prisma.user.findUnique({ where: { id: userId }, select: { businessId: true } });
+  const res = await prisma.userSession.deleteMany({
+    where: { userId, OR: [{ activeBusinessId: businessId }, ...(primary?.businessId === businessId ? [{ activeBusinessId: null }] : [])] },
+  });
+  return res.count;
+}
+
+/**
  * Disable or re-enable the person's access to THIS business (their account and other businesses are untouched). Refuses for the last
  * enabled owner. Sessions that were working here fall back to another of their businesses (done by disableMembership); when this was
  * their only business every session of theirs ends.

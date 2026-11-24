@@ -1245,6 +1245,16 @@ export async function setBookingStripeRefs(bookingId: ID, refs: { payment_intent
   return res.count === 1;
 }
 
+/** Remember the Payment Link texted for the booking's deposit (so a cancellation can deactivate it). */
+export async function setBookingPaymentLink(bookingId: ID, linkId: string | null | undefined): Promise<boolean> {
+  if (!linkId || !/^plink_[A-Za-z0-9]{6,100}$/.test(linkId)) return false; // mock links ("mock_...") have nothing to deactivate
+  return (await prisma.booking.updateMany({ where: { id: bookingId }, data: { stripePaymentLinkId: linkId } })).count === 1;
+}
+
+export async function getBookingPaymentLinkId(bookingId: ID): Promise<string | null> {
+  return (await prisma.booking.findUnique({ where: { id: bookingId }, select: { stripePaymentLinkId: true } }))?.stripePaymentLinkId ?? null;
+}
+
 /** The booking a Stripe payment intent or checkout session belongs to (refund / dispute webhooks). */
 export async function getBookingByStripeRef(ref: { payment_intent_id?: string; checkout_session_id?: string }): Promise<Booking | null> {
   const or: Prisma.BookingWhereInput[] = [];
@@ -1560,8 +1570,8 @@ export async function clearAll(): Promise<void> {
   log.warn('clear_all');
   await prisma.$transaction(async (tx) => {
     // The recordings at the provider must not outlive the only rows pointing at them: queue them first (same transaction).
-    const withRecording = await tx.call.findMany({ where: { recordingUrl: { not: null } }, select: { recordingUrl: true, businessId: true } });
-    await enqueueRecordingDeletions(tx, withRecording.map((c) => ({ url: c.recordingUrl, businessId: c.businessId })));
+    const withRecording = await tx.call.findMany({ where: { OR: [{ recordingUrl: { not: null } }, { conversationId: { not: null } }] }, select: { recordingUrl: true, businessId: true, conversationId: true } });
+    await enqueueRecordingDeletions(tx, withRecording.map((c) => ({ url: c.recordingUrl, businessId: c.businessId, conversationId: c.conversationId })));
     // Leaves first (explicit, so the order does not depend on cascade rules), then the parents.
     await tx.callTranscriptEvent.deleteMany();
     await tx.calendarBusyBlock.deleteMany();

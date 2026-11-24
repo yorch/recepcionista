@@ -109,5 +109,22 @@ export function transferOutcomeFromTranscript(transcript: unknown): 'connected' 
   }
   if (!called) return 'none';
   if (errored) return 'failed';
-  return resolved || called ? 'connected' : 'unknown';
+  // Called but no readable result: we do not KNOW it connected (the provider shape is unverified, or the leg dropped silently). 'unknown'
+  // leaves the status 'attempted' and the call is metered as an ordinary AI call.
+  return resolved ? 'connected' : 'unknown';
+}
+
+/**
+ * When (seconds into the call) the agent invoked `transfer_to_number`, from the turn's `time_in_call_secs`; null when unreadable. Everything
+ * before it was the AI talking (AI minutes), only the time after it is forward time.
+ */
+export function transferStartSecs(transcript: unknown): number | null {
+  if (!Array.isArray(transcript)) return null;
+  for (const turn of transcript as Record<string, unknown>[]) {
+    const calls = Array.isArray(turn?.tool_calls) ? (turn.tool_calls as Record<string, unknown>[]) : [];
+    if (!calls.some((c) => String(c?.tool_name ?? c?.name ?? '') === 'transfer_to_number')) continue;
+    const t = Number(turn.time_in_call_secs);
+    return Number.isFinite(t) && t >= 0 ? Math.round(t) : null;
+  }
+  return null;
 }

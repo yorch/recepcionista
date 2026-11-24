@@ -33,6 +33,10 @@ async function findByCode(businessId: string, code: string, now: Date): Promise<
   const rows = await prisma.ownerKbChange.findMany({
     where: { businessId, createdAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } }, orderBy: { createdAt: 'desc' }, take: 100, select: { id: true },
   });
+  // The newest APPLIED change is always a candidate, whatever its age or position: a voice UNDO of it texts a code for it, and that
+  // code must validate even when it is older than 7 days or more than 100 changes ago.
+  const newestApplied = await prisma.ownerKbChange.findFirst({ where: { businessId, status: 'applied' }, orderBy: [{ appliedAt: 'desc' }, { id: 'desc' }], select: { id: true } });
+  if (newestApplied && !rows.some((r) => r.id === newestApplied.id)) rows.push(newestApplied);
   const key = appSecretKey();
   const bucket = undoBucket(now);
   for (const r of rows) {

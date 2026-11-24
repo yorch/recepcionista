@@ -10,7 +10,7 @@ import { claimEvent } from '@/lib/db';
 import { prisma } from '@/lib/db/client';
 import { recordAudit } from '@/lib/db';
 import {
-  deleteBusyBlock, deleteEventLink, getCalendarConnectionById, listEventLinksForConnection, replaceBusyBlocks,
+  deleteBusyBlock, deleteEventLink, getCalendarConnectionById, listEventLinksForConnection, replaceBusyBlocksIf,
   setCalendarConnectionStatus, touchEventLink, updateCalendarSyncState, upsertBusyBlock, type BusyBlockInput,
 } from '@/lib/db/calendar';
 import { withLease } from '@/lib/db/locks';
@@ -68,8 +68,24 @@ export function mapEvent(ev: GEvent, tz: string, now: Date): Mapped {
   return { kind: 'block', block: { google_event_id: ev.id, starts_at: starts, ends_at: ends, all_day: allDay, transparency: ev.transparency === 'transparent' ? 'transparent' : 'opaque' } };
 }
 
-/** An event we created for a booking (link row or our private marker). */
-const isOurs = (ev: GEvent, links: Map<string, unknown>): boolean => links.has(ev.id) || Boolean(ev.extendedProperties?.private?.[BOOKING_PROP]);
+/**
+ * An event we created for a booking OF THIS BUSINESS: a link row of this connection, or our private marker naming one of this
+ * business's bookings. A marker naming another business's booking (two businesses sharing one Google calendar) is a normal busy
+ * event for this one: the other business really sold that slot.
+ */
+const isOurs = (ev: GEvent, links: Map<string, unknown>, ownBookings: Set<string>): boolean => {
+  if (links.has(ev.id)) return true;
+  const id = ev.extendedProperties?.private?.[BOOKING_PROP];
+  return id !== undefined && ownBookings.has(id);
+};
+
+/** Which of the page's marker booking ids belong to this connection's business (one batched lookup per page). */
+async function ownBookingIds(conn: CalendarConnection, events: GEvent[], links: Map<string, unknown>): Promise<Set<string>> {
+  const ids = [...new Set(events.filter((e) => !links.has(e.id)).map((e) => e.extendedProperties?.private?.[BOOKING_PROP]).filter((v): v is string => typeof v === 'string' && v.length > 0 && v.length <= 100))];
+  if (ids.length === 0) return new Set();
+  const rows = await prisma.booking.findMany({ where: { id: { in: ids }, businessId: conn.business_id }, select: { id: true } });
+  return new Set(rows.map((r) => r.id));
+}
 
 /** An owner changed a linked event in Google: record it (never touches the booking). Deduped by etag. */
 async function noteExternalChange(conn: CalendarConnection, ev: GEvent, link: { booking_id: string; etag: string | null } | undefined): Promise<void> {
@@ -110,17 +126,18 @@ async function runSync(conn: CalendarConnection, tz: string, now: Date): Promise
       let changed = 0, pageToken: string | undefined, next: string | undefined;
       for (let i = 0; i < MAX_PAGES; i++) {
         const page = await listPage(conn.id, conn.calendar_id, { syncToken: stored.token, ...(pageToken ? { pageToken } : {}) });
+        const own = await ownBookingIds(conn, page.items ?? [], links);
         for (const ev of page.items ?? []) {
-          if (isOurs(ev, links)) { await noteExternalChange(conn, ev, links.get(ev.id)); await deleteBusyBlock(conn.id, ev.id); continue; }
+          if (isOurs(ev, links, own)) { await noteExternalChange(conn, ev, links.get(ev.id)); await deleteBusyBlock(conn.id, ev.id); continue; }
           const m = mapEvent(ev, tz, now);
-          if (m.kind === 'block') await upsertBusyBlock(conn.id, m.block); else await deleteBusyBlock(conn.id, ev.id);
+          if (m.kind === 'block') await upsertBusyBlock(conn.id, m.block, prisma, { expectCalendarId: conn.calendar_id }); else await deleteBusyBlock(conn.id, ev.id);
           changed++;
         }
         pageToken = page.nextPageToken;
         if (!pageToken) { next = page.nextSyncToken; break; }
       }
       if (!next) throw new GoogleApiError(502, 'no_sync_token');
-      await updateCalendarSyncState(conn.id, { sync_token: encodeToken(next, stored.fullAt) });
+      await updateCalendarSyncState(conn.id, { sync_token: encodeToken(next, stored.fullAt) }, { expectCalendarId: conn.calendar_id });
       return { mode: 'incremental', changed };
     } catch (err) {
       if (!(err instanceof GoogleApiError && err.status === 410)) throw err;
@@ -135,8 +152,9 @@ async function runSync(conn: CalendarConnection, tz: string, now: Date): Promise
   const timeMax = new Date(now.getTime() + HORIZON_DAYS * 86_400_000).toISOString();
   for (let i = 0; i < MAX_PAGES; i++) {
     const page = await listPage(conn.id, conn.calendar_id, { timeMin, timeMax, ...(pageToken ? { pageToken } : {}) });
+    const own = await ownBookingIds(conn, page.items ?? [], links);
     for (const ev of page.items ?? []) {
-      if (isOurs(ev, links)) { await noteExternalChange(conn, ev, links.get(ev.id)); continue; }
+      if (isOurs(ev, links, own)) { await noteExternalChange(conn, ev, links.get(ev.id)); continue; }
       const m = mapEvent(ev, tz, now);
       if (m.kind === 'block') blocks.push(m.block);
     }
@@ -144,8 +162,11 @@ async function runSync(conn: CalendarConnection, tz: string, now: Date): Promise
     if (!pageToken) { next = page.nextSyncToken; break; }
   }
   if (!next) throw new GoogleApiError(502, 'no_sync_token'); // incomplete listing: keep the old blocks
-  await replaceBusyBlocks(conn.id, blocks);
-  await updateCalendarSyncState(conn.id, { sync_token: encodeToken(next, now.getTime()) });
+  // Conditional on the calendar this listing came from: if the owner switched calendars (or disconnected) while we were listing, the
+  // blocks and the token belong to the OLD calendar and are discarded (the switch already queued a fresh full sync).
+  const applied = await replaceBusyBlocksIf(conn.id, blocks, { expectCalendarId: conn.calendar_id });
+  if (!applied.applied) { log.info('sync_discarded', { connection: conn.id }); return { mode: 'full', changed: 0 }; }
+  await updateCalendarSyncState(conn.id, { sync_token: encodeToken(next, now.getTime()) }, { expectCalendarId: conn.calendar_id });
   return { mode: 'full', changed: blocks.length };
 }
 
@@ -180,14 +201,14 @@ async function syncOnce(connectionId: string, now: Date): Promise<SyncOutcome> {
   const tz = tzOf(biz?.timezone);
   try {
     const r = await runSync(conn, tz, now);
-    if (conn.status === 'error') await setCalendarConnectionStatus(conn.id, 'active', null);
-    await updateCalendarSyncState(conn.id, { last_sync_at: now, last_error: null });
+    if (conn.status === 'error') await setCalendarConnectionStatus(conn.id, 'active', null); // no-op when revoked meanwhile
+    await updateCalendarSyncState(conn.id, { last_sync_at: now, last_error: null }, { expectCalendarId: conn.calendar_id });
     return { outcome: 'synced', ...r };
   } catch (err) {
     if (err instanceof NeedsReauthError) return { outcome: 'needs_reauth' };
     const reason = err instanceof GoogleApiError ? `${err.status} ${err.reason}` : 'network_error';
     if (err instanceof GoogleApiError && (err.status === 403 || err.status === 404) && /forbidden|notFound|insufficient|accessNotConfigured|NOT_FOUND|PERMISSION/i.test(err.reason)) {
-      await markNeedsReauth(conn.id, `calendar_${err.status}`); // calendar gone / permission withdrawn
+      await markNeedsReauth(conn.id, `calendar_${err.status}`); // calendar gone / permission withdrawn (from active AND error: stale blocks must stop gating bookings)
       return { outcome: 'needs_reauth', reason };
     }
     const n = failureCount(conn.last_error) + 1;
@@ -200,7 +221,5 @@ async function syncOnce(connectionId: string, now: Date): Promise<SyncOutcome> {
 }
 
 async function markNeedsRetry(id: string, reason: string): Promise<void> {
-  // markNeedsReauth only transitions from 'active'; a failing connection is 'error', so move it back first.
-  await setCalendarConnectionStatus(id, 'active', null);
-  await markNeedsReauth(id, `sync_failing: ${reason}`);
+  await markNeedsReauth(id, `sync_failing: ${reason}`); // transitions from 'active' and from 'error'
 }

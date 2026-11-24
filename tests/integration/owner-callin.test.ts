@@ -488,4 +488,88 @@ integration('owner call-in (postgres)', () => {
     expect(live.ok).toBe(false);
     expect(await prisma.callTranscriptEvent.count({ where: { callId: s.call.id } })).toBe(0);
   });
+
+  // ------------------------------------------------------------------ review 14 (report 11)
+
+  test('R14 M2: confirming one proposal does not make the other pending ones stale; a second change to the SAME field is stale', async () => {
+    const biz = await shop();
+    const s = await dial(biz, biz.owner_phone_e164!);
+    await withEnv(DEMO, async () => {
+      await propose(biz, s, priceArgs(120));
+      const codeA = codeIn(await lastText(biz));
+      await propose(biz, s, { change_type: 'add_faq', question: 'Do you take cards?', answer: 'Yes, all major cards.' });
+      const codeB = codeIn(await lastText(biz));
+      await propose(biz, s, { change_type: 'add_pricing_note', text: 'Senior discount 10%' });
+      const codeC = codeIn(await lastText(biz));
+      await propose(biz, s, priceArgs(130)); // the SAME field as A
+      const codeD = codeIn(await lastText(biz));
+
+      expect(await inbound(biz, biz.owner_phone!, `YES ${codeA}`)).toContain('Applied');
+      // A rebuilt the prompt (bumping knowledge_bases.updated_at): B (faqs) and C (pricing notes) touch other fields and still apply
+      expect(await inbound(biz, biz.owner_phone!, `YES ${codeB}`)).toContain('Applied');
+      expect(await inbound(biz, biz.owner_phone!, `YES ${codeC}`)).toContain('Applied');
+      // D was computed over the old price list: applying it would silently undo A
+      expect(await inbound(biz, biz.owner_phone!, `YES ${codeD}`)).toContain('edited after');
+      const kb = (await db.getKnowledgeBase(biz.id))!;
+      expect(kb.services[0].base_price).toBe(120);
+      expect(kb.faqs.map((f) => f.question)).toContain('Do you take cards?');
+      expect(kb.pricing_notes).toContain('Senior discount');
+      expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'owner_kb.stale' } })).toBe(1);
+    });
+  });
+
+  test('R14 L4: a spoofed owner caller hears only changes that went live; the confirmation text says it was requested on a call', async () => {
+    const biz = await shop();
+    const s = await dial(biz, biz.owner_phone_e164!);
+    await withEnv(DEMO, async () => {
+      await propose(biz, s, priceArgs(150));
+      const text = await lastText(biz);
+      expect(text).toMatch(/Requested on a call at \d{1,2}:\d{2} [AP]M\. Not you\? Reply NO [A-Z2-9]{6}\./);
+      const listed = await tool(biz, s, 'list_recent_changes');
+      expect(listed.message).toBe('There are no changes yet.'); // the proposal is not live: not read out
+      const code = codeIn(text);
+      await propose(biz, s, { change_type: 'add_pricing_note', text: 'Unpublished closure plan' });
+      const codeRejected = codeIn(await lastText(biz));
+      expect(await inbound(biz, biz.owner_phone!, `NO ${codeRejected}`)).toContain('Cancelled');
+      await inbound(biz, biz.owner_phone!, `YES ${code}`);
+      const after = await tool(biz, s, 'list_recent_changes');
+      expect(after.message).toContain('price $150');
+      expect(after.message).not.toContain('Unpublished closure plan');
+      expect(after.message).not.toMatch(/cancelled|waiting/);
+    });
+  });
+
+  test('R14 L5: a voice UNDO of a change applied long ago texts a code that validates', async () => {
+    const biz = await shop();
+    const s = await dial(biz, biz.owner_phone_e164!);
+    await withEnv(DEMO, async () => {
+      await propose(biz, s, priceArgs(140));
+      const code = codeIn(await lastText(biz));
+      expect(await inbound(biz, biz.owner_phone!, `YES ${code}`)).toContain('Applied');
+      const old = new Date(Date.now() - 20 * 86_400_000);
+      await prisma.ownerKbChange.updateMany({ where: { businessId: biz.id }, data: { createdAt: old, appliedAt: old } });
+      // 120 newer (rejected) changes push it out of the 100-row window as well
+      for (let i = 0; i < 101; i++) await prisma.ownerKbChange.create({ data: { businessId: biz.id, source: 'dashboard', status: 'rejected', summary: `n${i}`, patch: {} } });
+      const s2 = await dial(biz, biz.owner_phone_e164!);
+      const r = await tool(biz, s2, 'undo_last_change');
+      expect(r.ok).toBe(true);
+      const undoCode = /UNDO ([A-Z2-9]{6})/.exec(await lastText(biz))?.[1] ?? '';
+      expect(undoCode).not.toBe('');
+      expect(await inbound(biz, biz.owner_phone!, `UNDO ${undoCode}`)).toContain('Reverted');
+      expect((await services(biz))[0].base_price).toBe(89);
+    });
+  });
+
+  test('R14 L6: a failed STIR verdict on the owner number is served as a stranger (no owner mode); no verdict is still allowed', async () => {
+    const biz = await shop();
+    const post = async (verstat?: string) => {
+      const body = { caller_id: biz.owner_phone_e164, agent_id: biz.agent_id, called_number: biz.phone, call_sid: uniq('CA'), conversation_id: uniq('conv'), ...(verstat ? { stir_verstat: verstat } : {}) };
+      await initiation.POST(new Request('http://localhost/api/voice/initiation', { method: 'POST', headers: { 'content-type': 'application/json', 'x-recepcionista-tool-secret': SECRETS.toolSecret }, body: JSON.stringify(body) }));
+      return (await prisma.call.findFirst({ where: { businessId: biz.id, callSid: body.call_sid } }))!;
+    };
+    expect((await post('TN-Validation-Failed')).kind).toBe('customer');
+    expect((await post('TN-Validation-Passed-A')).kind).toBe('owner');
+    expect((await post()).kind).toBe('owner');
+    expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'owner_kb.refused' } })).toBe(1);
+  });
 });

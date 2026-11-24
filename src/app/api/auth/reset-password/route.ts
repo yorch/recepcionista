@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { checkSameOrigin } from '@/lib/auth';
-import { afterResponse, auditIp, limitIp, sendPasswordChangedNotice, sendTwoFactorNotice } from '@/lib/account-flows';
+import { afterResponse, auditIp, limitIp, sendPasskeyNotice, sendPasswordChangedNotice, sendTwoFactorNotice } from '@/lib/account-flows';
 import {
-  changePassword, consumeEmailToken, disableTotp, getTotpState, getUserById, invalidateUserEmailTokens, markEmailVerified, peekEmailToken, recordAudit,
+  changePassword, consumeEmailToken, deleteUntrustedPasskeys, disableTotp, getTotpState, getUserById, invalidateUserEmailTokens, markEmailVerified, peekEmailToken, recordAudit,
 } from '@/lib/db';
 import { hashPassword } from '@/lib/password';
 import { validateStrongPassword } from '@/lib/user-policy';
@@ -43,6 +43,10 @@ export async function POST(req: Request) {
     const totp = await getTotpState(user.id);
     const untrustedTotp = Boolean(totp?.enabled_at) && (!user.email_verified_at || Date.parse(user.email_verified_at) > Date.parse(totp!.enabled_at as string));
 
+    // The same rule for passkeys: a credential registered while the address was unverified (or before it was verified) may belong to a
+    // squatter, and a passkey sign-in is a full MFA session, so it must not survive the real owner's reset. Done BEFORE the address is marked verified.
+    const removedPasskeys = await deleteUntrustedPasskeys(user.id, user.email_verified_at ? new Date(user.email_verified_at) : null);
+
     await changePassword(user.id, await hashPassword(body.password as string));
     await invalidateUserEmailTokens(user.id, 'reset');
     await markEmailVerified(user.id); // proving the mailbox is what verification means
@@ -53,6 +57,13 @@ export async function POST(req: Request) {
         meta: { reason: 'enrolled_before_email_verified' },
       });
       await afterResponse('reset.2fa_notice', () => sendTwoFactorNotice(user.email, false, user.locale));
+    }
+    if (removedPasskeys.length > 0) {
+      await recordAudit({
+        actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.passkeys_cleared_on_reset', target: `user:${user.id}`, ip: auditIp(req),
+        meta: { reason: 'registered_before_email_verified', count: removedPasskeys.length },
+      });
+      for (const name of removedPasskeys.slice(0, 5)) await afterResponse('reset.passkey_notice', () => sendPasskeyNotice(user.email, 'removed', name, user.locale));
     }
     await recordAudit({
       actor_kind: 'user', actor_user_id: user.id, business_id: user.business_id, action: 'auth.password_reset', target: `user:${user.id}`, ip: auditIp(req),

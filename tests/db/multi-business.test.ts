@@ -431,4 +431,23 @@ suite('multi-business accounts (postgres)', () => {
     expect(await db.getUserById(ids.ownerB)).not.toBeNull();
     expect((await db.getMembership(ids.ownerB, B)).role).toBe('owner');
   });
+
+  test('R14 L2: an owner signs a shared member out of THIS business only; a platform admin signs the account out everywhere', async () => {
+    const inA = await signIn('multi');          // primary business A (active business unset)
+    const inB = await signIn('multi');
+    expect((await switchTo(inB, B)).status).toBe(200);
+    const ownerA = await signIn('ownerA');
+    const r = await m.revoke.POST(req(`/api/team/users/${ids.multi}/revoke-sessions`, { method: 'POST', headers: { cookie: ownerA } }), ctx(ids.multi));
+    expect(r.status).toBe(200);
+    expect(await activeOf(inA)).toBeNull();                                   // the session working in A is gone
+    expect((await get(m.me, '/api/auth/me', inB)).status).toBe(200);          // the one working in B (where A's owner has no authority) is untouched
+    expect(await activeOf(inB)).not.toBeNull();
+    // an admin acting on one business signs the whole account out
+    const again = await signIn('multi');
+    expect((await switchTo(again, B)).status).toBe(200);
+    const adm = await m.revoke.POST(req(`/api/team/users/${ids.multi}/revoke-sessions?business_id=${A}`, { method: 'POST', headers: ADMIN }), ctx(ids.multi));
+    expect(adm.status).toBe(200);
+    expect(await activeOf(inB)).toBeNull();
+    expect(await activeOf(again)).toBeNull();
+  });
 });

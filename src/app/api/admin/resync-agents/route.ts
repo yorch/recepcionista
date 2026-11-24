@@ -2,7 +2,8 @@ import { ok, fail, readJson } from '@/lib/http';
 import { authenticate } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
 import { prisma, getBusiness, getKnowledgeBase, recordAudit } from '@/lib/db';
-import { expectedToolNames, hasElevenLabs, resetInitiationCache, syncAgent } from '@/lib/voice/elevenlabs';
+import { bindPhoneNumber, expectedToolNames, hasElevenLabs, resetInitiationCache, syncAgent } from '@/lib/voice/elevenlabs';
+import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -83,6 +84,17 @@ export async function POST(req: Request) {
             outcome: res.mock ? 'mock' : res.created ? 'created' : 'synced', ...(res.error ? { detail: res.error.slice(0, 120) } : {}),
           });
           if (res.mock || res.error) items[items.length - 1].outcome = 'failed';
+          else if (res.created) {
+            // The old agent was gone at the provider (404), so a NEW one was made. It needs what provisioning gives every agent: the phone
+            // number binding and the post-call webhook (summaries, transcripts, metering). Flagged for the operator: check the old agent is gone.
+            const notes: string[] = [];
+            try { await bindPhoneNumber(res.agent_id); } catch { notes.push('phone binding failed'); }
+            try {
+              const hook = await ensurePostCallWebhook({ allowCreate: false });
+              if (hook.webhook_id) await registerPostCallWebhookOnAgent(res.agent_id, hook.webhook_id); else notes.push('post-call webhook unavailable');
+            } catch { notes.push('post-call webhook registration failed'); }
+            items[items.length - 1].detail = `NEW agent created (the previous one was not found at the provider)${notes.length ? `; ${notes.join('; ')}: finish in the runbook` : ''}`;
+          }
         } catch (err) {
           log.warn('resync.failed', { business: r.id, err });
           items.push({ business_id: r.id, agent_id: r.agentId as string, outcome: 'failed', detail: (err as Error).message.slice(0, 120) });
@@ -95,7 +107,7 @@ export async function POST(req: Request) {
       actor_kind: user ? 'user' : 'admin_token', actor_user_id: user?.id ?? null, action: 'admin.resync_agents', target: 'agents',
       meta: {
         dry_run: dryRun, batch: batch.length, synced: items.filter((i) => i.outcome === 'synced' || i.outcome === 'created').length,
-        failed: items.filter((i) => i.outcome === 'failed').length, business_ids: batch.map((b) => b.id), has_more: nextCursor !== null,
+        created: items.filter((i) => i.outcome === 'created').length, failed: items.filter((i) => i.outcome === 'failed').length, business_ids: batch.map((b) => b.id), has_more: nextCursor !== null,
       },
     });
     return ok<ResyncResult>({ dry_run: dryRun, configured, tools: expectedToolNames(), items, next_cursor: nextCursor });

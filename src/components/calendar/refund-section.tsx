@@ -35,16 +35,18 @@ export function RefundSection({ booking, refund, onChanged }: {
 
   const paid = booking.deposit_paid ? booking.deposit_amount ?? 0 : 0;
   const status = booking.refund_status ?? 'none';
+  // While a refund is processing only THAT amount may be re-sent (a different amount would be a second refund at Stripe).
+  const pendingAmount = status === 'pending' && booking.refund_amount_cents ? booking.refund_amount_cents : null;
 
   const run = useCallback(async (override: boolean) => {
     setError(null);
-    const cents = partial ? dollarsToCents(dollars) : null;
-    if (partial && (cents === null || cents <= 0 || cents > paid)) { setError(t('refund.amountError', { max: money(paid, locale) })); return; }
+    const cents = pendingAmount ?? (partial ? dollarsToCents(dollars) : null);
+    if (pendingAmount === null && partial && (cents === null || cents <= 0 || cents > paid)) { setError(t('refund.amountError', { max: money(paid, locale) })); return; }
     setBusy(true);
     try {
       await guard(async () => {
         const r = await apiRequest<RefundRouteResult>(`/api/bookings/${booking.id}/refund`, {
-          method: 'POST', body: { ...(cents !== null && cents < paid ? { amount_cents: cents } : {}), ...(override ? { override: true } : {}) },
+          method: 'POST', body: { ...(cents !== null && (pendingAmount !== null || cents < paid) ? { amount_cents: cents } : {}), ...(override ? { override: true } : {}) },
         });
         setConfirm(false);
         onChanged(r.booking, {
@@ -60,7 +62,7 @@ export function RefundSection({ booking, refund, onChanged }: {
     } finally {
       setBusy(false);
     }
-  }, [booking.id, dollars, guard, onChanged, paid, partial, t, locale]);
+  }, [booking.id, dollars, guard, onChanged, paid, partial, pendingAmount, t, locale]);
 
   if (!booking.deposit_paid || paid <= 0) return null;
 
@@ -82,10 +84,10 @@ export function RefundSection({ booking, refund, onChanged }: {
         {status === 'failed' ? t('refund.lastFailed') : ''}
       </p>
       <label className="mt-2 flex min-h-11 items-center gap-2 text-xs text-soft">
-        <input type="checkbox" checked={partial} onChange={(e) => setPartial(e.target.checked)} className="h-5 w-5 accent-[#ff6b35]" />
+        <input type="checkbox" checked={pendingAmount !== null ? pendingAmount < paid : partial} disabled={pendingAmount !== null} onChange={(e) => setPartial(e.target.checked)} className="h-5 w-5 accent-[#ff6b35]" />
         {t('refund.partial')}
       </label>
-      {partial ? (
+      {partial && pendingAmount === null ? (
         <div className="mb-2">
           <label htmlFor="refund-amount" className="block text-xs text-dim">{t('refund.amountLabel', { max: money(paid, locale) })}</label>
           <input id="refund-amount" inputMode="decimal" value={dollars} onChange={(e) => setDollars(e.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-line-3 bg-panel px-3 text-[15px] text-white sm:text-sm" />
@@ -93,7 +95,7 @@ export function RefundSection({ booking, refund, onChanged }: {
       ) : null}
       {error ? <p role="alert" className="mb-2 text-xs text-danger">{error}</p> : null}
       {allowed ? (
-        <Button className="w-full" onClick={() => run(false)} disabled={busy}>{busy ? t('refund.refunding') : t('refund.button', { amount: money(partial && dollarsToCents(dollars) ? dollarsToCents(dollars) : paid, locale) })}</Button>
+        <Button className="w-full" onClick={() => run(false)} disabled={busy}>{busy ? t('refund.refunding') : t('refund.button', { amount: money(pendingAmount ?? (partial && dollarsToCents(dollars) ? dollarsToCents(dollars) : paid), locale) })}</Button>
       ) : confirm ? (
         <div role="group" aria-label={t('refund.confirmGroup')} className="rounded-xl border border-danger-line bg-danger-bg p-3">
           <p className="text-[13px] text-danger">{t('refund.confirmBody')}</p>

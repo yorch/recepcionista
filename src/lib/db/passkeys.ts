@@ -106,6 +106,19 @@ export async function deletePasskey(userId: string, id: string): Promise<boolean
   return res.count === 1;
 }
 
+/**
+ * Remove the passkeys of an account that were planted before its mailbox was ever proven (pre-account squatting): every credential when the
+ * address is still unverified (`verifiedAt` null), else those created before `verifiedAt`. Returns the removed credentials' names.
+ * The password-reset flow calls it BEFORE marking the address verified (the reset proves the mailbox; what an unproven session planted is not trusted).
+ */
+export async function deleteUntrustedPasskeys(userId: string, verifiedAt: Date | null): Promise<string[]> {
+  const where = verifiedAt ? { userId, createdAt: { lt: verifiedAt } } : { userId };
+  const rows = await prisma.passkeyCredential.findMany({ where, select: { id: true, name: true } });
+  if (rows.length === 0) return [];
+  await prisma.passkeyCredential.deleteMany({ where: { userId, id: { in: rows.map((r) => r.id) } } });
+  return rows.map((r) => r.name);
+}
+
 // ── challenges ───────────────────────────────────────────────────────────────
 
 /**

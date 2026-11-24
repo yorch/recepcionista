@@ -108,7 +108,7 @@ export async function POST(req: Request) {
     // OWNER CALL-IN (voice/owner): the caller id equals the VERIFIED owner number -> kind 'owner' (server side), private prompt, 5 minute
     // limit, never blocked by the minute caps, no customer artifacts. A spoofed id only gets a conversation: changes need the owner's SMS.
     try {
-      const ownerEntry = await enterOwnerMode(business, call, from, { planLapsed: !gate.ok && gate.reason === 'no_plan' });
+      const ownerEntry = await enterOwnerMode(business, call, from, { planLapsed: !gate.ok && gate.reason === 'no_plan', stirStatus });
       if (ownerEntry) {
         let agentId = '';
         let agentMock = true;

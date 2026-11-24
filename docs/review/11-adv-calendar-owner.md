@@ -143,3 +143,20 @@ Caller ID is spoofable, which the design accepts. A spoofer who reaches owner mo
 **Scenario:** the owner calls and says "undo my last change", which was applied two weeks ago. They get "Reply UNDO ABC123". The reply answers "That code is not valid" and uses one of the 10 attempts in the 15 min window.
 
 **Fix:** have `undoTool` refuse changes outside the `findByCode` window, or let `findByCode` also look at the newest applied change regardless of age.
+
+---
+
+## Resolution
+
+Status after the fix pass. Tests: `tests/integration/google-calendar.test.ts` (R14 cases), `tests/integration/owner-callin.test.ts` (R14 cases), `tests/review14-pure.test.ts`.
+
+| Finding | Status | How / test, or why it stays |
+| --- | --- | --- |
+| M1 reconnect resets the calendar to `primary` | **Fixed** | `upsertCalendarConnection` keeps `calendar_id` when the account email is unchanged (it only applies the requested calendar on first connect or for a different account). A different account first runs `resetForNewAccount` (deletes the old account's pushed events through the old tokens, drops links and blocks, under the sync lease) and starts on `primary`; the callback audits `account_changed` / `old_events_not_deleted`. Test: "R14 M1". Residual: events that cannot be deleted because the old tokens are already dead stay in the old account (counted in the audit; `docs/known-limitations.md`). |
+| M2 confirming one proposal makes the others stale | **Fixed** | The `updated_at` comparison is gone. Each proposal stores `base` for every field it touches (knowledge-base fields except the derived `system_prompt`, plus hours / closures / area) and `applyKbChange` compares them inside the apply transaction (per field). Test: "R14 M2" (A price, B FAQ, C note all apply; D, a second price change, is stale). Residual: a proposal made before the upgrade has no KB `base` (it expires after 30 minutes). |
+| M3 calendar switch races an in-flight sync / watch | **Fixed** | `changeCalendar` takes the `gcal-sync:<id>` lease (waits up to 20 s, else 409); `replaceBusyBlocksIf` (row `FOR SHARE`), `updateCalendarSyncState`, `upsertBusyBlock` and `ensureWatch` are conditional on the calendar they read and on not being revoked; a watch channel created for the old calendar is stopped, not stored. Test: "R14 M3" (conditional writes, watch race, switch waits for a running sync). |
+| L1 disconnect undone by an in-flight refresh / sync | **Fixed** | `updateCalendarTokens` never changes the status and ignores a revoked row; `setCalendarConnectionStatus` refuses every non-revoked transition from `revoked`; sync writes are conditional (see M3). Test: "R14 L1". |
+| L2 two businesses sharing one calendar | **Fixed** | `isOurs` = linked to this connection, or the `rc_booking` marker names a booking of THIS business (one batched lookup per page). Test: "R14 L2" (the existing marker test now uses a real booking; the fake Google is shared across tests). |
+| L3 403/404 from `error` never reaches `needs_reauth` | **Fixed** | `markNeedsReauth` transitions from `active` and from `error`; `markNeedsRetry` is now just that call. Test: "R14 L3". |
+| L4 spoofed owner caller id | **Partly fixed, rest residual** | Fixed: `list_recent_changes` reads out only applied / reverted changes; every confirmation / undo text says "Requested on a call at <time>. Not you? Reply NO <code>."; a `TN-Validation-Failed` caller id is served as a stranger (report 12 L6). Residual (by design, documented in `docs/known-limitations.md`): the 5-strike lockout, the 10 sessions a day and the 6 texts an hour stay per business, because a trustworthy per-call "verified" signal does not exist on lines without a STIR verdict. Tests: "R14 L4", "R14 L6", `tests/review14-pure.test.ts`. |
+| L5 voice UNDO of an old change texts a dead code | **Fixed** | `findByCode` always includes the newest applied change whatever its age or position. Test: "R14 L5" (applied 20 days ago, 101 newer rows). |

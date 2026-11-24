@@ -98,6 +98,10 @@ export async function handleRefundEvent(
     const refundId = str(obj.id);
     if (type === 'refund.failed' || status === 'failed' || status === 'canceled') {
       updated = (await markRefundFailed(booking.id, `stripe ${status ?? 'failed'}`)).updated;
+      // The app's own retry counter (refund-service: attempt suffix of the Idempotency-Key) counts `booking.refund_failed` rows. A failure that
+      // Stripe reports ASYNCHRONOUSLY must count too, or the next retry reuses the first key and Stripe replays the cached first response
+      // (the refund that already failed) for 24 h instead of creating a new refund.
+      if (updated) await recordAudit({ ...actor, action: 'booking.refund_failed', meta: { via: 'webhook', stripe_event: event.id ?? null, type, status: status ?? null } });
       if (updated) await alertOwner(booking.business_id, booking.id, `A refund of ${formatCents(amount)} for ${booking.customer_name} failed in Stripe. Check it in your Stripe dashboard.`);
     } else if (status === 'succeeded' && amount > 0) {
       updated = (await recordRefund(booking.id, { amount_cents: amount, status: 'refunded', stripe_refund_id: refundId })).updated;

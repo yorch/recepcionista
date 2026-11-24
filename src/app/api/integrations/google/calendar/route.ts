@@ -2,7 +2,7 @@ import { recordAudit } from '@/lib/db';
 import { getCalendarConnection } from '@/lib/db/calendar';
 import { fail, ok, readJson } from '@/lib/http';
 import { listCalendars } from '@/lib/integrations/google/api';
-import { changeCalendar } from '@/lib/integrations/google/oauth';
+import { changeCalendar, SyncBusyError } from '@/lib/integrations/google/oauth';
 import { scoped } from '@/lib/integrations/google/route-helpers';
 import { setBlockOnBusy } from '@/lib/integrations/google/settings';
 import { GoogleApiError } from '@/lib/integrations/google/http';
@@ -37,6 +37,7 @@ export async function PATCH(req: Request) {
     }
     return ok({ updated: true });
   } catch (err) {
+    if (err instanceof SyncBusyError) return fail('the calendar is syncing right now; try again in a moment', 409);
     if (err instanceof NeedsReauthError) return fail('google calendar needs to be reconnected', 409);
     if (err instanceof GoogleApiError) return fail('google is not reachable right now', 502);
     return fail(err, 500);

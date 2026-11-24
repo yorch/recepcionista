@@ -3,9 +3,12 @@ import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/se
 import { isLive, requestPoll } from '@/lib/voice/live-transcript';
 import { NextResponse } from 'next/server';
 import { fail } from '@/lib/http';
+import { rateLimit } from '@/lib/ratelimit';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
+
+export const LIVE_POLL_PER_MINUTE = 40;
 
 /**
  * GET /api/calls/:id/transcript?after=<seq>   Staff+, tenant-scoped. Polling fallback of the live stream: the events with seq > after
@@ -20,6 +23,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     const call = await getCall(id);
     requireBusinessAccess(auth.principal, call?.business_id);
     if (!call) return fail('call not found', 404);
+    // The client polls every 3 s (20 a minute per open view); this bounds a script that loops on it (each call runs several queries and a lease upsert).
+    const who = auth.principal.kind === 'user' ? `user:${auth.principal.user.id}` : `admin:${auth.sessionId ?? auth.principal.via}`;
+    const rl = await rateLimit(`live-poll:${who}`, LIVE_POLL_PER_MINUTE, 60_000);
+    if (!rl.allowed) return Response.json({ ok: false, error: 'too many requests; slow down' }, { status: 429, headers: { 'retry-after': String(rl.retryAfterS), 'cache-control': 'no-store' } });
     const q = new URL(req.url).searchParams;
     const afterRaw = q.get('after') ?? '';
     const after = /^-?\d{1,9}$/.test(afterRaw.trim()) ? Number(afterRaw.trim()) : -1;

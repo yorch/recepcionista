@@ -5,8 +5,9 @@
  *  2. A booking the policy does not refund (or one that is not cancelled) needs an explicit `override` from the owner; it is audited.
  *  3. One refund per booking at a time (a short claim) and ONE refund in total: once refunded, the booking cannot be refunded again here
  *     (the rest of a partial refund is the owner's to do in Stripe: see docs/refunds.md).
- *  4. The Stripe call carries an Idempotency-Key derived from booking + amount, so a repeated click, retry or timeout can never refund
- *     twice. A definite Stripe refusal marks the refund failed and a retry uses a NEW key; an unknown outcome (timeout) stays 'pending'
+ *  4. The Stripe call carries an Idempotency-Key derived from booking + amount (+ the number of failed attempts), so a repeated click, retry
+ *     or timeout can never refund twice; while a refund is 'pending' only the SAME amount may be re-sent (a different amount would be a different
+ *     key, i.e. a second refund), and asynchronous failures (webhook) count as failed attempts too. A definite Stripe refusal marks the refund failed and a retry uses a NEW key; an unknown outcome (timeout) stays 'pending'
  *     and a retry reuses the SAME key.
  *  5. The result is recorded with recordRefund / markRefundFailed, audited, the booking hook fires, and the customer is texted.
  */
@@ -68,6 +69,12 @@ export async function refundDeposit(input: {
       return booking.refund_amount_cents === amount
         ? { ok: true, booking, amount_cents: amount, status: 'refunded', replayed: true, override: false, policy, partial, notice: null }
         : { ok: false, status: 409, code: 'already_refunded', error: 'this deposit was already refunded; a second refund must be made in Stripe', booking };
+    }
+    // While a refund is 'pending' (Stripe said processing / needs action, or the call timed out) only an EXACT replay of it may go out (same
+    // amount = same Idempotency-Key = Stripe returns the same refund). A different amount would get a different key and create a SECOND refund.
+    // The owner can change the amount once the pending refund failed (webhook) or finished.
+    if (booking.refund_status === 'pending' && booking.refund_amount_cents != null && booking.refund_amount_cents !== amount) {
+      return { ok: false, status: 409, code: 'in_progress', error: `a refund of ${(booking.refund_amount_cents / 100).toFixed(2)} is still processing; wait for it to finish or fail before refunding a different amount`, booking };
     }
     // An owner override on a booking the policy had closed ('not_applicable') reopens it as 'none' before the attempt is recorded.
     if (booking.refund_status === 'not_applicable') await prisma.booking.updateMany({ where: { id: booking.id, refundStatus: 'not_applicable' }, data: { refundStatus: 'none' } });

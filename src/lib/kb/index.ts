@@ -130,6 +130,7 @@ export function buildSystemPrompt(
   const emergencyBlock = em.enabled
     ? `An emergency is any of:
 ${em.rules.map((r) => `- ${tx(r)}`).join('\n')}
+911 FIRST: if the caller describes a danger to life (the first rule above), BEFORE any tool say this, in the caller's language: EN "${em.call911.en}" / ES "${em.call911.es}"
 For an emergency: stay calm, use flag_emergency immediately (life-safety situations first follow the 911 rule below), and use handoff_to_human to reach ${business.owner_name || 'the owner'} right away. Emergencies jump the schedule.`
     : tx(em.none ?? { en: '', es: '' });
 

@@ -288,13 +288,13 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
       DELETE FROM "call_transcript_events" e USING "calls" c, "businesses" b
        WHERE e."call_id" = c."id" AND c."business_id" = b."id"
          AND c."started_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`;
-    const calls = await tx.$queryRaw<{ recording_url: string | null; business_id: string }[]>`
+    const calls = await tx.$queryRaw<{ recording_url: string | null; business_id: string; conversation_id: string | null }[]>`
       DELETE FROM "calls" c USING "businesses" b
        WHERE c."business_id" = b."id"
          AND c."started_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")
-      RETURNING c."recording_url", c."business_id"`;
+      RETURNING c."recording_url", c."business_id", c."conversation_id"`;
     // Durable record of every provider-side recording BEFORE the rows that referenced them are gone (same transaction).
-    const queued = await enqueueRecordingDeletions(tx, calls.map((c) => ({ url: c.recording_url, businessId: c.business_id })));
+    const queued = await enqueueRecordingDeletions(tx, calls.map((c) => ({ url: c.recording_url, businessId: c.business_id, conversationId: c.conversation_id })));
     const sms = await tx.$executeRaw`
       DELETE FROM "sms_log" s USING "businesses" b
        WHERE s."business_id" = b."id"
@@ -453,10 +453,10 @@ export async function eraseCustomerData(businessId: string, phone: string, count
     const events = await tx.$executeRaw`
       DELETE FROM "call_transcript_events" WHERE "call_id" = ANY(${rec.callIds}::text[])
          AND "call_id" IN (SELECT "id" FROM "calls" WHERE "business_id" = ${businessId})`;
-    const calls = await tx.$queryRaw<{ recording_url: string | null }[]>`
-      DELETE FROM "calls" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.callIds}::text[]) RETURNING "recording_url"`;
+    const calls = await tx.$queryRaw<{ recording_url: string | null; conversation_id: string | null }[]>`
+      DELETE FROM "calls" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.callIds}::text[]) RETURNING "recording_url", "conversation_id"`;
     // Same transaction as the DELETE: the recordings are on the deletion queue before the last reference to them is gone.
-    const queued = await enqueueRecordingDeletions(tx, calls.map((c) => ({ url: c.recording_url, businessId })));
+    const queued = await enqueueRecordingDeletions(tx, calls.map((c) => ({ url: c.recording_url, businessId, conversationId: c.conversation_id })));
     return {
       counts: { calls: calls.length, transcript_events: events, sms_logs: sms, bookings_anonymized: bookings, briefings: briefings.length },
       audio: briefings.map((r) => r.audio_url),

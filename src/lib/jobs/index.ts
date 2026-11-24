@@ -61,6 +61,7 @@ const GRATITUDE_LEASE_MS = 5 * 60_000;
 const CLEANUP_LEASE_MS = 2 * 60_000;
 export const CLEANUP_EVERY_MS = 60 * 60_000;
 export const RETENTION_EVERY_MS = 24 * 60 * 60_000;
+export const USAGE_WARNINGS_EVERY_MS = 10 * 60_000;
 const FIRST_TICK_DELAY_MS = 20_000;
 
 const STATE_SOURCE = 'job-state';
@@ -73,8 +74,8 @@ export const JOB_INFO: Record<JobName, { description: string; schedule: string }
   cleanup: { description: 'Delete expired sessions, expired email tokens, old processed events and stale rate-limit buckets.', schedule: 'hourly' },
   retention: { description: 'Delete customer data past each business retention window (OFF unless RETENTION_JOB=on).', schedule: 'daily' },
   recording_deletions: { description: 'Delete the provider-side voicemail recordings queued by retention / erasure (retries with backoff; alerts when one keeps failing).', schedule: 'every tick' },
-  reconcile: { description: 'Add the AI minutes of calls whose post-call webhook never arrived (fetched from ElevenLabs; once, shared with the webhook; backs off, gives up with an audit row).', schedule: 'every tick' },
-  usage_warnings: { description: 'Safety net for the 80% / 100% cap warnings (email + text, once per kind per period).', schedule: 'every tick' },
+  reconcile: { description: 'Add the AI minutes of calls whose post-call webhook never arrived (fetched from ElevenLabs; once, shared with the webhook; backs off, gives up with an audit row). Also re-syncs voice agents whose last sync failed (e.g. after a business-type change).', schedule: 'every tick' },
+  usage_warnings: { description: 'Safety net for the 80% / 100% cap warnings (email + text, once per kind per period). One instance at a time (lease).', schedule: 'every 10 minutes' },
   google_calendar: { description: 'Google Calendar: fallback poll (15 min), push-channel renewal, retry/backoff, push reconcile, privacy sweep.', schedule: 'every tick (per connection every 15 min)' },
 };
 
@@ -475,8 +476,13 @@ export async function runJobTick(opts: { now?: Date; env?: NodeJS.ProcessEnv; jo
       } else if (job === 'retention') {
         const last = await lastRunAt('retention');
         if (last && now.getTime() - last.getTime() < RETENTION_EVERY_MS) continue;
+      } else if (job === 'usage_warnings') {
+        // A safety net (the inline trigger sends the warnings): 3 queries per live business, so not every 60 s tick.
+        const last = await lastRunAt('usage_warnings');
+        if (last && now.getTime() - last.getTime() < USAGE_WARNINGS_EVERY_MS) continue;
       }
       reports.push(await runJob(job, { now, deps: opts.deps, env }));
+      if (job === 'usage_warnings') await markRun('usage_warnings', now);
     } catch (err) {
       log.error('tick.job_failed', { job, err });
     }
@@ -537,7 +543,9 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
     } else if (name === 'google_calendar') {
       next = now;
       note = `fallback poll every ${GOOGLE_POLL_EVERY_MS / 60_000} min per connection`;
-    } else if (name === 'reconcile' || name === 'usage_warnings') {
+    } else if (name === 'usage_warnings') {
+      next = last ? new Date(Math.max(now.getTime(), last.getTime() + USAGE_WARNINGS_EVERY_MS)) : now;
+    } else if (name === 'reconcile') {
       next = now;
     } else {
       next = retentionJobEnabled(env.RETENTION_JOB)

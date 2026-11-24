@@ -53,8 +53,11 @@ export function packPricingNotes(pack: VerticalPack, lang: Lang = 'en'): string 
   return `${tx(pack.pricing.notes, lang)}${deposit}`;
 }
 
-/** Words that mean danger to life in ANY vertical (post-call urgency floor; the spoken 911 rule is in every prompt too). */
-export const LIFE_SAFETY_STRONG = ['gas smell', 'smell gas', 'on fire', 'house fire', 'olor a gas', 'incendio', 'monóxido', 'monoxido', 'carbon monoxide'] as const;
+/** Words that mean danger to life in ANY vertical (post-call urgency floor; the spoken 911 rule is in every prompt too). Matched as substrings of what the CALLER said, lower-cased.. */
+export const LIFE_SAFETY_STRONG = [
+  'gas smell', 'smell gas', 'smells like gas', 'smell of gas', 'gas leak', 'on fire', 'house fire', 'smoke coming', 'smells smoke', 'smell smoke', 'smell of smoke', 'sparks', 'sparking', 'electrocut',
+  'olor a gas', 'huele a gas', 'huelo gas', 'fuga de gas', 'escape de gas', 'incendio', 'en fuego', 'sale humo', 'huele a humo', 'humo sale', 'chispas', 'monóxido', 'monoxido', 'carbon monoxide',
+] as const;
 
 /** Whether the pack has emergency handling (triage, keywords, owner alerts for urgent calls). */
 export const hasEmergencies = (pack: VerticalPack): boolean => pack.emergency.enabled;

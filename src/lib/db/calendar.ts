@@ -58,30 +58,36 @@ export interface ConnectCalendarInput {
 
 /**
  * Create the business's connection, or RE-connect it (same row, so ids and links survive): new tokens, status 'active', the old
- * sync token and push channel forgotten (the next sync is a full one). One connection per (business, provider).
+ * sync token and push channel forgotten (the next sync is a full one). One connection per (business, provider). Reconnecting the
+ * same Google account keeps the chosen calendar; a different account starts on `calendar_id` (default 'primary') and the caller
+ * must have cleaned up the old account's events first (see resetForNewAccount).
  */
 export async function upsertCalendarConnection(input: ConnectCalendarInput): Promise<CalendarConnection> {
   const provider = input.provider ?? 'google';
   if (!input.access_token || !input.refresh_token) throw new Error('upsertCalendarConnection: access and refresh tokens are required');
   const expires = input.token_expires_at ? new Date(input.token_expires_at) : null;
   if (expires && Number.isNaN(expires.getTime())) throw new Error('upsertCalendarConnection: invalid token_expires_at');
+  const accountEmail = input.account_email.trim().toLowerCase().slice(0, 320);
   const common = {
     connectedByUserId: input.connected_by_user_id ?? null,
-    accountEmail: input.account_email.trim().toLowerCase().slice(0, 320),
-    calendarId: clip(input.calendar_id, 300) ?? 'primary',
+    accountEmail,
     tokenExpiresAt: expires,
     scopes: (input.scopes ?? '').slice(0, 2000),
     syncToken: null, watchChannelId: null, watchResourceId: null, watchExpiresAt: null,
     status: 'active', lastError: null,
   };
   for (let attempt = 0; attempt < 3; attempt++) {
-    const existing = await prisma.calendarConnection.findUnique({ where: { businessId_provider: { businessId: input.business_id, provider } }, select: { id: true } });
+    const existing = await prisma.calendarConnection.findUnique({ where: { businessId_provider: { businessId: input.business_id, provider } }, select: { id: true, accountEmail: true } });
     const id = existing?.id ?? crypto.randomUUID();
+    // Reconnecting the SAME Google account keeps the calendar the owner picked (a reconnect after needs_reauth must not silently
+    // move the sync back to 'primary'); a different account gets the requested calendar ('primary' by default).
+    const calendarId = clip(input.calendar_id, 300) ?? 'primary';
+    const keepCalendar = existing !== null && existing.accountEmail === accountEmail;
     const enc = { accessTokenEnc: encryptSecret(input.access_token, id), refreshTokenEnc: encryptSecret(input.refresh_token, id) };
     try {
       const row = existing
-        ? await prisma.calendarConnection.update({ where: { id }, data: { ...common, ...enc } })
-        : await prisma.calendarConnection.create({ data: { id, businessId: input.business_id, provider, ...common, ...enc } });
+        ? await prisma.calendarConnection.update({ where: { id }, data: { ...common, ...(keepCalendar ? {} : { calendarId }), ...enc } })
+        : await prisma.calendarConnection.create({ data: { id, businessId: input.business_id, provider, ...common, calendarId, ...enc } });
       return toConnection(row);
     } catch (err) {
       // lost a create race (unique business+provider): loop and take the update path with the winner's id
@@ -137,17 +143,18 @@ export async function getDecryptedTokens(connectionId: string): Promise<Calendar
   };
 }
 
-/** Store a refreshed access token (and, when Google rotated it, the refresh token). Returns false when the connection is gone. */
+/** Store a refreshed access token (and, when Google rotated it, the refresh token). Returns false when the connection is gone or revoked. */
 export async function updateCalendarTokens(
   connectionId: string, tokens: { access_token: string; token_expires_at: Date | string | null; refresh_token?: string },
 ): Promise<boolean> {
   const expires = tokens.token_expires_at ? new Date(tokens.token_expires_at) : null;
+  // Never changes the status (a refresh that returns after Disconnect must not resurrect a revoked connection) and never writes a
+  // token into a revoked row.
   const res = await prisma.calendarConnection.updateMany({
-    where: { id: connectionId },
+    where: { id: connectionId, status: { not: 'revoked' } },
     data: {
       accessTokenEnc: encryptSecret(tokens.access_token, connectionId), tokenExpiresAt: expires,
       ...(tokens.refresh_token ? { refreshTokenEnc: encryptSecret(tokens.refresh_token, connectionId) } : {}),
-      status: 'active', lastError: null,
     },
   });
   return res.count === 1;
@@ -163,13 +170,18 @@ export interface CalendarSyncPatch {
   last_error?: string | null;
 }
 
-/** Sync bookkeeping (never tokens or status; use updateCalendarTokens / setCalendarConnectionStatus). Returns the connection or null. */
-export async function updateCalendarSyncState(connectionId: string, patch: CalendarSyncPatch): Promise<CalendarConnection | null> {
+/**
+ * Sync bookkeeping (never tokens or status; use updateCalendarTokens / setCalendarConnectionStatus). Returns the connection or null
+ * (unknown connection, or `expectCalendarId` no longer matches: the owner switched calendars while the caller was working, so its
+ * result belongs to the OLD calendar and must be discarded).
+ */
+export async function updateCalendarSyncState(connectionId: string, patch: CalendarSyncPatch, opts: { expectCalendarId?: string } = {}): Promise<CalendarConnection | null> {
   const d = (v: Date | string | null | undefined) => (v === undefined ? undefined : v === null ? null : new Date(v));
   try {
-    const row = await prisma.calendarConnection.update({
-      where: { id: connectionId },
-      data: {
+    const where = opts.expectCalendarId !== undefined
+      ? { id: connectionId, calendarId: opts.expectCalendarId.slice(0, 300), status: { not: 'revoked' } }
+      : { id: connectionId };
+    const data = {
         ...(patch.sync_token !== undefined ? { syncToken: patch.sync_token } : {}),
         ...(patch.watch_channel_id !== undefined ? { watchChannelId: patch.watch_channel_id } : {}),
         ...(patch.watch_resource_id !== undefined ? { watchResourceId: patch.watch_resource_id } : {}),
@@ -177,9 +189,11 @@ export async function updateCalendarSyncState(connectionId: string, patch: Calen
         ...(patch.calendar_id !== undefined ? { calendarId: patch.calendar_id.slice(0, 300) } : {}),
         ...(patch.last_sync_at !== undefined ? { lastSyncAt: d(patch.last_sync_at) } : {}),
         ...(patch.last_error !== undefined ? { lastError: clip(patch.last_error, 500) } : {}),
-      },
-    });
-    return toConnection(row);
+      };
+    const res = await prisma.calendarConnection.updateMany({ where, data });
+    if (res.count !== 1) return null;
+    const row = await prisma.calendarConnection.findUnique({ where: { id: connectionId } });
+    return row ? toConnection(row) : null;
   } catch (err) {
     if ((err as { code?: string })?.code === 'P2025') return null;
     throw err;
@@ -189,13 +203,15 @@ export async function updateCalendarSyncState(connectionId: string, patch: Calen
 /**
  * Change the connection state. 'revoked' also WIPES the stored tokens, the sync token and the push channel and deletes the mirrored
  * busy blocks (a disconnected calendar must neither keep credentials nor keep blocking time). Other states keep everything.
- * Returns false when the connection does not exist.
+ * Returns false when the connection does not exist, or when a non-'revoked' status is requested for a connection that is already revoked.
  */
 export async function setCalendarConnectionStatus(connectionId: string, status: CalendarConnectionStatus, lastError: string | null = null): Promise<boolean> {
   if (!CALENDAR_STATUSES.includes(status)) throw new Error('setCalendarConnectionStatus: invalid status');
   return prisma.$transaction(async (tx) => {
+    // 'revoked' is terminal for in-flight work: only a reconnect (upsertCalendarConnection) leaves it. A sync / refresh that finishes
+    // after Disconnect must not flip the row back to active / error.
     const res = await tx.calendarConnection.updateMany({
-      where: { id: connectionId },
+      where: status === 'revoked' ? { id: connectionId } : { id: connectionId, status: { not: 'revoked' } },
       data: status === 'revoked'
         ? { status, lastError: clip(lastError, 500), accessTokenEnc: null, refreshTokenEnc: null, tokenExpiresAt: null, syncToken: null, watchChannelId: null, watchResourceId: null, watchExpiresAt: null }
         : { status, lastError: clip(lastError, 500) },
@@ -292,24 +308,37 @@ const CHUNK = 1000;
  * Only times are stored; there is deliberately no way to pass a title.
  */
 export async function replaceBusyBlocks(connectionId: string, rows: BusyBlockInput[]): Promise<number> {
+  return (await replaceBusyBlocksIf(connectionId, rows)).stored;
+}
+
+/**
+ * replaceBusyBlocks, but conditional: with `expectCalendarId` the rows are written only while the connection still syncs THAT
+ * calendar and is not revoked (checked under a row lock, so a concurrent calendar switch or Disconnect waits for this
+ * transaction and a later one sees the result). `applied: false` means the rows were discarded.
+ */
+export async function replaceBusyBlocksIf(connectionId: string, rows: BusyBlockInput[], opts: { expectCalendarId?: string } = {}): Promise<{ applied: boolean; stored: number }> {
   const byEvent = new Map<string, NonNullable<ReturnType<typeof normBlock>>>();
   for (const r of rows) { const n = normBlock(r); if (n) byEvent.set(n.googleEventId, n); }
   return prisma.$transaction(async (tx) => {
-    const conn = await tx.calendarConnection.findUnique({ where: { id: connectionId }, select: { businessId: true } });
-    if (!conn) return 0;
+    const found = await tx.$queryRaw<{ business_id: string; calendar_id: string; status: string }[]>`
+      SELECT "business_id", "calendar_id", "status" FROM "calendar_connections" WHERE "id" = ${connectionId} FOR SHARE`;
+    const conn = found[0];
+    if (!conn) return { applied: false, stored: 0 };
+    if (opts.expectCalendarId !== undefined && (conn.calendar_id !== opts.expectCalendarId.slice(0, 300) || conn.status === 'revoked')) return { applied: false, stored: 0 };
     await tx.calendarBusyBlock.deleteMany({ where: { connectionId } });
-    const data = [...byEvent.values()].map((n) => ({ connectionId, businessId: conn.businessId, ...n }));
+    const data = [...byEvent.values()].map((n) => ({ connectionId, businessId: conn.business_id, ...n }));
     for (let i = 0; i < data.length; i += CHUNK) await tx.calendarBusyBlock.createMany({ data: data.slice(i, i + CHUNK) });
-    return data.length;
+    return { applied: true, stored: data.length };
   }, { timeout: 60_000 });
 }
 
 /** Insert or update one busy block (incremental sync). Returns null for a malformed row or an unknown connection. */
-export async function upsertBusyBlock(connectionId: string, row: BusyBlockInput, db: DbClient = prisma): Promise<CalendarBusyBlock | null> {
+export async function upsertBusyBlock(connectionId: string, row: BusyBlockInput, db: DbClient = prisma, opts: { expectCalendarId?: string } = {}): Promise<CalendarBusyBlock | null> {
   const n = normBlock(row);
   if (!n) return null;
-  const conn = await db.calendarConnection.findUnique({ where: { id: connectionId }, select: { businessId: true } });
+  const conn = await db.calendarConnection.findUnique({ where: { id: connectionId }, select: { businessId: true, calendarId: true, status: true } });
   if (!conn) return null;
+  if (opts.expectCalendarId !== undefined && (conn.calendarId !== opts.expectCalendarId || conn.status === 'revoked')) return null; // the calendar was switched / disconnected meanwhile
   const saved = await db.calendarBusyBlock.upsert({
     where: { connectionId_googleEventId: { connectionId, googleEventId: n.googleEventId } },
     update: { startsAt: n.startsAt, endsAt: n.endsAt, allDay: n.allDay, transparency: n.transparency, summaryRedacted: true },

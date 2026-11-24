@@ -223,3 +223,26 @@ This review did not repeat any finding from reports 05-13.
   - KB text stays inside `<untrusted_data>`, which strips its own delimiter.
   - Non-emergency packs still get the compliance 911 block and the `promptIsDeficient` marker ("does not run emergency dispatch").
 - **`resync-agents`.** Admin-only, rate-limited, dry run by default, cursor pagination correct when combined with `business_ids`, audited without prompts.
+
+---
+
+## Resolution
+
+Tests: `tests/review14-pure.test.ts`, `tests/integration/review14-data.test.ts`, `tests/db/migration.test.ts` (new populated old-schema upgrade test), `tests/db/locale.test.ts`.
+
+| Finding | Status | How / test, or why it stays |
+| --- | --- | --- |
+| M1 urgency scores the agent's own triage question | **Fixed** | `callerTranscriptText` (caller turns only; legacy string transcripts drop `agent:` lines) feeds `inferUrgency`. Tests: pure (one per vertical) and "R14 verticals M1 end to end" (stored `routine` vs `emergency`). |
+| M2 failed agent sync after a vertical change is silent and never retried | **Fixed** | `applyVerticalChange` returns `retry_queued`, the PATCH response carries `vertical_sync`, the dashboard shows a warning instead of "saved", and the business is flagged (`agent-dirty:<n>`); the `reconcile` job drains the flags with backoff (`voice/agent-resync.ts`), gives up loudly after 8 attempts. Test: "R14 M2" (503 -> warning + marker -> backoff -> recovery -> marker gone, no second agent). Residual: the generated call script is not retried (docs). |
+| M3 transcript consent trigger race | **Fixed** | `rc_transcript_consent_guard` takes `FOR SHARE` on the call row first (new migration, `CREATE OR REPLACE`). Test: "R14 M3" (a decline now waits for the in-flight insert and its purge deletes the committed row; the reverse order skips the insert); migration test checks the function. |
+| M4 admin resync silently replaces the live agent | **Fixed** | Only a 404 on the PATCH recreates an agent; 429 / 5xx / rejected body return `error: update <status>` and create nothing. The resync endpoint reports a created agent, binds the phone number, registers the post-call webhook and says so in `detail` / audit `created`. Test: "R14 M4". |
+| M5 `metered_at` backfill marks in-flight calls as metered | **Fixed** | New migration step: calls whose `metered_at` equals the backfill signature and that have no `ended_at` or no stored `duration_sec` (and started within 3 days) are un-settled again, so post-call or reconcile meters them; the same repair runs for databases that already applied the phase-1 migration. The old migration file is left untouched (checksum). Tests: migration test on a populated old-schema database (m1..m4) and the phase-1 test (c2 now unsettled), re-run of the SQL, zero drift. |
+| L1 malformed `rc_locale` breaks signup | **Fixed** | `localeCookieFrom` catches the decode error. Tests: pure + "R14 L5" in `tests/db/locale.test.ts` (signup with `rc_locale=%` succeeds). |
+| L2 life-safety floor misses phrasings | **Fixed** | Added "huele a gas", "huelo gas", "fuga / escape de gas", "gas leak", "smoke coming", "sale humo", sparks / "chispas", electrocut..., "en fuego". Bare "fire" / "smoke" are NOT added (a smoke-detector install must not be an emergency). `docs/verticals.md` corrected. Test: pure. |
+| L3 the pack's 911 sentence never reaches the prompt | **Fixed** | The EMERGENCIES section of every emergency pack carries "911 FIRST" with the pack's `call911` (EN + ES). Test: pure, one per vertical. |
+| L4 concurrent vertical changes / KB edits | **Fixed (vertical changes), residual (KB saves)** | `applyVerticalChange` runs under a `vertical-change:<id>` lease and rebuilds from the CURRENT business row; a request that cannot get the lease is flagged for the retry job. Test: "R14 L4". A concurrent `PUT /knowledge` that built its prompt from an older business row can still lag until the next sync (unchanged; the retry job heals only flagged businesses). |
+| L5 signup-exists notice in the attacker's language | **Fixed** | The notice uses the existing user's `users.locale` (looked up inside `afterResponse`, constant timing), falling back to the request locale. Test: "R14 L5". |
+| L6 `usage_warnings` runs every tick | **Partly fixed** | Every 10 minutes (`USAGE_WARNINGS_EVERY_MS`) and behind a `usage-warnings-job` lease (one instance); the per-business pass is unchanged ("only changed counters" is not implemented, documented). Test: "R14 L6". |
+| Nit: `OWNER_CALL_MAX_SECONDS` range text | **Fixed** | `docs/env-vars.md`: above 300 clamps to 300, missing / under-30 falls back to 300. |
+| Nit: i18n core header omits the cookie | **Fixed** | Header comment corrected. |
+| Nit: `docs/verticals.md` 911 floor list | **Fixed** | See L2. |

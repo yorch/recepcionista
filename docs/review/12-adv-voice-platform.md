@@ -100,3 +100,22 @@ Checked and holding (nothing found):
 - **Where:** `src/app/api/calls/[id]/transcript/route.ts:26-29`, and `requestPoll` → `acquireLease` (`live-transcript.ts:84`).
 - **Scenario:** A staff session can loop on `GET /api/calls/<live-id>/transcript` with no limit (the SSE slot limits do not apply here). Each request runs 2-3 `getCall` lookups, a lease upsert, `lastTranscriptSeq` and a list query. That is cheap per request but unbounded.
 - **Fix:** Add `rateLimit('live-poll:user:<id>', 40, 60_000)`. The client polls every few seconds, so this costs legitimate users nothing.
+
+---
+
+## Resolution
+
+Tests: `tests/review14-pure.test.ts` (recording proxy, transfer outcome), `tests/integration/telephony-phase2.test.ts` (R14 cases), `tests/db/migration.test.ts`.
+
+| Finding | Status | How / test, or why it stays |
+| --- | --- | --- |
+| M1 live stream survives removal from the business | **Fixed** | `voice/live-access.ts` `mayStillViewCall`: the re-check resolves the principal NOW and requires staff access to THIS call's business. Test: "R14 M1" (user in A and B removed from A: the session resolves to B and the check fails). |
+| M2 recording proxy memory / upstream amplification | **Fixed** | Streamed read with a hard 40 MB cap (cancels the upstream body), per-recording single flight, cache capped at 64 MB in total (oldest first, TTL), at most 4 concurrent downloads per process (503 + `Retry-After`), `subarray` instead of copies. Tests in `tests/review14-pure.test.ts` ("R14 voice M2": 20 parallel Range requests make 1 download, chunked cap, byte cap eviction, concurrency limit). |
+| M3 erasure / retention leave the ElevenLabs conversation | **Fixed** | Provider API supports it (`DELETE /v1/convai/conversations/{id}`, already used for declined / owner calls). `pending_recording_deletions.provider` (migration `20261203120000`), `enqueueRecordingDeletions` queues `conversation_id` in the same transaction as the call DELETE (retention purge, erasure, demo reset; only with `ELEVENLABS_API_KEY` set) and drops the proxy's memory copy; the drain deletes with retries / backoff / alert; a declined or owner call whose inline delete failed is queued too. `docs/compliance.md`, `docs/known-limitations.md`, `docs/runbook.md` corrected. Tests: "R14 voice M3", "R14 voice M3b", migration test. Residual: copies ElevenLabs keeps outside this API (backups, logs). |
+| L1 recording plays bypass the audit log | **Fixed** | One `call.recording_played` row per (person, call, 10 minutes) for ANY successful 200/206, deduplicated with `claimEvent`. Test: "R14 voice L1" (suffix range, open range, `bytes=0-0`). |
+| L2 transfer outcome defaults to "connected" | **Fixed** | `unknown` when the call has no readable result (status stays `attempted`, metered as AI). The AI part of a connected transfer is metered as AI seconds from the transfer turn's `time_in_call_secs` (`transferStartSecs`); without it the whole call stays forward time (residual, UNVERIFIED provider shape). Tests: pure + "R14 voice L2/L3". |
+| L3 forward-metering failure loses the minutes | **Fixed** | `meterForwardedCall`'s `'failed'` now releases the metering claim (throws into the existing catch). Test: "R14 voice L2/L3" (a temporary CHECK makes the write fail; the retry meters it). |
+| L4 reconcile meters 0 s when no duration | **Fixed** | No duration (and not `failed`) is `not_ready`: the attempt counter bumps, nothing is claimed. Test: "R14 voice L4". |
+| L5 poller stores the growing turn as final | **Fixed** | The last turn of an unfinished snapshot is stored interim (`is_final: false`), the poller re-reads from the newest stored seq and re-checks the decline on every caller turn whose text changed; finalised when the call ends. Test: "R14 voice L5". |
+| L6 owner mode ignores STIR | **Partly fixed** | `TN-Validation-Failed` on the owner number is refused owner mode on both entry paths (audited `owner_kb.refused` / `stir_failed`). Not required: attestation A, because many carriers report no verdict and the SMS confirmation is the real control (documented). Test: owner-callin "R14 L6". |
+| L7 `/transcript` has no rate limit | **Fixed** | 40 requests a minute per person (the client polls every 3 s), 429 + `Retry-After`. Test: "R14 voice L7". |

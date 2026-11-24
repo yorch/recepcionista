@@ -42,7 +42,10 @@ export async function ensureWatch(connectionId: string, opts: { force?: boolean;
   if (!res.ok) throw await toApiError(res);
   const j = (await res.json()) as { resourceId?: string; expiration?: string };
   const expires = j.expiration ? new Date(Number(j.expiration)) : new Date(now.getTime() + REQUEST_TTL_MS);
-  await updateCalendarSyncState(conn.id, { watch_channel_id: channelId, watch_resource_id: j.resourceId ?? null, watch_expires_at: expires });
+  // Conditional on the calendar this channel watches: if the owner switched calendars (or disconnected) while the request was in
+  // flight, the channel watches the OLD calendar; stop it instead of storing it.
+  const stored = await updateCalendarSyncState(conn.id, { watch_channel_id: channelId, watch_resource_id: j.resourceId ?? null, watch_expires_at: expires }, { expectCalendarId: conn.calendar_id });
+  if (!stored) { await stopChannel(conn.id, channelId, j.resourceId ?? null); return false; }
   await stopChannel(conn.id, conn.watch_channel_id, conn.watch_resource_id); // overlap is allowed; the old one is no longer needed
   return true;
 }

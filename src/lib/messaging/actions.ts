@@ -3,7 +3,7 @@
  * callers (voice tools, gratitude sweep). Calling these directly avoids an
  * authenticated HTTP hop to ourselves and guarantees ONE side effect per call.
  */
-import { claimEvent, countryForBusiness, findRecentSms, getBooking, getBusiness, releaseEvent, updateBooking } from '@/lib/db';
+import { claimEvent, countryForBusiness, findRecentSms, getBooking, getBusiness, releaseEvent, setBookingPaymentLink, updateBooking } from '@/lib/db';
 import { confirmationSms, FOLLOWUP_NOTICE_RE, gratitudeSms, paymentLinkSms, type Lang } from '@/lib/messaging/templates';
 import { sameNumber } from '@/lib/phone';
 import { sendAndLog } from '@/lib/messaging';
@@ -114,6 +114,7 @@ export async function createAndSendPaymentLink(input: PaymentLinkInput) {
   });
   // Remember what is owed so the pay page and dashboard read it from the DB (cents).
   if (booking && !booking.deposit_paid) await updateBooking(booking.id, { deposit_amount: amountCents });
+  if (booking && !link.mock) await setBookingPaymentLink(booking.id, link.id);
 
   const text = paymentLinkSms({
     business, amount_cents: amountCents, url: link.url,

@@ -26,9 +26,11 @@ export function VerticalSettings({ businessId, initial, lang = 'en' }: { busines
     setBusy(true);
     try {
       await guard(async () => {
-        await apiRequest(`/api/businesses/${businessId}`, { method: 'PATCH', body: { vertical: value } });
+        const r = await apiRequest<{ vertical_sync?: { retry_queued?: boolean } }>(`/api/businesses/${businessId}`, { method: 'PATCH', body: { vertical: value } });
         setSaved(value);
-        toast.success(t('set.type.saved'));
+        // The type is saved either way; when the live agent could not be updated right now a retry is queued: say so instead of "saved".
+        if (r?.vertical_sync?.retry_queued) toast.warning(t('set.type.syncPending'));
+        else toast.success(t('set.type.saved'));
         router.refresh();
       });
     } catch (e) {

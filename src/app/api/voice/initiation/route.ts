@@ -98,7 +98,7 @@ export async function POST(req: Request): Promise<Response> {
     // call gets the private owner prompt. Spoofable caller id grants a conversation, never a change: every change needs the owner's SMS reply.
     // Owner calls skip the minute-cap / call-handling branches below (they are limited by their own 5 minute maximum), and store no transcript.
     try {
-      const ownerEntry = await enterOwnerMode(business, call, callerId, { planLapsed: outOfService && gate.reason === 'no_plan' });
+      const ownerEntry = await enterOwnerMode(business, call, callerId, { planLapsed: outOfService && gate.reason === 'no_plan', stirStatus: text(body.stir_verstat) || text(body.StirVerstat) || text(body.stir_status) || null });
       if (ownerEntry) {
         return json({
           type: 'conversation_initiation_client_data',

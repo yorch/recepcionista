@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
-import { actorOf, authenticateTeam, businessIdsOfUser, getTeamUser, teamError } from '@/lib/team';
+import { actorOf, authenticateTeam, businessIdsOfUser, getTeamUser, revokeTeamUserSessions, teamError } from '@/lib/team';
 import { auditIp } from '@/lib/account-flows';
-import { deleteUserSessions, recordAudit } from '@/lib/db';
+import { recordAudit } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-/** Sign a team member of this business out everywhere (all their sessions: the account is one person; owner of that business, or admin). */
+/** Sign a team member out of THIS business (the sessions working in it; owner of that business). A platform admin signs the account out everywhere. */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   let requested = new URL(req.url).searchParams.get('business_id');
@@ -19,7 +19,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (!auth.ok) return auth.response;
   const target = id.length <= 64 ? await getTeamUser(auth.business.id, id) : null;
   if (!target) return teamError(404, 'user not found');
-  const revoked = await deleteUserSessions(target.id);
+  // An owner signs the person out of THIS business only; a platform admin signs the account out everywhere.
+  const revoked = await revokeTeamUserSessions(auth.business.id, target.id, { everywhere: auth.principal.kind === 'admin' });
   await recordAudit({
     ...actorOf(auth.principal), business_id: auth.business.id, action: 'user.sessions_revoked', target: `user:${target.id}`, ip: auditIp(req), meta: { count: revoked },
   });

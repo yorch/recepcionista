@@ -13,7 +13,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma, type DbClient } from './client';
 import { clampLimit, encodeTimeCursor, parseTimeCursor, toPage, type Page } from './paging';
-import { BUSINESS_PATCH_KEYS, hasBusinessFields, kbFieldsChangedSince, kbValuesEqual, pickKbFields, validateKbPatch, type PatchValues } from '@/lib/kb-patch';
+import { hasBusinessFields, kbFieldsChangedSince, kbValuesEqual, pickKbFields, validateKbPatch, type PatchValues } from '@/lib/kb-patch';
 import { closedDatesOf } from '@/lib/closures';
 import type { KbPatch, KnowledgeBase, OwnerKbChange, OwnerKbSource, OwnerKbStatus } from '@/lib/types';
 import { OWNER_KB_SOURCES } from '@/lib/types';
@@ -60,11 +60,22 @@ async function lockKb(tx: DbClient, businessId: string): Promise<KbValues> {
   await tx.knowledgeBase.upsert({ where: { businessId }, update: {}, create: { businessId } });
   await tx.$queryRaw`SELECT "id" FROM "knowledge_bases" WHERE "business_id" = ${businessId} FOR UPDATE`;
   const kb = await tx.knowledgeBase.findUniqueOrThrow({ where: { businessId } });
+  return kbRowValues(kb);
+}
+
+function kbRowValues(kb: { services: unknown; faqs: unknown; pricingNotes: string | null; systemPrompt: string | null; callScript: string | null }): KbValues {
   return {
     services: (kb.services ?? []) as unknown as KnowledgeBase['services'], faqs: (kb.faqs ?? []) as unknown as KnowledgeBase['faqs'],
     pricing_notes: kb.pricingNotes ?? '', system_prompt: kb.systemPrompt ?? '', call_script: kb.callScript ?? '',
   };
 }
+
+/**
+ * The fields a change's stale check covers: every field the patch touches EXCEPT system_prompt. The prompt is derived (every applied
+ * change and every resync rewrites it), so comparing it would make a second pending proposal stale just because the first one was
+ * applied. The check is per field: a pending FAQ stays valid after a price change, but a second change to the same list is stale.
+ */
+const baseKeysOf = (patch: object): string[] => Object.keys(patch).filter((k) => k !== 'system_prompt');
 
 export class KbChangeInvalidError extends Error {
   constructor(message: string) { super(message); this.name = 'KbChangeInvalidError'; }
@@ -86,13 +97,20 @@ export async function proposeKbChange(input: ProposeKbChangeInput): Promise<Owne
   if (!summary) throw new KbChangeInvalidError('summary is required');
   const v = validateKbPatch(input.patch);
   if (!v.ok) throw new KbChangeInvalidError(v.error);
-  // The business fields the patch touches, as they are NOW: apply refuses when they changed in between (see applyKbChange).
+  // The fields the patch touches (knowledge base AND business), as they are NOW: apply refuses when any of them changed in between
+  // (see applyKbChange). Per field, so confirming one proposal does not make the other pending ones stale.
   let base: PatchValues | null = null;
-  if (hasBusinessFields(v.patch)) {
-    const b = await prisma.business.findUnique({ where: { id: input.business_id }, select: { hours: true, serviceArea: true, closedDates: true } });
-    if (!b) throw new KbChangeInvalidError('business not found');
-    const now: PatchValues = { hours: b.hours ?? {}, service_area: b.serviceArea ?? [], closed_dates: closedDatesOf(b.closedDates) };
-    base = Object.fromEntries(BUSINESS_PATCH_KEYS.filter((k) => k in v.patch).map((k) => [k, now[k]]));
+  const keys = baseKeysOf(v.patch);
+  if (keys.length > 0) {
+    const now: PatchValues = {};
+    if (hasBusinessFields(v.patch)) {
+      const b = await prisma.business.findUnique({ where: { id: input.business_id }, select: { hours: true, serviceArea: true, closedDates: true } });
+      if (!b) throw new KbChangeInvalidError('business not found');
+      Object.assign(now, { hours: b.hours ?? {}, service_area: b.serviceArea ?? [], closed_dates: closedDatesOf(b.closedDates) });
+    }
+    const kbRow = await prisma.knowledgeBase.findUnique({ where: { businessId: input.business_id } });
+    Object.assign(now, kbRowValues(kbRow ?? { services: [], faqs: [], pricingNotes: '', systemPrompt: '', callScript: '' }));
+    base = Object.fromEntries(keys.map((k) => [k, now[k]]));
   }
   const row = await prisma.ownerKbChange.create({
     data: {
@@ -133,8 +151,10 @@ export async function applyKbChange(businessId: string, id: string, now: Date = 
     const kb = await lockKb(tx, businessId);
     const biz = hasBusinessFields(patch) ? await lockBusiness(tx, businessId) : {};
     const base = (change.base ?? null) as PatchValues | null;
-    if (base && Object.keys(base).some((k) => !kbValuesEqual(biz[k], base[k]))) {
-      // The hours / closures / area were edited after this was proposed: applying a whole-list patch would silently undo that edit.
+    const current: PatchValues = { ...kb, ...biz };
+    if (base && Object.keys(base).some((k) => !kbValuesEqual(current[k], base[k]))) {
+      // A field this change touches (services / faqs / notes / hours / closures / area) was edited after it was proposed: applying a
+      // whole-list patch would silently undo that edit.
       await tx.ownerKbChange.update({ where: { id }, data: { status: 'rejected', appliedAt: null } });
       return { ok: false as const, reason: 'stale' as const };
     }

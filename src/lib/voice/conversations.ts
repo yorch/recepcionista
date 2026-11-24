@@ -60,3 +60,26 @@ export async function fetchConversation(conversationId: string, deps: FetchDeps 
     return { ok: false, status: 0, notFound: false, error: (err as Error).name };
   }
 }
+
+export type ConversationDeleteResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Delete ONE provider conversation (audio AND transcript): DELETE /v1/convai/conversations/{id}. 2xx and 404 (already gone) are success; everything
+ * else is a failure with a short, credential-free reason, for the durable retry queue (voice/recording-deletion.ts). Never throws.
+ */
+export async function deleteConversation(conversationId: string, deps: FetchDeps = {}): Promise<ConversationDeleteResult> {
+  const env = deps.env ?? process.env;
+  const key = (env.ELEVENLABS_API_KEY ?? '').trim();
+  if (!key) return { ok: false, error: 'no ELEVENLABS_API_KEY' };
+  try {
+    const res = await (deps.fetchImpl ?? fetch)(`${API}/convai/conversations/${encodeURIComponent(conversationId)}`, {
+      method: 'DELETE', headers: { 'xi-api-key': key }, signal: AbortSignal.timeout(deps.timeoutMs ?? 15_000),
+    });
+    if (res.ok || res.status === 404) return { ok: true };
+    log.warn('delete_failed', { status: res.status });
+    return { ok: false, error: `http_${res.status}` };
+  } catch (err) {
+    log.warn('delete_error', { error: (err as Error).name });
+    return { ok: false, error: `error_${(err as Error).name}`.slice(0, 80) };
+  }
+}

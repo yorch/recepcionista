@@ -62,7 +62,10 @@ export async function reconcileUnmeteredCalls(deps: ReconcileDeps = {}): Promise
         item('already_metered');
         continue;
       }
-      if (!conv.ok || conv.snapshot.status === 'in-progress' || conv.snapshot.status === 'initiated' || conv.snapshot.status === 'unknown') {
+      // No duration (still 'processing', or metadata missing) is NOT zero seconds: claiming the call with 0 would close it for good. A 'failed'
+      // conversation may legitimately have none; every other state without a duration is retried like an unfinished one.
+      if (!conv.ok || conv.snapshot.status === 'in-progress' || conv.snapshot.status === 'initiated' || conv.snapshot.status === 'unknown'
+        || (conv.snapshot.durationSecs === null && conv.snapshot.status !== 'failed')) {
         const n = await bumpReconcileAttempt(c.id);
         const why = !conv.ok ? (conv.notFound ? 'not_found' : 'fetch_failed') : 'not_ready';
         item(why === 'not_found' ? 'not_found' : why === 'fetch_failed' ? 'fetch_failed' : 'not_ready');

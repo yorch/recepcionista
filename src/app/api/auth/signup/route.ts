@@ -3,7 +3,7 @@ import { checkSameOrigin, clientKey } from '@/lib/auth';
 import {
   afterResponse, allowPerEmail, auditIp, limitIp, sendSignupExistsNotice, sendVerificationEmail,
 } from '@/lib/account-flows';
-import { recordAudit } from '@/lib/db';
+import { getUserByEmail, recordAudit } from '@/lib/db';
 import { emailConfigured } from '@/lib/email';
 import { accountId } from '@/lib/login-throttle';
 import { hashPassword } from '@/lib/password';
@@ -77,7 +77,12 @@ export async function POST(req: Request) {
       // Existing address: no account is touched. One notice per hour at most.
       const may = await rateLimit(`auth/signup:notice:${accountId(input.email)}`, 1, 60 * 60_000);
       await afterResponse('signup.exists_notice', async () => {
-        if (may.allowed) await sendSignupExistsNotice(input.email, localeOfRequest(req.headers));
+        // The warning goes to the account OWNER, in THEIR language (users.locale), not in the requester's: an attacker probing an address must
+        // not be able to make the notice arrive in a language its owner does not read. Looked up here (after the response) so the timing is constant.
+        if (may.allowed) {
+          const existing = await getUserByEmail(input.email).catch(() => null);
+          await sendSignupExistsNotice(input.email, existing?.locale ?? localeOfRequest(req.headers));
+        }
       });
       return accepted();
     }

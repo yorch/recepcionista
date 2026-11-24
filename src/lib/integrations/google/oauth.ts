@@ -1,7 +1,8 @@
 /** OAuth 2.0 authorization-code + PKCE helpers, and disconnect. Tokens never appear in logs, audit meta or errors. */
 import { recordAudit } from '@/lib/db';
+import { withLease } from '@/lib/db/locks';
 import {
-  deleteEventLink, getCalendarConnection, getDecryptedTokens, listEventLinksForConnection, replaceBusyBlocks, setCalendarConnectionStatus,
+  deleteEventLink, getCalendarConnection, getCalendarConnectionById, getDecryptedTokens, listEventLinksForConnection, replaceBusyBlocks, setCalendarConnectionStatus,
   updateCalendarSyncState,
 } from '@/lib/db/calendar';
 import { logger } from '@/lib/log';
@@ -15,6 +16,28 @@ import { postToken, type TokenResponse } from './tokens';
 import { stopChannel } from './watch';
 
 const log = logger('gcal.oauth');
+
+/** The calendar is being synced right now and did not free up in time; the caller answers 409 and the owner tries again. */
+export class SyncBusyError extends Error {
+  constructor() { super('google calendar is syncing, try again in a moment'); this.name = 'SyncBusyError'; }
+}
+const SYNC_LEASE_KEY = (connectionId: string) => `gcal-sync:${connectionId}`;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Run `fn` while holding the connection's sync lease (the same `gcal-sync:<id>` lease syncConnection takes), waiting up to `waitMs`
+ * for a running sync to finish. A calendar switch or an account change must not interleave with a sync that is writing the OLD
+ * calendar's blocks and token. Throws SyncBusyError when the lease did not free up.
+ */
+export async function withSyncLease<T>(connectionId: string, fn: () => Promise<T>, waitMs = 20_000): Promise<T> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const r = await withLease(SYNC_LEASE_KEY(connectionId), 3 * 60_000, fn);
+    if (r.acquired) return r.value;
+    if (Date.now() >= deadline) throw new SyncBusyError();
+    await sleep(200);
+  }
+}
 
 export function buildAuthUrl(state: string, challenge: string, loginHint?: string): string {
   const u = new URL(GOOGLE_AUTH_URL);
@@ -48,15 +71,45 @@ export async function fetchPrimary(accessToken: string): Promise<{ email: string
 export const mockMode = googleMockEnabled;
 
 /** Switch the synced calendar: forget the old sync state, drop mirrored blocks, remove events pushed to the OLD calendar (re-pushed to the new one by the reconcile job). */
-export async function changeCalendar(conn: CalendarConnection, calendarId: string): Promise<void> {
-  if (calendarId === conn.calendar_id) return;
+export async function changeCalendar(connection: CalendarConnection, calendarId: string): Promise<void> {
+  await withSyncLease(connection.id, async () => {
+    // re-read under the lease: a sync that just finished may have stored a channel / token we must clean up
+    const conn = (await getCalendarConnectionById(connection.id)) ?? connection;
+    if (conn.status === 'revoked' || calendarId === conn.calendar_id) return;
+    await dropRemoteState(conn);
+    await updateCalendarSyncState(conn.id, { calendar_id: calendarId, sync_token: null, watch_channel_id: null, watch_resource_id: null, watch_expires_at: null, last_sync_at: null, last_error: null });
+  });
+}
+
+/** Stop the push channel, delete the events we pushed to the current calendar (best effort; the links go either way) and drop the mirrored blocks. */
+async function dropRemoteState(conn: CalendarConnection): Promise<number> {
   await stopChannel(conn.id, conn.watch_channel_id, conn.watch_resource_id);
+  let notDeleted = 0;
   for (const l of await listEventLinksForConnection(conn.id, 5000)) {
-    try { await gcal(conn.id, 'DELETE', `${calPath(conn.calendar_id)}/events/${encodeURIComponent(l.google_event_id)}`); } catch { /* best effort: the link goes either way */ }
+    try {
+      const res = await gcal(conn.id, 'DELETE', `${calPath(conn.calendar_id)}/events/${encodeURIComponent(l.google_event_id)}`);
+      if (!res.ok && res.status !== 404 && res.status !== 410) notDeleted++;
+    } catch { notDeleted++; }
     await deleteEventLink(l.booking_id);
   }
   await replaceBusyBlocks(conn.id, []);
-  await updateCalendarSyncState(conn.id, { calendar_id: calendarId, sync_token: null, watch_channel_id: null, watch_resource_id: null, watch_expires_at: null, last_sync_at: null, last_error: null });
+  return notDeleted;
+}
+
+/**
+ * Reconnecting with a DIFFERENT Google account: the pushed events live in the old account and the stored calendar id means nothing
+ * in the new one. Delete them through the old tokens (still on the row until the upsert replaces them), drop the links and blocks.
+ * Events that could not be deleted (the old tokens are dead) are counted and audited by the caller; this is the documented residual.
+ * Returns the number of events that could not be removed, or null when nothing needed doing.
+ */
+export async function resetForNewAccount(businessId: string, newAccountEmail: string): Promise<number | null> {
+  const conn = await getCalendarConnection(businessId);
+  if (!conn || conn.account_email === newAccountEmail.trim().toLowerCase()) return null;
+  return withSyncLease(conn.id, async () => {
+    const fresh = await getCalendarConnectionById(conn.id);
+    if (!fresh) return null;
+    return dropRemoteState(fresh).catch(() => -1);
+  });
 }
 
 /**

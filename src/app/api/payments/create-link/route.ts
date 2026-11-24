@@ -1,6 +1,6 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
-import { getBooking, getBusiness, updateBooking } from '@/lib/db';
+import { getBooking, getBusiness, setBookingPaymentLink, updateBooking } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { appUrl, createPaymentLink } from '@/lib/providers/stripe';
 import { checkoutRefundNote } from '@/lib/refunds';
@@ -50,6 +50,7 @@ export async function POST(req: Request) {
       { bookingId: found?.id ?? null, businessId: business.id, refundNote: checkoutRefundNote(business, appUrl()) },
     );
     if (found && !found.deposit_paid) await updateBooking(found.id, { deposit_amount: cents });
+    if (found && !link.mock) await setBookingPaymentLink(found.id, link.id);
 
     return ok<CreateLinkResult>({ ...link, booking_id: found?.id ?? null });
   } catch (err) {

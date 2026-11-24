@@ -110,8 +110,10 @@ export async function PATCH(
     }
     const updated = await updateBusiness(id, patch as Partial<Business>);
     if (!updated) return fail('business not found', 404);
+    let verticalSync: VerticalChangeOutcome | null = null;
     if (before && verticalChanges) {
       const outcome: VerticalChangeOutcome = await applyVerticalChange(before, updated);
+      verticalSync = outcome;
       const actor = auditActorOf(auth.principal);
       await recordAudit({
         actor_kind: actor.actor_kind, actor_user_id: actor.actor_user_id, business_id: id, action: 'business.vertical_changed',
@@ -119,7 +121,8 @@ export async function PATCH(
         meta: { ...actor.meta, from: before.vertical ?? 'hvac', to: updated.vertical ?? 'hvac', ...outcome, kb_content_kept: true },
       });
     }
-    return ok<Business>(publicBusiness(updated));
+    // `vertical_sync` (only after a trade change): the dashboard warns when the live agent could not be updated yet (a retry is queued).
+    return ok<Business & { vertical_sync?: VerticalChangeOutcome }>({ ...publicBusiness(updated), ...(verticalSync ? { vertical_sync: verticalSync } : {}) });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 400);
   }

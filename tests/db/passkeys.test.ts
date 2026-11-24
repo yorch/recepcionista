@@ -39,8 +39,8 @@ suite('passkeys (postgres)', () => {
     delete process.env.PUBLIC_BASE_URL; delete process.env.WEBAUTHN_ORIGINS; delete process.env.WEBAUTHN_RP_ID;
     await db.prisma.business.create({ data: { id: BIZ, name: `PK ${run}`, status: 'live' } });
     const hash = await pw.hashPassword(PASSWORD);
-    for (const n of ['alice', 'bob', 'totp', 'gone', 'nomem']) {
-      ids[n] = (await db.createUser({ email: email(n), password_hash: hash, role: 'owner', business_id: BIZ, email_verified: n !== 'bob' })).id;
+    for (const n of ['alice', 'bob', 'totp', 'gone', 'nomem', 'squat']) {
+      ids[n] = (await db.createUser({ email: email(n), password_hash: hash, role: 'owner', business_id: BIZ, email_verified: n !== 'squat' })).id;
     }
     await db.beginTotpEnrollment(ids.totp, 'v1:secret-not-used');
     expect(await db.confirmTotpEnrollment(ids.totp, 1, ['h1', 'h2'])).toBe(true);
@@ -260,9 +260,11 @@ suite('passkeys (postgres)', () => {
     // unverified email still signs in (the dashboard shows the banner), exactly like a password login
     const bobAuth = new VirtualAuthenticator();
     await register(await signIn('bob'), bobAuth, 'b');
+    await db.prisma.user.update({ where: { id: ids.bob }, data: { emailVerifiedAt: null } }); // (registration itself needs a verified address, see the R14 test)
     const rb = await loginWith(bobAuth);
     expect(rb.status).toBe(200);
     expect((await data(rb)).email_verified).toBe(false);
+    await db.prisma.user.update({ where: { id: ids.bob }, data: { emailVerifiedAt: new Date() } });
   });
 
   test('step-up with a passkey counts as the recent-auth proof; deleting a passkey needs it; ownership is enforced', async () => {
@@ -331,5 +333,39 @@ suite('passkeys (postgres)', () => {
       process.env.APP_URL = saved.app;
       (process.env as any).NODE_ENV = saved.node;
     }
+  });
+
+  test('R14 H1: a squatter on an unverified account cannot plant a passkey, and one planted earlier does not survive the real owner\'s password reset', async () => {
+    // (a) registration needs a verified email address
+    const cookie = await signIn('squat');
+    expect((await post(m.regOpt, '/api/auth/passkeys/register/options', cookie)).status).toBe(403);
+    expect((await post(m.regVer, '/api/auth/passkeys/register/verify', cookie, { response: { id: 'x' } })).status).toBe(403);
+    // (b) a credential that WAS planted while the address was unverified (an older deployment, or any other route in): the reset clears it
+    const planted = new VirtualAuthenticator();
+    await db.prisma.user.update({ where: { id: ids.squat }, data: { emailVerifiedAt: new Date() } });
+    await register(await signIn('squat'), planted, 'attacker key');
+    await db.prisma.user.update({ where: { id: ids.squat }, data: { emailVerifiedAt: null } });
+    await db.prisma.passkeyCredential.updateMany({ where: { userId: ids.squat }, data: { createdAt: new Date(Date.now() - 3600_000) } });
+    expect((await loginWith(planted)).status).toBe(200); // the attacker can sign in with it today
+    const reset = await import('../../src/app/api/auth/reset-password/route');
+    const { createEmailToken } = await import('../../src/lib/db/email-tokens');
+    const tok = await createEmailToken({ email: email('squat'), purpose: 'reset', user_id: ids.squat });
+    await clearLimiter(db, ['auth/reset-password']);
+    const r = await reset.POST(req('/api/auth/reset-password', { method: 'POST', json: { token: tok.token, password: 'a brand new passphrase 123' } }));
+    expect(r.status).toBe(200);
+    expect(await db.prisma.passkeyCredential.count({ where: { userId: ids.squat } })).toBe(0);
+    expect((await loginWith(planted)).status).toBe(401); // the planted key is dead
+    expect((await db.listAuditEvents({ actor_user_id: ids.squat })).map((a: any) => a.action)).toContain('auth.passkeys_cleared_on_reset');
+    expect(mail.to(email('squat')).some((x) => /passkey was removed/i.test(x.subject))).toBe(true);
+    // (c) a passkey registered AFTER the address was verified is kept by a reset (like TOTP enrolled after verification)
+    const honest = new VirtualAuthenticator();
+    await clearLimiter(db, ['auth/login']);
+    const again = await m.login.POST(req('/api/auth/login', { method: 'POST', json: { email: email('squat'), password: 'a brand new passphrase 123' } }));
+    expect(again.status).toBe(200);
+    await register(cookieFrom(again) as string, honest, 'honest key'); // the reset marked the address verified
+    const tok2 = await createEmailToken({ email: email('squat'), purpose: 'reset', user_id: ids.squat });
+    await clearLimiter(db, ['auth/reset-password']);
+    expect((await reset.POST(req('/api/auth/reset-password', { method: 'POST', json: { token: tok2.token, password: 'another new passphrase 456' } }))).status).toBe(200);
+    expect(await db.prisma.passkeyCredential.count({ where: { userId: ids.squat } })).toBe(1);
   });
 });

@@ -18,7 +18,7 @@ const log = logger('auth/passkeys/register/verify');
  * origin, rpID and user verification are enforced. Stores the credential, audits it and emails the account a notice.
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { allowEnrollment: true });
+  const auth = await authenticate(req, { allowEnrollment: true, verifiedEmail: true });
   if (!auth.ok) return auth.response;
   const user = accountOf(auth.principal);
   if (!user) return pkFail(403, 'passkeys belong to personal accounts');
