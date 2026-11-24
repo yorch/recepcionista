@@ -123,6 +123,7 @@ services:
       args:
         NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}
         NEXT_PUBLIC_PLAN_PRICE_DISPLAY: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY:-}
+        NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL:-}
     image: ${APP_IMAGE:-recepcionista-app:local}
     restart: unless-stopped
     init: true
@@ -166,6 +167,11 @@ services:
       APP_SECRET_KEY: ${APP_SECRET_KEY:-}
       EMAIL_PROVIDER: ${EMAIL_PROVIDER:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
+      # Google Calendar two-way sync (docs/integrations/google-calendar.md). deploy.sh requires the secret and https APP_URL when the client id is set.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
+      GOOGLE_WEBHOOK_SECRET: ${GOOGLE_WEBHOOK_SECRET:-}
       # Background jobs (daily briefing, gratitude sweep, cleanup; docs/runbook.md). Empty = the code default: ON in production.
       # JOBS=off disables all of them (and the retention purge). RETENTION_JOB still defaults to off (docs/compliance.md).
       JOBS: ${JOBS:-}
@@ -196,6 +202,15 @@ services:
       FORWARD_MAX_CONCURRENT: ${FORWARD_MAX_CONCURRENT:-}
       FORWARD_MIN_ANSWERED_SECONDS: ${FORWARD_MIN_ANSWERED_SECONDS:-}
       FORWARD_RING_SECONDS: ${FORWARD_RING_SECONDS:-}
+      # Phase 2 telephony: native live transfer (default off), STIR/SHAKEN trust, language detection, live transcript limits, metering reconciliation
+      NATIVE_TRANSFER: ${NATIVE_TRANSFER:-}
+      STIR_TRUST: ${STIR_TRUST:-}
+      LANGUAGE_DETECTION: ${LANGUAGE_DETECTION:-}
+      LIVE_MAX_PER_USER: ${LIVE_MAX_PER_USER:-}
+      LIVE_MAX_PER_BUSINESS: ${LIVE_MAX_PER_BUSINESS:-}
+      LIVE_MAX_POLLS_PER_CALL: ${LIVE_MAX_POLLS_PER_CALL:-}
+      RECONCILE_AFTER_MINUTES: ${RECONCILE_AFTER_MINUTES:-}
+      RECONCILE_MAX_ATTEMPTS: ${RECONCILE_MAX_ATTEMPTS:-}
       ELEVENLABS_PAUSED_PROMPT_OVERRIDE: ${ELEVENLABS_PAUSED_PROMPT_OVERRIDE:-}
       # Never true in production: the mock checkout / demo routes stay off.
       DEMO_MODE: "false"

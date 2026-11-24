@@ -8,6 +8,7 @@ import { es as esLocale } from 'date-fns/locale';
 import type { Booking, Business } from '@/lib/types';
 import { DEFAULT_TIMEZONE, tzOf } from '@/lib/time';
 import { formatCents } from '@/lib/money';
+import { policySentence } from '@/lib/refunds';
 
 export type Lang = 'en' | 'es' | 'mixed';
 
@@ -139,20 +140,15 @@ export function paymentLinkSms({
 }: PaymentLinkArgs): string {
   const amount = money(amount_cents);
   const what = safeText(service) || 'service';
-
-  if (language === 'es') {
-    return clip(
-      `${business.name}: Depósito de ${amount} para ${what}. Enlace seguro: ${url}`,
-    );
-  }
-  if (language === 'mixed') {
-    return clip(
-      `${business.name}: Your ${amount} deposit for ${what}. Enlace seguro: ${url}`,
-    );
-  }
-  return clip(
-    `${business.name}: Your ${amount} deposit for ${what}. Secure link: ${url}`,
-  );
+  const lang = language === 'es' ? 'es' : 'en';
+  const build = (policy: string) => {
+    if (language === 'es') return `${business.name}: Depósito de ${amount} para ${what}.${policy} Enlace seguro: ${url}`;
+    if (language === 'mixed') return `${business.name}: Your ${amount} deposit for ${what}.${policy} Enlace seguro: ${url}`;
+    return `${business.name}: Your ${amount} deposit for ${what}.${policy} Secure link: ${url}`;
+  };
+  // The refund policy travels with the link; it is dropped (never the link) when it would not fit one text.
+  const withPolicy = build(` ${policySentence(business.refund_policy, lang)}`);
+  return clip(withPolicy.length <= SMS_LIMIT ? withPolicy : build(''));
 }
 
 export interface GratitudeArgs {
@@ -217,4 +213,60 @@ export interface OwnerAlertArgs {
 
 export function ownerAlertSms({ business, text }: OwnerAlertArgs): string {
   return clip(`${business.name}: ${text}`);
+}
+
+// ---- booking changes (reschedule, cancellation, refund): transactional texts about a booking the customer already has ----
+
+/** "Sat, Dec 5 at 9:00 AM" in the BUSINESS zone: an explicit date, because a moved appointment must never be ambiguous. */
+export function formatWhenFull(iso: string, language: Lang = 'en', timezone?: string): string {
+  const tz = tzOf(timezone);
+  const spanish = language === 'es';
+  const d = new Date(iso);
+  const date = new Intl.DateTimeFormat(spanish ? 'es-US' : 'en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric' }).format(d);
+  const time = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(d);
+  return spanish ? `${date}, ${time}` : `${date} at ${time}`;
+}
+
+export interface RescheduleSmsArgs { business: Business; booking: Booking; language?: Lang }
+
+/** The customer's appointment was moved (by the owner or by the customer on the phone). */
+export function rescheduleSms({ business, booking, language = 'en' }: RescheduleSmsArgs): string {
+  const name = firstName(booking.customer_name);
+  const when = formatWhenFull(booking.scheduled_at, language, business.timezone);
+  const service = safeText(booking.service) || 'service';
+  const addr = safeText(booking.address, 80);
+  const where = addr ? `, ${addr}` : '';
+  if (language === 'es') return clip(`${business.name}: Su cita (${service}) se cambió a ${when}${where}. Si no le funciona, llámenos. Gracias ${name}.`);
+  if (language === 'mixed') return clip(`${business.name}: Your ${service} moved to ${when}${where}. Si no le funciona, call us. Gracias ${name}.`);
+  return clip(`${business.name}: Your ${service} was moved to ${when}${where}. If that does not work, call us. Thanks ${name}.`);
+}
+
+export interface CancelSmsArgs {
+  business: Business;
+  booking: Booking;
+  language?: Lang;
+  /** What the refund policy says about the PAID deposit of this cancellation: 'none' = no deposit paid. Never promises a refund the owner has not issued. */
+  deposit?: { state: 'none' } | { state: 'refundable' | 'not_refundable'; amount_cents: number };
+}
+
+export function cancelSms({ business, booking, language = 'en', deposit = { state: 'none' } }: CancelSmsArgs): string {
+  const when = formatWhenFull(booking.scheduled_at, language, business.timezone);
+  const service = safeText(booking.service) || 'service';
+  const spanish = language === 'es';
+  let tail = '';
+  if (deposit.state === 'refundable') {
+    tail = spanish ? ` Su depósito de ${money(deposit.amount_cents)} es reembolsable; lo procesaremos.` : ` Your ${money(deposit.amount_cents)} deposit is eligible for a refund; we will process it.`;
+  } else if (deposit.state === 'not_refundable') {
+    tail = spanish ? ` Según nuestra política, el depósito de ${money(deposit.amount_cents)} no es reembolsable. Llámenos si tiene dudas.` : ` Under our policy the ${money(deposit.amount_cents)} deposit is not refunded. Call us with any questions.`;
+  }
+  if (spanish) return clip(`${business.name}: Su cita (${service}, ${when}) fue cancelada.${tail}`);
+  return clip(`${business.name}: Your ${service} on ${when} was cancelled.${tail}`);
+}
+
+export interface RefundSmsArgs { business: Business; amount_cents: number; language?: Lang }
+
+/** A refund was issued. Banks take days to show it, so say that rather than "refunded instantly". */
+export function refundSms({ business, amount_cents, language = 'en' }: RefundSmsArgs): string {
+  if (language === 'es') return clip(`${business.name}: Le reembolsamos ${money(amount_cents)} de su depósito. Su banco puede tardar 5-10 días hábiles en mostrarlo.`);
+  return clip(`${business.name}: We refunded ${money(amount_cents)} of your deposit. It can take 5-10 business days to show on your statement.`);
 }

@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ApiError, apiRequest } from '@/hooks/use-api';
 import { relative, seconds } from '@/lib/format';
+import { RecordingPlayer } from '@/components/dashboard/recording-player';
+import { callHasRecording } from '@/lib/voice/recording-audio';
 import type { Page } from '@/lib/db/paging';
 import type { PublicCall } from '@/lib/voice/voicemail';
 
@@ -25,6 +27,9 @@ function CallCard({ c, nowMs, highlight }: { c: PublicCall; nowMs: number; highl
               <h2 className="text-[13.5px] font-medium text-white">{c.caller_name ?? 'Unknown caller'}</h2>
               <Badge tone={LANG_TONE[c.language ?? 'en']}>{LANG_LABEL[c.language ?? 'en']}</Badge>
               {c.urgency !== 'routine' ? <Badge tone={c.urgency}>{c.urgency}</Badge> : null}
+              {c.caller_verified === true ? <Badge tone="routine">Verified caller</Badge> : /failed/i.test(c.stir_status ?? '') ? <Badge tone="emergency">Caller ID check failed</Badge> : c.stir_status ? <Badge tone="neutral">Caller ID not fully verified</Badge> : null}
+              {c.transfer_status && c.transfer_status !== 'none' ? <Badge tone={c.transfer_status === 'connected' ? 'routine' : 'unsure'}>{`Transfer ${c.transfer_status}`}</Badge> : null}
+              {c.status === 'in_progress' && !c.ended_at && c.consent_status === 'disclosed' ? <Link href={`/dashboard/calls/${c.id}`} className="inline-flex min-h-11 items-center text-xs text-brand-soft hover:underline">Watch live</Link> : null}
             </div>
             <p className="mt-0.5 font-mono text-xs text-dim">
               {c.caller_phone} · {relative(c.started_at, nowMs)} · {seconds(c.duration_sec)}
@@ -48,6 +53,8 @@ function CallCard({ c, nowMs, highlight }: { c: PublicCall; nowMs: number; highl
           <Link href="/dashboard/calls?tab=voicemails" className="inline-flex min-h-11 items-center text-brand-soft hover:underline">Listen in Voicemails</Link>
         </p>
       ) : null}
+
+      {callHasRecording(c) ? <RecordingPlayer callId={c.id} label={c.caller_name ?? c.caller_phone ?? 'caller'} /> : null}
 
       {c.transcript ? (
         <details className="group mt-3">

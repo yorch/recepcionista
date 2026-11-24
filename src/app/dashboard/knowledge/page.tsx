@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { getKnowledgeBase, listAuditEvents } from '@/lib/db';
+import { getKnowledgeBase, listAuditEvents, listKbChanges } from '@/lib/db';
 import { hasRole } from '@/lib/session';
 import { getDashboardContext } from '@/lib/dashboard-context';
 import { tzOf } from '@/lib/time';
@@ -8,6 +8,10 @@ import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty';
 import { PageHeader } from '@/components/ui/page-header';
 import { KnowledgeEditor } from '@/components/dashboard/knowledge-editor';
+import { KbChanges } from '@/components/dashboard/kb-changes';
+import { publicKbChange } from '@/lib/voice/owner/view';
+import { ReadinessChecklist } from '@/components/knowledge/readiness-checklist';
+import { readinessOf } from '@/lib/kb/readiness';
 import { money } from '@/lib/format';
 import { dollarsToCents } from '@/lib/money';
 
@@ -22,6 +26,7 @@ export default async function KnowledgePage() {
   const kb = await getKnowledgeBase(biz.id);
   const extracted = isOwner && kb ? (await listAuditEvents({ business_id: biz.id, action: 'knowledge.extracted', limit: 1 }))[0] : undefined;
   const meta = (extracted?.meta ?? {}) as { url?: unknown };
+  const kbChanges = isOwner && kb ? await listKbChanges(biz.id, { limit: 10 }) : null;
 
   return (
     <main className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
@@ -41,6 +46,7 @@ export default async function KnowledgePage() {
         </div>
       ) : isOwner ? (
         <div className="mt-6">
+          <ReadinessChecklist readiness={readinessOf(kb, biz)} className="mb-6" />
           <KnowledgeEditor
             businessId={biz.id}
             business={{ name: biz.name, owner_name: biz.owner_name ?? null, service_area: biz.service_area, hours: biz.hours, url: biz.url ?? null }}
@@ -48,6 +54,11 @@ export default async function KnowledgePage() {
             lastExtracted={extracted ? { url: typeof meta.url === 'string' ? meta.url : null, at: extracted.at } : null}
             timeZone={tzOf(biz)}
           />
+          {kbChanges ? (
+            <div className="mt-6">
+              <KbChanges businessId={biz.id} initial={{ items: kbChanges.items.map(publicKbChange), next_cursor: kbChanges.next_cursor }} nowMs={new Date().getTime()} />
+            </div>
+          ) : null}
         </div>
       ) : (
         <div className="mt-6 grid gap-4 lg:grid-cols-5">

@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { KnowledgeForm } from '@/components/knowledge/knowledge-form';
+import { ReadinessChecklist } from '@/components/knowledge/readiness-checklist';
+import { readinessOfDraft } from '@/lib/kb/readiness';
 import {
   hasErrors, snapshot, toBusinessPatch, toKnowledgePayload, validateDraft, type DraftErrors, type KnowledgeDraft,
 } from '@/components/knowledge/model';
@@ -73,6 +75,8 @@ export function ReviewStep({
             : 'We could not find much on your website, so some of this is a starting template. Please check every price and service.'}
         </p>
       ) : null}
+
+      <ReadinessChecklist readiness={readinessOfDraft(draft)} className="mt-5" />
 
       <div className="mt-5">
         <KnowledgeForm draft={draft} errors={errors} onChange={(d) => { setDraft(d); if (hasErrors(errors)) setErrors(validateDraft(d)); }} />

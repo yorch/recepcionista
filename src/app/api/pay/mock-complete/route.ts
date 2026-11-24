@@ -1,3 +1,4 @@
+import { emitBookingChanged } from '@/lib/booking-hooks';
 import { fail, ok, readJson } from '@/lib/http';
 import { demoModeEnabled } from '@/lib/auth';
 import { getBooking, markDepositPaid } from '@/lib/db';
@@ -25,6 +26,7 @@ export async function POST(req: Request) {
     if (!amount || amount <= 0) return fail('booking has no deposit due', 422);
 
     const result = await markDepositPaid(booking.id, amount);
+    if (result.updated) await emitBookingChanged(booking.id, 'updated', booking.business_id);
     return ok({ updated: result.updated, amount_cents: amount });
   } catch (err) {
     return fail(err instanceof Error ? err.message : 'mock payment failed', 500);

@@ -2,6 +2,8 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { StatusBadge } from './status';
+import { RefundSection } from './refund-section';
+import { RescheduleDialog } from './reschedule-dialog';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { allowedActions } from '@/lib/calendar';
@@ -9,9 +11,23 @@ import { dayET, money, timeET } from '@/lib/format';
 import { ApiError, apiRequest } from '@/hooks/use-api';
 import type { BookingDetail, BookingPatchResult } from '@/app/api/bookings/[id]/route';
 import type { ResendResult } from '@/app/api/bookings/[id]/resend-confirmation/route';
+import { POLICY_LABEL } from '@/lib/refunds';
+import type { RescheduleRouteResult } from '@/app/api/bookings/[id]/reschedule/route';
+import type { NoticeResult } from '@/lib/booking-changes';
 import type { Booking } from '@/lib/types';
 
 const FOCUSABLE = 'a[href], button:not([disabled]), select, input, textarea, [tabindex]:not([tabindex="-1"])';
+
+/** What happened to the customer's text about a cancel / move (never claims a blocked text was sent). */
+function noticeText(n: NoticeResult | null | undefined): string {
+  if (!n || n.status === 'duplicate') return '';
+  if (n.delivered) return ' The customer was texted.';
+  if (n.status === 'skipped') return n.reason === 'not_requested' ? ' The customer was not texted.' : ' The customer could not be texted (no number on file).';
+  if (n.status === 'blocked_opt_out') return ' The customer opted out of texts, so they were not texted.';
+  if (n.status === 'blocked_quiet_hours') return ' It is quiet hours for the customer, so the text was held back. Use "Text the customer" later.';
+  if (n.status === 'blocked_cap') return ' This month\'s text allowance is used up, so the customer was not texted.';
+  return ' The text to the customer could not be sent. Use "Text the customer" to try again.';
+}
 
 const RESEND_TEXT: Record<string, string> = {
   sent: 'Confirmation text sent.',
@@ -39,8 +55,10 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [detail, setDetail] = useState<BookingDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | 'cancel' | 'complete' | 'resend'>(null);
+  const [busy, setBusy] = useState<null | 'cancel' | 'complete' | 'resend' | 'notify'>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [rescheduling, setRescheduling] = useState(false);
+  const [refundInfo, setRefundInfo] = useState<BookingDetail['refund'] | undefined>(undefined);
   const [openedAt] = useState(() => Date.now());
   const [message, setMessage] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
 
@@ -58,7 +76,7 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
     headingRef.current?.focus();
     const root = rootRef.current;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+      if (e.key === 'Escape') { if (e.defaultPrevented) return; e.preventDefault(); onClose(); return; }
       if (e.key !== 'Tab' || !root) return;
       const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null);
       if (items.length === 0) return;
@@ -78,10 +96,11 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
       const r = await apiRequest<BookingPatchResult>(`/api/bookings/${booking.id}`, { method: 'PATCH', body: { status: kind === 'cancel' ? 'cancelled' : 'completed' } });
       onChanged(r.booking);
       setConfirmCancel(false);
+      if (kind === 'cancel' && r.refund) setRefundInfo({ ...r.refund, policy_label: POLICY_LABEL[r.refund.policy] });
       setMessage({
         tone: 'ok',
         text: kind === 'cancel'
-          ? (r.deposit_refund_needed ? 'Booking cancelled. A deposit was paid: refund it from your payments dashboard (it is not refunded automatically).' : 'Booking cancelled. The time is free again.')
+          ? `Booking cancelled. The time is free again.${noticeText(r.notice)}${r.deposit_refund_needed ? ' The deposit qualifies for a refund under your policy: refund it below.' : r.booking.deposit_paid ? ' A deposit was paid; your policy does not refund it, but you can still refund it below.' : ''}`
           : 'Marked completed.',
       });
     } catch (err) {
@@ -90,6 +109,26 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
       setBusy(null);
     }
   }, [booking.id, onChanged]);
+
+  const moved = useCallback((r: RescheduleRouteResult) => {
+    setRescheduling(false);
+    onChanged(r.booking);
+    setMessage({ tone: 'ok', text: r.changed ? `Booking moved to ${dayET(r.booking.scheduled_at, tz)}, ${timeET(r.booking.scheduled_at, tz)}.${noticeText(r.notice)}` : 'That is the time it already has. Nothing changed.' });
+  }, [onChanged, tz]);
+
+  const notify = useCallback(async () => {
+    setBusy('notify');
+    setMessage(null);
+    try {
+      const n = await apiRequest<NoticeResult>(`/api/bookings/${booking.id}/notify`, { method: 'POST', body: {} });
+      if (n.delivered) onChanged({ ...booking, customer_notified_at: new Date().toISOString() });
+      setMessage({ tone: n.delivered ? 'ok' : 'error', text: noticeText(n).trim() || 'Nothing was sent.' });
+    } catch (err) {
+      setMessage({ tone: 'error', text: err instanceof ApiError ? err.message : 'Something went wrong. Try again.' });
+    } finally {
+      setBusy(null);
+    }
+  }, [booking, onChanged]);
 
   const resend = useCallback(async () => {
     setBusy('resend');
@@ -147,6 +186,7 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
           <dd className="tabular-nums text-soft">{money(booking.price_estimate)} <span className="text-dim">estimate</span></dd>
           <dt className="text-dim">Deposit</dt>
           <dd className={booking.deposit_amount ? (booking.deposit_paid ? 'text-mint-text' : 'text-warn') : 'text-dim'}>{depositLine}</dd>
+          {booking.reschedule_count ? (<><dt className="text-dim">Moved</dt><dd className="text-soft">{booking.reschedule_count} {booking.reschedule_count === 1 ? 'time' : 'times'}</dd></>) : null}
           <dt className="text-dim">Call</dt>
           <dd>
             {booking.call_id
@@ -172,12 +212,15 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
             <Button variant="outline" onClick={resend} disabled={busy !== null || !actions.resend}>
               {busy === 'resend' ? 'Sending…' : 'Resend confirmation text'}
             </Button>
+            <Button variant="outline" onClick={() => setRescheduling(true)} disabled={busy !== null || !(booking.status === 'pending' || booking.status === 'confirmed')}>
+              Reschedule
+            </Button>
             <Button variant="outline" onClick={() => act('complete')} disabled={busy !== null || !actions.complete} title={!actions.complete && (booking.status === 'pending' || booking.status === 'confirmed') ? 'Available once the job has started' : undefined}>
               {busy === 'complete' ? 'Saving…' : 'Mark completed'}
             </Button>
             {confirmCancel ? (
               <div role="group" aria-label="Confirm cancellation" className="rounded-xl border border-danger-line bg-danger-bg p-3">
-                <p className="text-[13px] text-danger">Cancel this booking? The time becomes free for new bookings. The customer is not texted.</p>
+                <p className="text-[13px] text-danger">Cancel this booking? The time becomes free for new bookings. The customer is texted (unless they opted out).</p>
                 <div className="mt-3 flex gap-2">
                   <Button variant="danger" className="flex-1" onClick={() => act('cancel')} disabled={busy !== null}>{busy === 'cancel' ? 'Cancelling…' : 'Yes, cancel it'}</Button>
                   <Button variant="outline" className="flex-1" onClick={() => setConfirmCancel(false)} disabled={busy !== null}>Keep it</Button>
@@ -186,13 +229,20 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
             ) : (
               <Button variant="danger" onClick={() => setConfirmCancel(true)} disabled={busy !== null || !actions.cancel}>Cancel booking</Button>
             )}
-            {booking.deposit_paid && actions.cancel ? <p className="text-xs text-dim">A deposit was paid. Cancelling does not refund it automatically.</p> : null}
+            {booking.deposit_paid && actions.cancel ? <p className="text-xs text-dim">A deposit was paid. Cancelling never refunds it by itself: you decide, after cancelling.</p> : null}
+            {!booking.customer_notified_at && !booking.anonymized_at && (booking.status === 'cancelled' || (booking.reschedule_count ?? 0) > 0) ? (
+              <Button variant="outline" onClick={notify} disabled={busy !== null}>{busy === 'notify' ? 'Sending…' : 'Text the customer about this change'}</Button>
+            ) : null}
+            {booking.deposit_paid ? (
+              <RefundSection booking={booking} refund={refundInfo === undefined ? detail?.refund ?? null : refundInfo} onChanged={(b, m) => { onChanged(b); setMessage(m); }} />
+            ) : null}
           </div>
         ) : (
           <p className="mt-6 border-t border-line pt-4 text-xs text-dim">You can view bookings. Only the account owner can cancel, complete or re-text them.</p>
         )}
 
       </div>
+      {rescheduling ? <RescheduleDialog booking={booking} tz={tz} onClose={() => setRescheduling(false)} onMoved={moved} /> : null}
     </div>
   );
 }

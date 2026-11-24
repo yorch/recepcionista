@@ -44,8 +44,9 @@ export async function appendTranscriptEvents(callId: string, events: TranscriptE
   const bySeq = new Map<number, NonNullable<(typeof rows)[number]>>();
   for (const r of rows) if (r) bySeq.set(r.seq, r);
   const list = [...bySeq.values()];
-  const call = await db.call.findUnique({ where: { id: callId }, select: { consentStatus: true } });
+  const call = await db.call.findUnique({ where: { id: callId }, select: { consentStatus: true, kind: true } });
   if (!call) return { ok: false, reason: 'call_not_found' };
+  if (call.kind === 'owner') return { ok: false, reason: 'consent_declined' }; // owner-line calls never keep a transcript (voice/owner)
   if (call.consentStatus === 'declined') return { ok: false, reason: 'consent_declined' };
   if (list.length === 0) return { ok: true, stored: 0, skipped: 0 };
   const stored = await db.$queryRaw<{ seq: number }[]>`
@@ -54,7 +55,7 @@ export async function appendTranscriptEvents(callId: string, events: TranscriptE
       FROM "calls" c
       CROSS JOIN LATERAL unnest(${list.map((e) => e.seq)}::int[], ${list.map((e) => e.role)}::text[], ${list.map((e) => e.text)}::text[],
                                 ${list.map((e) => e.at.toISOString())}::text[]::timestamptz[], ${list.map((e) => e.is_final)}::boolean[]) AS t("seq", "role", "text", "at", "is_final")
-     WHERE c."id" = ${callId} AND c."consent_status" <> 'declined'
+     WHERE c."id" = ${callId} AND c."consent_status" <> 'declined' AND c."kind" <> 'owner'
     ON CONFLICT ("call_id", "seq") DO UPDATE
       SET "role" = EXCLUDED."role", "text" = EXCLUDED."text", "at" = EXCLUDED."at", "is_final" = EXCLUDED."is_final"
       WHERE "call_transcript_events"."is_final" = false

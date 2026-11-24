@@ -75,7 +75,7 @@ Copy the signing secret (`whsec_...`) into `STRIPE_BILLING_WEBHOOK_SECRET`. It i
 ### 3. Customer Portal
 
 Settings > Billing > Customer portal: enable it, then allow customers to update payment methods, view invoices and **cancel subscriptions**
-(cancel at end of period is recommended). Leave plan switching off unless you add more prices. Set the default return link to
+(cancel at end of period is recommended). To offer the annual plan (below) enable **customers can switch plans** and add both prices (monthly and annual) of the product; otherwise leave plan switching off. Set the default return link to
 `https://<DOMAIN>/dashboard/billing`. Without a saved portal configuration Stripe refuses to create portal sessions (the route answers 502).
 
 ### 4. Environment
@@ -84,6 +84,8 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 | --- | --- |
 | `STRIPE_SECRET_KEY` | `sk_test_...` until you have gone live. Shared with deposit links. |
 | `STRIPE_PRICE_ID` | recurring monthly price |
+| `STRIPE_PRICE_ID_ANNUAL` | optional recurring annual price (see "Annual plan") |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | text for the annual choice, e.g. `$1,490/year (2 months free)` (build time) |
 | `STRIPE_BILLING_WEBHOOK_SECRET` | billing endpoint signing secret |
 | `BILLING_TRIAL_DAYS` | 0-90, default 7 |
 | `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh and compose. Outside production only `true` enforces |
@@ -96,6 +98,17 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 
 `deploy.sh` refuses to deploy when `BILLING_ENFORCED` is unset/invalid, and with `BILLING_ENFORCED=true` unless `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
 `STRIPE_BILLING_WEBHOOK_SECRET` are set. In production a missing key or price makes checkout answer 503; the local mock never runs there.
+
+#### Annual plan (optional)
+
+Create a second recurring price (yearly) on the same product and put its id in `STRIPE_PRICE_ID_ANNUAL` (+ `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL`, rebuild).
+When it is set (and `STRIPE_SECRET_KEY` is), the Billing page's "Start free trial" offers Monthly / Annual and `POST /api/billing/checkout` accepts
+`interval: 'month' | 'year'` (anything else is 422; `year` without the env is 422). The trial, the one-trial-per-card rule and the caps are the same for both.
+The cadence is stored in `businesses.billing_interval` by the subscription webhook, from the subscription's price (the annual price id, else the price's
+`recurring.interval`); an event without price information never changes it. Subscribed owners switch in the Stripe Customer Portal (**Manage billing**, then
+update plan; needs the portal setting above); Stripe then sends `customer.subscription.updated` and the badge ("Billed monthly/annually") follows. A change
+is audited (`billing.interval_changed`). `GET /api/billing/status` also returns `billing_interval`, `annual_available` and `usage_warnings` (the 80% / 100% cap warnings
+from `usageWarningsFor`, also shown on the Billing page). Onboarding's plan step starts the monthly plan.
 
 #### How texts are counted
 

@@ -3,8 +3,10 @@ import { checkSameOrigin, SESSION_COOKIE, USER_SESSION_COOKIE } from '@/lib/auth
 import { auditIp, limitIp, userAgentOf } from '@/lib/account-flows';
 import { clearSessionCookie, setSessionCookie } from '@/lib/auth-cookies';
 import {
-  consumeEmailToken, createSession, createUser, EmailTakenError, getBusiness, getUserByEmail, peekEmailToken, prisma, recordAudit, SESSION_TTL_MS,
+  acceptInviteForExistingUser, consumeEmailToken, createSession, createUser, EmailTakenError, getBusiness, getMembership, getUserByEmail,
+  markEmailVerified, peekEmailToken, prisma, recordAudit, SESSION_TTL_MS, setSessionActiveBusiness,
 } from '@/lib/db';
+import { authenticate } from '@/lib/session';
 import { hashPassword } from '@/lib/password';
 import { validateStrongPassword } from '@/lib/user-policy';
 import { logger } from '@/lib/log';
@@ -16,10 +18,38 @@ const log = logger('auth/accept-invite');
 const fail = (status: number, error: string, code?: string) => NextResponse.json({ ok: false, error, ...(code ? { code } : {}) }, { status });
 class BadLinkError extends Error {}
 const BAD_LINK = 'this invitation is invalid or has expired';
-const ACCOUNT_EXISTS = 'this email already has an account (an account belongs to one business). Sign in instead, or ask for an invitation to a different address.';
+const ACCOUNT_EXISTS = 'this email already has an account: sign in with it, then accept the invitation';
 
 /**
- * `{ token, password }`: accept an invitation. The token is bound to one business and role (set by whoever
+ * Accept an invitation into another business with an account that ALREADY EXISTS. Requires a signed-in session of exactly that account
+ * (the invited address must equal the account email; the link proves the mailbox, the session proves the account). The token is consumed
+ * together with the membership in one transaction, so a mismatch uses nothing up. The session then switches to the new business.
+ */
+async function acceptForExistingAccount(
+  req: Request, token: string, peek: { email: string; business_id: string | null; role: string | null },
+): Promise<NextResponse> {
+  const auth = await authenticate(req);
+  if (!auth.ok) return fail(401, 'sign in to accept this invitation', 'login_required');
+  const { principal } = auth;
+  if (principal.kind !== 'user' || principal.user.email.toLowerCase() !== peek.email.toLowerCase()) {
+    return fail(403, 'this invitation was sent to a different address: sign in with that account', 'wrong_account');
+  }
+  const businessId = peek.business_id as string;
+  const current = await getMembership(principal.user.id, businessId);
+  if (current && !current.disabled_at) return fail(409, 'you are already a member of this business', 'already_member');
+  const accepted = await acceptInviteForExistingUser(token, principal.user.id);
+  if (!accepted) return fail(400, BAD_LINK);
+  await markEmailVerified(principal.user.id); // the link was mailed to this address
+  if (auth.sessionId) await setSessionActiveBusiness(auth.sessionId, businessId);
+  await recordAudit({
+    actor_kind: 'user', actor_user_id: principal.user.id, business_id: businessId, action: 'user.invite_accepted', target: `user:${principal.user.id}`,
+    ip: auditIp(req), meta: { role: accepted.membership.role, invited_by: accepted.invite.invited_by, existing_account: true, created: accepted.created },
+  });
+  return NextResponse.json({ ok: true, data: { accepted: true, existing_account: true, role: accepted.membership.role, business_id: businessId } });
+}
+
+/**
+ * `{ token, password }`: accept an invitation as a NEW account; `{ token }` with a signed-in session: accept it with an EXISTING account. The token is bound to one business and role (set by whoever
  * invited), single use, 7 days. Creates the user with the email already verified (the link proved the mailbox)
  * and signs them in. Consuming the token and creating the user are ONE transaction: if the address already has an
  * account (including one created in the race window after the pre-check) or anything else fails, the transaction rolls
@@ -34,10 +64,10 @@ export async function POST(req: Request) {
     const token = typeof body.token === 'string' ? body.token : '';
     const peek = await peekEmailToken('invite', token);
     if (!peek || !peek.business_id || !peek.role) return fail(400, BAD_LINK);
+    if (!(await getBusiness(peek.business_id))) return fail(400, BAD_LINK);
+    if (await getUserByEmail(peek.email)) return acceptForExistingAccount(req, token, peek);
     const pwErr = validateStrongPassword(body.password, peek.email);
     if (pwErr) return fail(422, pwErr);
-    if (await getUserByEmail(peek.email)) return fail(409, ACCOUNT_EXISTS, 'account_exists');
-    if (!(await getBusiness(peek.business_id))) return fail(400, BAD_LINK);
 
     const passwordHash = await hashPassword(body.password as string); // CPU-heavy: outside the transaction
     let rec: Awaited<ReturnType<typeof consumeEmailToken>> = null;

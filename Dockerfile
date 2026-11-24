@@ -49,8 +49,10 @@ COPY . .
 # arrive as build args from compose (app.build.args). Public values only: never put a secret in these.
 ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY=""
 ARG NEXT_PUBLIC_PLAN_PRICE_DISPLAY=""
+ARG NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL=""
 ENV NEXT_PUBLIC_TURNSTILE_SITE_KEY=$NEXT_PUBLIC_TURNSTILE_SITE_KEY \
-    NEXT_PUBLIC_PLAN_PRICE_DISPLAY=$NEXT_PUBLIC_PLAN_PRICE_DISPLAY
+    NEXT_PUBLIC_PLAN_PRICE_DISPLAY=$NEXT_PUBLIC_PLAN_PRICE_DISPLAY \
+    NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL=$NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL
 
 # `next build` evaluates route modules, and several of them construct clients
 # from their env at import time. The dummy URL satisfies that without a database

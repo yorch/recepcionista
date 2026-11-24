@@ -14,6 +14,18 @@ const API = 'https://api.stripe.com/v1';
 
 export const DEFAULT_TRIAL_DAYS = 7;
 
+export type BillingIntervalChoice = 'month' | 'year';
+
+/** The optional annual price id (STRIPE_PRICE_ID_ANNUAL). Offered only when set AND real Stripe billing is configured. */
+export const annualPriceId = (env: NodeJS.ProcessEnv = process.env): string | null => env.STRIPE_PRICE_ID_ANNUAL?.trim() || null;
+export const annualAvailable = (env: NodeJS.ProcessEnv = process.env): boolean => Boolean(annualPriceId(env)) && Boolean(env.STRIPE_SECRET_KEY?.trim());
+
+/** Validate a client-supplied interval: only 'month' or 'year' (anything else, or absent, is monthly). */
+export function parseInterval(raw: unknown): BillingIntervalChoice | 'invalid' {
+  if (raw === undefined || raw === null || raw === '') return 'month';
+  return raw === 'month' || raw === 'year' ? raw : 'invalid';
+}
+
 /** Billing is not configured (missing key/price/base URL). Surface as 503. */
 export class BillingConfigError extends Error {
   readonly code = 'billing_not_configured';
@@ -123,12 +135,15 @@ export interface CheckoutInput {
   withTrial: boolean;
   /** Where Stripe sends the browser back to (default the billing page); see checkoutReturnPath. */
   returnPath?: CheckoutReturnPath;
+  /** 'year' uses STRIPE_PRICE_ID_ANNUAL (throws BillingConfigError when it is not set). Default 'month'. */
+  interval?: BillingIntervalChoice;
 }
 
 /** Subscription Checkout Session: trial + card collected up front. Returns the hosted URL. */
 export async function createCheckoutSession(input: CheckoutInput, env: NodeJS.ProcessEnv = process.env): Promise<{ url: string; id: string }> {
-  const price = env.STRIPE_PRICE_ID?.trim();
-  if (!price) throw new BillingConfigError('STRIPE_PRICE_ID is not set');
+  const yearly = input.interval === 'year';
+  const price = yearly ? annualPriceId(env) : env.STRIPE_PRICE_ID?.trim();
+  if (!price) throw new BillingConfigError(yearly ? 'STRIPE_PRICE_ID_ANNUAL is not set' : 'STRIPE_PRICE_ID is not set');
   const base = returnBaseUrl(env);
   const form = new URLSearchParams();
   form.set('mode', 'subscription');
@@ -139,6 +154,7 @@ export async function createCheckoutSession(input: CheckoutInput, env: NodeJS.Pr
   form.set('payment_method_collection', 'always');
   form.set('subscription_data[metadata][business_id]', input.business.id);
   form.set('metadata[business_id]', input.business.id);
+  form.set('subscription_data[metadata][interval]', yearly ? 'year' : 'month');
   const days = trialDays(env);
   if (input.withTrial && days > 0) {
     form.set('subscription_data[trial_period_days]', String(days));
@@ -173,7 +189,7 @@ export interface RetrievedSubscription {
   current_period_end?: number | null;
   cancel_at_period_end?: boolean;
   cancel_at?: number | null;
-  items?: { data?: Array<{ current_period_end?: number | null }> };
+  items?: { data?: Array<{ current_period_end?: number | null; price?: { id?: string; recurring?: { interval?: string } | null } | null }> };
 }
 
 export async function retrieveSubscription(id: string): Promise<RetrievedSubscription> {

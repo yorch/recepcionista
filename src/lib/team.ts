@@ -1,12 +1,14 @@
 /**
- * Team management data layer (users of one business, pending invitations) with the last-owner guard.
+ * Team management data layer (members of one business, pending invitations) with the last-owner guard.
  * Node runtime only. Authorization lives in the route handlers (src/app/api/team/**): everything here
- * takes the business id EXPLICITLY and never matches a user of another business.
+ * takes the business id EXPLICITLY and never matches a member of another business. Membership (src/lib/db/memberships.ts) is the
+ * source of truth: a person's role and disabled state here are per business.
  */
 import { NextResponse } from 'next/server';
 import { getBusiness, prisma } from '@/lib/db';
+import { disableMembership, listBusinessMembers, listMembershipsForUser, removeMembership, setMembershipRole } from '@/lib/db/memberships';
 import { authenticate, type AuthenticateOptions, type Principal } from '@/lib/session';
-import type { Business, User, UserRole } from '@/lib/types';
+import type { Business, BusinessMember, User, UserRole } from '@/lib/types';
 
 export interface PendingInvite {
   id: string;
@@ -19,26 +21,29 @@ export interface PendingInvite {
   created_at: string;
 }
 
-export type TeamUser = Pick<User, 'id' | 'email' | 'role' | 'created_at' | 'disabled_at' | 'email_verified_at' | 'totp_enabled'>;
+/**
+ * A person on one business's team. `role` is their role IN THIS business (their membership), `disabled_at` is set when that
+ * membership OR the whole account is disabled. The shape is what the team UI and /api/team have always returned.
+ */
+export type TeamUser = Pick<User, 'id' | 'email' | 'created_at' | 'disabled_at' | 'email_verified_at' | 'totp_enabled'> & { role: UserRole };
 
-const toTeamUser = (r: {
-  id: string; email: string; role: string; createdAt: Date; disabledAt: Date | null; emailVerifiedAt: Date | null; totpEnabledAt: Date | null;
-}): TeamUser => ({
-  id: r.id, email: r.email, role: r.role as UserRole, created_at: r.createdAt.toISOString(),
-  disabled_at: r.disabledAt ? r.disabledAt.toISOString() : null,
-  email_verified_at: r.emailVerifiedAt ? r.emailVerifiedAt.toISOString() : null,
-  totp_enabled: r.totpEnabledAt !== null,
+const toTeamUser = (m: BusinessMember): TeamUser => ({
+  id: m.user_id, email: m.email, role: m.role, created_at: m.joined_at,
+  disabled_at: m.membership_disabled_at ?? m.user_disabled_at, email_verified_at: m.email_verified_at, totp_enabled: m.totp_enabled,
 });
 
-/** Users of a business (owner/staff only), oldest first. No hashes, no secrets. */
+/** Team of a business (owner/staff memberships, disabled ones included), oldest first. No hashes, no secrets. */
 export async function listTeamUsers(businessId: string): Promise<TeamUser[]> {
-  const rows = await prisma.user.findMany({ where: { businessId, role: { in: ['owner', 'staff'] } }, orderBy: { createdAt: 'asc' } });
-  return rows.map(toTeamUser);
+  return (await listBusinessMembers(businessId, { includeDisabled: true })).map(toTeamUser);
 }
 
 export async function getTeamUser(businessId: string, userId: string): Promise<TeamUser | null> {
-  const row = await prisma.user.findFirst({ where: { id: userId, businessId, role: { in: ['owner', 'staff'] } } });
-  return row ? toTeamUser(row) : null;
+  return (await listTeamUsers(businessId)).find((u) => u.id === userId) ?? null;
+}
+
+/** The businesses a user (any account) has a membership in, for admins acting on a user without naming a business. */
+export async function businessIdsOfUser(userId: string): Promise<string[]> {
+  return (await listMembershipsForUser(userId, { includeDisabled: true })).map((m) => m.business_id);
 }
 
 /** Unused, unexpired invitations of one business, newest first. */
@@ -73,67 +78,47 @@ export async function supersedeInvites(businessId: string, email: string, except
 
 export type TeamChange<T = void> = { ok: true; value: T } | { ok: false; reason: 'not_found' | 'last_owner' };
 
-/**
- * Serialise every change to a business's owners (row locks on its owner rows) and run `fn` inside the same
- * transaction, so two concurrent "demote/disable/remove" requests can never both pass the last-owner check.
- */
-async function lockedOwnerChange<T>(
-  businessId: string,
-  userId: string,
-  fn: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0], target: { role: string; disabledAt: Date | null }, otherEnabledOwners: number, otherOwners: number) => Promise<T>,
-): Promise<TeamChange<T>> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT "id" FROM "users" WHERE "business_id" = ${businessId} AND "role" = 'owner' ORDER BY "id" FOR UPDATE`;
-    const target = await tx.user.findFirst({ where: { id: userId, businessId, role: { in: ['owner', 'staff'] } } });
-    if (!target) return { ok: false as const, reason: 'not_found' as const };
-    const [otherEnabledOwners, otherOwners] = await Promise.all([
-      tx.user.count({ where: { businessId, role: 'owner', disabledAt: null, id: { not: userId } } }),
-      tx.user.count({ where: { businessId, role: 'owner', id: { not: userId } } }),
-    ]);
-    const value = await fn(tx, target, otherEnabledOwners, otherOwners);
-    return { ok: true as const, value };
-  });
-}
-
 const LAST_OWNER = { ok: false, reason: 'last_owner' } as const;
 
-/** Change owner<->staff. Refuses to demote the last enabled owner. */
+/**
+ * Change owner<->staff IN THIS BUSINESS ONLY. Refuses to demote the last enabled owner (row lock on the business's owner memberships,
+ * so two concurrent changes cannot both pass). A role change re-authorises the person: their sessions in this business end, except the caller's own when
+ * they changed their own role.
+ */
 export async function changeTeamRole(
   businessId: string, userId: string, role: 'owner' | 'staff', opts: { keepSessionId?: string } = {},
 ): Promise<TeamChange<TeamUser | null>> {
-  const r = await lockedOwnerChange(businessId, userId, async (tx, target, others) => {
-    if (target.role === 'owner' && role !== 'owner' && !target.disabledAt && others === 0) return 'last_owner' as const;
-    const row = await tx.user.update({ where: { id: userId }, data: { role } });
-    // A role change re-authorises the user: every session (MFA-pending ones included) must sign in again, except the
-    // caller's own when they changed their own role.
-    if (role !== target.role) await tx.userSession.deleteMany({ where: { userId, ...(opts.keepSessionId ? { id: { not: opts.keepSessionId } } : {}) } });
-    return toTeamUser(row);
-  });
-  if (r.ok && r.value === 'last_owner') return LAST_OWNER;
-  return r as TeamChange<TeamUser | null>;
+  const r = await setMembershipRole(userId, businessId, role);
+  if (!r.ok) return r.reason === 'last_owner' ? LAST_OWNER : { ok: false, reason: 'not_found' };
+  if (r.changed) {
+    // Only the sessions working in THIS business: the person's sessions in their other businesses are unaffected by this role.
+    const primary = await prisma.user.findUnique({ where: { id: userId }, select: { businessId: true } });
+    await prisma.userSession.deleteMany({
+      where: {
+        userId, ...(opts.keepSessionId ? { id: { not: opts.keepSessionId } } : {}),
+        OR: [{ activeBusinessId: businessId }, ...(primary?.businessId === businessId ? [{ activeBusinessId: null }] : [])],
+      },
+    });
+  }
+  return { ok: true, value: await getTeamUser(businessId, userId) };
 }
 
-/** Disable or re-enable. Disabling revokes every session of that user and refuses for the last enabled owner. */
+/**
+ * Disable or re-enable the person's access to THIS business (their account and other businesses are untouched). Refuses for the last
+ * enabled owner. Sessions that were working here fall back to another of their businesses (done by disableMembership); when this was
+ * their only business every session of theirs ends.
+ */
 export async function setTeamUserDisabled(businessId: string, userId: string, disabled: boolean): Promise<TeamChange<TeamUser | null>> {
-  const r = await lockedOwnerChange(businessId, userId, async (tx, target, others) => {
-    if (disabled && target.role === 'owner' && !target.disabledAt && others === 0) return 'last_owner' as const;
-    const row = await tx.user.update({ where: { id: userId }, data: { disabledAt: disabled ? new Date() : null } });
-    if (disabled) await tx.userSession.deleteMany({ where: { userId } });
-    return toTeamUser(row);
-  });
-  if (r.ok && r.value === 'last_owner') return LAST_OWNER;
-  return r as TeamChange<TeamUser | null>;
+  const r = await disableMembership(userId, businessId, disabled);
+  if (!r.ok) return r.reason === 'last_owner' ? LAST_OWNER : { ok: false, reason: 'not_found' };
+  if (disabled && r.changed && (await listMembershipsForUser(userId)).length === 0) await prisma.userSession.deleteMany({ where: { userId } });
+  return { ok: true, value: await getTeamUser(businessId, userId) };
 }
 
-/** Delete a user (sessions, recovery codes and their tokens cascade). Refuses to remove the last owner. */
-export async function removeTeamUser(businessId: string, userId: string): Promise<TeamChange<void>> {
-  const r = await lockedOwnerChange(businessId, userId, async (tx, target, enabledOthers, others) => {
-    if (target.role === 'owner' && ((!target.disabledAt && enabledOthers === 0) || others === 0)) return 'last_owner' as const;
-    await tx.user.delete({ where: { id: userId } });
-    return undefined;
-  });
-  if (r.ok && (r.value as unknown) === 'last_owner') return LAST_OWNER;
-  return r as TeamChange<void>;
+/** Remove a person from this business. Their account survives when it has other businesses. Refuses to remove the last owner. */
+export async function removeTeamUser(businessId: string, userId: string): Promise<TeamChange<{ account_deleted: boolean }>> {
+  const r = await removeMembership(userId, businessId);
+  return r.ok ? { ok: true, value: { account_deleted: r.account_deleted } } : r.reason === 'last_owner' ? LAST_OWNER : { ok: false, reason: 'not_found' };
 }
 
 // ── request authorization shared by the /api/team routes ─────────────────────────
@@ -146,8 +131,9 @@ const err = (status: number, error: string, code?: string) => NextResponse.json(
 export { err as teamError };
 
 /**
- * Owner-or-admin guard that also resolves the business. An owner is pinned to their own business (another id is a
- * 404, never a 403); an admin must name one (`requested`). Staff get 403.
+ * Owner-or-admin guard that also resolves the business. An owner is pinned to the session's ACTIVE business, where the account is
+ * an owner (another id is a 404, never a 403, even one the account belongs to: switch first); an admin must name one (`requested`).
+ * Staff (in the active business) get 403.
  */
 export async function authenticateTeam(req: Request, requested: string | null | undefined, opts: AuthenticateOptions = {}): Promise<TeamAuth> {
   const auth = await authenticate(req, { role: 'owner', ...opts });

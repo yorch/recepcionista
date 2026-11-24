@@ -1,0 +1,43 @@
+# Owner call-in: update the AI by phone
+
+The business owner calls the business line from their **verified** phone and talks to a private assistant: "we raised the diagnostic fee to $99", "closed Monday", "new FAQ: ...". The assistant reads the change back; after the owner says yes, the server texts a confirmation code to the owner's phone; the change goes live when the owner **replies YES with that code**. Every change is audited and can be undone.
+
+## How the owner uses it
+
+1. Call the business number from the phone verified in Settings. The assistant says it is the private owner line and that no transcript is kept.
+2. Say one change at a time. The assistant says it back ("So: Change AC Diagnostic: price $99. Is that right?"). Say yes (or correct it).
+3. A text arrives: `Reply YES K7M2QX to apply: ... Reply NO K7M2QX to cancel. UNDO K7M2QX to revert. Expires in 30 min.` The change is **not live** until you reply `YES K7M2QX`. `NO K7M2QX` cancels. After it is applied, `UNDO K7M2QX` reverts it for 30 minutes; later, say "undo my last change" on a call (a fresh code is texted) or press Undo in Her brain > Voice changes.
+4. Her brain > **Voice changes** lists every proposal with status (waiting, applied, undone, cancelled) and Apply / Reject / Undo buttons for owners.
+
+Spanish works the same (`SI <code>`, `DESHACER <code>`); the language follows the business default.
+
+What the assistant can change: **services** (add, remove, price, duration, description), **hours / closed days / service area** (as notices the assistant tells callers; closures add up, hours and service area replace the previous notice), **FAQs** (add, replace, remove) and **pricing notes** (append a line).
+
+What it cannot do (it says so and points to the dashboard): change the assistant's instructions or system prompt, change the call script, edit the real opening hours used for booking availability (a "closed Monday" notice informs callers but the calendar still follows Settings hours), touch phone numbers, web addresses or emails, payments, bookings, customers' data, or anything about other businesses.
+
+## Security model
+
+Caller ID can be spoofed and everything the model says is untrusted, so:
+
+* **Owner mode is entered only on the server.** The initiation webhook / incoming route enter it only when the caller id equals `business.owner_phone_e164` (E.164 equality, anonymous ids refused) **and** `owner_phone_verified_at` is set. It sets `calls.kind = 'owner'` and the per-call owner prompt, first message and `owner_mode` variable. The model can never claim owner status: the three owner tools (`propose_kb_change`, `list_recent_changes`, `undo_last_change`) re-derive it from the database on every call (call row found by the platform's call sid / conversation id, kind `owner`, still running, within `OWNER_CALL_MAX_SECONDS`, stored caller still the verified owner number) and are refused otherwise. An owner call can also not use customer tools (booking, texting, payments).
+* **Two channels.** A proposal is only *recorded* from the call. It is applied only when `YES <code>` arrives by SMS at `/api/sms/inbound` (Twilio-signed) **from the verified owner phone**, handled after STOP/START/HELP so opt-outs always win. The code is a 6-character HMAC of (business id, change id) keyed from `APP_SECRET_KEY`: stateless, bound to one business and one change, never spoken on the call, valid 30 minutes, single use (the change status is the state; replays and Twilio retries are no-ops). A spoofed caller id therefore reaches only a conversation: the confirmation goes to the real owner's phone. **Even a call with STIR attestation A skips nothing**: attestation says the carrier vouches for the number, not that the person is the owner (shared phone, SIM swap, forwarded line), and the SMS is the cheap, uniform second factor.
+* **Patches are validated** (`src/lib/kb-patch.ts` `validateOwnerKbPatch`, `src/lib/voice/owner/ops.ts`). Only services, FAQs and pricing notes can change, through seven fixed operations; the system prompt and call script can never be touched (an attempt is flagged). New text is scanned and refused when it looks like an instruction (ignore/disregard previous instructions, system prompt, role markers, chat-template tokens, code fences, "you are now", Spanish equivalents, obfuscated spellings), mentions an internal tool name, contains a web address, email or phone number (no allowance: use the dashboard), asks for card numbers/passwords, or has control/zero-width characters. Counts and lengths are capped. The summary the owner hears and is texted is built by the server from the validated values, never taken from the model. The agent prompt is rebuilt from validated knowledge by `buildSystemPrompt`, which wraps these values as untrusted data.
+* **Read-back is enforced.** `propose_kb_change confirmed=false` returns the read-back and records that it happened; `confirmed=true` works only for the identical resulting change within 10 minutes, once. The model cannot skip it.
+* **Stale proposals** (the knowledge base was saved after the proposal) are refused and cancelled, since a patch holds whole lists and would overwrite newer edits. **Undo** restores the previous values only if the touched fields still hold what the change wrote; otherwise it reports `changed_since` and restores nothing.
+* **Limits.** 10 owner sessions per day per business (the 11th gets a short "limit reached" message), 5 proposals per call, 5-minute maximum call (`OWNER_CALL_MAX_SECONDS`, clamped to 30-300), 6 confirmation texts per hour, 10 SMS command attempts per 15 minutes, and a 1-hour lockout of the owner line after 5 attack-looking proposals within an hour. All by Postgres limiter / counts.
+* **Audit.** `owner_kb.session`, `proposed`, `applied`, `rejected`, `reverted`, `expired`, `stale`, `refused`, `locked`, `tool_refused`, `undo_requested`, with source `owner_voice` / `owner_sms` / `dashboard` and the change summary (no phone numbers or secrets).
+
+## Privacy
+
+Owner calls keep **no transcript, summary, recording or language**; the provider-side conversation is deleted best effort after the call. They count AI minutes, are never blocked by the minute caps (only an inactive plan closes the line), and are excluded from customer artifacts: Calls list, stats, briefings, gratitude/follow-ups, known-caller and release-recency logic. See docs/compliance.md.
+
+## Provider behaviour and its limits (UNVERIFIED unless stated)
+
+* Per-call prompt / first message / max duration come from the initiation webhook's `conversation_config_override`; the **system prompt override must be enabled on the agent** (`initiationAgentOverrides` requests it when `OWNER_CALLIN_ENABLED` is not `false`; the field names are the same unverified ones as the rest of the initiation setup, see docs/runbook.md section 6).
+* ElevenLabs configures **tools per agent, not per call** (the override covers prompt, first message, language, voice, duration; no per-call tool list was found). The owner tools are therefore registered on the agent for everyone and refused server-side unless the call row is `owner`. A customer's model seeing three extra tool names is harmless; a refused call is audited (rate limited) as `owner_kb.tool_refused`.
+* The Twilio-webhook path (`/api/voice/incoming`) also marks owner calls and returns the owner override in its JSON, but only the native ElevenLabs line can actually carry it to a live call.
+* Whether ElevenLabs keeps audio/transcripts of the call before our deletion request is governed by the agent's retention setting; set it to the minimum.
+
+## Limits and non-goals
+
+One change per proposal. Hours used for **booking availability** are not editable by phone (notices only). No multi-owner support beyond the single verified owner phone; a shared phone means anyone with that phone can confirm texts. Turning the feature off: `OWNER_CALLIN_ENABLED=false`.

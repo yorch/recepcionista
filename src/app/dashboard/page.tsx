@@ -7,6 +7,7 @@ import { dayLabelET, money, relative, seconds, timeET } from '@/lib/format';
 import { callModeView } from '@/lib/voice/call-mode';
 import { CallModeSwitch } from '@/components/dashboard/call-mode';
 import { tzOf } from '@/lib/time';
+import { listLiveCalls } from '@/lib/voice/live-transcript';
 import { longDate, greetingFor } from '@/components/dashboard/dates';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHead } from '@/components/ui/card';
@@ -37,6 +38,7 @@ export default async function TodayPage() {
     listSmsPage(biz.id, { limit: 2 }),
     countSms(biz.id),
   ]);
+  const liveCalls = await listLiveCalls(biz.id, now).catch(() => []); // calls in progress right now (consented ones only)
   const calls = recent.items;
   const sms = smsPage.items;
   const upcoming = upcomingPage.items.filter((b) => b.status !== 'cancelled' && b.status !== 'completed');
@@ -82,6 +84,23 @@ export default async function TodayPage() {
             secondary={{ href: '/dashboard/knowledge', label: 'Review what she knows' }}
           />
         </div>
+      ) : null}
+
+      {liveCalls.length > 0 ? (
+        <section aria-label="Live now" className="mt-6 rounded-2xl border border-mint-line bg-mint-bg p-4">
+          <h2 className="flex items-center gap-2 text-[13px] font-medium text-mint-text">
+            <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-mint live-dot" />Live now
+          </h2>
+          <ul className="mt-2 space-y-1">
+            {liveCalls.map((c) => (
+              <li key={c.id}>
+                <Link href={`/dashboard/calls/${c.id}`} className="inline-flex min-h-11 items-center text-[13px] text-mint-text hover:underline">
+                  {c.caller_phone ?? 'Unknown caller'} · watch the conversation
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">

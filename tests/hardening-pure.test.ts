@@ -127,6 +127,6 @@ describe('L4 pagination primitives', () => {
 describe('DRY: one tool list', () => {
   test('kb and voice tools share the same TOOL_NAMES', () => {
     expect(TOOLS).toBe(KB_TOOLS);
-    expect(TOOLS.length).toBe(7);
+    expect(TOOLS).toContain('transfer_to_human'); // registered only while NATIVE_TRANSFER=on
   });
 });

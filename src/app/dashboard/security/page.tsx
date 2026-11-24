@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { SecurityPanel, type SessionView } from '@/components/auth/security-panel';
-import { countUnusedRecoveryCodes, listAdminSessions, listUserSessions } from '@/lib/db';
+import { countUnusedRecoveryCodes, listAdminSessions, listPasskeys, listUserSessions } from '@/lib/db';
 import { getServerResolution, require2faForAdmins } from '@/lib/session';
 import type { UserSession } from '@/lib/types';
 
@@ -17,16 +17,17 @@ export default async function SecurityPage() {
   if (!res) redirect('/login');
   const { principal, sessionId } = res;
   const user = 'user' in principal ? principal.user : undefined;
-  const [sessions, recoveryLeft, adminSessions] = await Promise.all([
+  const [sessions, recoveryLeft, adminSessions, passkeys] = await Promise.all([
     user ? listUserSessions(user.id) : Promise.resolve([]),
     user?.totp_enabled ? countUnusedRecoveryCodes(user.id) : Promise.resolve(0),
     principal.kind === 'admin' ? listAdminSessions() : Promise.resolve([]),
+    user ? listPasskeys(user.id) : Promise.resolve([]),
   ]);
   return (
     <main className="mx-auto w-full max-w-3xl px-6 py-8">
       <header>
         <h1 className="text-[24px] font-semibold tracking-[-0.02em]">Security</h1>
-        <p className="mt-1 text-[13px] text-[#8b98ab]">Your email, two-step verification and signed-in devices.</p>
+        <p className="mt-1 text-[13px] text-[#8b98ab]">Your email, passkeys, two-step verification and signed-in devices.</p>
       </header>
       <SecurityPanel
         email={user?.email ?? null}
@@ -37,6 +38,7 @@ export default async function SecurityPage() {
         isAdmin={principal.kind === 'admin'}
         adminSessionCount={adminSessions.length}
         twoFactorRequired={principal.kind === 'admin' && Boolean(user) && require2faForAdmins()}
+        passkeys={passkeys.map((p) => ({ id: p.id, name: p.name, created_at: p.created_at, last_used_at: p.last_used_at, device_type: p.device_type, backed_up: p.backed_up }))}
       />
     </main>
   );

@@ -15,6 +15,8 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   flag_emergency: 'Mark the call as an emergency and alert the owner now.',
   get_pricing: 'Look up a starting price — never quote from memory.',
   handoff_to_human: 'Transfer the caller to the owner.',
+  reschedule_booking: "Move the caller's own booking (caller-id verified).",
+  cancel_booking: "Cancel the caller's own booking after they confirm (caller-id verified).",
 };
 
 export async function GET(req: Request) {

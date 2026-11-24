@@ -154,3 +154,30 @@ export async function sendMfaFailuresNotice(email: string): Promise<void> {
   );
   await deliver({ to: email, ...m });
 }
+
+/** Security notice when a passkey is added to or removed from the account. */
+export async function sendPasskeyNotice(email: string, change: 'added' | 'removed', name: string): Promise<void> {
+  const label = name.replace(/[\r\n]+/g, ' ').slice(0, 80);
+  const m = plainMail(
+    change === 'added' ? 'A passkey was added to your account' : 'A passkey was removed from your account',
+    [change === 'added'
+      ? `A passkey named "${label}" was just added to your Recepcionista account. It can now sign in to your account without your password.`
+      : `The passkey named "${label}" was just removed from your Recepcionista account.`],
+    `If this was not you, reset your password right away at ${appBaseUrl()}/forgot-password and contact your team admin.`,
+  );
+  await deliver({ to: email, ...m });
+}
+
+/** Sent when a passkey's signature counter went backwards (the authenticator was probably cloned): every session was signed out. */
+export async function sendPasskeyCloneNotice(email: string, name: string): Promise<void> {
+  const label = name.replace(/[\r\n]+/g, ' ').slice(0, 80);
+  const m = plainMail(
+    'A passkey of your account may have been copied',
+    [
+      `A sign-in attempt with your passkey "${label}" was refused because its usage counter went backwards, which can mean the passkey was cloned.`,
+      'For your safety every session of your account was signed out.',
+    ],
+    `Remove that passkey from the Security page after signing in, and change your password at ${appBaseUrl()}/forgot-password if you do not recognise this.`,
+  );
+  await deliver({ to: email, ...m });
+}

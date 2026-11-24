@@ -42,7 +42,10 @@ export function ProvisionStep({ businessId, status, go, refresh }: StepProps) {
       } else if (e.status === 403 && /email/i.test(e.message)) setError({ text: 'Confirm your email address first (check your inbox for our link), then try again. Everything you entered is saved.' });
       else if (e.status === 403) setError({ text: 'This account cannot turn on a number yet. Everything you entered is saved. Please contact support to finish.' });
       else if (e.status === 429) setError({ text: 'Too many tries in a row. Wait a minute and try again.' });
-      else if (e.status === 422) setError({ text: `We could not read your website: ${e.message}. Go back and enter your services by hand.` });
+      else if (e.status === 422 && (e.payload as { code?: string } | undefined)?.code === 'kb_incomplete') {
+        const blockers = ((e.payload as { blockers?: { message: string }[] }).blockers ?? []).map((b) => b.message);
+        setError({ text: `Before we turn her on: ${blockers.join(' ') || 'add the missing details'} Go back to the review step to add them.` });
+      } else if (e.status === 422) setError({ text: `We could not read your website: ${e.message}. Go back and enter your services by hand.` });
       else if (e.status === 502 || e.status === 503) {
         setError({ text: `${e.message} Wait a minute and press Try again: if a number was already reserved for you, the retry reuses it and does not buy another.` });
         void refresh();

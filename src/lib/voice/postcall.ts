@@ -11,10 +11,12 @@
  */
 
 import { appUrl } from '@/lib/providers/stripe';
+import { meterForwardedCall } from '@/lib/voice/forward-metering';
+import { transferOutcomeFromTranscript } from '@/lib/voice/transfer';
 import { logger } from '@/lib/log';
 import {
   claimEvent, completeEvent, createCall, getBusiness, getBusinessByAgentId, getCall, getCallByConversationId, getCallBySid,
-  nowIso, prisma, recordCallSeconds, releaseEvent, updateCall,
+  claimCallMetering, deleteTranscriptEvents, setTransferStatus, nowIso, prisma, recordCallSeconds, releaseCallMetering, releaseEvent, updateCall,
 } from '@/lib/db';
 import { initiationAgentOverrides } from '@/lib/voice/initiation-config';
 import { disclosureSpokenIn } from '@/lib/kb/disclosure';
@@ -260,7 +262,7 @@ function inferUrgency(transcript: string): Urgency {
   return 'unsure';
 }
 
-function normalizeLanguage(raw: unknown, transcript: string): 'en' | 'es' | 'mixed' | null {
+export function normalizeLanguage(raw: unknown, transcript: string): 'en' | 'es' | 'mixed' | null {
   if (typeof raw === 'string') {
     const v = raw.toLowerCase();
     if (v.startsWith('es')) return 'es';
@@ -362,10 +364,23 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
     // still used minutes, so they count too. A metering failure never fails the webhook.
     if (conversationId && outcome.status === 200 && 'call' in outcome.body && outcome.body.call) {
       const c = outcome.body.call;
-      if (c.duration_sec && c.duration_sec > 0) {
+      // Shared with the reconcile job (voice/reconcile.ts): whichever claims `metered_at` first adds the minutes, the other skips. Owner-line
+      // calls (kind 'owner', voice/owner) ARE metered (they use AI minutes) but are never blocked by the caps. A failed write gives the claim back so the job can retry.
+      // Live transfer (NATIVE_TRANSFER): settle the outcome from the transcript's tool calls. A transferred call's talk time is FORWARD time
+      // (own cap + concurrency lease released), never AI minutes; a refused / failed transfer was an ordinary AI call.
+      let transferred = false;
+      if (c.transfer_status && c.transfer_status !== 'none') {
+        const o = transferOutcomeFromTranscript(body.transcript);
+        const settled = o === 'connected' ? 'connected' : o === 'failed' || o === 'none' ? 'failed' : null;
+        if (settled) { try { await setTransferStatus(c.id, settled); } catch { /* best-effort */ } }
+        transferred = o === 'connected' || (o === 'unknown' && c.transfer_status === 'connected');
+      }
+      if (c.duration_sec && c.duration_sec > 0 && await claimCallMetering(c.id)) {
         try {
-          await recordCallSeconds(c.business_id, c.duration_sec);
+          if (transferred) await meterForwardedCall(c.call_sid ?? conversationId, c.business_id, c.duration_sec);
+          else await recordCallSeconds(c.business_id, c.duration_sec);
         } catch (err) {
+          await releaseCallMetering(c.id);
           log.warn('usage.record_failed', { call: c.id, business: c.business_id, err });
         }
       }
@@ -494,6 +509,20 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
   const alreadyHandedOff = call.status === 'handed_off';
   const biz = business ?? (await getBusiness(call.business_id));
 
+  // OWNER CALL (kind 'owner', set server-side from the verified owner caller id): keep NO transcript, summary, recording or language, and delete
+  // the provider-side conversation too. Only the duration is kept (minutes still count; owner calls are never blocked by the caps). Nothing here
+  // triggers a customer-facing artifact (briefing, gratitude, summary). See docs/owner-call-in.md.
+  if (call.kind === 'owner') {
+    const updated = await updateCall(call.id, {
+      ended_at: call.ended_at ?? nowIso(),
+      duration_sec: duration != null && Number.isFinite(Number(duration)) ? Math.round(Number(duration)) : call.duration_sec,
+      transcript: null, summary: null, recording_url: null, status: 'completed',
+    });
+    if (conversationId) await deleteProviderConversation(conversationId);
+    log.info('stored.owner_call', { call: call.id, business: call.business_id });
+    return { status: 200, body: { call: updated } };
+  }
+
   // ---- consent: only a recorded objection or SERVER-SIDE evidence of disclosure counts ----------------------
   let consent = call.consent_status ?? 'unknown';
   if (consent !== 'declined' && callerDeclinedRecording(body.transcript)) {
@@ -509,6 +538,7 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
   // recording URL or language is stored. For a declined call the provider-side conversation is also deleted.
   if (consent !== 'disclosed') {
     const declined = consent === 'declined';
+    try { await deleteTranscriptEvents(call.id); } catch { /* best-effort: the database also purges on decline */ }
     const updated = await updateCall(call.id, {
       ended_at: call.ended_at ?? nowIso(),
       duration_sec:
@@ -563,6 +593,11 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
     urgency: call.urgency === 'emergency' ? 'emergency' : urgency,
     status: alreadyHandedOff ? 'handed_off' : 'completed',
   });
+  // Post-call is the source of truth: it replaces the interim rows the live view showed (dynamic import: live-transcript imports this module).
+  try {
+    const live = await import('@/lib/voice/live-transcript');
+    await live.reconcileFinalTranscript(call.id, body.transcript, call.started_at, body.metadata?.start_time_unix_secs);
+  } catch { /* the saved transcript is already stored on the call */ }
   log.info('stored', { call: call.id, business: call.business_id, conversation: conversationId || null });
   return { status: 200, body: { call: updated } };
 }

@@ -14,6 +14,7 @@ import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { classifyDial, meterForwardedCall, meterVoicemail, parseSeconds, voicemailAllowance } from '@/lib/voice/forward-metering';
 import { callerKey, isKnownCaller } from '@/lib/voice/caller-limits';
 import { FORWARD_UNANSWERED_FLAG, markUnavailable, notifyMissedCall } from '@/lib/voice/non-ai';
+import { bridgedSeconds, screenOutcome } from '@/lib/voice/screening';
 import { TWILIO_RECORDING_URL } from '@/lib/voice/voicemail';
 import { emptyHangupTwiml, pausedTwiml, thanksTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
 import { logger } from '@/lib/log';
@@ -44,8 +45,13 @@ export async function POST(req: Request): Promise<Response> {
 
   try {
     if (form.DialCallStatus) {
-      const dial = classifyDial(form);
-      const secs = parseSeconds(form.DialCallDuration);
+      // Call screening: a leg whose owner never pressed 1 was not bridged (carrier voicemail, declined, no input): unanswered, 0 minutes.
+      const screen = await screenOutcome((call.call_sid ?? callSid) || '');
+      const notAccepted = screen.screened && !screen.accepted;
+      const dial = notAccepted && (form.DialCallStatus ?? '').toLowerCase() !== 'canceled'
+        ? { result: 'unanswered' as const, why: screen.declined ? 'owner declined the screening' : 'screening not accepted (no input / voicemail)' }
+        : classifyDial(form);
+      const secs = bridgedSeconds(parseSeconds(form.DialCallDuration), screen);
       if (dial.result === 'answered') {
         await updateCall(call.id, { status: 'completed', ...(secs !== null ? { duration_sec: secs } : {}) });
         await meterForwardedCall(call.call_sid ?? callSid, business.id, secs);
@@ -63,7 +69,7 @@ export async function POST(req: Request): Promise<Response> {
         return twimlResponse(emptyHangupTwiml());
       }
       // Nobody picked up (or only a machine / an instant hang-up did): fall back to the voicemail (the notice below is spoken before the beep).
-      const vm = await voicemailAllowance(business.id, process.env, { business, callSid: call.call_sid ?? callSid, from: call.caller_phone });
+      const vm = await voicemailAllowance(business.id, process.env, { business, callSid: call.call_sid ?? callSid, from: call.caller_phone, stirStatus: call.stir_status ?? null });
       if (!vm.ok) {
         log.warn('voicemail_refused', { business: business.id, call: call.id, why: vm.why });
         const callerCaused = vm.why === 'caller_limited' || vm.why === 'unknown_reserved';

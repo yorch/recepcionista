@@ -1,24 +1,27 @@
 import { NextResponse } from 'next/server';
 import {
-  actorOf, authenticateTeam, changeTeamRole, getTeamUser, removeTeamUser, setTeamUserDisabled, teamError, type TeamChange,
+  actorOf, authenticateTeam, businessIdsOfUser, changeTeamRole, getTeamUser, removeTeamUser, setTeamUserDisabled, teamError, type TeamChange,
 } from '@/lib/team';
 import { auditIp } from '@/lib/account-flows';
-import { prisma, recordAudit } from '@/lib/db';
+import { recordAudit } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const LAST_OWNER = 'a business must keep at least one active owner';
 
-/** Resolve the target user. A user of another business (or an admin account) is a 404 for owners; admins name the business via the user. */
+/**
+ * Resolve the target member. Owners are pinned to the session's active business by authenticateTeam (a member of another business is a
+ * 404, even one the owner also manages: switch first). Admins name the business (`?business_id=`); without it the user's only
+ * membership is used, and a user in several businesses needs the parameter (422).
+ */
 async function resolveTarget(req: Request, userId: string) {
   const url = new URL(req.url);
   let requested = url.searchParams.get('business_id');
   if (!requested) {
-    // Admins act on a user directly: the business is the user's own. Owners are pinned by authenticateTeam either way.
-    const row = userId.length <= 64 ? await prisma.user.findUnique({ where: { id: userId }, select: { businessId: true } }) : null;
-    if (row && !row.businessId) return { ok: false as const, response: teamError(404, 'user not found') }; // admin accounts are not team members
-    requested = row?.businessId ?? null;
+    const ids = userId.length <= 64 ? await businessIdsOfUser(userId) : [];
+    if (ids.length === 0) return { ok: false as const, response: teamError(404, 'user not found') }; // admin accounts and strangers are not team members
+    if (ids.length === 1) requested = ids[0]; // owners are pinned by authenticateTeam either way
   }
   const auth = await authenticateTeam(req, requested);
   if (!auth.ok) return auth;
@@ -64,7 +67,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   return NextResponse.json({ ok: true, data: { user: await getTeamUser(auth.business.id, target.id) } });
 }
 
-/** Remove a user from the business (their sessions die with them). Not yourself, not the last owner. */
+/** Remove a person from THIS business (their account and other businesses stay; an account with no business left is deleted). Not yourself, not the last owner. */
 export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   const t = await resolveTarget(req, id);

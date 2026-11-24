@@ -157,7 +157,7 @@ describe('billing emails', () => {
 
 describe('gates', () => {
   const user = (verified: boolean): Principal => ({
-    kind: 'user', business_id: 'b1', role: 'owner', email_verified: verified,
+    kind: 'user', business_id: 'b1', role: 'owner', email_verified: verified, memberships: [],
     user: { id: 'u1', email: 'o@x.test', business_id: 'b1', role: 'owner', created_at: '', disabled_at: null, email_verified_at: verified ? '2026-01-01T00:00:00Z' : null, phone: null, totp_enabled: false } as User,
   });
   const admin: Principal = { kind: 'admin', via: 'token', email_verified: true };

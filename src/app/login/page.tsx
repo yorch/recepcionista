@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { go } from '@/components/auth/auth-ui';
+import { PasskeyLogin } from '@/components/auth/passkey-login';
 import { safeNextPath } from '@/lib/safe-redirect';
 
 const inputCls =
@@ -79,7 +80,7 @@ export default function LoginPage() {
             <input
               id="email"
               type="email"
-              autoComplete="username"
+              autoComplete="username webauthn"
               autoFocus
               required
               value={email}
@@ -108,6 +109,7 @@ export default function LoginPage() {
         >
           {busy ? 'Signing in...' : 'Sign in'}
         </button>
+        {!adminMode && <PasskeyLogin disabled={busy} />}
         <button
           type="button"
           onClick={() => { setAdminMode((v) => !v); setError(null); }}

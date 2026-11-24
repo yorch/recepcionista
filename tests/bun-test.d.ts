@@ -8,6 +8,8 @@ declare module 'bun:test' {
   export function test(name: string, fn: Fn, timeoutMs?: number): void;
   export function it(name: string, fn: Fn): void;
   export function beforeEach(fn: Fn): void;
+  /** Freeze (or, with no argument, restore) the clock. */
+  export function setSystemTime(now?: Date | number): void;
   export function afterEach(fn: Fn): void;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   export function expect(value: unknown): any;

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/components/ui/cn';
 import { Logo } from '@/components/ui/logo';
+import { BusinessSwitcher, type SwitcherMembership } from '@/components/dashboard/business-switcher';
 
 interface NavItem {
   href: string;
@@ -44,6 +45,9 @@ export interface SidebarProps {
   currentBusinessId: string;
   /** Admin only: every business for the switcher. */
   businesses: { id: string; name: string }[];
+  /** Accounts in several businesses (not admins): where they can switch to, and whether they may add another location. */
+  memberships?: SwitcherMembership[];
+  canAddBusiness?: boolean;
 }
 
 const FOCUSABLE = 'a[href], button:not([disabled]), select, input, textarea, [tabindex]:not([tabindex="-1"])';
@@ -171,7 +175,7 @@ export function Sidebar(props: SidebarProps) {
 }
 
 function SidebarBody({
-  businessName, phone, live, statusText = 'Answering calls', who, role, isAdmin, isOwner, currentBusinessId, businesses, path,
+  businessName, phone, live, statusText = 'Answering calls', who, role, isAdmin, isOwner, currentBusinessId, businesses, memberships = [], canAddBusiness = false, path,
 }: SidebarProps & { path: string }) {
   const router = useRouter();
   const gates = { owner: isOwner, admin: isAdmin };
@@ -206,6 +210,7 @@ function SidebarBody({
             ))}
           </select>
         ) : null}
+        {!isAdmin ? <BusinessSwitcher memberships={memberships} currentBusinessId={currentBusinessId} canAddBusiness={canAddBusiness} /> : null}
         <p className="truncate text-[13px] font-medium text-white">{businessName}</p>
         <div className="mt-1.5 flex items-center gap-1.5">
           <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', live ? (statusText === 'Answering calls' ? 'bg-mint live-dot' : 'bg-warn') : 'bg-dim')} />

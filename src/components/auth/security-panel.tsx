@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardHead } from '@/components/ui/card';
 import { go, inputCls, friendly, sendJson } from './auth-ui';
+import { PasskeysCard, type PasskeyView } from './passkeys-card';
 
 export interface SessionView {
   id: string; created_at: string; last_used_at: string; expires_at: string; ip: string | null; user_agent: string | null; current: boolean;
@@ -258,7 +259,7 @@ function AdminSessions({ count }: { count: number }) {
 
 export function SecurityPanel(props: {
   email: string | null; emailVerified: boolean; totpEnabled: boolean; recoveryLeft: number; sessions: SessionView[];
-  isAdmin: boolean; adminSessionCount: number; twoFactorRequired: boolean;
+  isAdmin: boolean; adminSessionCount: number; twoFactorRequired: boolean; passkeys?: PasskeyView[];
 }) {
   return (
     <>
@@ -268,6 +269,7 @@ export function SecurityPanel(props: {
       ) : (
         <Card className="mt-6"><div className="p-5 text-[13px] text-[#a8b6c8]">You are signed in with the break-glass admin token. Two-step verification and personal sessions apply to personal accounts.</div></Card>
       )}
+      {props.email ? <PasskeysCard initial={props.passkeys ?? []} /> : null}
       {props.email ? <Sessions initial={props.sessions} canRevoke /> : null}
       {props.isAdmin ? <AdminSessions count={props.adminSessionCount} /> : null}
     </>

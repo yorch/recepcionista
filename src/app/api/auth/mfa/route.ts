@@ -5,6 +5,7 @@ import { clearSessionCookie, setSessionCookie } from '@/lib/auth-cookies';
 import { accountId, checkClientAttempts, checkPair, clearFailures, mfaPairKey, recordFailure, verdictResponse } from '@/lib/login-throttle';
 import { countUnusedRecoveryCodes, createSession, deleteSession, recordAudit, SESSION_TTL_MS } from '@/lib/db';
 import { verifySecondFactor } from '@/lib/mfa';
+import { signedInData } from '@/lib/login-session';
 import { rateLimit } from '@/lib/ratelimit';
 import { resolvePendingMfa } from '@/lib/session';
 import { logger } from '@/lib/log';
@@ -67,8 +68,7 @@ export async function POST(req: Request) {
     const res = NextResponse.json({
       ok: true,
       data: {
-        authenticated: true, kind: 'user', email: user.email, role: user.role, business_id: user.business_id,
-        email_verified: user.email_verified_at !== null,
+        ...(await signedInData(user)),
         ...(result.method === 'recovery' ? { recovery_codes_left: left } : {}),
       },
     });

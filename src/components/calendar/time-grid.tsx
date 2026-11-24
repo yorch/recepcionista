@@ -1,6 +1,7 @@
 'use client';
 import { useMemo, useRef } from 'react';
 import { StatusIcon } from './status';
+import { BusyLayer, useBusyBlocks } from './busy-layer';
 import { cn } from '@/components/ui/cn';
 import { axisFor, blockBox, groupByDay, hourLabel, layoutLanes, nowLine, STATUS_META, type Axis } from '@/lib/calendar';
 import { timeET } from '@/lib/format';
@@ -34,6 +35,7 @@ export interface TimeGridProps {
 /** Week / day time grid (md and up): hour rows on the business's open hours, blocks sized by duration. */
 export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, selectedId, onOpen, onOpenDay }: TimeGridProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const busyBlocks = useBusyBlocks(days, tz);
   const grouped = useMemo(() => groupByDay(bookings, days, tz), [bookings, days, tz]);
   const axis: Axis = useMemo(() => axisFor(hours, days, tz, [...grouped.values()].flat().map((x) => x.segment)), [hours, days, tz, grouped]);
   const hourMarks = useMemo(() => {
@@ -123,6 +125,7 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
                 {hourMarks.map((m) => (
                   <div key={m} aria-hidden="true" className="absolute inset-x-0 border-t border-line/70" style={{ top: `${((m - axis.startMin) / (axis.endMin - axis.startMin)) * 100}%` }} />
                 ))}
+                <BusyLayer blocks={busyBlocks} day={d} tz={tz} axis={axis} />
                 {line !== null ? <div aria-hidden="true" className="absolute inset-x-0 z-[5] border-t-2 border-brand" style={{ top: `${line}%` }}><span className="absolute -left-1 -top-[5px] h-2 w-2 rounded-full bg-brand" /></div> : null}
                 {items.map(({ booking: b, segment }) => {
                   const box = blockBox(segment, axis);

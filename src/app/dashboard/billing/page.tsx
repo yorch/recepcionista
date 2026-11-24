@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { billingSummary } from '@/lib/billing/summary';
 import { daysLeft } from '@/lib/billing/banner-state';
 import { BillingActions } from './billing-actions';
+import { planPriceDisplay, planPriceDisplayAnnual } from '@/app/site-config';
 import type { BillingStatus } from '@/lib/types';
 
 export const metadata: Metadata = { title: 'Billing' };
@@ -109,11 +110,24 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
           ) : null}
           {s.billing_status === 'trialing' && s.cancel_at_period_end ? <p>Set to cancel when the trial ends.</p> : null}
           {s.billing_status === 'past_due' && graceEnd ? <p>Service pauses on {graceEnd} unless the payment goes through.</p> : null}
+          {s.billing_status !== 'none' && s.billing_status !== 'canceled' ? (
+            <p>Billed {s.billing_interval === 'year' ? 'annually' : 'monthly'}.
+              {s.annual_available && s.billing_interval === 'month' && s.has_customer ? ' You can switch to the annual plan in the billing portal (Manage billing, then Update plan); the change is shown here after Stripe confirms it.' : ''}
+              {s.billing_interval === 'year' && s.has_customer ? ' To go back to monthly, use Manage billing.' : ''}
+            </p>
+          ) : null}
+          {s.usage_warnings.length > 0 ? (
+            <ul aria-label="Usage warnings" className="space-y-1 text-[#f2c86b]">
+              {s.usage_warnings.map((w) => (
+                <li key={`${w.kind}-${w.level}`}>{w.level === 100 ? 'Limit reached' : 'Nearly at the limit'}: {w.label} ({w.used.toLocaleString('en-US')} of {w.cap.toLocaleString('en-US')} {w.unit}).</li>
+              ))}
+            </ul>
+          ) : null}
           {!s.enforced && s.billing_status === 'none' ? (
             <p className="text-[#8b98ab]">Plans are not enforced on this installation yet, so nothing is paused.</p>
           ) : null}
           <div className="pt-1">
-            {canStart ? <BillingActions businessId={biz.id} mode="start" /> : null}
+            {canStart ? <BillingActions businessId={biz.id} mode="start" annualAvailable={s.annual_available} monthlyLabel={planPriceDisplay()} annualLabel={planPriceDisplayAnnual()} /> : null}
             {canManage ? <BillingActions businessId={biz.id} mode="manage" /> : null}
           </div>
         </div>

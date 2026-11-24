@@ -1,16 +1,21 @@
 import { NextResponse } from 'next/server';
-import { actorOf, authenticateTeam, getTeamUser, teamError } from '@/lib/team';
+import { actorOf, authenticateTeam, businessIdsOfUser, getTeamUser, teamError } from '@/lib/team';
 import { auditIp } from '@/lib/account-flows';
-import { deleteUserSessions, prisma, recordAudit } from '@/lib/db';
+import { deleteUserSessions, recordAudit } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-/** Sign a team member out everywhere (owner of that business, or admin). */
+/** Sign a team member of this business out everywhere (all their sessions: the account is one person; owner of that business, or admin). */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
-  const row = id.length <= 64 ? await prisma.user.findUnique({ where: { id }, select: { businessId: true } }) : null;
-  const auth = await authenticateTeam(req, new URL(req.url).searchParams.get('business_id') ?? row?.businessId ?? null);
+  let requested = new URL(req.url).searchParams.get('business_id');
+  if (!requested) {
+    const ids = id.length <= 64 ? await businessIdsOfUser(id) : [];
+    if (ids.length === 0) return teamError(404, 'user not found');
+    if (ids.length === 1) requested = ids[0]; // admins naming no business; owners are pinned to the active one either way
+  }
+  const auth = await authenticateTeam(req, requested);
   if (!auth.ok) return auth.response;
   const target = id.length <= 64 ? await getTeamUser(auth.business.id, id) : null;
   if (!target) return teamError(404, 'user not found');

@@ -73,8 +73,9 @@ integration('review round 6 fixes (postgres)', () => {
     body: new URLSearchParams(params).toString(),
   }));
   const FWD = { callMode: 'forward', forwardNumber: '+13055550142', forwardNumberE164: '+13055550142', forwardNumberVerifiedAt: new Date() };
-  const ring = (biz: { phone?: string | null }, from: string = phone(), CallSid: string = uniq('CA')) =>
-    post(URL_IN, { AccountSid: ACCOUNT, CallSid, CallStatus: 'ringing', From: from, To: biz.phone! }, incoming);
+  // These round-6 tests exercise the per-caller identity, which (STIR/SHAKEN trust) only attestation-A callers have: ring as a verified caller.
+  const ring = (biz: { phone?: string | null }, from: string = phone(), CallSid: string = uniq('CA'), StirVerstat = 'TN-Validation-Passed-A') =>
+    post(URL_IN, { AccountSid: ACCOUNT, CallSid, CallStatus: 'ringing', From: from, To: biz.phone!, StirVerstat }, incoming);
   const kindOf = (xml: string) => (xml.includes('<Dial') ? 'dial' : xml.includes('<Record') ? 'record' : 'hangup');
   const ctx = (id: string): Ctx => ({ params: Promise.resolve({ id }) });
   const api = (url: string, method: string, body?: unknown, headers: Record<string, string> = {}) =>

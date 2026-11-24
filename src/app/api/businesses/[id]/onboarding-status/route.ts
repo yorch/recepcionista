@@ -22,9 +22,9 @@ export async function GET(
 
     const [kb, firstCall, latestCall, firstBooking, extracted] = await Promise.all([
       getKnowledgeBase(id),
-      prisma.call.findFirst({ where: { businessId: id }, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }),
+      prisma.call.findFirst({ where: { businessId: id, kind: 'customer' }, orderBy: { startedAt: 'asc' }, select: { startedAt: true } }),
       prisma.call.findFirst({
-        where: { businessId: id }, orderBy: { startedAt: 'desc' },
+        where: { businessId: id, kind: 'customer' }, orderBy: { startedAt: 'desc' },
         select: { startedAt: true, language: true, durationSec: true, status: true },
       }),
       prisma.booking.findFirst({ where: { businessId: id }, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),

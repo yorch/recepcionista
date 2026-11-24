@@ -4,6 +4,7 @@
  * the business's time zone (see lib/time.ts), whatever the process TZ is.
  */
 import { listBlockingIntervals } from '@/lib/db';
+import { calendarBusyIntervals } from '@/lib/integrations/google/busy';
 import {
   buildSlots, clampDuration, upcomingDateKeys, validateSlot, type SlotRejection,
 } from '@/lib/availability';
@@ -19,7 +20,10 @@ export async function slotsForDate(
   const tz = tzOf(business);
   const duration = clampDuration(durationMinutes);
   const { gte, lt } = dayRange(dateStr, tz);
-  const busy = await listBlockingIntervals(business.id, gte.getTime(), lt.getTime());
+  const busy = [
+    ...(await listBlockingIntervals(business.id, gte.getTime(), lt.getTime())),
+    ...(await calendarBusyIntervals(business.id, gte.getTime(), lt.getTime())), // owner's Google Calendar (healthy connection + switch on)
+  ];
   return buildSlots(business.hours, dateStr, tz, duration, busy, { nowMs: Date.now() });
 }
 
@@ -31,7 +35,10 @@ export async function nextAvailable(business: Business, count = 3, durationMinut
   const days = upcomingDateKeys(nowMs, tz, 14);
   const from = dayRange(days[0], tz).gte.getTime();
   const to = dayRange(days[days.length - 1], tz).lt.getTime();
-  const busy = await listBlockingIntervals(business.id, from, to); // one query for the whole range
+  const busy = [
+    ...(await listBlockingIntervals(business.id, from, to)), // one query for the whole range
+    ...(await calendarBusyIntervals(business.id, from, to)),
+  ];
 
   const out: TimeSlot[] = [];
   for (const dateKey of days) {

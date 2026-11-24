@@ -9,6 +9,8 @@ import { forwardAllowance, voicemailAllowance } from '@/lib/voice/forward-meteri
 import { vetForwardNumber } from '@/lib/voice/forward-vet';
 import { forwardRingSeconds, forwardTwiml, pausedTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { setCallTrust } from '@/lib/db';
+import { enterOwnerMode } from '@/lib/voice/owner/session';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
 
@@ -90,10 +92,37 @@ export async function POST(req: Request) {
       consent_status: 'unknown',
     });
 
+    // STIR/SHAKEN: Twilio reports the caller-id verification as `StirVerstat` (form post; unsigned JSON demo posts have none). Stored on the
+    // call; per-caller budgets and known-customer capacity apply only to attestation A (voice/caller-limits.ts).
+    const stirStatus = (form.StirVerstat ?? form.StirStatus ?? '').trim() || null;
+    if (!existing || stirStatus) { try { await setCallTrust(call.id, stirStatus); } catch (err) { log.warn('trust_store_failed', { call: call.id, err }); } }
+
     // Plan gate: over the call-minutes cap (or no active plan while billing is enforced) the caller hears an honest
     // out-of-service line, the call is handed off (the owner is told when their phone is verified) and no agent is used.
     const gate = await callGate(business.id);
     let allowedSeconds: number | undefined;
+
+    // OWNER CALL-IN (voice/owner): the caller id equals the VERIFIED owner number -> kind 'owner' (server side), private prompt, 5 minute
+    // limit, never blocked by the minute caps, no customer artifacts. A spoofed id only gets a conversation: changes need the owner's SMS.
+    try {
+      const ownerEntry = await enterOwnerMode(business, call, from, { planLapsed: !gate.ok && gate.reason === 'no_plan' });
+      if (ownerEntry) {
+        let agentId = '';
+        let agentMock = true;
+        let wsUrl: string | null = null;
+        try {
+          const agent = await createOrUpdateAgent({ business, kb: null });
+          agentId = agent.agent_id;
+          agentMock = agent.mock;
+          if (agentId) wsUrl = (await getSignedUrl(agentId)).signed_url ?? null;
+        } catch (err) { log.error('owner_agent_setup_failed', { business: business.id, err }); }
+        return ok({
+          agent_id: agentId, business_id: business.id, call_id: call.id, business_name: business.name, caller_phone: from || null,
+          ws_url: wsUrl, mock: agentMock || !wsUrl, owner_mode: true, dynamic_variables: ownerEntry.variables,
+          conversation_config_override: ownerEntry.override, fallback_script: ownerEntry.override.agent.first_message,
+        });
+      }
+    } catch (err) { log.error('owner_mode_failed', { business: business.id, err }); }
 
     // Call handling mode (paused / forward). A lapsed PLAN stops these too (we do not place or take calls for an inactive account).
     // This is the 'webhook' line (a signed Twilio form POST answered with TwiML), the only kind that can dial a human.
@@ -121,7 +150,7 @@ export async function POST(req: Request) {
       } else if (!(gate.ok || gate.reason !== 'no_plan')) {
         // plan lapsed: handled by the out-of-service branch below
       } else {
-        const allowance = await forwardAllowance(business.id, process.env, { business, callSid: callSid || null, from });
+        const allowance = await forwardAllowance(business.id, process.env, { business, callSid: callSid || null, from, stirStatus });
         knownCaller = allowance.known ?? false;
         if (!allowance.ok) {
           if (allowance.why !== 'no_plan') {
@@ -148,11 +177,11 @@ export async function POST(req: Request) {
         if (isJson) return ok({ business_id: business.id, call_id: call.id, call_mode: 'forward', forwarded: true, ws_url: null, mock: true });
         return twimlResponse(forwardTwiml(route.to, {
           callerId: business.phone_e164 ?? null, action: '/api/voice/voicemail', timeLimit: allowedSeconds, statusCallback: '/api/voice/dial-status',
-          ringSeconds: forwardRingSeconds(),
+          ringSeconds: forwardRingSeconds(), screenUrl: '/api/voice/screen',
         }));
       }
       if (!isJson) {
-        const vm = await voicemailAllowance(business.id, process.env, { business, callSid: callSid || null, from });
+        const vm = await voicemailAllowance(business.id, process.env, { business, callSid: callSid || null, from, stirStatus });
         if (!vm.ok) {
           // Over their own limit (or the stranger share): the cheap path, nothing is recorded, and the owner is not texted for it.
           log.warn('voicemail_refused', { business: business.id, call: call.id, why: vm.why });

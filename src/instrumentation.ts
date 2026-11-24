@@ -89,6 +89,15 @@ export async function register() {
 
   startupWarnings();
 
+  // Google Calendar: push booking changes to the owner's calendar (a no-op until a business connects one).
+  if (process.env.NEXT_PHASE !== 'phase-production-build' && process.env.DATABASE_URL) {
+    const { registerGoogleCalendar } = await import('@/lib/integrations/register');
+    registerGoogleCalendar();
+    if ((process.env.GOOGLE_OAUTH_MOCK ?? '').trim().toLowerCase() === 'true' && process.env.NODE_ENV === 'production') {
+      boot.error('google_mock_in_production', { banner: '!!! GOOGLE_OAUTH_MOCK=true is IGNORED in production (mock Google is never enabled there)' });
+    }
+  }
+
   // Background jobs (daily briefing, gratitude sweep, cleanup, retention purge): not during `next build`, not in tests.
   // JOBS=on|off (default on in production), JOBS_TICK_SECONDS; see src/lib/jobs.
   if (process.env.NEXT_PHASE !== 'phase-production-build' && process.env.DATABASE_URL) {

@@ -10,15 +10,15 @@ function publicBusiness(b: Business): Business {
   return rest as Business;
 }
 
-/** Admin: every business. Owner/staff: only their own (a list of one). */
+/** Admin: every business. Owner/staff: the businesses they have an enabled membership in (the active one is `business_id` of /api/auth/me). */
 export async function GET(req: Request): Promise<ReturnType<typeof ok<Business[]>> | ReturnType<typeof fail>> {
   const auth = await authenticate(req);
   if (!auth.ok) return auth.response;
   const { principal } = auth;
   try {
     if (principal.kind === 'user') {
-      const own = await getBusiness(principal.business_id);
-      return ok<Business[]>(own ? [publicBusiness(own)] : []);
+      const own = await Promise.all(principal.memberships.map((m) => getBusiness(m.business_id)));
+      return ok<Business[]>(own.filter((b): b is Business => b !== null).map(publicBusiness));
     }
     return ok<Business[]>((await listBusinesses()).map(publicBusiness));
   } catch (err) {

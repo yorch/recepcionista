@@ -7,6 +7,7 @@
 import { getCallBySid } from '@/lib/db';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { meterForwardedCall, parseSeconds } from '@/lib/voice/forward-metering';
+import { bridgedSeconds, screenOutcome } from '@/lib/voice/screening';
 import { logger } from '@/lib/log';
 
 export const runtime = 'nodejs';
@@ -32,7 +33,8 @@ export async function POST(req: Request): Promise<Response> {
     log.warn('unknown_call', { has_parent: Boolean(parentSid) });
     return empty();
   }
-  const seconds = parseSeconds(form.CallDuration ?? form.DialCallDuration);
+  // Screened call: only the BRIDGED seconds count (0 when the owner never accepted).
+  const seconds = bridgedSeconds(parseSeconds(form.CallDuration ?? form.DialCallDuration), await screenOutcome(parentSid));
   const outcome = await meterForwardedCall(parentSid, call.business_id, seconds);
   log.info('forward_metered', { business: call.business_id, call: call.id, seconds, outcome });
   // A failed write is retried by Twilio (non-2xx); everything else is final.

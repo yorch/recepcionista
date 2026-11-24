@@ -110,6 +110,7 @@ export default function Home() {
         <nav aria-label="Footer" className="flex gap-4">
           <Link href="/login" className="inline-flex min-h-11 items-center hover:text-soft">Sign in</Link>
           <Link href="/signup" className="inline-flex min-h-11 items-center hover:text-soft">Sign up</Link>
+          <Link href="/refunds" className="inline-flex min-h-11 items-center hover:text-soft">Deposits and refunds</Link>
         </nav>
       </footer>
     </div>

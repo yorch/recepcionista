@@ -52,7 +52,7 @@ export function pausedTwiml(business: Pick<Business, 'name'>, voicemailAction: s
  * Forwarded: ring `to`. Never `record` (a forwarded call is not recorded by us), caller id stays the business line when it
  * is known so the owner sees it is a business call. `to` must be an E.164 the caller of this function already trusts.
  */
-export function forwardTwiml(to: string, opts: { callerId?: string | null; action?: string; timeLimit?: number; statusCallback?: string; ringSeconds?: number } = {}): string {
+export function forwardTwiml(to: string, opts: { callerId?: string | null; action?: string; timeLimit?: number; statusCallback?: string; ringSeconds?: number; screenUrl?: string } = {}): string {
   if (!/^\+[1-9]\d{7,14}$/.test(to)) throw new RangeError('forward target must be E.164');
   const callerId = opts.callerId && /^\+[1-9]\d{7,14}$/.test(opts.callerId) ? ` callerId="${xmlEscape(opts.callerId)}"` : '';
   const action = opts.action ? ` action="${xmlEscape(opts.action)}" method="POST"` : '';
@@ -60,8 +60,31 @@ export function forwardTwiml(to: string, opts: { callerId?: string | null; actio
   const limit = opts.timeLimit !== undefined && Number.isFinite(opts.timeLimit) && opts.timeLimit >= 1 ? ` timeLimit="${Math.floor(opts.timeLimit)}"` : '';
   // The per-leg "completed" callback reports the bridged duration even when the caller hangs up first (metered once per call).
   const status = opts.statusCallback ? ` statusCallback="${xmlEscape(opts.statusCallback)}" statusCallbackEvent="completed" statusCallbackMethod="POST"` : '';
-  return wrap(`<Dial timeout="${opts.ringSeconds !== undefined && Number.isInteger(opts.ringSeconds) && opts.ringSeconds >= 5 && opts.ringSeconds <= 60 ? opts.ringSeconds : FORWARD_RING_SECONDS}" answerOnBridge="true"${limit}${callerId}${action}><Number${status}>${xmlEscape(to)}</Number></Dial>`);
+  return wrap(`<Dial timeout="${opts.ringSeconds !== undefined && Number.isInteger(opts.ringSeconds) && opts.ringSeconds >= 5 && opts.ringSeconds <= 60 ? opts.ringSeconds : FORWARD_RING_SECONDS}" answerOnBridge="true"${limit}${callerId}${action}><Number${opts.screenUrl ? ` url="${xmlEscape(opts.screenUrl)}" method="POST"` : ''}${status}>${xmlEscape(to)}</Number></Dial>`);
 }
+
+/** How a caller number is read aloud to the owner: digit by digit ("+1 5 5 5 ..."), or "an unknown number" when withheld. */
+export function spokenNumber(from: string | null | undefined): string {
+  const digits = (from ?? '').replace(/[^0-9]/g, '');
+  return digits.length >= 7 ? digits.split('').join(' ') : 'an unknown number';
+}
+
+/**
+ * Call screening whisper: the TwiML Twilio runs on the OWNER's leg after they answer and BEFORE the legs are bridged (`<Number url>`; only
+ * Play / Say / Gather / Hangup are allowed there). "Press 1 to accept"; anything else, or no input, hangs up this leg only, so a carrier
+ * voicemail (which cannot press 1) never gets bridged to the caller. The caller hears ringing the whole time (answerOnBridge).
+ */
+export function screenPromptTwiml(business: Pick<Business, 'name'>, from: string | null | undefined, action: string): string {
+  const say = `${business.name} call from ${spokenNumber(from)}. Press 1 to accept.`;
+  return wrap(
+    `<Gather input="dtmf" numDigits="1" timeout="6" action="${xmlEscape(action)}" method="POST"><Say language="en-US">${xmlEscape(say)}</Say></Gather>`
+    + '<Hangup/>',
+  );
+}
+/** Accepted: an empty response ends the whisper and Twilio bridges the two legs. */
+export const screenAcceptTwiml = (): string => wrap('');
+/** Declined / no input: hang up the owner's leg; the <Dial> ends unanswered and the caller falls through to voicemail. */
+export const screenDeclineTwiml = (): string => wrap('<Hangup/>');
 
 /** Said when the voicemail budget of the hour is spent or the line cannot take a message: honest, short, then hang up (no <Record>). */
 export const unavailableTwiml = (): string => wrap(

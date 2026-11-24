@@ -13,6 +13,9 @@ export const TOOL_NAMES = [
   'flag_emergency',
   'get_pricing',
   'handoff_to_human',
+  'reschedule_booking',
+  'cancel_booking',
+  'transfer_to_human',
 ] as const;
 
 export type ToolName = typeof TOOL_NAMES[number];
@@ -20,7 +23,8 @@ export type ToolName = typeof TOOL_NAMES[number];
 const DAY_KEYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const;
 
 /** The voice tools the agent must be told about, by exact name (the same list). */
-export const REQUIRED_TOOLS = TOOL_NAMES;
+/** transfer_to_human is optional (NATIVE_TRANSFER): a prompt that does not mention it is not deficient. */
+export const REQUIRED_TOOLS: readonly ToolName[] = TOOL_NAMES.filter((t) => t !== 'transfer_to_human');
 
 /** Marker heading of the compliance block; lets stale stored prompts be detected and healed. */
 export const COMPLIANCE_MARKER = '## DISCLOSURE, CONSENT AND LIFE SAFETY';
@@ -176,6 +180,8 @@ You have exactly these tools:
 - flag_emergency — mark the call as an emergency so the owner is alerted
 - get_pricing — look up the starting price for a service
 - handoff_to_human — transfer the call to ${owner}
+- reschedule_booking — move the CALLER'S OWN booking (works only for the number they are calling from; otherwise take a message with handoff_to_human)
+- cancel_booking — cancel the CALLER'S OWN booking after they confirm out loud (never promise a refund: repeat what the tool says about the deposit)
 Always use your tools rather than guessing answers. Prices come from get_pricing, never from memory of "typical" prices.
 
 ## FAQ YOU CAN ANSWER

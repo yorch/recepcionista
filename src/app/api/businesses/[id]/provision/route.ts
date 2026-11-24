@@ -6,6 +6,7 @@ import { areaCodeForBusiness } from '@/lib/phone';
 import crypto from 'node:crypto';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
+import { readinessOf } from '@/lib/kb/readiness';
 import { isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
 import { createOrUpdateAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
@@ -209,6 +210,19 @@ async function provision(
       kb = await upsertKnowledgeBase(id, generated);
       regenerated = true;
       log.info('knowledge_base.ready', { business: id, force, kept_services: Boolean(keepServices) });
+    }
+
+    // Minimum content checks (docs: kb readiness): a business whose KB is too thin to answer calls does not get a paid number or agent.
+    // Admins may override (they can see the same list in the response). Checked before ANY paid step.
+    if (principal.kind !== 'admin') {
+      const readiness = readinessOf(kb, (await getBusiness(id)) ?? business);
+      if (!readiness.ready) {
+        log.info('kb_incomplete', { business: id, blockers: readiness.blockers.map((b) => b.key) });
+        return NextResponse.json({
+          ok: false, error: 'Add the missing details before turning your receptionist on.', code: 'kb_incomplete',
+          blockers: readiness.blockers, warnings: readiness.warnings, score: readiness.score,
+        }, { status: 422 }) as unknown as ReturnType<typeof fail>;
+      }
     }
 
     // Preserve the business's existing line: CONTRACTS.md documents the demo

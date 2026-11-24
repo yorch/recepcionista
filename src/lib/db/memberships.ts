@@ -134,6 +134,39 @@ export async function disableMembership(userId: string, businessId: string, disa
   });
 }
 
+/**
+ * Remove the user from ONE business (the team page's "remove"). The account and its other memberships survive; when this was their last
+ * membership the account itself is deleted (a login with no business has nothing to open), exactly as removing a team member always did.
+ * Refuses when the business would be left without an enabled owner (same lock as the other owner-affecting changes). Sessions that
+ * were working in the business fall back to their primary one; the legacy `users.business_id/role` is moved to another membership.
+ */
+export async function removeMembership(
+  userId: string, businessId: string,
+): Promise<{ ok: true; account_deleted: boolean } | { ok: false; reason: 'not_found' | 'last_owner' }> {
+  return prisma.$transaction(async (tx) => {
+    await lockOwners(tx, businessId);
+    const m = await tx.membership.findUnique({ where: { userId_businessId: { userId, businessId } } });
+    if (!m) return { ok: false as const, reason: 'not_found' as const };
+    if (m.role === 'owner') {
+      const otherEnabled = await tx.membership.count({ where: { businessId, role: 'owner', disabledAt: null, userId: { not: userId }, user: { disabledAt: null } } });
+      if (otherEnabled === 0) return { ok: false as const, reason: 'last_owner' as const };
+    }
+    const others = await tx.membership.findMany({ where: { userId, businessId: { not: businessId } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    if (others.length === 0) {
+      await tx.user.delete({ where: { id: userId } }); // sessions, tokens, passkeys and the membership cascade
+      return { ok: true as const, account_deleted: true };
+    }
+    await tx.membership.delete({ where: { id: m.id } });
+    await tx.userSession.updateMany({ where: { userId, activeBusinessId: businessId }, data: { activeBusinessId: null } });
+    const u = await tx.user.findUnique({ where: { id: userId }, select: { businessId: true } });
+    if (u?.businessId === businessId) {
+      const next = others.find((o) => o.disabledAt === null) ?? others[0];
+      await tx.user.update({ where: { id: userId }, data: { businessId: next.businessId, role: next.role } });
+    }
+    return { ok: true as const, account_deleted: false };
+  });
+}
+
 export const enableMembership = (userId: string, businessId: string): Promise<MembershipChange> => disableMembership(userId, businessId, false);
 
 /** The team of a business: account + role in THIS business. Disabled members (membership or account) only with `includeDisabled`. */

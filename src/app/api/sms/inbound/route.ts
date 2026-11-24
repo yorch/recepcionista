@@ -4,6 +4,9 @@ import { routeGratitudeReply } from '@/lib/gratitude/reply';
 import { applyInboundKeyword } from '@/lib/messaging/inbound';
 import { normalizeInbound, twiml } from '@/lib/messaging/keywords';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
+import { handleOwnerSms } from '@/lib/voice/owner/sms';
+import { meterSms } from '@/lib/messaging';
+import { smsSegments } from '@/lib/messaging/policy';
 import { logger } from '@/lib/log';
 
 export const runtime = 'nodejs';
@@ -42,6 +45,13 @@ export async function POST(req: Request) {
 
     const reply = await applyInboundKeyword(business, from, fields.Body);
     if (reply) return xml(reply);
+
+    // Owner call-in confirmations ("YES <code>" / "NO <code>" / "UNDO <code>"): only from the verified owner phone, after STOP-class keywords.
+    const ownerReply = await handleOwnerSms(business, from, fields.Body);
+    if (ownerReply) {
+      await meterSms(business.id, smsSegments(ownerReply));
+      return xml(twiml(ownerReply));
+    }
 
     // A bare 1-5 answers the most recent gratitude text we sent to this number.
     const rating = /^[1-5]$/.test(normalizeInbound(fields.Body)) ? Number(normalizeInbound(fields.Body)) : null;

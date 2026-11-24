@@ -13,6 +13,8 @@ export interface PaymentLinkOptions {
   /** Stored as Stripe metadata so the webhook can confirm the right booking. */
   bookingId?: string | null;
   businessId?: string | null;
+  /** Shown beside the Pay button on Stripe's page (Payment Links custom_text.submit.message, max 1200 chars): the refund policy. */
+  refundNote?: string | null;
 }
 
 const STRIPE_TIMEOUT_MS = 15_000;
@@ -63,6 +65,7 @@ export async function createPaymentLink(
       form.set('metadata[business_id]', opts.businessId);
       form.set('payment_intent_data[metadata][business_id]', opts.businessId);
     }
+    if (opts.refundNote) form.set('custom_text[submit][message]', opts.refundNote.slice(0, 1200));
     const res = await fetch('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
       headers: {

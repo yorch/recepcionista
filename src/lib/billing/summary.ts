@@ -2,7 +2,9 @@
  * Billing summary for a business (status route + dashboard page). Node runtime only.
  */
 import { billingEnforced, isProvisioningAllowed, callMinutesCapFor, forwardMinutesCapFor, getUsage, pastDueGraceDays, smsCapFor, voicemailMinutesCap } from '@/lib/db';
-import type { BillingStatus, Business } from '@/lib/types';
+import { annualAvailable } from '@/lib/providers/stripe-billing';
+import { usageWarningsFor, type UsageWarningView } from '@/lib/billing/warnings';
+import type { BillingInterval, BillingStatus, Business } from '@/lib/types';
 
 export interface BillingSummary {
   billing_status: BillingStatus;
@@ -17,6 +19,12 @@ export interface BillingSummary {
   /** Would provisioning be allowed right now (always true when not enforced). */
   provisioning_allowed: boolean;
   has_customer: boolean;
+  /** How the subscription is billed (default 'month'). */
+  billing_interval: BillingInterval;
+  /** True when STRIPE_PRICE_ID_ANNUAL is configured (the annual plan can be chosen at checkout / switched to in the portal). */
+  annual_available: boolean;
+  /** Cap warnings (80% / 100% of SMS, AI minutes, forwarded minutes) with whether each was already sent. */
+  usage_warnings: UsageWarningView[];
   usage: {
     period_start: string | null;
     sms: { used: number; cap: number };
@@ -50,6 +58,9 @@ export async function billingSummary(b: Business, now: Date = new Date()): Promi
     enforced: billingEnforced(),
     provisioning_allowed: isProvisioningAllowed(b, now),
     has_customer: Boolean(b.stripe_customer_id),
+    billing_interval: b.billing_interval ?? 'month',
+    annual_available: annualAvailable(),
+    usage_warnings: await usageWarningsFor(b.id, now).catch(() => []),
     usage: {
       period_start: usage?.period_start ?? null,
       sms: { used: usage?.sms_count ?? 0, cap: smsCapFor(b) },

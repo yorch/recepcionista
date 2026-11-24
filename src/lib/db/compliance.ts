@@ -308,12 +308,21 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
   });
   const audio = removeBriefingAudio(briefingRows.map((r) => r.audio_url));
   const rec = await drainQueuedRecordings(queued);
+  if (bookings > 0) await redactCalendarEvents(null); // sweep: Google events of every anonymised booking
   const counts: PurgeCounts = {
     calls: calls.length, transcript_events: events, sms_logs: sms, briefings: briefingRows.length, bookings_anonymized: bookings, audio_files: audio,
     recordings: rec.deleted, recordings_pending: rec.pending,
   };
   log.info('retention.purged', { ...counts });
   return counts;
+}
+
+/** Calendar privacy hook (dynamic import: the integration depends on this layer, not the other way round). `null` = sweep all anonymised bookings. */
+async function redactCalendarEvents(bookingIds: string[] | null): Promise<void> {
+  try {
+    const m = await import('@/lib/integrations/google/privacy');
+    if (bookingIds === null) await m.redactAnonymizedBookingEvents(); else await m.redactCalendarEventsForBookings(bookingIds);
+  } catch (err) { log.warn('calendar_redaction_failed', { err }); }
 }
 
 export interface EraseCounts {
@@ -428,7 +437,7 @@ export async function locateCustomerRecords(db: Reader, businessId: string, id: 
 export async function eraseCustomerData(businessId: string, phone: string, country: string = defaultPhoneCountry()): Promise<EraseCounts> {
   const id = phoneIdent(phone, country);
   if (!id.e164) throw new Error('eraseCustomerData: phone must be a valid number (use +country code for non-US numbers)');
-  const { counts, audio, queued } = await prisma.$transaction(async (tx) => {
+  const { counts, audio, queued, bookingIds } = await prisma.$transaction(async (tx) => {
     // Locate FIRST: anonymising the bookings would erase the very phone numbers/names the matching relies on.
     const rec = await locateCustomerRecords(tx, businessId, id, country);
     const bookings = await tx.$executeRaw`
@@ -452,9 +461,11 @@ export async function eraseCustomerData(businessId: string, phone: string, count
       counts: { calls: calls.length, transcript_events: events, sms_logs: sms, bookings_anonymized: bookings, briefings: briefings.length },
       audio: briefings.map((r) => r.audio_url),
       queued,
+      bookingIds: rec.bookingIds,
     };
   });
   const rec = await drainQueuedRecordings(queued);
+  await redactCalendarEvents(bookingIds); // Google events pushed for the erased bookings (never throws; a failure is retried by the calendar job)
   const result: EraseCounts = { ...counts, audio_files: removeBriefingAudio(audio), recordings: rec.deleted, recordings_pending: rec.pending, recording_deletion: rec.pending > 0 ? 'pending' : 'complete' };
   log.info('customer.erased', { business: businessId, ...result });
   return result;

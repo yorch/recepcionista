@@ -53,13 +53,15 @@ export async function markPaused(
 }
 
 /** A paused / forwarded call on the NATIVE ElevenLabs path: the agent says the paused message and takes a callback message. */
-export async function markPausedNative(business: Business, call: Call, from: string | null | undefined, mode: 'paused' | 'forward'): Promise<void> {
+export async function markPausedNative(business: Business, call: Call, from: string | null | undefined, mode: 'paused' | 'forward', refusedWhy: string | null = null): Promise<void> {
   if (call.status === 'handed_off') return;
   await updateCall(call.id, {
     status: 'handed_off',
-    flagged_reason: mode === 'forward' ? 'Forwarding is not available on this line; the assistant took a message' : PAUSED_FLAG,
+    flagged_reason: mode === 'forward'
+      ? (refusedWhy ? `Forwarding was not used (${refusedWhy.replace(/_/g, ' ')}); the assistant took a message` : 'Forwarding is not available on this line; the assistant took a message')
+      : PAUSED_FLAG,
   });
-  const notified = await notifyMissedCall(business, from, mode === 'forward' ? 'forwarding is not available on this line' : 'calls are paused');
+  const notified = await notifyMissedCall(business, from, mode === 'forward' ? (refusedWhy ? 'forwarding could not be used' : 'forwarding is not available on this line') : 'calls are paused');
   log.info('paused_call_native', { business: business.id, call: call.id, mode, owner_notified: notified });
 }
 

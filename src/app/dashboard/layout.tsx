@@ -35,6 +35,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
         isOwner={isOwner}
         currentBusinessId={biz.id}
         businesses={ctx.role === 'admin' ? ctx.businesses.map((b) => ({ id: b.id, name: b.name })) : []}
+        memberships={ctx.memberships.map((m) => ({ business_id: m.business_id, business_name: m.business_name, role: m.role }))}
+        canAddBusiness={ctx.canAddBusiness && ctx.principal.email_verified}
       />
       <div className="min-w-0 flex-1">
         <Suspense fallback={null}><OnboardingReturn unprovisioned={!live && isOwner} /></Suspense>

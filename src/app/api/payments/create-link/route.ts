@@ -2,7 +2,8 @@ import { fail, ok, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { getBooking, getBusiness, updateBooking } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
-import { createPaymentLink } from '@/lib/providers/stripe';
+import { appUrl, createPaymentLink } from '@/lib/providers/stripe';
+import { checkoutRefundNote } from '@/lib/refunds';
 import type { PaymentLink } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -46,7 +47,7 @@ export async function POST(req: Request) {
       cents,
       body.description?.trim() || `${business.name} deposit`,
       business.name,
-      { bookingId: found?.id ?? null, businessId: business.id },
+      { bookingId: found?.id ?? null, businessId: business.id, refundNote: checkoutRefundNote(business, appUrl()) },
     );
     if (found && !found.deposit_paid) await updateBooking(found.id, { deposit_amount: cents });
 

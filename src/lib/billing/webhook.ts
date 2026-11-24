@@ -6,11 +6,11 @@
  * alone: a business that already has a different stripe_customer_id refuses the event, and a customer id that
  * belongs to one business cannot be claimed by another through metadata.
  */
-import { getBusiness, getBusinessByStripeCustomer, recordAudit, setBillingState } from '@/lib/db';
+import { getBusiness, getBusinessByStripeCustomer, recordAudit, setBillingState, updateBusiness } from '@/lib/db';
 import { endTrialNow, planName, retrieveCardFingerprint, retrieveSubscription, type RetrievedSubscription } from '@/lib/providers/stripe-billing';
 import { cardFingerprint, claimTrial } from './trial';
 import { notifyOwners } from './emails';
-import { acceptsSubscription, fromUnix, idOf, subscriptionPatch, type StripeSubscriptionLike } from './status';
+import { acceptsSubscription, fromUnix, idOf, intervalOfSubscription, subscriptionPatch, type StripeSubscriptionLike } from './status';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
 
@@ -94,6 +94,11 @@ async function applySubscription(
     ...(link ? { stripe_customer_id: customerId } : {}),
   });
   if (!updated) return { handled: false, reason: 'business vanished' };
+  const interval = intervalOfSubscription(sub);
+  if (interval && interval !== (business.billing_interval ?? 'month')) {
+    await updateBusiness(business.id, { billing_interval: interval });
+    await audit(event, business, 'billing.interval_changed', { from: business.billing_interval ?? 'month', to: interval });
+  }
   await audit(event, business, 'billing.subscription_updated', {
     from: business.billing_status ?? 'none', to: patch.billing_status, subscription: patch.stripe_subscription_id,
   });

@@ -7,12 +7,16 @@ import { tzOf } from '@/lib/time';
 import Link from 'next/link';
 import { CallHandlingSettings } from '@/components/dashboard/call-mode';
 import { callModeView } from '@/lib/voice/call-mode';
+import { VoiceSettingsCard } from '@/components/dashboard/voice-settings';
+import { RefundPolicySettings } from '@/components/dashboard/refund-policy-settings';
+import { GoogleCalendarCard } from '@/components/dashboard/google-calendar-card';
 
 export const metadata: Metadata = { title: 'Settings' };
 
 export const dynamic = 'force-dynamic';
 
-export default async function SettingsPage() {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ gcal?: string }> }) {
+  const { gcal } = await searchParams;
   const ctx = await getDashboardContext();
   requireRolePage(ctx, 'owner');
   const biz = ctx.business;
@@ -49,6 +53,23 @@ export default async function SettingsPage() {
             ownerPhoneVerified={Boolean(biz.owner_phone_verified_at)}
             ownerPhone={biz.owner_phone ?? null}
           />
+        </div>
+      </Card>
+
+      <Card className="mt-6" id="google-calendar">
+        <CardHead title="Google Calendar" subtitle="Never double-book your own time, and see booked jobs in your calendar" />
+        <div className="p-4"><GoogleCalendarCard initialResult={gcal ?? null} /></div>
+      </Card>
+
+      <Card className="mt-6" id="voice">
+        <CardHead title="Assistant voice" subtitle="Pick how your receptionist sounds" />
+        <div className="p-4"><VoiceSettingsCard businessId={biz.id} /></div>
+      </Card>
+
+      <Card className="mt-6" id="refund-policy">
+        <CardHead title="Deposit refund policy" subtitle="What happens to a deposit when a booking is cancelled" />
+        <div className="p-4">
+          <RefundPolicySettings businessId={biz.id} initialPolicy={biz.refund_policy ?? 'full_24h'} initialText={biz.refund_policy_text ?? ''} />
         </div>
       </Card>
 

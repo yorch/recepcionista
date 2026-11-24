@@ -387,7 +387,7 @@ suite('account lifecycle (postgres)', () => {
       expect(acts.includes('user.invite') && acts.includes('user.invite_accepted')).toBe(true);
     });
 
-    test('accepting when the address already has an account: clear 409, invitation not consumed', async () => {
+    test('an address that already has an account: a password-only accept is refused (login required), the invitation is NOT consumed', async () => {
       const { biz } = await newOwner('inv2');
       await newOwner('already'); // an account in ANOTHER business with the invited address
       const cookie = await signIn('inv2');
@@ -395,12 +395,11 @@ suite('account lifecycle (postgres)', () => {
       expect(res.status).toBe(201);
       const m = mail.to(email('already')).at(-1)!;
       const r = await post(accept, '/api/auth/accept-invite', { token: m.token, password: PASSWORD });
-      expect(r.status).toBe(409);
-      const body = await r.json();
-      expect(body.code).toBe('account_exists');
-      expect(body.error).toContain('already has an account');
+      expect(r.status).toBe(401);
+      expect((await r.json()).code).toBe('login_required');
       expect(await db.peekEmailToken('invite', m.token)).not.toBeNull();
       expect((await db.getUserByEmail(email('already'))).business_id).not.toBe(biz.id);
+      expect(await db.getMembership((await db.getUserByEmail(email('already'))).id, biz.id)).toBeNull();
     });
 
     test('race: an account for the address appears AFTER the pre-check: 409 and the token is NOT burned (atomic accept)', async () => {

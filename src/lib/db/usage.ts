@@ -135,6 +135,15 @@ function positiveInt(n: number, what: string): number {
   return Math.round(n);
 }
 
+/**
+ * After a usage write: let the cap-warning check run (fire-and-forget, only while billing is enforced; a dynamic import avoids a cycle
+ * with the messaging layer). The check itself is idempotent (markWarned), so calling it on every write is safe.
+ */
+function usageRecorded(businessId: string): void {
+  if (!billingEnforced()) return;
+  void import('@/lib/billing/warnings').then((m) => m.triggerUsageWarnings(businessId)).catch(() => undefined);
+}
+
 type CounterRow = { sms_count: number; call_seconds: number; voicemail_seconds: number; forward_seconds: number };
 
 async function bump(businessId: string, sms: number, seconds: number, now: Date, voicemail = 0, forward = 0): Promise<UsageSummary | null> {
@@ -150,6 +159,7 @@ async function bump(businessId: string, sms: number, seconds: number, now: Date,
           "forward_seconds" = "usage_counters"."forward_seconds" + EXCLUDED."forward_seconds",
           "updated_at" = EXCLUDED."updated_at"
     RETURNING to_char("period_start", 'YYYY-MM-DD') AS period_start, "sms_count", "call_seconds", "voicemail_seconds", "forward_seconds"`;
+  if (rows[0]) usageRecorded(businessId);
   return rows[0] ?? null;
 }
 
@@ -247,7 +257,7 @@ export async function reserveSms(businessId: string, segments = 1, now: Date = n
       SET "sms_count" = "usage_counters"."sms_count" + EXCLUDED."sms_count", "updated_at" = EXCLUDED."updated_at"
       WHERE "usage_counters"."sms_count"::bigint + EXCLUDED."sms_count"::bigint <= ${limit}::bigint
     RETURNING to_char("period_start", 'YYYY-MM-DD') AS period_start, "sms_count"`;
-  if (rows.length === 1) return { ok: true, used: rows[0].sms_count, cap, period_start: rows[0].period_start };
+  if (rows.length === 1) { usageRecorded(businessId); return { ok: true, used: rows[0].sms_count, cap, period_start: rows[0].period_start }; }
   const usage = await getUsage(businessId, now);
   return { ok: false, reason: usage ? 'cap_reached' : 'no_plan', used: usage?.sms_count ?? 0, cap };
 }

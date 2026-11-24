@@ -1,6 +1,8 @@
+import { emitBookingChanged } from '@/lib/booking-hooks';
 import { ok, fail } from '@/lib/http';
 import { insecureDevAllowed } from '@/lib/auth';
-import { getBooking, getBusiness, markDepositPaid, claimEvent, completeEvent, releaseEvent } from '@/lib/db';
+import { getBooking, getBusiness, markDepositPaid, setBookingStripeRefs, claimEvent, completeEvent, releaseEvent } from '@/lib/db';
+import { handleRefundEvent, REFUND_EVENT_TYPES } from '@/lib/payments/refund-events';
 import { ownerAlertSms } from '@/lib/messaging/templates';
 import { sendAndLog } from '@/lib/messaging';
 import { logger } from '@/lib/log';
@@ -13,6 +15,7 @@ const RELEVANT = new Set([
   'checkout.session.completed',
   'payment_link.completed',
   'payment_intent.succeeded',
+  ...REFUND_EVENT_TYPES,
 ]);
 
 /**
@@ -90,6 +93,7 @@ async function handleEvent(
 ) {
 
   const object = event.data?.object ?? {};
+  if (REFUND_EVENT_TYPES.has(type)) return ok(await handleRefundEvent(event, type));
   const metadata = (object.metadata ?? {}) as Record<string, string>;
   // Integer cents. Checkout sessions use amount_total; PaymentIntents amount_received/amount.
   const rawAmount = Number(object.amount_total ?? object.amount_received ?? object.amount ?? 0);
@@ -108,8 +112,13 @@ async function handleEvent(
     const booking = await getBooking(bookingId);
     // The metadata is ours, but never trust a booking that belongs to another business.
     if (booking && (!businessId || booking.business_id === businessId) && amountCents > 0) {
+      // Remember what the deposit was paid with, so the owner can refund it later (and refund/dispute events find the booking).
+      const objectId = typeof object.id === 'string' ? object.id : null;
+      const intent = type === 'payment_intent.succeeded' ? objectId : (typeof object.payment_intent === 'string' ? object.payment_intent : null);
+      await setBookingStripeRefs(booking.id, { payment_intent_id: intent, checkout_session_id: type === 'checkout.session.completed' ? objectId : null });
       const { updated } = await markDepositPaid(booking.id, amountCents);
       if (updated) {
+        await emitBookingChanged(booking.id, 'updated', booking.business_id);
         const business = await getBusiness(booking.business_id);
         if (business?.owner_phone) {
           await sendAndLog({

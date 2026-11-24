@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { TextField } from '@/components/ui/field';
 import { ApiError, apiRequest } from '@/hooks/use-api';
+import { passkeyErrorMessage, reauthWithPasskey, useWebAuthnSupport } from '@/lib/passkey-client';
 
 /** Did the server ask for a fresh proof of identity (`requireRecentAuth`, 403 `reauth_required`)? */
 export function isReauthRequired(err: unknown): boolean {
@@ -50,6 +51,22 @@ function ReauthPanel({ onCancel, onDone }: { onCancel: () => void; onDone: () =>
   const ref = useRef<HTMLFormElement>(null);
 
   useEffect(() => { ref.current?.querySelector('input')?.focus(); }, [mode]);
+  const canPasskey = useWebAuthnSupport() === true;
+
+  async function viaPasskey() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await reauthWithPasskey();
+      setBusy(false);
+      await onDone();
+    } catch (err) {
+      setBusy(false);
+      // 409 no_passkey: this account has none registered
+      setError(err instanceof ApiError ? (err.status === 409 ? 'This account has no passkeys. Use your password instead.' : err.message) : passkeyErrorMessage(err));
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -97,6 +114,11 @@ function ReauthPanel({ onCancel, onDone }: { onCancel: () => void; onDone: () =>
         >
           {useCode ? 'Use my password instead' : 'Use an authenticator code instead'}
         </button>
+        {canPasskey && mode !== 'token' ? (
+          <button type="button" onClick={viaPasskey} disabled={busy} className="min-h-11 rounded-xl px-2 text-xs text-brand-soft hover:underline disabled:opacity-50">
+            Use a passkey instead
+          </button>
+        ) : null}
         <button
           type="button" onClick={() => { setMode(mode === 'token' ? 'password' : 'token'); setSecret(''); setError(null); }}
           className="min-h-11 rounded-xl px-2 text-xs text-brand-soft hover:underline"

@@ -131,7 +131,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Owner alert phone verification (SMS code, rate limited) | Shipped | `src/lib/messaging/owner-verify.ts`, `src/app/api/businesses/[id]/owner-phone/verify/*` |
 | Carrier call-forwarding instructions (AT&T, T-Mobile, Verizon, GSM, landline, VoIP) | Shipped | `src/app/onboarding/forwarding.ts` |
 | Test-call step (polls until the first call) | Shipped | `src/app/onboarding/step-test.tsx` |
-| Minimum content checks (5 services, 3 FAQs) | Not built | v1.0 target; no check in `src/lib/extraction/index.ts` |
+| Minimum content checks (5 services, 3 FAQs) | Shipped (gate: 3 priced services, hours, 1 FAQ; 5 and 3 recommended) | `src/lib/kb/readiness.ts`, provision 422 `kb_incomplete`, checklist on Brain and onboarding |
 
 ### 5.4 Phone and voice
 
@@ -178,7 +178,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Production fails closed if Stripe errors (no mock link) | Shipped | `src/lib/providers/stripe.ts` |
 | Signed deposit webhook confirms the booking and records the deposit | Shipped | `src/app/api/payments/webhook/route.ts` |
 | Cancelling a booking with a paid deposit: the owner is told to refund it in Stripe; nothing is refunded or texted automatically | Shipped as a notice. No automatic refund. | `src/components/calendar/booking-panel.tsx`, `src/app/api/bookings/[id]/route.ts` |
-| Refund and dispute policy (written policy, linked from Checkout) | Not built | none |
+| Refund and dispute policy (written policy, linked from Checkout) | Shipped; operator must review the wording | per-business policy, `/refunds`, owner-initiated refunds with step-up, dispute alert (`docs/refunds.md`) |
 
 ### 5.7 Dashboard and reporting
 
@@ -312,13 +312,13 @@ Ordered by what most blocks a paying launch:
 
 1. **Live human transfer** for emergencies and requested humans, instead of a callback flag.
 2. **Forwarding on the production AI line.** No supported API exists for a per-call transfer override on the native ElevenLabs path (see `docs/known-limitations.md`). Forwarding works today only on a webhook line or through carrier forwarding.
-3. **Minimum content checks** on extraction (5 services, 3 FAQs) before go-live.
-4. **Refund and dispute policy**, linked from Checkout, and automatic deposit refund or customer text on cancel (today the owner refunds in Stripe).
+3. ~~Minimum content checks~~ Done: provisioning is gated on 3 priced services, opening hours and 1 FAQ (5 and 3 recommended).
+4. ~~Refund and dispute policy~~ Done (`docs/refunds.md`): policy, `/refunds`, customer text on cancel, owner-initiated refunds. Still manual by design: the app never refunds without an owner action.
 5. **Warning before a cap** (for example at 80%) by email or text, and reconciliation for calls whose post-call webhook never arrives.
-6. **Recording player** on the call page (the URL is stored but not shown).
+6. ~~Recording player~~ Done (consent-gated proxy).
 7. **Operator-independent compliance:** 10DLC registration support and a per-state disclosure setting.
-8. **Voice selection** in Settings.
-9. **Calendar reschedule** (today: cancel and rebook).
+8. ~~Voice selection~~ Done (allowlist).
+9. ~~Calendar reschedule~~ Done (dashboard and voice).
 
 Deferred by owner decision (not built, not scheduled): owner voice reply and voice correction of the knowledge base, live transcript during calls, Google Calendar sync.
 
@@ -334,7 +334,7 @@ Engineering debt (no behaviour change): extract `provisionBusiness` from the pro
 | Next.js 14 | Next.js 16.4.6. |
 | "30-50% of calls lost" and "Miami market is underserved" | Removed. No source. |
 | Demo number `+1-305-555-0199` | Removed. Demo numbers are mock numbers. |
-| Owner dashboard with settings for voice and hours | Partial. Alert phone, disclosure, retention and call mode in Settings; hours in Brain. Voice selection not built. |
+| Owner dashboard with settings for voice and hours | Partial. Alert phone, disclosure, retention and call mode in Settings; hours in Brain. Voice selection shipped. |
 | 6 PM auto-briefing | Shipped (job runner, per business time zone). |
 | Live human transfer | Not built. Callback flag only. |
 | Spanglish detection | Partial. Prompt-driven, no detection code. |

@@ -36,6 +36,8 @@ import { smsSegments } from '@/lib/messaging/policy';
 import { CLEANUP_HORIZON_MS, cleanupRateLimitBuckets } from '@/lib/ratelimit';
 import { retentionJobEnabled, logRetentionPreview, runRetentionNow } from '@/lib/retention-job';
 import { alertOwner } from '@/lib/voice/owner-alert';
+import { runReconcileJob, runUsageWarningsJob } from './reconcile';
+import { POLL_EVERY_MS as GOOGLE_POLL_EVERY_MS, runGoogleCalendarWork } from './calendar';
 import { drainRecordingDeletions } from '@/lib/voice/recording-deletion';
 import type { Briefing, Business } from '@/lib/types';
 import type { JobBusiness } from '@/lib/db';
@@ -69,6 +71,9 @@ export const JOB_INFO: Record<JobName, { description: string; schedule: string }
   cleanup: { description: 'Delete expired sessions, expired email tokens, old processed events and stale rate-limit buckets.', schedule: 'hourly' },
   retention: { description: 'Delete customer data past each business retention window (OFF unless RETENTION_JOB=on).', schedule: 'daily' },
   recording_deletions: { description: 'Delete the provider-side voicemail recordings queued by retention / erasure (retries with backoff; alerts when one keeps failing).', schedule: 'every tick' },
+  reconcile: { description: 'Add the AI minutes of calls whose post-call webhook never arrived (fetched from ElevenLabs; once, shared with the webhook; backs off, gives up with an audit row).', schedule: 'every tick' },
+  usage_warnings: { description: 'Safety net for the 80% / 100% cap warnings (email + text, once per kind per period).', schedule: 'every tick' },
+  google_calendar: { description: 'Google Calendar: fallback poll (15 min), push-channel renewal, retry/backoff, push reconcile, privacy sweep.', schedule: 'every tick (per connection every 15 min)' },
 };
 
 // ---- types ------------------------------------------------------------------------------------
@@ -409,6 +414,24 @@ export async function runRecordingDeletions(opts: RunOptions & { fetchImpl?: typ
   return report;
 }
 
+// ---- Google Calendar (logic in ./calendar) ------------------------------------------------------
+
+export async function runGoogleCalendarJob(opts: RunOptions = {}): Promise<JobReport> {
+  const now = opts.now ?? new Date();
+  const report: JobReport = { job: 'google_calendar', dry_run: opts.dryRun === true, at: now.toISOString(), processed: 0, errors: 0, items: [] };
+  if (opts.dryRun) return report;
+  try {
+    const r = await runGoogleCalendarWork({ now, force: opts.force });
+    report.processed = r.processed; report.errors = r.errors; report.items = r.items; report.counts = r.counts;
+    if (r.errors > 0) await auditRun(report);
+  } catch (err) {
+    report.errors++;
+    report.items.push({ outcome: 'error', detail: { error: err instanceof Error ? err.message : String(err) } });
+    log.error('google_calendar.failed', { err });
+  }
+  return report;
+}
+
 // ---- dispatch, tick, runner -------------------------------------------------------------------
 
 /** Run one job by name now (admin endpoint and tests). */
@@ -419,6 +442,9 @@ export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> 
     case 'cleanup': return runCleanup(opts);
     case 'retention': return runRetentionJob(opts);
     case 'recording_deletions': return runRecordingDeletions(opts);
+    case 'reconcile': return runReconcileJob({ now: opts.now, dryRun: opts.dryRun, env: opts.env }) as Promise<JobReport>;
+    case 'usage_warnings': return runUsageWarningsJob({ now: opts.now, dryRun: opts.dryRun, businessId: opts.businessId }) as Promise<JobReport>;
+    case 'google_calendar': return runGoogleCalendarJob(opts);
   }
 }
 
@@ -504,6 +530,11 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
       const status = await recordingDeletionStatus();
       next = now;
       note = `${status.pending} recording(s) queued for provider-side deletion${status.stuck > 0 ? `, ${status.stuck} NOT draining (alerted): check the runbook` : ''}`;
+    } else if (name === 'google_calendar') {
+      next = now;
+      note = `fallback poll every ${GOOGLE_POLL_EVERY_MS / 60_000} min per connection`;
+    } else if (name === 'reconcile' || name === 'usage_warnings') {
+      next = now;
     } else {
       next = retentionJobEnabled(env.RETENTION_JOB)
         ? (last ? new Date(Math.max(now.getTime(), last.getTime() + RETENTION_EVERY_MS)) : now)

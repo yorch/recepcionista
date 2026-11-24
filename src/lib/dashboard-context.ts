@@ -2,7 +2,8 @@
  * Per-request tenant context for dashboard / onboarding server components. Validates the session
  * in Node (the proxy only gates cheaply), so EVERY page must call this rather than assume it ran.
  *
- * - owner/staff: always their own business (cannot be overridden).
+ * - owner/staff: the session's ACTIVE business (user_sessions.active_business_id, re-validated against the enabled memberships on every
+ *   request; switched with POST /api/auth/switch-business, never by a cookie or query parameter).
  * - admin / ADMIN_TOKEN: all businesses; the selected one comes from the `rc_business` cookie
  *   (set by the switcher; validated against the real list) and defaults to the first.
  */
@@ -20,8 +21,12 @@ export interface DashboardContext {
   /** Human label for the shell: the user's email, or the admin credential type. */
   who: string;
   business: Business;
-  /** Admin: every business (switcher). Users: just their own. */
+  /** Admin: every business (switcher). Users: just the active one. */
   businesses: Business[];
+  /** Users: every business the account has an enabled membership in (the business switcher); empty for admins. */
+  memberships: { business_id: string; business_name: string; role: 'owner' | 'staff' }[];
+  /** Users who own at least one business may add another location. */
+  canAddBusiness: boolean;
 }
 
 export const getDashboardContext = cache(async (): Promise<DashboardContext> => {
@@ -32,7 +37,11 @@ export const getDashboardContext = cache(async (): Promise<DashboardContext> => 
   if (principal.kind === 'user') {
     const business = await getBusiness(principal.business_id);
     if (!business) notFound();
-    return { principal, role, who: principal.user.email, business, businesses: [business] };
+    const memberships = principal.memberships.map((m) => ({ business_id: m.business_id, business_name: m.business_name, role: m.role }));
+    return {
+      principal, role, who: principal.user.email, business, businesses: [business], memberships,
+      canAddBusiness: memberships.some((m) => m.role === 'owner'),
+    };
   }
 
   const businesses = await listBusinesses();
@@ -45,7 +54,7 @@ export const getDashboardContext = cache(async (): Promise<DashboardContext> => 
   }
   const business = businesses.find((b) => b.id === selected) ?? businesses[0];
   const who = principal.user?.email ?? (principal.via === 'dev' ? 'dev (auth disabled)' : 'admin token');
-  return { principal, role, who, business, businesses };
+  return { principal, role, who, business, businesses, memberships: [], canAddBusiness: false };
 });
 
 /** 404 unless the caller has at least `min` (don't advertise admin-only pages to tenants). */

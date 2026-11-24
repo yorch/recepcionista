@@ -1,7 +1,10 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { getBooking, getBusiness } from '@/lib/db';
+import Link from 'next/link';
 import { Checkout } from './checkout';
+import { policySentence } from '@/lib/refunds';
+import type { Business } from '@/lib/types';
 import { PaymentReceived } from './received';
 
 /**
@@ -27,6 +30,18 @@ const DEFAULT_BUSINESS = 'Miami Cool Air Conditioning';
 
 type Params = Promise<{ id: string }>;
 type Search = Promise<Record<string, string | string[] | undefined>>;
+
+/** The business's refund policy, in plain text (the free text is rendered as text, never as markup). */
+function PolicyNote({ business }: { business: Business | null }) {
+  if (!business) return null;
+  return (
+    <aside aria-label="Refund policy" className="mx-auto mt-4 w-full max-w-md px-4 pb-8 text-xs leading-relaxed text-dim">
+      <p><strong className="text-soft">Refund policy.</strong> {policySentence(business.refund_policy)}</p>
+      {business.refund_policy_text ? <p className="mt-1.5 whitespace-pre-line text-mute">{business.refund_policy_text}</p> : null}
+      <p className="mt-1.5"><Link href="/refunds" className="underline underline-offset-2 hover:text-soft">How deposits and refunds work</Link></p>
+    </aside>
+  );
+}
 
 const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
 
@@ -56,9 +71,11 @@ export default async function PayPage({
   let amountCents: number;
   let label: string;
   let businessName: string;
+  let policyBusiness: Business | null = null;
 
   if (booking) {
     const business = await getBusiness(booking.business_id);
+    policyBusiness = business;
     businessName = business?.name ?? 'Your service provider';
     label = `${booking.service} deposit`;
     if (booking.deposit_amount && booking.deposit_amount > 0) {
@@ -78,6 +95,7 @@ export default async function PayPage({
             businessName={businessName}
             last4="----"
           />
+          <PolicyNote business={policyBusiness} />
         </div>
       );
     }
@@ -99,6 +117,7 @@ export default async function PayPage({
         businessName={businessName}
         bookingId={booking?.id}
       />
+      <PolicyNote business={policyBusiness} />
     </div>
   );
 }

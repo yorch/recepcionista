@@ -29,6 +29,7 @@ import type {
 } from '@/lib/types';
 import { BILLING_INTERVALS, LOCALES, REFUND_POLICIES, REFUND_POLICY_TEXT_MAX, TRANSFER_STATUSES, VERTICALS } from '@/lib/types';
 import { sanitizeAuditMeta } from './audit';
+import { calendarBusyConflict } from '@/lib/integrations/google/busy';
 
 const MAX_PAGE_SIZE_RANGE = 500;
 
@@ -753,6 +754,7 @@ export async function listCalls(
 ): Promise<Call[]> {
   const rows = await prisma.call.findMany({
     where: {
+      kind: 'customer', // owner call-in sessions (voice/owner) are not customer calls
       ...(businessId ? { businessId } : {}),
       ...(date ? { startedAt: dayRange(date, tz) } : {}),
       ...(opts.flaggedSince ? { flaggedReason: { not: null }, startedAt: { gte: opts.flaggedSince } } : {}),
@@ -765,7 +767,7 @@ export async function listCalls(
 
 /** How many calls the business has logged (a count, not a list). */
 export async function countCalls(businessId: ID): Promise<number> {
-  return prisma.call.count({ where: { businessId } });
+  return prisma.call.count({ where: { businessId, kind: 'customer' } });
 }
 
 /** Cursor-paginated calls, newest first. */
@@ -774,7 +776,7 @@ export async function listCallsPage(businessId: ID, opts: { limit?: number; curs
   const cur = parseTimeCursor(opts.cursor);
   const rows = await prisma.call.findMany({
     where: {
-      businessId,
+      businessId, kind: 'customer',
       // A voicemail is a call whose Twilio recording is stored (the URL is only ever written after the recording notice was spoken).
       ...(opts.voicemailOnly ? { recordingUrl: { startsWith: 'https://api.twilio.com/2010-04-01/Accounts/' } } : {}),
       ...(cur ? { OR: [{ startedAt: { lt: cur.at } }, { startedAt: cur.at, id: { lt: cur.id } }] } : {}),
@@ -786,7 +788,7 @@ export async function listCallsPage(businessId: ID, opts: { limit?: number; curs
 }
 
 // ---------- bookings ----------
-export type BookingRejection = SlotRejection | 'call_cap' | 'no_call' | 'slot_taken' | 'invalid_time' | 'business_not_found' | 'booking_not_found' | 'not_reschedulable';
+export type BookingRejection = SlotRejection | 'call_cap' | 'no_call' | 'slot_taken' | 'invalid_time' | 'business_not_found' | 'booking_not_found' | 'not_reschedulable' | 'calendar_busy';
 
 /** Thrown by createBooking when the slot cannot be booked; `reason` is machine-readable. */
 export class BookingRejectedError extends Error {
@@ -864,6 +866,8 @@ export async function createBooking(
           scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes,
         })));
         if (clash) throw new BookingRejectedError('slot_taken');
+        // Owner's Google Calendar busy time (healthy connection + "block on busy" on); same transaction, same advisory lock.
+        if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
       }
 
       return tx.booking.create({
@@ -1195,6 +1199,7 @@ export async function rescheduleBooking(input: RescheduleInput, opts: { enforce?
       if (near.some((b) => intervalsOverlap(candidate, bookingInterval({ scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes })))) {
         throw new BookingRejectedError('slot_taken');
       }
+      if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
       const row = await tx.booking.update({
         where: { id: cur.id },
         data: { scheduledAt: start, durationMinutes: duration, rescheduleCount: { increment: 1 }, customerNotifiedAt: null },
@@ -1490,8 +1495,8 @@ export async function getDashboardStats(businessId: ID, tz: string, now: Date = 
   const weekAgo = new Date(now.getTime() - 7 * 24 * 3600_000);
   const upcomingFloor = new Date(now.getTime() - MAX_DURATION_MIN * 60_000);
   const [callsToday, bilingual, upcomingRows, deposits, revenue, flagged] = await Promise.all([
-    prisma.call.count({ where: { businessId, startedAt: day } }),
-    prisma.call.count({ where: { businessId, startedAt: day, language: { in: ['es', 'mixed'] } } }),
+    prisma.call.count({ where: { businessId, kind: 'customer', startedAt: day } }),
+    prisma.call.count({ where: { businessId, kind: 'customer', startedAt: day, language: { in: ['es', 'mixed'] } } }),
     prisma.booking.findMany({
       where: { businessId, status: { not: 'cancelled' }, scheduledAt: { gte: upcomingFloor } },
       select: { scheduledAt: true, durationMinutes: true },
@@ -1499,7 +1504,7 @@ export async function getDashboardStats(businessId: ID, tz: string, now: Date = 
     }),
     prisma.booking.aggregate({ _sum: { depositAmount: true }, where: { businessId, depositPaid: true, scheduledAt: month } }),
     prisma.booking.aggregate({ _sum: { priceEstimate: true }, where: { businessId, status: { in: ['confirmed', 'completed'] }, createdAt: month } }),
-    prisma.call.count({ where: { businessId, startedAt: { gte: weekAgo }, flaggedReason: { not: null } } }),
+    prisma.call.count({ where: { businessId, kind: 'customer', startedAt: { gte: weekAgo }, flaggedReason: { not: null } } }),
   ]);
   const nowMs = now.getTime();
   return {
@@ -1521,7 +1526,7 @@ export async function isKnownContact(businessId: ID, phone: string): Promise<boo
   if (biz.ownerPhoneE164 === e164) return true;
   const [booking, call] = await Promise.all([
     prisma.booking.findFirst({ where: { businessId, phoneE164: e164 }, select: { id: true } }),
-    prisma.call.findFirst({ where: { businessId, callerE164: e164 }, select: { id: true } }),
+    prisma.call.findFirst({ where: { businessId, kind: 'customer', callerE164: e164 }, select: { id: true } }),
   ]);
   return Boolean(booking || call);
 }
@@ -1541,6 +1546,9 @@ export async function clearAll(): Promise<void> {
     await tx.booking.deleteMany();
     await tx.call.deleteMany();
     await tx.knowledgeBase.deleteMany();
+    // Memberships first: the database trigger that keeps a person with SEVERAL businesses alive when one is deleted would otherwise try to
+    // re-point them to another business that this same statement is deleting (foreign key violation on a multi-business account).
+    await tx.membership.deleteMany();
     await tx.business.deleteMany(); // cascades connections, busy blocks, KB changes, memberships, transcript events
   });
 }
