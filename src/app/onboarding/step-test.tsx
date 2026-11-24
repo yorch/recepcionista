@@ -8,6 +8,7 @@ import { useCopy } from '@/hooks/use-copy';
 import type { OnboardingStatus } from '@/app/api/businesses/[id]/onboarding-status/status';
 import { prettyPhone } from './forwarding';
 import type { StepProps } from './flow';
+import { packOf, tx } from '@/lib/verticals';
 
 const POLL_MS = 4000;
 
@@ -53,7 +54,7 @@ export function TestStep({ businessId, status: initial, isAdmin, go }: StepProps
       <Card className="mt-6 p-5">
         <ol className="space-y-3 text-[13px] leading-relaxed text-soft">
           <li><span className="font-medium text-white">1.</span> From a different phone, call <a href={`tel:${phone}`} className="font-mono text-white underline underline-offset-2">{prettyPhone(phone)}</a>.</li>
-          <li><span className="font-medium text-white">2.</span> Say something a customer would, like “Hola, my AC is not cooling.” Switch between English and Spanish to hear her follow you.</li>
+          <li><span className="font-medium text-white">2.</span> Say something a customer would, like “{tx(packOf(status.vertical).hints.testPhrase, status.locale)}” Switch between English and Spanish to hear her follow you.</li>
           <li><span className="font-medium text-white">3.</span> Forwarding set up? Also call your business line and let it ring. After about 20 seconds she should answer.</li>
         </ol>
         <div className="mt-4 flex flex-wrap items-center gap-3">

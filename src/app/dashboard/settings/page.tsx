@@ -10,6 +10,7 @@ import { callModeView } from '@/lib/voice/call-mode';
 import { VoiceSettingsCard } from '@/components/dashboard/voice-settings';
 import { RefundPolicySettings } from '@/components/dashboard/refund-policy-settings';
 import { GoogleCalendarCard } from '@/components/dashboard/google-calendar-card';
+import { VerticalSettings } from '@/components/dashboard/vertical-settings';
 
 export const metadata: Metadata = { title: 'Settings' };
 
@@ -42,6 +43,11 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             </p>
           )}
         </div>
+      </Card>
+
+      <Card className="mt-6" id="business-type">
+        <CardHead title="Business type" subtitle="Which trade she is written for, including how she treats emergencies" />
+        <div className="p-4"><VerticalSettings businessId={biz.id} initial={biz.vertical ?? 'hvac'} lang={biz.locale_default === 'es' ? 'es' : 'en'} /></div>
       </Card>
 
       <Card className="mt-6" id="call-handling-card">

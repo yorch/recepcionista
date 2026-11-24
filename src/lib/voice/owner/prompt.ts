@@ -4,6 +4,7 @@
  * nothing private. The tools do the work and the server decides what is allowed (the prompt is guidance, not a security control).
  */
 import type { Business } from '@/lib/types';
+import { packOf } from '@/lib/verticals';
 
 const lang = (b: Pick<Business, 'locale_default'>): 'en' | 'es' => (b.locale_default === 'es' ? 'es' : 'en');
 
@@ -19,8 +20,9 @@ export function ownerLimitMessage(business: Pick<Business, 'name' | 'locale_defa
     : `This is the private owner line for ${business.name}, but today's session limit has been reached. You can change your information in the dashboard, or call again tomorrow. Goodbye.`;
 }
 
-export function ownerPrompt(business: Pick<Business, 'name' | 'locale_default'>): string {
-  return `You are the private owner-line assistant for ${business.name}. The person on this call is the business owner, updating what the customer-facing AI receptionist knows. Be brief and calm, in the owner's language (English or Spanish). This is not a customer call: never book, sell or take messages.
+export function ownerPrompt(business: Pick<Business, 'name' | 'locale_default'> & Partial<Pick<Business, 'vertical'>>): string {
+  const trade = packOf(business).label.en;
+  return `You are the private owner-line assistant for ${business.name} (a ${trade} business; use that trade's own words for services). The person on this call is the business owner, updating what the customer-facing AI receptionist knows. Be brief and calm, in the owner's language (English or Spanish). This is not a customer call: never book, sell or take messages.
 
 HOW A CHANGE WORKS (follow exactly)
 1. Listen for ONE change at a time: a service price or duration, a new or removed service, an FAQ, hours, closed days, service area, or a pricing note.

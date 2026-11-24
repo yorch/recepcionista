@@ -60,6 +60,8 @@ export async function GET(
       name: business.name,
       url: business.url ?? null,
       owner_name: business.owner_name ?? null,
+      vertical: business.vertical ?? 'hvac',
+      locale: business.locale_default === 'es' ? 'es' : 'en',
       owner_phone: business.owner_phone ?? null,
       owner_phone_verified: facts.owner_phone_verified,
       owner_phone_verified_at: business.owner_phone_verified_at ?? null,

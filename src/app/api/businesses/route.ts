@@ -1,7 +1,8 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse } from '@/lib/session';
 import { getBusiness, listBusinesses, createBusiness } from '@/lib/db';
-import type { Business } from '@/lib/types';
+import { VERTICALS, type Business } from '@/lib/types';
+import { isVertical } from '@/lib/verticals';
 
 /** Dashboard-safe projection: no owner contact details or voice-agent ids. */
 function publicBusiness(b: Business): Business {
@@ -30,11 +31,13 @@ export async function POST(req: Request): Promise<ReturnType<typeof ok<Business>
   const auth = await authenticate(req, { role: 'admin' }); // creating tenants is admin-only
   if (!auth.ok) return auth.response;
   try {
-    const body = await readJson<{ name?: string; url?: string; owner_phone?: string; owner_name?: string }>(req);
+    const body = await readJson<{ name?: string; url?: string; owner_phone?: string; owner_name?: string; vertical?: unknown }>(req);
     if (!body.name || typeof body.name !== 'string' || !body.name.trim()) {
       return fail('missing "name" in body');
     }
+    if (body.vertical !== undefined && !isVertical(body.vertical)) return fail(`vertical must be one of: ${VERTICALS.join(', ')}`, 422);
     const business = await createBusiness({
+      ...(body.vertical !== undefined ? { vertical: body.vertical } : {}),
       name: body.name.trim(),
       url: body.url?.trim() || null,
       owner_phone: body.owner_phone?.trim() || null,

@@ -14,7 +14,7 @@ import { ApiError, useApi } from '@/hooks/use-api';
 import { useUnsavedGuard } from '@/hooks/use-unsaved-guard';
 import type { Business, ExtractionResult, KnowledgeBase } from '@/lib/types';
 
-type BizFields = Pick<Business, 'name' | 'owner_name' | 'service_area' | 'hours' | 'url'>;
+type BizFields = Pick<Business, 'name' | 'owner_name' | 'service_area' | 'hours' | 'url'> & Partial<Pick<Business, 'vertical'>>;
 type KbFields = Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes' | 'call_script' | 'system_prompt'>;
 
 const NO_ERRORS: DraftErrors = { services: {}, faqs: {}, hours: {} };
@@ -123,7 +123,7 @@ export function KnowledgeEditor({
         {mergeNote ? <p role="status" className="mt-3 rounded-xl bg-sunken px-3.5 py-2.5 text-[13px] text-body">{mergeNote}</p> : null}
       </Card>
 
-      <KnowledgeForm draft={draft} onChange={onChange} errors={errors} />
+      <KnowledgeForm draft={draft} onChange={onChange} errors={errors} vertical={business.vertical} />
 
       <Card>
         <CardHead title="Her opening script" subtitle="The words she opens with" />

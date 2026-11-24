@@ -3,7 +3,8 @@
  * UI units: prices in DOLLARS (strings), durations in minutes (strings), hours as per-day open/from/to.
  * Stored units follow src/lib/types.ts: Service.base_price is whole dollars, Hours are "HH:MM" 24h or null.
  */
-import type { Business, ExtractionResult, FAQ, Hours, KnowledgeBase, Service } from '@/lib/types';
+import type { Business, ExtractionResult, FAQ, Hours, KnowledgeBase, Service, Vertical } from '@/lib/types';
+import { packFaqs, packOf, packPricingNotes, packServices } from '@/lib/verticals';
 
 export const DAYS = [
   { key: 'monday', label: 'Monday' },
@@ -95,6 +96,34 @@ export function draftFromExtraction(ex: ExtractionResult, ownerName = ''): Knowl
     services: (ex.services ?? []).map(serviceToDraft),
     faqs: (ex.faqs ?? []).map((f) => ({ uid: nextUid(), question: f.question, answer: f.answer })),
     pricingNotes: ex.pricing_notes ?? '',
+  };
+}
+
+/**
+ * The editable starting point for a business with no website to read: the vertical's services, FAQs, pricing notes and opening hours,
+ * all still editable, in the owner's language. Nothing is saved until the owner continues.
+ */
+export function draftFromPack(vertical: Vertical, lang: 'en' | 'es' = 'en', ownerName = '', name = ''): KnowledgeDraft {
+  const pack = packOf(vertical);
+  return draftFromExtraction({
+    name,
+    services: packServices(pack, lang),
+    hours: pack.hours,
+    service_area: [],
+    faqs: packFaqs(pack, lang),
+    pricing_notes: packPricingNotes(pack, lang),
+    confidence: 'low',
+    source: 'template',
+  }, ownerName);
+}
+
+/** A scraped draft keeps everything it found; only an EMPTY FAQ list or empty pricing notes are filled from the vertical's pack (still editable). */
+export function withPackDefaults(draft: KnowledgeDraft, vertical: Vertical, lang: 'en' | 'es' = 'en'): KnowledgeDraft {
+  const pack = packOf(vertical);
+  return {
+    ...draft,
+    faqs: draft.faqs.length > 0 ? draft.faqs : packFaqs(pack, lang).map((f) => ({ uid: nextUid(), question: f.question, answer: f.answer })),
+    pricingNotes: draft.pricingNotes.trim() ? draft.pricingNotes : packPricingNotes(pack, lang),
   };
 }
 

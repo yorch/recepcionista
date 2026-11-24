@@ -49,7 +49,7 @@ export default async function KnowledgePage() {
           <ReadinessChecklist readiness={readinessOf(kb, biz)} className="mb-6" />
           <KnowledgeEditor
             businessId={biz.id}
-            business={{ name: biz.name, owner_name: biz.owner_name ?? null, service_area: biz.service_area, hours: biz.hours, url: biz.url ?? null }}
+            business={{ name: biz.name, owner_name: biz.owner_name ?? null, service_area: biz.service_area, hours: biz.hours, url: biz.url ?? null, vertical: biz.vertical ?? 'hvac' }}
             kb={{ services: kb.services, faqs: kb.faqs, pricing_notes: kb.pricing_notes, call_script: kb.call_script, system_prompt: kb.system_prompt }}
             lastExtracted={extracted ? { url: typeof meta.url === 'string' ? meta.url : null, at: extracted.at } : null}
             timeZone={tzOf(biz)}

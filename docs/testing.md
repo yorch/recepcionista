@@ -10,7 +10,7 @@ bunx tsc --noEmit && bunx eslint src tests
 
 | Path | Needs Postgres | Covers |
 | --- | --- | --- |
-| `tests/*.test.ts` | no | pure logic: time zones, availability maths, money, auth paths, proxy decisions |
+| `tests/*.test.ts` | no | pure logic: time zones, availability maths, money, auth paths, proxy decisions, vertical packs (`verticals-pure.test.ts`) |
 | `tests/db/` | yes | rate limit, processed events, leases, retention/erasure, users and sessions |
 | `tests/integration/` | yes | route handlers called directly with real `Request`s: booking integrity (overlap, hours, DST, 20-way race), Stripe webhook, voice tools, Twilio and ElevenLabs signatures |
 

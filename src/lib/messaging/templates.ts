@@ -9,6 +9,7 @@ import type { Booking, Business } from '@/lib/types';
 import { DEFAULT_TIMEZONE, tzOf } from '@/lib/time';
 import { formatCents } from '@/lib/money';
 import { policySentence } from '@/lib/refunds';
+import { packOf, tx } from '@/lib/verticals';
 
 export type Lang = 'en' | 'es' | 'mixed';
 
@@ -107,24 +108,27 @@ export function confirmationSms({ business, booking, language = 'en' }: Confirma
   const when = formatWhen(booking.scheduled_at, language, business.timezone);
   const addr = safeText(booking.address, 80);
   const where = addr ? `, ${addr}` : '';
-  const service = safeText(booking.service) || 'service';
+  const pack = packOf(business);
+  const service = safeText(booking.service) || tx(pack.sms.fallbackService, language === 'es' ? 'es' : 'en');
   const price = booking.price_estimate ? money(booking.price_estimate) : null;
+  // The trade's preparation note goes in only when the whole text still fits one message: the cancel + follow-up notices are never cut for it.
+  const withNote = (body: (note: string) => string, note: string | null): string => {
+    const plain = body('');
+    if (!note) return clip(plain);
+    const full = body(` ${note}`);
+    return full.length <= SMS_LIMIT ? full : clip(plain);
+  };
+  const note = pack.sms.confirmationNote ? tx(pack.sms.confirmationNote, language === 'es' ? 'es' : 'en') : null;
 
   if (language === 'es') {
     const estimate = price ? ` Aprox. ${price}.` : '';
-    return clip(
-      `${business.name}: Confirmado — ${service}, ${when}${where}.${estimate} Responda C para cancelar. Podemos escribirle después de su visita. ¡Gracias ${name}!`,
-    );
+    return withNote((n) => `${business.name}: Confirmado — ${service}, ${when}${where}.${estimate}${n} Responda C para cancelar. Podemos escribirle después de su visita. ¡Gracias ${name}!`, note);
   }
   const estimate = price ? ` Estimate ${price}.` : '';
   if (language === 'mixed') {
-    return clip(
-      `${business.name}: You're all set — ${service}, ${when}${where}.${estimate} Text C to cancel. We may text you after your visit. ¡Gracias ${name}!`,
-    );
+    return withNote((n) => `${business.name}: You're all set — ${service}, ${when}${where}.${estimate}${n} Text C to cancel. We may text you after your visit. ¡Gracias ${name}!`, note);
   }
-  return clip(
-    `${business.name}: Confirmed — ${service}, ${when}${where}.${estimate} Reply C to cancel. We may text you after your visit. Thanks ${name}!`,
-  );
+  return withNote((n) => `${business.name}: Confirmed — ${service}, ${when}${where}.${estimate}${n} Reply C to cancel. We may text you after your visit. Thanks ${name}!`, note);
 }
 
 export interface PaymentLinkArgs {
@@ -139,7 +143,7 @@ export function paymentLinkSms({
   business, amount_cents, url, service, language = 'en',
 }: PaymentLinkArgs): string {
   const amount = money(amount_cents);
-  const what = safeText(service) || 'service';
+  const what = safeText(service) || tx(packOf(business).sms.fallbackService, language === 'es' ? 'es' : 'en');
   const lang = language === 'es' ? 'es' : 'en';
   const build = (policy: string) => {
     if (language === 'es') return `${business.name}: Depósito de ${amount} para ${what}.${policy} Enlace seguro: ${url}`;
@@ -159,7 +163,7 @@ export interface GratitudeArgs {
 
 export function gratitudeSms({ business, booking, language = 'en' }: GratitudeArgs): string {
   const name = firstName(booking.customer_name);
-  const svc = safeText(booking.service) || 'service';
+  const svc = safeText(booking.service) || tx(packOf(business).sms.fallbackService, language === 'es' ? 'es' : 'en');
   const service = svc.charAt(0).toLowerCase() + svc.slice(1);
 
   if (language === 'es') {
@@ -233,7 +237,7 @@ export interface RescheduleSmsArgs { business: Business; booking: Booking; langu
 export function rescheduleSms({ business, booking, language = 'en' }: RescheduleSmsArgs): string {
   const name = firstName(booking.customer_name);
   const when = formatWhenFull(booking.scheduled_at, language, business.timezone);
-  const service = safeText(booking.service) || 'service';
+  const service = safeText(booking.service) || tx(packOf(business).sms.fallbackService, language === 'es' ? 'es' : 'en');
   const addr = safeText(booking.address, 80);
   const where = addr ? `, ${addr}` : '';
   if (language === 'es') return clip(`${business.name}: Su cita (${service}) se cambió a ${when}${where}. Si no le funciona, llámenos. Gracias ${name}.`);
@@ -251,7 +255,7 @@ export interface CancelSmsArgs {
 
 export function cancelSms({ business, booking, language = 'en', deposit = { state: 'none' } }: CancelSmsArgs): string {
   const when = formatWhenFull(booking.scheduled_at, language, business.timezone);
-  const service = safeText(booking.service) || 'service';
+  const service = safeText(booking.service) || tx(packOf(business).sms.fallbackService, language === 'es' ? 'es' : 'en');
   const spanish = language === 'es';
   let tail = '';
   if (deposit.state === 'refundable') {

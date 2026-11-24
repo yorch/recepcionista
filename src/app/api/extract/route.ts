@@ -1,6 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, scopeBusinessId } from '@/lib/session';
 import { extractFromUrl, ExtractionError } from '@/lib/extraction';
+import { getBusiness } from '@/lib/db';
 import { limitRequest, rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
 import type { ExtractionResult } from '@/lib/types';
@@ -29,7 +30,9 @@ export async function POST(req: Request): Promise<ReturnType<typeof ok<Extractio
       log.warn('rejected', { reason: 'missing url' });
       return fail('missing "url" in body');
     }
-    const result = await extractFromUrl(url);
+    // The trade of the business being onboarded (HVAC when there is none) steers what the model looks for.
+    const biz = scoped ? await getBusiness(scoped).catch(() => null) : null;
+    const result = await extractFromUrl(url, biz?.vertical);
     log.info('done', {
       url,
       name: result.name,

@@ -89,7 +89,7 @@ export async function PUT(
       if (typeof body.call_script !== 'string' || body.call_script.length > 8000) return fail('invalid "call_script"', 422);
       call_script = body.call_script;
     } else if (!call_script) {
-      call_script = buildCallScript({ services });
+      call_script = buildCallScript({ services }, business);
     }
 
     const system_prompt = buildSystemPrompt(business, { services, faqs, pricing_notes });

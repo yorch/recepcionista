@@ -16,7 +16,7 @@ import type { ExtractionMeta } from './step-info';
 const NONE: DraftErrors = { services: {}, faqs: {}, hours: {} };
 
 export function ReviewStep({
-  businessId, go, refresh, draft, ensureDraft, setDraft, meta,
+  businessId, status, go, refresh, draft, ensureDraft, setDraft, meta,
 }: StepProps & {
   draft: KnowledgeDraft | null;
   ensureDraft: () => Promise<KnowledgeDraft | null>;
@@ -71,15 +71,15 @@ export function ReviewStep({
       {thin ? (
         <p role="note" className="mt-4 rounded-xl border border-warn-line bg-warn-bg px-4 py-3 text-[13px] text-warn">
           {meta?.source === 'manual'
-            ? 'Add the services you sell, with starting prices if you have them.'
+            ? 'We pre-filled typical services, prices and answers for your kind of business. They are only a starting point: change every line to match what you really offer and charge.'
             : 'We could not find much on your website, so some of this is a starting template. Please check every price and service.'}
         </p>
       ) : null}
 
-      <ReadinessChecklist readiness={readinessOfDraft(draft)} className="mt-5" />
+      <ReadinessChecklist readiness={readinessOfDraft(draft, status.vertical)} className="mt-5" />
 
       <div className="mt-5">
-        <KnowledgeForm draft={draft} errors={errors} onChange={(d) => { setDraft(d); if (hasErrors(errors)) setErrors(validateDraft(d)); }} />
+        <KnowledgeForm draft={draft} vertical={status.vertical} errors={errors} onChange={(d) => { setDraft(d); if (hasErrors(errors)) setErrors(validateDraft(d)); }} />
       </div>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">

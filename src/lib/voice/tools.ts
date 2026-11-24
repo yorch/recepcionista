@@ -21,7 +21,8 @@ import { logger } from '@/lib/log';
 import { normalizePhone } from '@/lib/providers/twilio';
 import { E164 } from '@/lib/messaging/recipient';
 import { sendAndLog } from '@/lib/messaging';
-import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
+import { SERVICE_ALIASES } from '@/lib/verticals/aliases';
+import { CALL_911_EN, CALL_911_ES, call911For, call911Hazards } from '@/lib/voice/emergency';
 import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
 import { isOwnerNumber } from '@/lib/messaging/owner';
 import { countryForBusiness } from '@/lib/db';
@@ -237,13 +238,14 @@ export type { OwnerAlert };
 /** What to tell a caller when we could NOT reach the owner. */
 function ownerFallback(business: Business, lang: ToolLanguage, emergency: boolean): { message: string; data: Record<string, unknown> } {
   const phone = business.owner_phone ? normalizePhone(business.owner_phone) : null;
-  const call911 = say(lang, CALL_911_EN, CALL_911_ES);
+  const copy911 = call911For(business);
+  const call911 = say(lang, copy911.en, copy911.es);
   const owner = phone
     ? say(lang, `You can also call the owner directly at ${phone}.`, `También puede llamar al dueño directamente al ${phone}.`)
     : say(lang, 'I will keep trying to reach the owner and they will call you back.', 'Voy a seguir intentando comunicarme con el dueño y él le devolverá la llamada.');
   return {
     message: emergency ? `${call911} ${owner}` : owner,
-    data: { call_911_for: ['gas', 'carbon_monoxide', 'smoke', 'fire'], owner_phone: phone },
+    data: { call_911_for: call911Hazards(business), owner_phone: phone },
   };
 }
 
@@ -765,8 +767,8 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       return {
         ok: true,
         message: say(lang,
-          `${CALL_911_EN} I've flagged this as an emergency and the owner has been notified.`,
-          `${CALL_911_ES} Lo marqué como emergencia y el dueño ya fue notificado.`),
+          `${call911For(business).en} I've flagged this as an emergency and the owner has been notified.`,
+          `${call911For(business).es} Lo marqué como emergencia y el dueño ya fue notificado.`),
         data: { call: updated, owner_sms: alert.sms, owner_notified: true },
       };
     }
@@ -791,42 +793,32 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
   }
 }
 
-/** Spanish callers describe the same jobs with different words — bridge them. */
-const SERVICE_ALIASES: Record<string, string> = {
-  reparacion: 'repair', reparación: 'repair', arreglar: 'repair', arreglo: 'repair',
-  instalacion: 'installation', instalación: 'installation', instalar: 'installation',
-  mantenimiento: 'maintenance', afinacion: 'maintenance', afinación: 'maintenance',
-  servicio: 'service', diagnostico: 'diagnostic', diagnóstico: 'diagnostic',
-  revision: 'diagnostic', revisión: 'diagnostic', visita: 'visit',
-  limpieza: 'cleaning', ductos: 'duct', conductos: 'duct',
-  emergencia: 'emergency', emergencias: 'emergency', urgencia: 'emergency',
-  aire: 'ac', acondicionado: 'ac', equipo: 'system', sistema: 'system',
-  calefaccion: 'heating', calefacción: 'heating', calentar: 'heating',
-};
-
-function normalizeQuery(query: string): string {
+function normalizeQuery(query: string, aliases = true): string {
   return query
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .split(/\s+/)
     .filter(Boolean)
-    .map((w) => SERVICE_ALIASES[w] ?? w)
+    .map((w) => (aliases ? SERVICE_ALIASES[w] ?? w : w))
     .join(' ');
 }
 
 function matchService<T extends { name: string }>(services: T[], query: string): T[] {
   const q = normalizeQuery(query).trim();
   if (!q) return services;
-  const words = q.split(/\s+/).filter((w) => w.length > 2);
+  // The query as spoken is scored too: a service named in Spanish ("Limpieza profunda") must match the Spanish words, not only their English aliases.
+  const queries = [...new Set([q, normalizeQuery(query, false).trim()].filter(Boolean))];
+  const scoreOf = (name: string, query2: string): number => {
+    const words = query2.split(/\s+/).filter((w) => w.length > 2);
+    if (name === query2) return 100;
+    if (name.includes(query2)) return 80;
+    if (query2.includes(name)) return 70;
+    return words.filter((w) => name.includes(w)).length * 20;
+  };
   const scored = services
     .map((s) => {
       const name = s.name.toLowerCase();
-      let score = 0;
-      if (name === q) score = 100;
-      else if (name.includes(q)) score = 80;
-      else if (q.includes(name)) score = 70;
-      else score = words.filter((w) => name.includes(w)).length * 20;
-      return { s, score };
+      return { s, score: Math.max(...queries.map((q2) => scoreOf(name, q2))) };
     })
     .filter((row) => row.score > 0)
     .sort((a, b) => b.score - a.score);

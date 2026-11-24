@@ -3,6 +3,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardHead } from '@/components/ui/card';
 import { TextAreaField, TextField } from '@/components/ui/field';
 import { DAYS, LIMITS, nextUid, type DraftErrors, type KnowledgeDraft } from './model';
+import { packOf, tx } from '@/lib/verticals';
+import type { Vertical } from '@/lib/types';
 
 const timeInput =
   'min-h-11 rounded-xl border border-line-2 bg-sunken px-3 py-2 font-mono text-[15px] text-white sm:text-sm';
@@ -12,13 +14,16 @@ const timeInput =
  * Fully controlled: the parent owns the draft, validation errors and saving.
  */
 export function KnowledgeForm({
-  draft, onChange, errors, showBusiness = true,
+  draft, onChange, errors, showBusiness = true, vertical,
 }: {
   draft: KnowledgeDraft;
   onChange: (d: KnowledgeDraft) => void;
   errors: DraftErrors;
   showBusiness?: boolean;
+  /** The business's trade: only changes the example in the service-name placeholder. */
+  vertical?: Vertical | null;
 }) {
+  const servicePlaceholder = tx(packOf(vertical).hints.servicePlaceholder);
   const set = <K extends keyof KnowledgeDraft>(k: K, v: KnowledgeDraft[K]) => onChange({ ...draft, [k]: v });
 
   return (
@@ -52,7 +57,7 @@ export function KnowledgeForm({
             return (
               <li key={s.uid} className="p-4 sm:p-5">
                 <div className="grid gap-3 sm:grid-cols-[1fr_120px_110px]">
-                  <TextField label={`Service ${i + 1} name`} srOnlyLabel value={s.name} placeholder="Service name, e.g. AC repair"
+                  <TextField label={`Service ${i + 1} name`} srOnlyLabel value={s.name} placeholder={servicePlaceholder}
                     maxLength={LIMITS.serviceName} onChange={(ev) => update({ name: ev.target.value })} error={e.name} />
                   <TextField label={`Service ${i + 1} starting price in dollars`} srOnlyLabel value={s.price} inputMode="decimal"
                     placeholder="Price $ (blank = quote)" onChange={(ev) => update({ price: ev.target.value })} error={e.price} />

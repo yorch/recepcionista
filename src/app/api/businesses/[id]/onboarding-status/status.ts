@@ -1,4 +1,4 @@
-import type { BillingStatus } from '@/lib/types';
+import type { BillingStatus, Vertical } from '@/lib/types';
 
 /** Types and pure helpers for the onboarding status API (kept out of route.ts: Next restricts route exports). */
 
@@ -13,6 +13,9 @@ export interface OnboardingStatus {
   name: string;
   url: string | null;
   owner_name: string | null;
+  /** The trade the receptionist is written for (default 'hvac') and the dashboard language, to seed the review step. */
+  vertical: Vertical;
+  locale: 'en' | 'es';
   /** The owner's own number (owner/admin only), E.164 or as entered. */
   owner_phone: string | null;
   owner_phone_verified: boolean;

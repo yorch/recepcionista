@@ -5,11 +5,12 @@ import { Card } from '@/components/ui/card';
 import { TextField } from '@/components/ui/field';
 import { cn } from '@/components/ui/cn';
 import {
-  draftFromExtraction, nextUid, toBusinessPatch, toKnowledgePayload, type KnowledgeDraft,
+  draftFromExtraction, draftFromPack, toBusinessPatch, toKnowledgePayload, withPackDefaults, type KnowledgeDraft,
 } from '@/components/knowledge/model';
+import { VerticalPicker } from '@/components/knowledge/vertical-picker';
 import { ApiError, apiRequest } from '@/hooks/use-api';
 import { normalizeUrl } from '@/lib/extraction/url';
-import type { Business, ExtractionResult } from '@/lib/types';
+import type { Business, ExtractionResult, Vertical } from '@/lib/types';
 import type { OnboardingStatus } from '@/app/api/businesses/[id]/onboarding-status/status';
 
 export interface ExtractionMeta {
@@ -45,6 +46,8 @@ export function InfoStep({
   const [nameError, setNameError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [phase, setPhase] = useState<number | null>(null);
+  const [vertical, setVertical] = useState<Vertical>(status?.vertical ?? 'hvac');
+  const lang = status?.locale ?? 'en';
   const createdId = useRef<string | null>(businessId); // reuse on retry: never create a second business
   const ticker = useRef<ReturnType<typeof setInterval> | null>(null);
   const [busyManual, setBusyManual] = useState(false);
@@ -54,7 +57,7 @@ export function InfoStep({
 
   async function ensureBusiness(label: string, siteUrl: string | null): Promise<string> {
     if (createdId.current) return createdId.current;
-    const created = await apiRequest<Business>('/api/businesses', { body: { name: label, url: siteUrl ?? undefined } });
+    const created = await apiRequest<Business>('/api/businesses', { body: { name: label, url: siteUrl ?? undefined, vertical } });
     createdId.current = created.id;
     onBusiness(created.id);
     return created.id;
@@ -72,10 +75,10 @@ export function InfoStep({
     ticker.current = setInterval(() => setPhase((p) => (p === null ? p : Math.min(p + 1, PHASES.length - 2))), 2500);
     try {
       const id = await ensureBusiness(name.trim() || hostName(normalized), normalized);
-      await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: { url: normalized } });
+      await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: { url: normalized, vertical } });
       const ex = await apiRequest<ExtractionResult>('/api/extract', { body: { url: normalized, business_id: id }, timeoutMs: 90_000 });
       setPhase(PHASES.length - 1);
-      const draft = draftFromExtraction(ex, status?.owner_name ?? '');
+      const draft = withPackDefaults(draftFromExtraction(ex, status?.owner_name ?? ''), vertical, lang);
       // Save immediately so a refresh (or another device) resumes at review with these values.
       await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: toBusinessPatch(draft) });
       await apiRequest(`/api/businesses/${id}/onboarding-status/knowledge`, {
@@ -104,13 +107,9 @@ export function InfoStep({
     setBusyManual(true);
     try {
       const id = await ensureBusiness(name.trim(), normalized);
-      await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: { name: name.trim(), ...(normalized ? { url: normalized } : {}) } });
-      const blank: KnowledgeDraft = {
-        name: name.trim(), ownerName: status?.owner_name ?? '', serviceArea: '',
-        hours: draftFromExtraction({ name: '', services: [], hours: {}, service_area: [], faqs: [], pricing_notes: '', confidence: 'low', source: 'template' }).hours,
-        services: [{ uid: nextUid(), name: '', description: '', price: '', duration: '' }],
-        faqs: [], pricingNotes: '',
-      };
+      await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: { name: name.trim(), vertical, ...(normalized ? { url: normalized } : {}) } });
+      // Pre-filled with this trade's services, FAQs and hours: every line stays editable on the next screen.
+      const blank: KnowledgeDraft = draftFromPack(vertical, lang, status?.owner_name ?? '', name.trim());
       await onReady(blank, { source: 'manual', confidence: 'manual', url: normalized }, id);
     } catch (err) {
       setFormError((err as Error).message);
@@ -160,6 +159,8 @@ export function InfoStep({
       ) : null}
 
       <Card className="mt-6 p-5">
+        <VerticalPicker value={vertical} onChange={setVertical} lang={lang} disabled={busyManual} />
+        <div className="my-5 h-px bg-line" aria-hidden="true" />
         <form onSubmit={readWebsite} noValidate>
           <TextField
             label="Business website" value={url} autoFocus inputMode="url" autoComplete="url" placeholder="miamicoolair.com"

@@ -187,7 +187,7 @@ const TOOL_SPECS: Record<ToolName, { description: string; properties: Record<str
     required: ['amount_cents', 'description'],
   },
   flag_emergency: {
-    description: 'Mark the call as an emergency and alert the owner immediately. Use for leaks, burning smells, no cooling with a vulnerable occupant, or total failure in extreme heat.',
+    description: 'Mark the call as an emergency and alert the owner immediately. Use for what the EMERGENCIES section of your instructions lists as an emergency, and always when anyone is in danger (after telling them to call 911).',
     properties: {
       reason: { type: 'string', description: 'One sentence on why it is an emergency.' },
       customer_name: { type: 'string', description: "Caller's name." },

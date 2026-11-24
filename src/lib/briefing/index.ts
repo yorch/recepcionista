@@ -12,6 +12,7 @@ import { formatCents } from '@/lib/money';
 import type { Booking, Briefing, Business, Call } from '@/lib/types';
 import { synthesizeBriefing } from './tts';
 import { logger } from '@/lib/log';
+import { packOf, tx } from '@/lib/verticals';
 
 const log = logger('briefing');
 
@@ -144,7 +145,7 @@ function fallbackScript(
 
   const emergencies = calls.filter((c) => c.urgency === 'emergency').length;
   if (emergencies > 0) {
-    parts.push(`Manejé ${emergencies === 1 ? 'una emergencia' : emergencies + ' emergencias'} hoy — el cliente quedó tranquilo y el tech está enterado.`);
+    parts.push(`Manejé ${emergencies === 1 ? 'una emergencia' : emergencies + ' emergencias'} hoy — el cliente quedó tranquilo y ${tx(packOf(business).briefing.providerWord, 'es')} está enterado.`);
   }
 
   if (flagged.length === 0) {
@@ -201,8 +202,8 @@ async function narrate(
       {
         role: 'system',
         content:
-          `You write a 45-second voice note from an AI receptionist to the owner of a small local service business called "${business.name}". ` +
-          'Write in natural SPANGLISH — Spanish sentence structure with the English trade words this business would use (booked, deposit, tech, the service names). ' +
+          `You write a 45-second voice note from an AI receptionist to the owner of a small local ${packOf(business).label.en.toLowerCase()} business called "${business.name}". ` +
+          `Write in natural SPANGLISH — Spanish sentence structure with the English trade words this business would use (${packOf(business).briefing.tradeWords}). ` +
           'Warm, spoken, first person. 110-140 words. No bullet points, no headers, no markdown. ' +
           'Open with "Hola" and the owner\'s name from the data (just "Hola." when the owner is null). Name the real bookings with real times. Say the money collected. ' +
           'End with the ONE thing needing attention, or say nothing is pending. Close with "Eso es todo."',

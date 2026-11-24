@@ -52,7 +52,7 @@ function kbIsStale(kb: KnowledgeBase, business: Business): boolean {
  * A correct curated prompt is left untouched so owner edits survive re-runs.
  */
 function kbNeedsRegen(kb: KnowledgeBase, business: Business): boolean {
-  return promptIsDeficient(kb.system_prompt) || kbIsStale(kb, business);
+  return promptIsDeficient(kb.system_prompt, business.vertical) || kbIsStale(kb, business);
 }
 
 /**
@@ -201,10 +201,10 @@ async function provision(
         if (business.url) {
           // A real URL that cannot be scraped must fail loudly — the user
           // needs to know their agent would be talking about the wrong trade.
-          const extraction = await extractFromUrl(business.url);
+          const extraction = await extractFromUrl(business.url, business.vertical);
           generated = generateKnowledgeBase(extraction, business);
         } else {
-          generated = generateKnowledgeBase(templateResult(business.name), business);
+          generated = generateKnowledgeBase(templateResult(business.name, business.vertical, business.locale_default === 'es' ? 'es' : 'en'), business);
         }
       }
       kb = await upsertKnowledgeBase(id, generated);

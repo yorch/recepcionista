@@ -15,6 +15,7 @@ import { ok, fail, readJson } from '@/lib/http';
 import { demoModeEnabled } from '@/lib/auth';
 import { logger } from '@/lib/log';
 import type { Booking, Call, PaymentLink, SmsLog } from '@/lib/types';
+import { packOf } from '@/lib/verticals';
 
 export const dynamic = 'force-dynamic';
 
@@ -140,7 +141,7 @@ export async function POST(req: Request) {
         {
           role: 'system',
           content:
-            'Summarize this HVAC service call in one sentence for the owner. Name the problem, the urgency, and what was booked. No preamble.',
+            `Summarize this ${packOf(business).label.en} service call in one sentence for the owner. Name the problem, the urgency, and what was booked. No preamble.`,
         },
         { role: 'user', content: script.transcript },
       ],

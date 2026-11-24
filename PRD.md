@@ -36,7 +36,8 @@ A background job runner texts the owner a briefing link at 18:00 local time and 
 ## 2. Target market
 
 - **Primary:** owner-operated HVAC, plumbing and electrical businesses, one to five people, in Florida
-  (Miami-Dade first). Owners often answer the phone on a job, or miss calls.
+  (Miami-Dade first). Cleaning, landscaping, dental and general service businesses are supported by vertical
+  templates (`docs/verticals.md`); HVAC remains the default and the best-exercised pack. Owners often answer the phone on a job, or miss calls.
 - **Language:** English- and Spanish-speaking callers. Bilingual is the wedge; the product itself is not
   Miami-only (nothing in the code restricts the market). Numbers are US-only (see section 5.4).
 - **Not sized.** No market-size, call-volume or willingness-to-pay data is in this repo. The v1.0 claim that
@@ -131,6 +132,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Owner alert phone verification (SMS code, rate limited) | Shipped | `src/lib/messaging/owner-verify.ts`, `src/app/api/businesses/[id]/owner-phone/verify/*` |
 | Carrier call-forwarding instructions (AT&T, T-Mobile, Verizon, GSM, landline, VoIP) | Shipped | `src/app/onboarding/forwarding.ts` |
 | Test-call step (polls until the first call) | Shipped | `src/app/onboarding/step-test.tsx` |
+| Vertical templates: seven trade packs (prompt, emergency rules, services, FAQs, SMS wording, deposit default), chosen in onboarding and Settings, owner-only change with step-up that never overwrites edited knowledge | Shipped | `src/lib/verticals/`, `docs/verticals.md`, `src/app/api/businesses/[id]/route.ts`, `tests/verticals-pure.test.ts`, `tests/integration/verticals.test.ts` |
 | Minimum content checks (5 services, 3 FAQs) | Shipped (gate: 3 priced services, hours, 1 FAQ; 5 and 3 recommended) | `src/lib/kb/readiness.ts`, provision 422 `kb_incomplete`, checklist on Brain and onboarding |
 
 ### 5.4 Phone and voice
@@ -227,7 +229,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 - Live human transfer or a staffed answering service.
 - Google Calendar or other external calendar sync. The internal calendar is the source of truth.
 - Card data over the phone or inside the app. Deposits use Stripe-hosted payment links.
-- Legal advice, HIPAA, PCI scope, data residency.
+- Legal advice, HIPAA (the dental template is not a HIPAA-compliant product), PCI scope, data residency.
 - Native mobile app. The dashboard is responsive web.
 
 ## 7. Architecture

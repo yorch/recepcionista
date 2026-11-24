@@ -10,7 +10,8 @@
  *
  * `score` is 0-100 (weighted, partial credit): a progress meter, not a gate. Only `blockers` gate.
  */
-import type { FAQ, Hours, Service } from '@/lib/types';
+import type { FAQ, Hours, Service, Vertical } from '@/lib/types';
+import { packOf, tx } from '@/lib/verticals';
 
 export const MIN_PRICED_SERVICES = 3;
 export const RECOMMENDED_PRICED_SERVICES = 5;
@@ -36,7 +37,7 @@ export interface Readiness {
 
 export interface ReadinessKb { services: Pick<Service, 'name' | 'base_price'>[]; faqs: Pick<FAQ, 'question' | 'answer'>[] }
 /** The business facts that live outside the KB. Omit a field to skip its check (unknown is not "missing"). */
-export interface ReadinessFacts { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null }
+export interface ReadinessFacts { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null; /** The business's trade: only used to give an example service in the messages (the default vertical when null). */ vertical?: Vertical | null }
 
 const hasText = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0;
 
@@ -51,7 +52,8 @@ export function kbReadiness(kb: ReadinessKb | null | undefined, facts: Readiness
   score += (Math.min(priced, MIN_PRICED_SERVICES) / MIN_PRICED_SERVICES) * 30;
   score += (Math.min(priced, RECOMMENDED_PRICED_SERVICES) / RECOMMENDED_PRICED_SERVICES) * 10;
   if (priced < MIN_PRICED_SERVICES) {
-    blockers.push({ key: 'services', message: `Add at least ${MIN_PRICED_SERVICES} services with a starting price (you have ${priced}).` });
+    const example = facts.vertical === undefined ? '' : ` For example: ${tx(packOf(facts.vertical).services[0].name)}.`;
+    blockers.push({ key: 'services', message: `Add at least ${MIN_PRICED_SERVICES} services with a starting price (you have ${priced}).${example}` });
   } else if (priced < RECOMMENDED_PRICED_SERVICES) {
     warnings.push({ key: 'services', message: `${RECOMMENDED_PRICED_SERVICES} or more priced services lets her answer more calls (you have ${priced}).` });
   }
@@ -80,8 +82,8 @@ export function kbReadiness(kb: ReadinessKb | null | undefined, facts: Readiness
 }
 
 /** Readiness of a saved business + KB. */
-export function readinessOf(kb: ReadinessKb | null | undefined, business: { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null }): Readiness {
-  return kbReadiness(kb, { hours: business.hours ?? {}, service_area: business.service_area ?? [], owner_name: business.owner_name ?? null });
+export function readinessOf(kb: ReadinessKb | null | undefined, business: { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null; vertical?: Vertical | null }): Readiness {
+  return kbReadiness(kb, { hours: business.hours ?? {}, service_area: business.service_area ?? [], owner_name: business.owner_name ?? null, vertical: business.vertical ?? null });
 }
 
 /** The editable onboarding draft (prices as dollar strings, hours per day). Mirrors components/knowledge/model.ts without importing it. */
@@ -93,13 +95,14 @@ export interface ReadinessDraft {
   faqs: { question: string; answer: string }[];
 }
 
-export function readinessOfDraft(d: ReadinessDraft): Readiness {
+export function readinessOfDraft(d: ReadinessDraft, vertical?: Vertical | null): Readiness {
   return kbReadiness(
     { services: d.services.map((s) => ({ name: s.name, base_price: Number(String(s.price).replace(/[$,\s]/g, '')) })), faqs: d.faqs },
     {
       hours: Object.fromEntries(Object.entries(d.hours).map(([k, v]) => [k, v.open ? { open: v.from, close: v.to } : null])),
       service_area: d.serviceArea.split(/[,\n;]/).map((a) => a.trim()).filter(Boolean),
       owner_name: d.ownerName,
+      ...(vertical !== undefined ? { vertical } : {}),
     },
   );
 }
