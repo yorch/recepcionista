@@ -1,6 +1,6 @@
 # Monetization proposal
 
-- **Date:** 2026-11-23
+- **Date:** 2026-11-24
 - **Status:** proposal. Nothing here is priced in Stripe yet. The app ships with an env-driven price (`STRIPE_PRICE_ID`) and a free-text display string (`NEXT_PUBLIC_PLAN_PRICE_DISPLAY`).
 - **Rule for this document:** every external vendor price is a placeholder or range and must be checked against the vendor's current pricing page before use. Nothing here is a vendor price fact.
 
@@ -13,16 +13,17 @@
 | Plans | One monthly recurring price (Stripe `STRIPE_PRICE_ID`), plan label `BILLING_PLAN_NAME` (default `standard`) | `docs/billing.md`, `src/lib/providers/stripe-billing.ts` |
 | Free trial | `BILLING_TRIAL_DAYS`, default **7**, range 0 to 90. Card on file required at Checkout. | `src/lib/providers/stripe-billing.ts` (`DEFAULT_TRIAL_DAYS = 7`) |
 | One trial per person | Normalised owner email and Stripe card fingerprint, stored as HMAC. A repeat starts paid. | `src/lib/billing/trial.ts`, `docs/billing.md` |
-| Monthly text cap | `PLAN_SMS_CAP`, default **500** per business per calendar month (business time zone). Per-business override column wins. | `src/lib/db/usage.ts` |
-| Monthly call-minute cap | `PLAN_CALL_MINUTES_CAP`, default **300** minutes per business per month. Per-business override wins. | `src/lib/db/usage.ts` |
+| Monthly text cap | `PLAN_SMS_CAP`, default **500 SMS segments** per business per calendar month (business time zone), reserved atomically before each send. Per-business override column wins. | `src/lib/db/usage.ts` (`reserveSms`) |
+| Trial caps | While trialing: min(`TRIAL_SMS_CAP`, plan), default **50** segments; min(`TRIAL_CALL_MINUTES_CAP`, plan), default **30** minutes. Applied while billing is enforced. | `src/lib/db/usage.ts` (`DEFAULT_TRIAL_SMS_CAP`, `DEFAULT_TRIAL_CALL_MINUTES_CAP`) |
+| Monthly call-minute cap | `PLAN_CALL_MINUTES_CAP`, default **300** minutes per business per month. Per-business override wins. Forwarded-call minutes count too. | `src/lib/db/usage.ts`, `src/lib/voice/forward-metering.ts` |
 | Past-due grace | `BILLING_PAST_DUE_GRACE_DAYS`, default **5** days of continued service | `src/lib/db/usage.ts` |
 | Gate | No number or agent is provisioned without an active or trialing plan in production | `src/lib/billing/gate.ts` |
-| Over cap | Texts are logged `blocked_cap` (owner alerts and STOP/HELP replies still go out and count). Calls get an out-of-service line and a 60-second cut-off. | `docs/compliance.md` |
+| Over cap | Customer texts are logged `blocked_cap`. Owner alerts are exempt from the plan cap (own hourly budget, counted after sending); STOP/HELP replies still go out. Calls get an out-of-service line; the 60-second cut-off needs the agent's initiation override. | `src/lib/messaging/index.ts`, `src/lib/voice/owner-alert.ts`, `src/lib/voice/capacity.ts`, `docs/known-limitations.md` |
 | Customer billing | Stripe Checkout, Customer Portal (cancel at period end), dunning emails on failure | `src/app/api/billing/*`, `docs/billing.md` |
 
-**Counting detail that affects cost.** The text cap counts one unit per message send, not per SMS segment (`src/lib/messaging/index.ts`, `meterSms(businessId, n = 1)`). A long message is billed by the carrier per segment, so the cap understates real text cost. Call minutes are added once per conversation by the post-call webhook. A conversation whose post-call never arrives is not metered, which understates call cost.
+**Counting detail that affects cost.** The text cap counts SMS segments using the GSM-7/UCS-2 rules of `smsSegments` (`src/lib/messaging/policy.ts`), so a long text costs what the carrier bills for it. The segments are reserved before the send and given back if the send fails (`reserveSms` in `src/lib/db/usage.ts`). Call minutes are added once per conversation by the post-call webhook, and forwarded-call minutes come from Twilio callbacks. A conversation whose post-call never arrives is not metered, which understates call cost. Segment counts can differ from the carrier invoice by a segment in edge cases.
 
-**Not built:** add-on minute packs, extra numbers per business (each business has one `phone` field), annual prepay, per-location pricing, trial-specific caps. See section 6.
+**Not built:** add-on minute packs, extra numbers per business (each business has one `phone` field), annual prepay, per-location pricing, a warning before a cap is reached. See section 6.
 
 ## 2. Pricing model proposal
 
@@ -87,15 +88,15 @@ Example with placeholders: P = $149, f = 3% + $0.30 (verify current Stripe fees)
 1. Start with the current defaults (500 texts, 300 minutes) and do not change them before measuring. The app already counts usage per business.
 2. After 30 days with real traffic, set the cap at about the 90th percentile of usage for paying businesses, not the average.
 3. Use the per-business override columns for exceptions (for example a high-volume plumber). Do not change the global default for one customer.
-4. Warn the owner at 80% of each cap. There is no warning email today. Add one before the first paid cohort.
-5. Make the trial cap lower than the paid cap (section 5).
+4. Warn the owner at 80% of each cap. Not built: the dashboard banner appears only once a cap is reached, and there is no warning email. Add one before the first paid cohort.
+5. Keep the trial cap lower than the paid cap. Built: 50 texts and 30 minutes while trialing (section 5).
 
 ## 4. Upsell paths (none built; order of build)
 
 | Path | What it needs | Notes |
 | --- | --- | --- |
 | **Minute packs** (for example +100 min for a fixed fee) | Second Stripe price; a per-business cap override bump on payment; webhook handling | Cheapest path. Keeps the flat-plan model. |
-| **Text packs** (+500 texts) | Same as minute packs | Count segments before selling this (section 6). |
+| **Text packs** (+500 segments) | Same as minute packs | Segment counting is built, so a pack can be sized in segments. |
 | **Extra numbers** (second line or department line) | Multiple numbers per business. Today each business has one `phone` field and one agent. | Real engineering work in provisioning and routing. |
 | **Multi-location** | Multiple businesses under one billing account. Today one owner account equals one business. | Largest change. Defer until demand is proven. |
 | **Live human backup** (human answers after hours, or on transfer) | Human-answering partner or in-house on-call; live transfer is not built | Competitors sell this as the premium tier (see `competitors.md`). Adds cost and an operations burden. |
@@ -103,7 +104,7 @@ Example with placeholders: P = $149, f = 3% + $0.30 (verify current Stripe fees)
 
 ## 5. Trial and churn considerations
 
-**Trial cost exposure.** A trialing business can use the full monthly cap (300 minutes, 500 texts) within the trial period. That is the cost in section 3.2, with no revenue yet. The code has no trial-specific cap; the only controls are the per-business override columns. Recommendation: set a lower default override at trial start (for example 60 minutes and 100 texts) and raise it on conversion. This needs a small code change in `src/lib/db/usage.ts` and is not built.
+**Trial cost exposure.** A trialing business is capped at 30 call minutes and 50 texts (segments) by default (`TRIAL_CALL_MINUTES_CAP`, `TRIAL_SMS_CAP`, `src/lib/db/usage.ts`), so the trial cannot reach the full paid cap. At the trial cap, using the section 3.2 assumptions, the provider cost is roughly 30 x $0.10 to $0.30 for calls plus 50 x 1.5 x $0.01 to $0.02 for texts, about $4 to $11 (ASSUMPTION; before the number cost). Raising a trial to the paid cap is a per-business override, not a default. These caps apply while billing is enforced (`BILLING_ENFORCED`); see `docs/known-limitations.md`.
 
 **Trial length.** Seven days is short for an owner who must verify a phone, review the knowledge base, and forward the line. The "Connect" step can take days if the carrier's forwarding is unclear. Test 14 days against 7 days in the first cohort and watch the activation metric (PRD section 10).
 
@@ -117,15 +118,16 @@ Example with placeholders: P = $149, f = 3% + $0.30 (verify current Stripe fees)
 - Past-due cancellations. The 5-day grace period plus dunning emails are the controls; measure recovery rate.
 - Over-cap moments. A blocked call is a visible failure to the owner. Alert before the cap, not after.
 
-**Cancellation.** Portal cancellation runs at period end (`cancel_at_period_end`), which is the right default. Do not add a pause option until there is demand; a pause would need a new billing state.
+**Cancellation.** Portal cancellation runs at period end (`cancel_at_period_end`), which is the right default. Do not add a pause option until there is demand; a pause would need a new billing state. Canceled tenants' provider resources are released only by the operator script after a grace period (default 30 days, with a heads-up mail); a later resubscription gets a new number (`scripts/release-canceled-tenants.ts`).
 
 ## 6. Gaps that block the pricing model
 
-1. **Segment-based text metering.** Without it the text cap undercounts cost. Fix before the first paid cohort.
-2. **Trial-specific caps.** Section 5. Fix before opening signup widely.
-3. **Missed post-call metering.** A call whose post-call webhook never arrives is never metered. Add a reconciliation or a fallback duration from the provider.
-4. **Cap warnings to the owner.** Section 3.4.
-5. **Mock number fallback.** A failed Twilio purchase assigns a fake number and sets the business live (see PRD section 9). A fake number consumes no cost but also gives the owner a line that never rings. This is a churn risk and a billing-trust risk.
+Resolved since the 2026-11-23 draft (verified in code): segment-based text metering (`reserveSms`); trial-specific caps (`TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP`); the mock-number fallback (a failed purchase now fails the provisioning step with 502/503 and never issues a fake number once Twilio is configured or in production).
+
+Still open:
+
+1. **Missed post-call metering.** A call whose post-call webhook never arrives is never metered. Add a reconciliation or a fallback duration from the provider.
+2. **Cap warnings to the owner.** Section 3.4. Only the reached-cap banner exists.
 
 ## 7. Items to verify before any public price
 
