@@ -321,21 +321,30 @@ async function upsertTool(name: ToolName): Promise<string | null> {
   return json.id ?? null;
 }
 
-/** Created once per process; seven round-trips on every call would be wasteful. */
-const toolIdCache = new Map<ToolName, string>();
+/**
+ * Tool ids are cached per process (seven round-trips on every call would be wasteful) but only for TOOL_ID_TTL_MS: another instance
+ * (or `deleteAgentTools` after the last tenant was released) may delete/recreate the workspace tools, and a stale id here would register
+ * agents against deleted tools. A provider answer that says the ids are bad also flushes the cache (see createOrUpdateAgent).
+ */
+export const TOOL_ID_TTL_MS = 10 * 60_000;
+const toolIdCache = new Map<ToolName, { id: string; at: number }>();
+export const clearToolIdCache = (): void => toolIdCache.clear();
+const cachedToolIds = (): boolean => [...toolIdCache.values()].some((e) => Date.now() - e.at < TOOL_ID_TTL_MS);
 
-async function ensureToolIds(): Promise<string[]> {
+async function ensureToolIds(opts: { fresh?: boolean } = {}): Promise<string[]> {
+  if (opts.fresh) toolIdCache.clear();
   const ids = await Promise.all(TOOL_NAMES.map(async (name) => {
     const cached = toolIdCache.get(name);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.at < TOOL_ID_TTL_MS) return cached.id;
     const id = await upsertTool(name);
-    if (id) toolIdCache.set(name, id);
+    if (id) toolIdCache.set(name, { id, at: Date.now() });
+    else toolIdCache.delete(name);
     return id;
   }));
   return ids.filter((id): id is string => Boolean(id));
 }
 
-async function agentBody(business: Business, kb: KnowledgeBase | null) {
+async function agentBody(business: Business, kb: KnowledgeBase | null, opts: { freshTools?: boolean } = {}) {
   let prompt = kb?.system_prompt?.trim()
     || buildSystemPrompt(business, {
       services: kb?.services ?? [],
@@ -372,7 +381,7 @@ async function agentBody(business: Business, kb: KnowledgeBase | null) {
           llm: 'gpt-4o-mini',
           temperature: 0.4,
           timezone: business.timezone || 'America/New_York',
-          tool_ids: await ensureToolIds(),
+          tool_ids: await ensureToolIds({ fresh: opts.freshTools }),
         },
       },
       tts: {
@@ -502,64 +511,79 @@ export async function createOrUpdateAgent(
   }
 
   const started = Date.now();
-  const body = JSON.stringify(await agentBody(business, kb));
-  try {
-    if (existing && !existing.startsWith('mock_')) {
-      const res = await fetch(`${API}/convai/agents/${existing}`, {
-        method: 'PATCH',
+  // The ids in the cache may be stale (another instance deleted/recreated the workspace tools): the provider then rejects the
+  // body with a 4xx. Retry ONCE with freshly looked-up ids before treating it as a failure.
+  const looksLikeBadToolIds = (status: number) => status === 400 || status === 404 || status === 422;
+  let freshTools = false;
+  for (let attempt = 0; ; attempt++) {
+    const usedCache = !freshTools && cachedToolIds();
+    const body = JSON.stringify(await agentBody(business, kb, { freshTools }));
+    const retryWithFreshTools = (status: number, step: string): boolean => {
+      if (attempt > 0 || !usedCache || !looksLikeBadToolIds(status)) return false;
+      log.warn('agent.stale_tool_ids', { business: business.id, step, status, action: 'flushing the tool-id cache and retrying once' });
+      freshTools = true;
+      return true;
+    };
+    try {
+      if (existing && !existing.startsWith('mock_')) {
+        const res = await fetch(`${API}/convai/agents/${existing}`, {
+          method: 'PATCH',
+          headers: headers(),
+          body,
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res.ok) {
+          await rememberAgent(business.id, existing);
+          // Success was silent before, so the account drifted away from the DB with
+          // no local record of which agent was created, updated or by whom.
+          log.info('agent.updated', {
+            agent: existing,
+            business: business.id,
+            name: business.name,
+            ms: Date.now() - started,
+          });
+          await ensureInitiationWebhook(existing);
+          return { agent_id: existing, mock: false, created: false };
+        }
+        if (retryWithFreshTools(res.status, 'update')) continue;
+        log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
+      }
+
+      const res = await fetch(`${API}/convai/agents/create`, {
+        method: 'POST',
         headers: headers(),
         body,
         signal: AbortSignal.timeout(15_000),
       });
-      if (res.ok) {
-        await rememberAgent(business.id, existing);
-        // Success was silent before, so the account drifted away from the DB with
-        // no local record of which agent was created, updated or by whom.
-        log.info('agent.updated', {
-          agent: existing,
+      if (!res.ok) {
+        if (retryWithFreshTools(res.status, 'create')) continue;
+        const detail = await res.text().catch(() => '');
+        log.error('agent.create_failed', {
           business: business.id,
-          name: business.name,
-          ms: Date.now() - started,
+          status: res.status,
+          detail: detail.slice(0, 200),
         });
-        await ensureInitiationWebhook(existing);
-        return { agent_id: existing, mock: false, created: false };
+        return { agent_id: existing || `mock_agent_${business.id}`, mock: true, error: `create ${res.status}` };
       }
-      log.warn('agent.update_failed', { agent: existing, status: res.status, recreating: true });
-    }
-
-    const res = await fetch(`${API}/convai/agents/create`, {
-      method: 'POST',
-      headers: headers(),
-      body,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      log.error('agent.create_failed', {
+      const json = await res.json() as { agent_id?: string };
+      const agentId = json.agent_id || '';
+      if (!agentId) return { agent_id: existing, mock: true, error: 'no agent_id returned' };
+      await rememberAgent(business.id, agentId);
+      log.info('agent.created', {
+        agent: agentId,
         business: business.id,
-        status: res.status,
-        detail: detail.slice(0, 200),
+        name: business.name,
+        ms: Date.now() - started,
       });
-      return { agent_id: existing || `mock_agent_${business.id}`, mock: true, error: `create ${res.status}` };
+      await ensureInitiationWebhook(agentId);
+      return { agent_id: agentId, mock: false, created: true };
+    } catch (err) {
+      return {
+        agent_id: existing || `mock_agent_${business.id}`,
+        mock: true,
+        error: (err as Error).message,
+      };
     }
-    const json = await res.json() as { agent_id?: string };
-    const agentId = json.agent_id || '';
-    if (!agentId) return { agent_id: existing, mock: true, error: 'no agent_id returned' };
-    await rememberAgent(business.id, agentId);
-    log.info('agent.created', {
-      agent: agentId,
-      business: business.id,
-      name: business.name,
-      ms: Date.now() - started,
-    });
-    await ensureInitiationWebhook(agentId);
-    return { agent_id: agentId, mock: false, created: true };
-  } catch (err) {
-    return {
-      agent_id: existing || `mock_agent_${business.id}`,
-      mock: true,
-      error: (err as Error).message,
-    };
   }
 }
 
@@ -656,7 +680,12 @@ export async function deleteAgent(agentId: string, deps: ReleaseCallDeps = {}): 
   const doFetch = deps.fetchImpl ?? fetch;
   const id = (agentId || '').trim();
   if (!id) return { ok: true, already_deleted: true };
-  if (!env.ELEVENLABS_API_KEY || id.startsWith('mock_')) return { ok: true, mock: true };
+  if (id.startsWith('mock_')) return { ok: true, mock: true };
+  if (!env.ELEVENLABS_API_KEY) {
+    // A non-mock id is a REAL agent. Reporting "mock success" here would let the caller drop its reference and orphan it.
+    log.error('agent.delete_unconfigured', { agent: id, reason: 'ELEVENLABS_API_KEY is not set: cannot delete a real agent' });
+    return { ok: false, error: 'ELEVENLABS_API_KEY is not set: the real agent was NOT deleted and the database reference is kept' };
+  }
   const h = { 'content-type': 'application/json', 'xi-api-key': env.ELEVENLABS_API_KEY };
   let unbound = false;
   try {

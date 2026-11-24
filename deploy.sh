@@ -135,18 +135,24 @@ if [[ "${OWNER_PHONE_GRANDFATHER:-}" == "true" ]]; then
     || die "OWNER_PHONE_GRANDFATHER=true needs OWNER_PHONE_GRANDFATHER_ACK=i-understand (and, strongly, OWNER_PHONE_GRANDFATHER_UNTIL / _BEFORE). Without the ack the app ignores it. See docs/runbook.md section 6."
   echo "WARNING: OWNER_PHONE_GRANDFATHER=true: unverified owner phones receive alerts that bypass opt-outs and the country allow-list. Turn it off once owners verified." >&2
 fi
-# Background jobs (docs/runbook.md "Background jobs"): JOBS must be on, off or empty (= on in production); an invalid value is refused
-# instead of silently running the default. Off is allowed but loud: no daily briefing, no gratitude sweep, no cleanup, no retention purge.
-case "${JOBS:-}" in
-  ""|on|off) ;;
-  *) die "JOBS is '${JOBS}' in .env: use on or off (empty = on in production)." ;;
+# Background jobs (docs/runbook.md "Background jobs"): JOBS takes the same values the app accepts (on/true/1/yes, off/false/0/no, or
+# empty = on in production); anything else is refused instead of silently running the default. Off is allowed but loud: no daily
+# briefing, no gratitude sweep, no cleanup, no retention purge.
+jobs_value="$(printf '%s' "${JOBS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "${jobs_value}" in
+  ""|on|true|1|yes|off|false|0|no) ;;
+  *) die "JOBS is '${JOBS}' in .env: use on or off (also accepted: true/false, 1/0, yes/no; empty = on in production)." ;;
 esac
-if [[ "${JOBS:-}" == "off" ]]; then
-  echo "WARNING: JOBS=off. The 6 PM daily briefing, the hourly gratitude sweep, the expired-row cleanup and the retention purge will NOT run (docs/runbook.md)." >&2
-fi
-for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP; do
+case "${jobs_value}" in
+  off|false|0|no)
+    echo "WARNING: JOBS=${JOBS}. The 6 PM daily briefing, the hourly gratitude sweep, the expired-row cleanup and the retention purge will NOT run (docs/runbook.md)." >&2 ;;
+esac
+for v in JOBS_TICK_SECONDS TRIAL_SMS_CAP TRIAL_CALL_MINUTES_CAP OWNER_ALERT_HOURLY_LIMIT; do
   [[ -z "${!v:-}" || "${!v}" =~ ^[0-9]+$ ]] || die "${v} is '${!v}' in .env: it must be a whole number (docs/env-vars.md)."
 done
+# Default area code for newly bought numbers (a business's own owner-phone area code wins): three digits, first 2-9.
+[[ -z "${TWILIO_AREA_CODE:-}" || "${TWILIO_AREA_CODE}" =~ ^[2-9][0-9]{2}$ ]] \
+  || die "TWILIO_AREA_CODE is '${TWILIO_AREA_CODE}' in .env: it must be a 3-digit US/Canada area code such as 305 (docs/env-vars.md). Unset it to use 305."
 # Phone numbers: in production a failed purchase FAILS provisioning (no fake number is ever issued), so Twilio must be complete.
 if [[ -z "${TWILIO_ACCOUNT_SID:-}" || -z "${TWILIO_AUTH_TOKEN:-}" || -z "${TWILIO_PHONE_NUMBER:-}" ]]; then
   echo "WARNING: Twilio is not fully configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER). Provisioning a business will answer 503 phone_provider_not_configured: production never hands out a mock number (docs/runbook.md)." >&2

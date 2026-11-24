@@ -48,7 +48,7 @@ suite('release canceled tenants (postgres)', () => {
     const biz = await db.prisma.business.create({
       data: {
         id: `biz_rel_${name}_${run}`, name: `Rel ${name}`, status: 'live', phone: p, phoneE164: p, phoneKey: p ? p.slice(-10) : null,
-        agentId: o.agent === undefined ? `agent_${name}_${run}` : o.agent, billingStatus: o.status ?? 'canceled', plan: o.plan === undefined ? 'standard' : o.plan,
+        agentId: o.agent === undefined ? `mock_agent_${name}_${run}` : o.agent, billingStatus: o.status ?? 'canceled', plan: o.plan === undefined ? 'standard' : o.plan,
         currentPeriodEnd: o.periodEnd === undefined ? ago(60) : o.periodEnd,
       },
     });
@@ -143,10 +143,109 @@ suite('release canceled tenants (postgres)', () => {
     const young = await mk('young', { periodEnd: ago(5) });
     expect((await rel.processBusiness(young.id, { now: NOW, apply: true }, okDeps())).decision.action).toBe('wait');
     const busy = await mk('busy');
-    await db.prisma.call.create({ data: { businessId: busy.id, startedAt: ago(2) } });
+    await db.prisma.call.create({ data: { businessId: busy.id, startedAt: ago(2), durationSec: 120 } });
     expect((await rel.processBusiness(busy.id, { now: NOW, apply: false }, okDeps())).decision.action).toBe('skip');
     expect((await rel.processBusiness(busy.id, { now: NOW, apply: false, includeRecent: true }, okDeps())).decision.action).toBe('notify');
     expect(calls).toHaveLength(0);
+  });
+
+  test('F4: calls refused at the gate, hang-ups and empty calls do NOT keep a canceled tenant on skip; real calls do', async () => {
+    const noise = await mk('noise');
+    const c = (data: Record<string, unknown>) => db.prisma.call.create({ data: { businessId: noise.id, startedAt: ago(1), ...data } as never });
+    await c({ status: 'handed_off', flaggedReason: 'out_of_service:no_plan' }); // every robocall to a canceled line
+    await c({ status: 'handed_off', flaggedReason: 'out_of_service:cap_reached', durationSec: 40 }); // even a long refused call
+    await c({ durationSec: 0 });
+    await c({ durationSec: 4 }); // hang-up
+    expect(await rel.countRecentRealCalls(noise.id, ago(7))).toBe(0);
+    const facts = await rel.loadReleaseFacts(noise.id, NOW);
+    expect(facts!.recent_calls).toBe(0);
+    expect((await rel.processBusiness(noise.id, { now: NOW, apply: false }, okDeps())).decision.action).toBe('notify'); // no longer stuck on skip
+    // real activity still protects the tenant: a talk longer than the minimum, a transcript, or a booking
+    await c({ durationSec: rel.RECENT_CALL_MIN_SECONDS });
+    expect(await rel.countRecentRealCalls(noise.id, ago(7))).toBe(1);
+    await c({ transcript: 'Customer: hi' });
+    expect(await rel.countRecentRealCalls(noise.id, ago(7))).toBe(2);
+    const withBooking = await c({});
+    await db.prisma.booking.create({ data: { businessId: noise.id, callId: withBooking.id, customerName: 'A', customerPhone: '+13055550100', service: 's', scheduledAt: ago(-2), durationMinutes: 60 } as never });
+    expect(await rel.countRecentRealCalls(noise.id, ago(7))).toBe(3);
+    expect((await rel.processBusiness(noise.id, { now: NOW, apply: false }, okDeps())).decision.action).toBe('skip');
+    // calls older than the window never count
+    const old = await mk('noiseold');
+    await db.prisma.call.create({ data: { businessId: old.id, startedAt: ago(30), durationSec: 300 } });
+    expect(await rel.countRecentRealCalls(old.id, ago(7))).toBe(0);
+  });
+
+  test('lock: a release never runs while the business is being provisioned (same lease), and stale facts are re-checked under the lease', async () => {
+    const b = await mk('lock', { periodEnd: ago(60) });
+    await db.prisma.auditEvent.create({ data: { actorKind: 'system', businessId: b.id, action: 'billing.release_notice', target: 'x', meta: { notified_at: ago(10).toISOString() } } });
+    const staleFacts = (await rel.loadReleaseFacts(b.id, NOW))!;
+    expect(rel.decideRelease(staleFacts, { now: NOW }).action).toBe('release');
+    // 1) the provision route holds `provision:<id>`: nothing is mailed, nothing is deleted
+    const held = await db.acquireLease(rel.businessLeaseKey(b.id), 60_000);
+    expect(held).not.toBeNull();
+    const blocked = await rel.processBusiness(b.id, { now: NOW, apply: true, facts: staleFacts }, okDeps());
+    expect(blocked!.applied).toBe(false);
+    expect(blocked!.error).toMatch(/holds this business/);
+    expect(calls).toHaveLength(0);
+    await db.releaseLease(held!);
+    // 2) the business was reactivated after the decision was made (a Stripe webhook landed): the stale "release" is not carried out
+    await db.prisma.business.update({ where: { id: b.id }, data: { billingStatus: 'active' } });
+    const reactivated = await rel.processBusiness(b.id, { now: NOW, apply: true, facts: staleFacts }, okDeps());
+    expect(reactivated!.decision.action).toBe('skip');
+    expect(reactivated!.applied).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect((await fresh(b.id))!.phone).toBe(b.phone);
+    // 3) still canceled: it goes through, and the lease is free again afterwards
+    await db.prisma.business.update({ where: { id: b.id }, data: { billingStatus: 'canceled' } });
+    const done = await rel.processBusiness(b.id, { now: NOW, apply: true, facts: staleFacts }, okDeps());
+    expect(done!.applied).toBe(true);
+    expect(calls.length).toBeGreaterThan(0);
+    const again = await db.acquireLease(rel.businessLeaseKey(b.id), 5_000);
+    expect(again).not.toBeNull();
+    await db.releaseLease(again!);
+  });
+
+  test('F1: the real releaseNumber refuses a number held by another business (database check), and lets the holder release its own', async () => {
+    const holder = await mk('holdr');
+    const other = await mk('othr');
+    const tw = await import('@/lib/providers/twilio');
+    const fetched: string[] = [];
+    const fetchImpl = (async (u: unknown, init?: { method?: string }) => { fetched.push(`${init?.method ?? 'GET'} ${String(u)}`); return Response.json({ incoming_phone_numbers: [{ sid: 'PN9', phone_number: holder.phone }] }); }) as unknown as typeof fetch;
+    const env = { NODE_ENV: 'test', TWILIO_ACCOUNT_SID: 'ACx', TWILIO_AUTH_TOKEN: 't', TWILIO_PHONE_NUMBER: '+15005550006' } as unknown as NodeJS.ProcessEnv;
+    const refused = await tw.releaseNumber(holder.phone!, { env, fetchImpl, callerBusinessId: other.id });
+    expect(refused.ok).toBe(false);
+    expect(refused.refused).toMatch(/another business/);
+    expect(await tw.releaseNumber(holder.phone!, { env, fetchImpl })).toMatchObject({ ok: false }); // no caller: any holder blocks
+    expect(fetched).toEqual([]);
+    const own = await tw.releaseNumber(holder.phone!, { env, fetchImpl, callerBusinessId: holder.id });
+    expect(own).toMatchObject({ ok: true, sid: 'PN9' });
+    expect(fetched.some((f) => f.startsWith('DELETE'))).toBe(true);
+  });
+
+  test('F6: a half-configured provider does not report success: the DB reference is KEPT and the error is clear', async () => {
+    const b = await mk('half');
+    const facts = (await rel.loadReleaseFacts(b.id, NOW))!;
+    const out = await rel.executeRelease(facts, { notice: 'off' }, {
+      releaseNumber: async () => ({ ok: false, error: 'Twilio credentials are incomplete' }),
+      deleteAgent: async () => ({ ok: false, error: 'ELEVENLABS_API_KEY is not set' }),
+      deleteAgentTools: async () => ({ ok: true, deleted: 0, already_deleted: 0 }),
+    });
+    expect(out.errors.join(' ')).toMatch(/incomplete/);
+    expect(out.cleared).toEqual({ phone: false, agent: false });
+    const row = await fresh(b.id);
+    expect(row!.phone).toBe(b.phone);
+    expect(row!.agentId).toBe(b.agentId);
+  });
+
+  test('F1: executeRelease asks the provider to release on behalf of THIS business (the holder check excludes its own row)', async () => {
+    const b = await mk('who');
+    const facts = (await rel.loadReleaseFacts(b.id, NOW))!;
+    const seen: unknown[] = [];
+    await rel.executeRelease(facts, { notice: 'off' }, {
+      releaseNumber: async (_n: string, d?: { callerBusinessId?: string | null }) => { seen.push(d?.callerBusinessId); return { ok: true }; },
+      deleteAgent: async () => ({ ok: true }), deleteAgentTools: async () => ({ ok: true, deleted: 0, already_deleted: 0 }),
+    });
+    expect(seen).toEqual([b.id]);
   });
 
   test('a number shared with another business (same E.164) is never released at the provider; only this business\'s reference is dropped', async () => {
@@ -231,7 +330,16 @@ suite('release canceled tenants (postgres)', () => {
       expect((await fresh(b.id)).phone).toBe(b.phone);
       const step2 = (await (await call({ business_id: b.id, dry_run: false })).json()).data;
       expect(step2.decision.action).toBe('wait');
-      const forced = (await (await call({ business_id: b.id, dry_run: false, skip_notice: true })).json()).data;
+      // "mock providers" means NO provider variables at all (other test files leave a Twilio token behind; a half-configured
+      // provider is an error now, not a mock success: docs/review/08 F6)
+      const saved: Record<string, string | undefined> = {};
+      for (const k of ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'ELEVENLABS_API_KEY']) { saved[k] = process.env[k]; delete process.env[k]; }
+      let forced;
+      try {
+        forced = (await (await call({ business_id: b.id, dry_run: false, skip_notice: true })).json()).data;
+      } finally {
+        for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+      }
       expect(forced.decision).toEqual({ action: 'release', notice: 'skipped' });
       const after = await fresh(b.id);
       expect(after.phone).toBeNull();

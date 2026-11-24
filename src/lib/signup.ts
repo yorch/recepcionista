@@ -8,6 +8,7 @@ import { logger } from '@/lib/log';
 import { validateBusinessName, validatePublicEmail, validateStrongPassword } from '@/lib/user-policy';
 import type { User } from '@/lib/types';
 export { signupAvailability, signupConfigWarning, turnstileFullyConfigured } from '@/lib/signup-config';
+import { turnstileFullyConfigured } from '@/lib/signup-config';
 export type { SignupAvailability } from '@/lib/signup-config';
 
 const log = logger('signup');
@@ -40,8 +41,15 @@ export function parseSignupBody(body: unknown): SignupInput {
   return { ok: true, email, password: b.password as string, businessName: name.value, honeypot: false, turnstileToken };
 }
 
-/** Cloudflare Turnstile is on when its secret key is configured. */
+/** The Turnstile secret key is configured (the server COULD verify tokens). Whether it MUST is `captchaRequired`. */
 export const turnstileEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => Boolean((env.TURNSTILE_SECRET_KEY ?? '').trim());
+
+/**
+ * Must this signup carry a verified Turnstile token? Only when BOTH halves are configured (secret + public site key): without the
+ * site key the page shows no widget, so no client can produce a token and demanding one would fail every signup (e.g.
+ * SIGNUP_ALLOW_WITHOUT_CAPTCHA=true next to a leftover secret). In production this is exactly `signupAvailability().captcha === 'turnstile'`.
+ */
+export const captchaRequired = (env: NodeJS.ProcessEnv = process.env): boolean => turnstileFullyConfigured(env);
 
 /**
  * Server-side Turnstile check. Only called when enabled; FAILS CLOSED (missing token, network error,

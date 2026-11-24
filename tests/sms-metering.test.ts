@@ -105,3 +105,33 @@ describe('plan and trial caps', () => {
     for (const s of ['none', 'past_due', 'canceled', 'unpaid'] as const) expect(smsCapFor({ billing_status: s }, env())).toBe(500);
   });
 });
+
+describe('smsSegments: a two-unit character never straddles a segment boundary (GSM 03.38; docs/review/08 F7)', () => {
+  test('GSM extension characters (2 septets) move whole into the next segment', () => {
+    // 152 + euro (septets 153-154) + 152: the euro does not fit in the first segment's 153, so it starts the second
+    expect(smsSegments(`${'a'.repeat(152)}€${'a'.repeat(152)}`)).toBe(3);
+    expect(smsSegments(`${'a'.repeat(151)}€${'a'.repeat(100)}`)).toBe(2); // fits exactly (151 + 2 = 153)
+    expect(smsSegments(`${'a'.repeat(152)}\u20ac`)).toBe(1); // 154 septets: still a single (<= 160) segment
+    expect(smsSegments(`${'a'.repeat(158)}€`)).toBe(1); // exactly 160 septets stays single
+    expect(smsSegments(`${'a'.repeat(159)}€`)).toBe(2); // 161 septets
+    // brute force: greedy packing never yields fewer segments than ceil(septets/153) and at most one more per segment boundary
+    for (let n = 150; n <= 160; n++) {
+      const t = `${'a'.repeat(n)}[${'b'.repeat(300 - n)}`;
+      const septets = n + 2 + (300 - n);
+      expect(smsSegments(t)).toBeGreaterThanOrEqual(Math.ceil(septets / 153));
+      expect(smsSegments(t)).toBeLessThanOrEqual(Math.ceil(septets / 153) + 1);
+    }
+  });
+  test('UCS-2 surrogate pairs (2 code units) are never split across segments', () => {
+    expect(smsSegments(`${'a'.repeat(66)}\u{1F600}${'a'.repeat(66)}`)).toBe(3);
+    expect(smsSegments(`${'á'.repeat(65)}\u{1F600}${'á'.repeat(40)}`)).toBe(2); // pair ends exactly at unit 67
+    expect(smsSegments('\u{1F600}'.repeat(35))).toBe(1); // exactly 70 units stays single
+    expect(smsSegments('\u{1F600}'.repeat(36))).toBe(2); // 72 units: 33 pairs per 67-unit segment
+  });
+  test('unchanged for plain text', () => {
+    expect(smsSegments('a'.repeat(306))).toBe(2);
+    expect(smsSegments('a'.repeat(307))).toBe(3);
+    expect(smsSegments('á'.repeat(134))).toBe(2);
+    expect(smsSegments('á'.repeat(135))).toBe(3);
+  });
+});

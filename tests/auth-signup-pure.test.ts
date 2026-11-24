@@ -68,6 +68,17 @@ describe('Turnstile and caps', () => {
     expect(signup.turnstileEnabled(env({ TURNSTILE_SECRET_KEY: ' ' }))).toBe(false);
     expect(signup.turnstileEnabled(env({ TURNSTILE_SECRET_KEY: 's' }))).toBe(true);
   });
+  test('a token is demanded only when BOTH halves are configured (a widget exists); in production that equals captcha === turnstile', () => {
+    expect(signup.captchaRequired(env({ TURNSTILE_SECRET_KEY: 's' }))).toBe(false); // secret alone: no site key, no widget, every signup would fail
+    expect(signup.captchaRequired(env({ NEXT_PUBLIC_TURNSTILE_SITE_KEY: 'k' }))).toBe(false);
+    expect(signup.captchaRequired(env({ TURNSTILE_SECRET_KEY: 's', NEXT_PUBLIC_TURNSTILE_SITE_KEY: 'k' }))).toBe(true);
+    const prod = { NODE_ENV: 'production', SIGNUP_ALLOW_WITHOUT_CAPTCHA: 'true', TURNSTILE_SECRET_KEY: 's' };
+    expect(signup.signupAvailability(env(prod))).toEqual({ open: true, captcha: 'waived' });
+    expect(signup.captchaRequired(env(prod))).toBe(false); // waived + leftover secret: signup is open and needs no token
+    const both = { ...prod, NEXT_PUBLIC_TURNSTILE_SITE_KEY: 'k' };
+    expect(signup.signupAvailability(env(both))).toEqual({ open: true, captcha: 'turnstile' });
+    expect(signup.captchaRequired(env(both))).toBe(true);
+  });
   test('verification fails closed: no token, http error, network error, timeout, success:false', async () => {
     const e = env({ TURNSTILE_SECRET_KEY: 's' });
     const json = (b: unknown, status = 200) => (async () => new Response(JSON.stringify(b), { status })) as unknown as typeof fetch;

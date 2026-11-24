@@ -37,9 +37,10 @@ Not legal advice.
 
 ### Background jobs (daily briefing, gratitude sweep, cleanup, retention)
 
-One small runner starts with the app (`src/instrumentation.ts` -> `src/lib/jobs`), never during `next build`. `JOBS=on|off` (default **on in
+One small runner starts with the app (`src/instrumentation.ts` -> `src/lib/jobs`), never during `next build`. `JOBS=on|off` (also true/false, 1/0, yes/no; default **on in
 production**, off in development/test), `JOBS_TICK_SECONDS` (default 60). It runs inside every app instance; each unit of work is fenced by a
 Postgres lease plus an idempotency claim in `processed_events`, so several instances (or a restart in the middle of a pass) never do the same work twice.
+A job checks that it still holds its lease before every paid or user-visible step (generating a briefing, texting the owner, each gratitude text): a runner that lost its lease (renewals failing for longer than the lease TTL) stops, gives its claim back and reports `lease_lost`; the next tick finishes the work. A tick reads only the narrow `live` business columns (indexed on `status`) and, after 18:00 local, two batched lookups for all due tenants; it never loads a tenant's sms or booking history (the gratitude sweep reads only the 20-48 h booking window).
 
 | Job | When | What it does |
 | --- | --- | --- |
@@ -55,6 +56,8 @@ Job runs that did work or failed are in the audit trail (`jobs.<name>`). No new 
 If a briefing never appears: check `GET /api/admin/jobs`, then the owner's phone verification, the business `status` (must be `live`) and billing; the logs line is `jobs ... briefing.failed`.
 
 ### Phone numbers fail loudly
+
+The Twilio account is SHARED by every tenant, so the purchase is guarded (docs/review/08 F1): the candidate must not be held by any business or be `TWILIO_PHONE_NUMBER`, it is reserved for this attempt (`processed_events` `number-candidate`) so two tenants provisioning at once in the same area code never buy the same one, the attempt is recorded BEFORE the purchase (`number-attempt:<attempt id>:<number>`), and the purchase is tagged with FriendlyName `recepcionista:<attempt id>`. If the purchase answer is lost (timeout/5xx) the account is re-listed with backoff (the listing can lag) and a number is adopted ONLY when it carries this attempt's tag and no business holds it; otherwise nothing is adopted and the audit row `provision.number_failed` carries `unsettled_candidate` for the operator (check Twilio Phone Numbers). The area code is the one of the owner's own phone when valid, else `TWILIO_AREA_CODE` (default 305). A bought number that cannot be saved is released ONLY when this call bought it and no other business holds it; when another business holds it the answer is 502 `number_taken` and nothing is deleted.
 
 `POST /api/businesses/:id/provision` never stores a fake number when Twilio is configured or in production. A failed search/purchase answers **502** (`number_purchase_failed`) and, without Twilio credentials in production,
 **503** (`phone_provider_not_configured`); the business stays `onboarding`, an audit event (`provision.number_failed`) is written and retrying is safe (nothing was bought, or the number that was bought is adopted/reused).
@@ -197,7 +200,7 @@ docker compose -f compose.production.yaml --profile seed run --rm seed bun scrip
 
 Defaults: 30 days of grace after the paid period ends, heads-up e-mail 7 days before (`--grace-days`, `--notify-days`), businesses with calls in the last 7 days are skipped (`--include-recent`).
 Check before the first `--apply`: `EMAIL_PROVIDER` works (the heads-up needs it), the dry-run list contains only tenants you expect, and the Twilio/ElevenLabs credentials are those of the production
-account. Never released: comped plans, a number shared with another business, `TWILIO_PHONE_NUMBER`. One business: `POST /api/admin/release-tenant` (`dry_run` defaults to true). Details and rules: docs/billing.md.
+account. Never released: comped plans, a number shared with another business or held by ANY other business row (`releaseNumber` checks the database itself), `TWILIO_PHONE_NUMBER` (compared as E.164). "Recent calls" counts only calls that were really handled: calls refused at the gate (`out_of_service:*`), hang-ups under 15 s and calls with no transcript, summary or booking are ignored, so a robocall a week no longer keeps a canceled tenant for ever. Each business is processed under the same lease as provisioning (`provision:<id>`): a release never overlaps a provision call or another release, and the facts are re-read under the lease, so a reactivation that landed after the dry run is honoured. With incomplete Twilio/ElevenLabs credentials a release FAILS (the database reference is kept, the error says which variable) instead of reporting a mock success. One business: `POST /api/admin/release-tenant` (`dry_run` defaults to true). Details and rules: docs/billing.md.
 After a release the owner can resubscribe; re-provisioning (`POST /api/businesses/:id/provision`) buys a NEW number. The ElevenLabs phone-number detach/unassign call shape is UNVERIFIED (like the rest of the phone binding):
 after the first real release check in the ElevenLabs dashboard that the agent is gone and the shared number is not assigned to a deleted agent. Twilio: confirm the number disappeared from Phone Numbers > Active numbers.
 

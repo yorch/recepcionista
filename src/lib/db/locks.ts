@@ -67,10 +67,13 @@ export async function withLease<T>(
   key: string,
   ttlMs: number,
   fn: (lease: Lease, signal: AbortSignal) => Promise<T>,
+  opts: { renewEveryMs?: number } = {},
 ): Promise<{ acquired: true; value: T } | { acquired: false }> {
   const lease = await acquireLease(key, ttlMs);
   if (!lease) return { acquired: false };
   const controller = new AbortController();
+  /** Renewal cadence: ttl/3 (never faster than 500 ms), or `opts.renewEveryMs` (tests). */
+  const every = opts.renewEveryMs ? Math.max(50, opts.renewEveryMs) : Math.max(500, Math.floor(ttlMs / 3));
   let lastRenewed = Date.now();
   const timer = setInterval(() => {
     renewLease(lease, ttlMs).then((renewed) => {
@@ -80,7 +83,7 @@ export async function withLease<T>(
       // The store is unreachable: the next beat retries, but once a full ttl passed without a renewal the lease has expired.
       if (Date.now() - lastRenewed >= ttlMs) controller.abort(new Error(`lease ${key} expired (renewal failing)`));
     });
-  }, Math.max(500, Math.floor(ttlMs / 3)));
+  }, every);
   timer.unref?.();
   try {
     return { acquired: true, value: await fn(lease, controller.signal) };

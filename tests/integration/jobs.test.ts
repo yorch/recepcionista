@@ -400,4 +400,88 @@ integration('job runner (postgres)', () => {
       });
     });
   });
+
+  describe('F8: the scheduler does not scan every tenant\'s history on every tick', () => {
+    test('a tick reads NARROW business columns and a fixed number of statements, however many tenants have finished their day', async () => {
+      const { recordQueries } = await import('@/lib/db/client');
+      const s = stubs();
+      const now = at('2027-08-02T23:30:00Z'); // 19:30 EDT: every New York tenant is past 18:00
+      const first = await Promise.all([live('America/New_York'), live('America/New_York')]);
+      // everybody gets their briefing (10 per tick; other tests leave live tenants behind), then the next ticks have nothing to do
+      const drain = async (t: Date) => { for (let i = 0; i < 40; i++) if ((await jobs.runDailyBriefings({ now: t, deps: s.deps, env: ENFORCED })).processed === 0) return; };
+      await drain(now);
+      expect(first.every((b) => s.generated.some((g) => g.id === b.id))).toBe(true);
+      const small = await recordQueries(() => jobs.runDailyBriefings({ now: at('2027-08-02T23:31:00Z'), deps: s.deps, env: ENFORCED }));
+      await Promise.all([live('America/New_York'), live('America/New_York'), live('America/New_York')]);
+      await drain(at('2027-08-02T23:32:00Z'));
+      const big = await recordQueries(() => jobs.runDailyBriefings({ now: at('2027-08-02T23:33:00Z'), deps: s.deps, env: ENFORCED }));
+      expect(small.queries.length).toBeGreaterThan(0);
+      expect(big.queries.length).toBe(small.queries.length); // constant: no per-tenant point queries after 18:00
+      expect(big.queries.length).toBeLessThanOrEqual(5);
+      const tenantReads = big.queries.filter((q) => /FROM "public"\."businesses"/.test(q));
+      expect(tenantReads.length).toBe(1);
+      expect(tenantReads[0]).not.toContain('"hours"'); // never the whole row
+      expect(tenantReads[0]).not.toContain('"name"');
+      expect(tenantReads[0]).toContain('"status"');
+    });
+
+    test('the gratitude tick loads only the booking window, never the sms/booking history', async () => {
+      const { recordQueries } = await import('@/lib/db/client');
+      const b = await live('America/Chicago');
+      // a long history: 40 old completed bookings and 40 gratitude texts, none inside the 20-48 h window
+      for (let i = 0; i < 40; i++) {
+        await prisma.booking.create({ data: { businessId: b.id, customerName: 'Old', customerPhone: `+1305555${String(1000 + i)}`, phoneE164: `+1305555${String(1000 + i)}`, service: 'x', scheduledAt: new Date(Date.now() - (10 + i) * 86400_000), durationMinutes: 60, status: 'completed' } });
+      }
+      const { queries } = await recordQueries(() => jobs.runGratitudeJob({ now: at('2027-08-03T17:00:00Z'), env: ENFORCED, businessId: b.id, force: true, deps: { sweepGratitude: async (id: string) => ({ ...(await (await import('@/lib/gratitude')).runGratitudeSweep(id)) }) } }));
+      const bookingReads = queries.filter((q) => /FROM "public"\."bookings"/.test(q));
+      expect(bookingReads.length).toBe(1);
+      expect(bookingReads[0]).toContain('"scheduled_at" >=');
+      expect(bookingReads[0]).toContain('"scheduled_at" <');
+      expect(queries.some((q) => /FROM "public"\."sms_log"/.test(q))).toBe(false); // no candidates: the sms history is not touched at all
+    });
+  });
+
+  describe('lease loss: a job that lost its lease stops before the next side effect', () => {
+    const steal = (id: string, kind: 'briefing' | 'gratitude') => prisma.provisionLock.updateMany({ where: { key: `job:${kind}:${id}` }, data: { holder: 'thief' } });
+
+    test('briefing: the lease is stolen during generation -> the owner is NOT texted by the stale holder', async () => {
+      const b = await live('America/New_York');
+      let notified = 0;
+      const generated: string[] = [];
+      const deps = {
+        async generateBriefing(id: string, date: string) { generated.push(id); await steal(id, 'briefing'); await sleep(450); return db.createBriefing({ business_id: id, date, transcript: 'x'.repeat(40) }); },
+        async notifyOwner() { notified++; return 'sent'; },
+      };
+      const r = await jobs.runDailyBriefings({ now: at('2027-09-01T23:00:00Z'), businessId: b.id, deps, env: ENFORCED, leaseRenewMs: 100 });
+      expect(generated).toEqual([b.id]);
+      expect(notified).toBe(0);
+      expect(r.items[0]).toMatchObject({ business_id: b.id, outcome: 'generated', detail: { owner_notice: 'skipped_lease_lost' } });
+      await prisma.provisionLock.deleteMany({ where: { key: `job:briefing:${b.id}` } });
+    });
+
+    test('gratitude: lease lost mid-sweep -> reported as lease_lost and the hour is given back for the next tick', async () => {
+      const b = await live('America/New_York');
+      const now = at('2027-09-01T17:00:00Z');
+      const deps = {
+        async sweepGratitude(id: string, signal?: AbortSignal) { await steal(id, 'gratitude'); await sleep(450); return { sent: 0, aborted: signal?.aborted ?? false }; },
+      };
+      const r = await jobs.runGratitudeJob({ now, businessId: b.id, deps, env: ENFORCED, leaseRenewMs: 100 });
+      expect(itemsFor(r, b.id)).toEqual(['lease_lost']);
+      expect(r.errors).toBe(1);
+      expect(await prisma.processedEvent.count({ where: { source: 'gratitude-sweep', id: `${jobs.hourBucket(now)}:${b.id}` } })).toBe(0); // claim released
+      await prisma.provisionLock.deleteMany({ where: { key: `job:gratitude:${b.id}` } });
+    });
+
+    test('runGratitudeSweep with an aborted signal sends nothing', async () => {
+      const { runGratitudeSweep } = await import('@/lib/gratitude');
+      const b = await live('America/New_York');
+      await prisma.booking.create({ data: { businessId: b.id, customerName: 'C', customerPhone: '+13055550177', phoneE164: '+13055550177', service: 'x', scheduledAt: new Date(Date.now() - 26 * 3600_000), durationMinutes: 60, status: 'completed', followupConsentAt: new Date() } });
+      const ctl = new AbortController();
+      ctl.abort();
+      const res = await runGratitudeSweep(b.id, { signal: ctl.signal });
+      expect(res.aborted).toBe(true);
+      expect(res.sent).toBe(0);
+      expect(await prisma.smsLog.count({ where: { businessId: b.id, kind: 'gratitude' } })).toBe(0);
+    });
+  });
 });

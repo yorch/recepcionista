@@ -10,11 +10,11 @@
  *            `notified_at` so the mail is never sent twice for the same cancellation)
  *   release only when now >= R AND now >= notified_at + notifyDays; so a script run that is late never mails and releases in
  *   the same breath (unless notifyDays is 0, which turns the notice off).
- * Never touched: admin-comped, trialing/active/past_due/none businesses, ones with calls in the last 7 days (unless
- * includeRecent), a number or agent that another business also uses, and the platform's own TWILIO_PHONE_NUMBER.
+ * Never touched: admin-comped, trialing/active/past_due/none businesses, ones with REAL calls in the last 7 days (unless
+ * includeRecent; out-of-service/blocked calls, hang-ups and calls with no transcript, booking or RECENT_CALL_MIN_SECONDS do not count), a number or agent that another business also uses, and the platform's own TWILIO_PHONE_NUMBER.
  */
 import { prisma } from '@/lib/db/client';
-import { clearBusinessProviderResources, recordAudit } from '@/lib/db';
+import { clearBusinessProviderResources, recordAudit, withLease } from '@/lib/db';
 import { notifyOwners } from '@/lib/billing/emails';
 import { releaseNumber, type ReleaseNumberResult } from '@/lib/providers/twilio';
 import { deleteAgent, deleteAgentTools, type ReleaseAgentResult, type ReleaseToolsResult } from '@/lib/voice/elevenlabs';
@@ -25,11 +25,16 @@ const log = logger('billing.release');
 export const DEFAULT_GRACE_DAYS = 30;
 export const DEFAULT_NOTIFY_DAYS = 7;
 export const RECENT_CALL_DAYS = 7;
+/** A call only counts as "recent activity" when it was actually answered or forwarded for at least this long (or has a transcript/booking). */
+export const RECENT_CALL_MIN_SECONDS = 15;
 export const NOTICE_ACTION = 'billing.release_notice';
 export const RELEASED_ACTION = 'billing.tenant_released';
 /** Plans that mark an admin-comped (free by decision) business. */
 export const COMP_PLANS: readonly string[] = ['legacy', 'grandfathered'];
 const DAY_MS = 24 * 60 * 60_000;
+/** Releases and provisioning of one business exclude each other through this lease (same key as the provision route). */
+const RELEASE_LEASE_MS = 90_000;
+export const businessLeaseKey = (businessId: string): string => `provision:${businessId}`;
 
 export interface ReleaseOptions {
   now?: Date;
@@ -103,6 +108,21 @@ export function decideRelease(f: ReleaseFacts, o: ReleaseOptions = {}): ReleaseD
   return { action: 'release', notice: 'sent' };
 }
 
+/**
+ * Calls since `since` that were really handled: NOT refused at the gate (flagged_reason out_of_service:*, which every robocall to a
+ * canceled line produces) and that either lasted RECENT_CALL_MIN_SECONDS, left a transcript or summary, or produced a booking.
+ */
+export async function countRecentRealCalls(businessId: string, since: Date): Promise<number> {
+  const rows = await prisma.$queryRaw<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM "calls" c
+     WHERE c."business_id" = ${businessId} AND c."started_at" >= ${since}
+       AND NOT starts_with(COALESCE(c."flagged_reason", ''), 'out_of_service:')
+       AND (COALESCE(c."duration_sec", 0) >= ${RECENT_CALL_MIN_SECONDS}
+            OR COALESCE(c."transcript", '') <> '' OR COALESCE(c."summary", '') <> ''
+            OR EXISTS (SELECT 1 FROM "bookings" bk WHERE bk."call_id" = c."id"))`;
+  return rows[0]?.n ?? 0;
+}
+
 /** Load everything decideRelease needs for one business (null when it does not exist). */
 export async function loadReleaseFacts(businessId: string, now: Date = new Date()): Promise<ReleaseFacts | null> {
   const b = await prisma.business.findUnique({
@@ -115,7 +135,7 @@ export async function loadReleaseFacts(businessId: string, now: Date = new Date(
   if (!b) return null;
   const periodEnd = b.currentPeriodEnd ?? b.trialEndsAt;
   const [recent, comp, notice, phoneShared, agentShared, otherAgents] = await Promise.all([
-    prisma.call.count({ where: { businessId, startedAt: { gte: addDays(now, -RECENT_CALL_DAYS) } } }),
+    countRecentRealCalls(businessId, addDays(now, -RECENT_CALL_DAYS)),
     prisma.auditEvent.findFirst({ where: { businessId, action: { in: ['billing.admin_override', 'billing.grandfathered'] } }, orderBy: { at: 'desc' }, select: { at: true } }),
     prisma.auditEvent.findFirst({ where: { businessId, action: NOTICE_ACTION }, orderBy: { at: 'desc' }, select: { at: true, meta: true } }),
     b.phone || b.phoneE164
@@ -147,7 +167,7 @@ export interface ReleaseOutcome {
 }
 
 export interface ReleaseDeps {
-  releaseNumber?: typeof releaseNumber;
+  releaseNumber?: (e164: string, deps?: { callerBusinessId?: string | null }) => Promise<ReleaseNumberResult>;
   deleteAgent?: typeof deleteAgent;
   deleteAgentTools?: typeof deleteAgentTools;
 }
@@ -156,16 +176,21 @@ const last4 = (p: string | null) => (p ? p.slice(-4) : null);
 
 /** Perform the release for a business already decided as `release`. Idempotent; partial failures stay retryable. */
 export async function executeRelease(
-  f: ReleaseFacts, ctx: { notice: 'sent' | 'off' | 'skipped'; actor?: { kind: 'user' | 'admin_token' | 'system'; user_id?: string | null }; script?: string }, deps: ReleaseDeps = {},
+  f: ReleaseFacts, ctx: { notice: 'sent' | 'off' | 'skipped'; actor?: { kind: 'user' | 'admin_token' | 'system'; user_id?: string | null }; script?: string; /** Aborts when the business lease is lost: no further provider call is made. */ signal?: AbortSignal }, deps: ReleaseDeps = {},
 ): Promise<ReleaseOutcome> {
   const out: ReleaseOutcome = { number: { phone_last4: last4(f.phone_e164 ?? f.phone), result: null }, agent: { agent_id: f.agent_id, result: null }, tools: null, cleared: { phone: false, agent: false }, errors: [] };
   const doNumber = deps.releaseNumber ?? releaseNumber;
   const doAgent = deps.deleteAgent ?? deleteAgent;
   const doTools = deps.deleteAgentTools ?? deleteAgentTools;
 
+  const lostLease = (step: string): boolean => {
+    if (!ctx.signal?.aborted) return false;
+    out.errors.push(`${step}: lease lost, stopped before the provider call (retry later)`);
+    return true;
+  };
   // 1) the agent first: it stops answering before the line disappears.
   let agentGone = false;
-  if (f.agent_id) {
+  if (f.agent_id && !lostLease('agent')) {
     if (f.agent_shared) {
       out.agent.result = { skipped: 'another business uses this agent; kept at the provider' };
       agentGone = true; // only this business's reference is dropped
@@ -179,19 +204,19 @@ export async function executeRelease(
   }
   // 2) the number.
   const number = f.phone_e164 ?? f.phone;
-  if (number) {
+  if (number && !lostLease('number')) {
     if (f.phone_shared) {
       out.number.result = { skipped: 'another business uses this number; kept at the provider' };
       out.cleared.phone = Boolean(await clearBusinessProviderResources(f.id, { phone: true }));
     } else {
-      const r = await doNumber(number);
+      const r = await doNumber(number, { callerBusinessId: f.id });
       out.number.result = r;
       if (r.ok) out.cleared.phone = Boolean(await clearBusinessProviderResources(f.id, { phone: true }));
       else out.errors.push(`number: ${r.refused ?? r.error ?? 'failed'}`);
     }
   }
   // 3) the workspace tools are shared by every tenant: only when this was the last business with an agent.
-  if (f.agent_id && agentGone && !f.agent_shared) {
+  if (f.agent_id && agentGone && !f.agent_shared && !lostLease('tools')) {
     if (f.other_agents_exist) out.tools = { skipped: 'other businesses still have agents; the shared workspace tools stay' };
     else {
       out.tools = await doTools();
@@ -232,22 +257,34 @@ export async function processBusiness(
   if (!facts) return null;
   const decision = decideRelease(facts, { ...o, now });
   const report: BusinessReport = { id: facts.id, name: facts.name, decision, applied: false };
-  if (!o.apply) return report;
+  if (!o.apply || (decision.action !== 'notify' && decision.action !== 'release')) return report;
   try {
-    if (decision.action === 'notify') {
-      const sent = await notifyOwners({ id: facts.id, name: facts.name }, 'release_notice', { releaseOn: decision.release_on });
-      report.notified = sent;
-      if (sent > 0) {
-        await recordAudit({
-          actor_kind: o.actor?.kind ?? 'system', actor_user_id: o.actor?.user_id ?? null, business_id: facts.id, action: NOTICE_ACTION, target: `business:${facts.id}`,
-          meta: { notified_at: now.toISOString(), release_on: decision.release_on.toISOString(), recipients: sent, ...(o.script ? { script: o.script } : {}) },
-        });
+    // One release (or heads-up mail) per business at a time, and never while that business is being provisioned: the same lease
+    // key as POST /businesses/:id/provision. The facts are RE-READ under the lease, so a reactivation (webhook, admin comp) or a
+    // concurrent run that landed since the decision was made is honoured before anything is mailed or deleted.
+    const run = await withLease(businessLeaseKey(facts.id), RELEASE_LEASE_MS, async (_lease, signal) => {
+      const fresh = await loadReleaseFacts(facts.id, now);
+      if (!fresh) return { gone: true } as const;
+      const again = decideRelease(fresh, { ...o, now });
+      report.decision = again;
+      if (again.action === 'notify') {
+        const sent = await notifyOwners({ id: fresh.id, name: fresh.name }, 'release_notice', { releaseOn: again.release_on });
+        report.notified = sent;
+        if (sent > 0) {
+          await recordAudit({
+            actor_kind: o.actor?.kind ?? 'system', actor_user_id: o.actor?.user_id ?? null, business_id: fresh.id, action: NOTICE_ACTION, target: `business:${fresh.id}`,
+            meta: { notified_at: now.toISOString(), release_on: again.release_on.toISOString(), recipients: sent, ...(o.script ? { script: o.script } : {}) },
+          });
+          report.applied = true;
+        } else report.error = 'heads-up e-mail could not be sent to any owner; nothing recorded, will retry on the next run';
+      } else if (again.action === 'release') {
+        report.outcome = await executeRelease(fresh, { notice: again.notice, actor: o.actor, script: o.script, signal }, deps);
         report.applied = true;
-      } else report.error = 'heads-up e-mail could not be sent to any owner; nothing recorded, will retry on the next run';
-    } else if (decision.action === 'release') {
-      report.outcome = await executeRelease(facts, { notice: decision.notice, actor: o.actor, script: o.script }, deps);
-      report.applied = true;
-    }
+      }
+      return { gone: false } as const;
+    });
+    if (!run.acquired) report.error = 'another release or provisioning run holds this business right now; nothing was changed, try again in a minute';
+    else if (run.value.gone) return null;
   } catch (err) {
     log.error('process_failed', { business: facts.id, err });
     report.error = (err as Error).message;

@@ -1,6 +1,6 @@
 /** Provider release calls with a fake fetch: Twilio number release and ElevenLabs agent/tool deletion (idempotent, mock-safe). */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { isMockPoolNumber, releaseNumber } from '../src/lib/providers/twilio';
+import { isMockPoolNumber, releaseNumber as releaseNumberRaw } from '../src/lib/providers/twilio';
 import { deleteAgent, deleteAgentTools } from '../src/lib/voice/elevenlabs';
 
 type Call = { url: string; method: string };
@@ -17,11 +17,13 @@ function fake(handler: (url: string, method: string) => Response): { fetchImpl: 
 }
 const env = (o: Record<string, string> = {}) => ({ NODE_ENV: 'test', TWILIO_ACCOUNT_SID: 'ACtest', TWILIO_AUTH_TOKEN: 'tok', TWILIO_PHONE_NUMBER: '+13055550100', ...o }) as unknown as NodeJS.ProcessEnv;
 const NUM = '+17864129234';
+/** Holder check stubbed (no database in this file): no other business holds the number. */
+const releaseNumber = (n: string, d: Parameters<typeof releaseNumberRaw>[1] = {}) => releaseNumberRaw(n, { heldByOther: async () => false, ...d });
 const savedApp = process.env.APP_URL;
 afterEach(() => { if (savedApp === undefined) delete process.env.APP_URL; else process.env.APP_URL = savedApp; });
 
 describe('twilio releaseNumber', () => {
-  test('mock mode (no credentials) and mock-pool numbers call nothing and succeed', async () => {
+  test('mock mode (no credentials at all, not production) and mock-pool numbers call nothing and succeed', async () => {
     const f = fake(() => J({}));
     expect(await releaseNumber(NUM, { fetchImpl: f.fetchImpl, env: { NODE_ENV: 'test' } as unknown as NodeJS.ProcessEnv })).toEqual({ ok: true, mock: true });
     expect(await releaseNumber('+13055551234', { fetchImpl: f.fetchImpl, env: env() })).toEqual({ ok: true, mock: true });
@@ -64,9 +66,14 @@ describe('elevenlabs deleteAgent / deleteAgentTools', () => {
   const E = (o: Record<string, string> = {}) => ({ ELEVENLABS_API_KEY: 'xi', ...o }) as unknown as NodeJS.ProcessEnv;
   test('mock mode: no key or mock_ id calls nothing', async () => {
     const f = fake(() => J({}));
-    expect(await deleteAgent('agent_1', { fetchImpl: f.fetchImpl, env: {} as NodeJS.ProcessEnv })).toEqual({ ok: true, mock: true });
+    expect(await deleteAgent('mock_agent_1', { fetchImpl: f.fetchImpl, env: {} as NodeJS.ProcessEnv })).toEqual({ ok: true, mock: true });
     expect(await deleteAgent('mock_agent_x', { fetchImpl: f.fetchImpl, env: E() })).toEqual({ ok: true, mock: true });
     expect((await deleteTools(f)).mock).toBe(true);
+    expect(f.calls).toHaveLength(0);
+    // ...but a REAL agent id with no key is an error (never mock success: the agent would be orphaned and the reference dropped)
+    const real = await deleteAgent('agent_1', { fetchImpl: f.fetchImpl, env: {} as NodeJS.ProcessEnv });
+    expect(real.ok).toBe(false);
+    expect(real.mock).toBeUndefined();
     expect(f.calls).toHaveLength(0);
     async function deleteTools(x: ReturnType<typeof fake>) { return deleteAgentTools({ fetchImpl: x.fetchImpl, env: {} as NodeJS.ProcessEnv }); }
   });
@@ -101,5 +108,56 @@ describe('elevenlabs deleteAgent / deleteAgentTools', () => {
     expect(f.calls.filter((c) => c.method === 'DELETE').map((c) => c.url.split('/').pop())).toEqual(['t1', 't2']);
     const fail = await deleteAgentTools({ fetchImpl: fake((u, m) => (m === 'GET' ? J({ tools }) : J({}, 500))).fetchImpl, env: E() });
     expect(fail.ok).toBe(false);
+  });
+});
+
+describe('twilio releaseNumber: guards (docs/review/08 F1, F5, F6)', () => {
+  test('F5: the platform sender is compared as E.164, whatever the formatting of TWILIO_PHONE_NUMBER', async () => {
+    for (const fmt of ['+1 305 777 0100', '13057770100', '(305) 777-0100', '+13057770100']) {
+      const f = fake(() => J({ incoming_phone_numbers: [{ sid: 'PN_PLATFORM', phone_number: '+13057770100' }] }));
+      const r = await releaseNumber('+13057770100', { fetchImpl: f.fetchImpl, env: env({ TWILIO_PHONE_NUMBER: fmt }) });
+      expect(r.ok).toBe(false);
+      expect(r.refused).toMatch(/SMS sender/);
+      expect(f.calls).toHaveLength(0);
+    }
+    // an unparseable sender fails closed: nothing can be proven to differ from it
+    const garbled = fake(() => J({}));
+    expect((await releaseNumber(NUM, { fetchImpl: garbled.fetchImpl, env: env({ TWILIO_PHONE_NUMBER: 'abc' }) })).refused).toBeDefined();
+    expect(garbled.calls).toHaveLength(0);
+  });
+
+  test('F1: a number another business holds is never released, and a failed holder check refuses too', async () => {
+    const f = fake(() => J({ incoming_phone_numbers: [{ sid: 'PN_A', phone_number: NUM }] }));
+    const held = await releaseNumberRaw(NUM, { fetchImpl: f.fetchImpl, env: env(), callerBusinessId: 'biz-b', heldByOther: async () => true });
+    expect(held.ok).toBe(false);
+    expect(held.refused).toMatch(/another business/);
+    const broken = await releaseNumberRaw(NUM, { fetchImpl: f.fetchImpl, env: env(), callerBusinessId: 'biz-b', heldByOther: async () => { throw new Error('db down'); } });
+    expect(broken.ok).toBe(false);
+    expect(broken.refused).toMatch(/could not verify/);
+    expect(f.calls).toHaveLength(0);
+    // the caller's own row is not a conflict (the holder check receives the caller id)
+    let seen: unknown;
+    await releaseNumberRaw(NUM, { fetchImpl: f.fetchImpl, env: env(), callerBusinessId: 'biz-b', heldByOther: async (_n, id) => { seen = id; return false; } });
+    expect(seen).toBe('biz-b');
+  });
+
+  test('F6: half-configured Twilio (or production without Twilio) is an ERROR, never mock success', async () => {
+    const halves: Array<Record<string, string>> = [
+      { TWILIO_PHONE_NUMBER: '' }, // SID + token but no platform number
+      { TWILIO_AUTH_TOKEN: '' },
+      { TWILIO_ACCOUNT_SID: '' },
+    ];
+    for (const e of halves) {
+      const f = fake(() => J({}));
+      const r = await releaseNumber(NUM, { fetchImpl: f.fetchImpl, env: env(e) });
+      expect(r.ok).toBe(false);
+      expect(r.mock).toBeUndefined();
+      expect(r.error).toMatch(/incomplete/);
+      expect(f.calls).toHaveLength(0);
+    }
+    const prod = await releaseNumber(NUM, { env: { NODE_ENV: 'production' } as unknown as NodeJS.ProcessEnv });
+    expect(prod.ok).toBe(false);
+    // mock-pool numbers never existed at Twilio: success even half-configured
+    expect(await releaseNumber('+13055551234', { env: env({ TWILIO_PHONE_NUMBER: '' }) })).toEqual({ ok: true, mock: true });
   });
 });

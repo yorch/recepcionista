@@ -34,6 +34,7 @@ suite('account lifecycle (postgres)', () => {
   afterEach(async () => {
     delete process.env.SIGNUP_MAX_PER_HOUR;
     delete process.env.TURNSTILE_SECRET_KEY;
+    delete process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
     mail.mails.length = 0;
     await clearLimiter(db, ['auth/signup:']);
   });
@@ -215,8 +216,19 @@ suite('account lifecycle (postgres)', () => {
       if (u) bizIds.push(u.business_id);
     });
 
+    test('Turnstile: secret WITHOUT a site key (no widget can exist, e.g. the captcha waiver) does not demand a token', async () => {
+      process.env.TURNSTILE_SECRET_KEY = 'ts-secret'; // site key deliberately unset
+      const e = email('tsnowidget');
+      userEmails.push(e);
+      expect((await doSignup(e)).status).toBe(200);
+      const u = await db.getUserByEmail(e);
+      expect(u).not.toBeNull();
+      bizIds.push(u.business_id);
+    });
+
     test('Turnstile: enabled -> missing/failed token is refused (fail closed), valid token passes', async () => {
       process.env.TURNSTILE_SECRET_KEY = 'ts-secret';
+      process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY = 'ts-site';
       const e = email('ts1');
       userEmails.push(e);
       expect((await doSignup(e)).status).toBe(400); // no token
@@ -227,6 +239,7 @@ suite('account lifecycle (postgres)', () => {
       mail.restore();
       mail = captureMail({ turnstile: true });
       process.env.TURNSTILE_SECRET_KEY = 'ts-secret';
+      process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY = 'ts-site';
       expect((await doSignup(e, { turnstile_token: 'good' })).status).toBe(200);
       const u = await db.getUserByEmail(e);
       expect(u).not.toBeNull();

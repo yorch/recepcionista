@@ -3,7 +3,7 @@
  * Logging lives here so "texts sent" on the dashboard is truthful in mock mode
  * too, and so every route reports the same provider status.
  */
-import { checkSmsAllowed, countryForBusiness, getBusiness, isOptedOut, logSms, recordSms } from '@/lib/db';
+import { countryForBusiness, getBusiness, isOptedOut, logSms, recordSms, releaseSmsReservation, reserveSms } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
 import { tzOf } from '@/lib/time';
 import { decide, smsSegments, withStopFooter } from '@/lib/messaging/policy';
@@ -96,21 +96,32 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
   const text = decision.footer ? withStopFooter(input.body) : input.body;
   const segments = Math.max(1, smsSegments(text));
 
-  // Plan cap: customer-facing texts stop at the cap (a text that would not fit in what is left is blocked);
-  // owner alerts are exempt from blocking (but are still counted).
+  // Plan cap: customer-facing texts stop at the cap (a text that would not fit in what is left is blocked). The segments are
+  // RESERVED atomically before sending (concurrent sends can never overshoot the cap) and refunded if the send fails.
+  // Owner alerts are exempt from blocking (but are still counted, after sending; see voice/owner-alert for their own budget).
   const ownerClass = decision.consent_basis === 'owner_alert';
+  let reservation: { period_start: string } | null = null;
   if (!ownerClass) {
-    const allowed = await checkSmsAllowed(input.business_id, new Date(), segments);
-    if (!allowed.ok) {
-      log.warn('send.over_cap', { business: input.business_id, reason: allowed.reason, used: allowed.used, cap: allowed.cap, segments });
+    const reserved = await reserveSms(input.business_id, segments, new Date());
+    if (!reserved.ok) {
+      log.warn('send.over_cap', { business: input.business_id, reason: reserved.reason, used: reserved.used, cap: reserved.cap, segments });
       return blockedResult('blocked_cap', decision.consent_basis);
     }
+    reservation = { period_start: reserved.period_start as string };
   }
+  const refund = async () => { if (reservation) await releaseSmsReservation(input.business_id, segments, reservation.period_start); };
 
   // The country allow-list does not apply to the owner's verified number (proven by possession).
-  const result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass });
+  let result: SendSmsResult;
+  try {
+    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass });
+  } catch (err) {
+    await refund();
+    throw err;
+  }
 
   if (result.status === 'failed') {
+    await refund();
     log.warn('send.failed', {
       business: input.business_id,
       kind: input.kind,
@@ -127,7 +138,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
       booking: input.booking_id ?? null,
       ms: Date.now() - started,
     });
-    await meterSms(input.business_id, segments);
+    if (!reservation) await meterSms(input.business_id, segments); // owner alerts: counted after the send
   }
 
   const sms = await logSms({

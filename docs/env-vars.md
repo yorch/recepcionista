@@ -36,7 +36,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `LOG_LEVEL` | no | `debug` (dev), `info` (prod) | log verbosity | no |
 | `PRISMA_LOG` | no | unset | `1` logs every query | no |
 | `RETENTION_JOB` | no | off | exactly `on` enables the automatic PII purge (docs/compliance.md); it is driven by the job runner below | no |
-| `JOBS` | no | `on` in production, `off` in development and test | `on`/`off`: the background job runner (6 PM daily briefing per business time zone, hourly gratitude sweep, hourly cleanup of expired sessions/tokens/events/rate-limit rows; the retention purge when `RETENTION_JOB=on`). `off` disables ALL of them, the retention purge included. deploy.sh refuses any other value and warns on `off`. Unset in development still lets `RETENTION_JOB=on` run on its own | no |
+| `JOBS` | no | `on` in production, `off` in development and test | `on`/`off` (also `true`/`false`, `1`/`0`, `yes`/`no`, any case): the background job runner (6 PM daily briefing per business time zone, hourly gratitude sweep, hourly cleanup of expired sessions/tokens/events/rate-limit rows; the retention purge when `RETENTION_JOB=on`). `off` disables ALL of them, the retention purge included. deploy.sh accepts the same values as the app, refuses anything else and warns on an off value. Unset in development still lets `RETENTION_JOB=on` run on its own | no |
 | `JOBS_TICK_SECONDS` | no | `60` | seconds between scheduler passes (clamped to 5-3600). Work is claimed per business in Postgres, so any tick rate and any number of app instances are safe | no |
 | `NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE` | set by Next / the image | | runtime mode flags; never set by hand | no |
 
@@ -51,7 +51,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_SECURE` | cond (`smtp` without `SMTP_URL`) | port `587`, secure `false` | SMTP parts | no |
 | `SMTP_PASS` | cond (`smtp` without `SMTP_URL`) | none | SMTP password | yes |
 | `SIGNUP_MAX_PER_HOUR` | no | `60` | platform-wide cap on accounts CREATED per hour (existing-address/honeypot requests do not count). One client may use 20% (50% for the shared `untrusted` key); at 70% signup degrades (one account per client, Turnstile mandatory when configured, warning logged); only at 100% signup stops for everyone (`signup.global_cap_reached` error log) | no |
-| `TURNSTILE_SECRET_KEY` | prod (with the site key) unless `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` | off | Cloudflare Turnstile on signup; server verification fails closed. Needs the site key too (deploy.sh checks the pair). In production, open signup is REFUSED (503 `signup_disabled`, `/signup` invite-only) without the pair or the opt-out below | yes |
+| `TURNSTILE_SECRET_KEY` | prod (with the site key) unless `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` | off | Cloudflare Turnstile on signup; server verification fails closed and is demanded ONLY when the site key is set too (no widget without it, so a secret left over next to `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` no longer makes every signup fail `captcha_failed`). Needs the site key too (deploy.sh checks the pair). In production, open signup is REFUSED (503 `signup_disabled`, `/signup` invite-only) without the pair or the opt-out below | yes |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | prod (with the secret) | none | Turnstile widget (build time) | no |
 | `SIGNUP_ALLOW_WITHOUT_CAPTCHA` | no | unset | exactly `true` lets production run open signup with no captcha (startup logs a loud warning, deploy.sh prints a banner). NOT recommended; without it and without the Turnstile pair deploy.sh fails | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | price text on the plan step (build time) | no |
@@ -73,6 +73,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `BILLING_PAST_DUE_GRACE_DAYS` | no | `5` | days a past_due business keeps working | no |
 | `PLAN_SMS_CAP` | no | `500` | monthly SMS SEGMENTS per business (a text is metered as its real segment count: GSM-7 160/153, UCS-2 70/67; a text that would not fit in what is left is blocked). Per-business overrides win | no |
 | `PLAN_CALL_MINUTES_CAP` | no | `300` | monthly call minutes per business | no |
+| `OWNER_ALERT_HOURLY_LIMIT` | no | `6` | owner texts a CALLER can trigger (`flag_emergency`, `handoff_to_human`) per business per hour, counted in a budget SEPARATE from the plan SMS cap (those alerts are exempt from the cap). Identical alerts for one call are sent once. The FIRST emergency of a call is never starved by a spent budget, up to a hard ceiling of 2x this number per hour; the rest answer honestly that the owner could not be reached. Alert text is cut to 320 GSM-safe characters. Whole number >= 1 (deploy.sh checks) | no |
 | `TRIAL_SMS_CAP` | no | `50` | monthly SMS segments while `billing_status='trialing'` (never above `PLAN_SMS_CAP`; per-business overrides win). Applies only while billing is enforced | no |
 | `TRIAL_CALL_MINUTES_CAP` | no | `30` | monthly call minutes while `billing_status='trialing'` (never above `PLAN_CALL_MINUTES_CAP`; overrides win) | no |
 
@@ -82,7 +83,8 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | --- | --- | --- | --- | --- |
 | `TWILIO_ACCOUNT_SID` | prod (real SMS and numbers) | unset: SMS is logged and numbers are mock-pool numbers, outside production only | Twilio. In production, or whenever Twilio is configured, a failed number purchase FAILS provisioning (502, or 503 `phone_provider_not_configured` without credentials): a fake number is never issued | no |
 | `TWILIO_AUTH_TOKEN` | cond (with the SID; also verifies Twilio webhooks) | none | Twilio | yes |
-| `TWILIO_PHONE_NUMBER` | cond | none | SMS sender number | no |
+| `TWILIO_PHONE_NUMBER` | cond | none | SMS sender number. The platform's own line: never bought for, adopted by or released from a tenant (compared as E.164, so `+1 305 ...` and `1305...` match; an unparseable value makes releases refuse). Releases also refuse when it is set but SID/token are missing | no |
+| `TWILIO_AREA_CODE` | no | `305` | default US/Canada area code for newly bought tenant numbers (3 digits, first 2-9; an invalid value falls back to 305; deploy.sh rejects it). A business is bought a number in the area code of ITS OWN owner phone when that is a valid US/Canada code, so this only applies to tenants without one | no |
 | `SMS_ALLOWED_COUNTRY_CODES` | no | `1` | destination countries for outbound texts. Also applied to `owner_phone` (PATCH) and to verification texts, so an owner alert destination is always in an enabled country | no |
 | `DEFAULT_PHONE_COUNTRY` | no | `US` | ISO country assumed for numbers typed without `+` | no |
 | `OWNER_PHONE_GRANDFATHER` | no | `false` | `true` treats existing unverified owner phones as verified until the owner re-verifies (rollout switch; docs/runbook.md section 6). DANGEROUS: bypasses opt-outs and the country allow-list. In production it is ignored without `OWNER_PHONE_GRANDFATHER_ACK`; startup logs a warning | no |

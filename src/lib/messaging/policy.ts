@@ -89,16 +89,33 @@ export function isGsm7(text: string): boolean {
   return true;
 }
 
-/** Number of SMS segments the text will occupy. */
+/**
+ * Pack `costs` (the size of each character in the segment's unit: septets for GSM-7, UTF-16 code units for UCS-2) into
+ * segments of `capacity` units, greedily, the way a handset/carrier does: a character is NEVER split across two segments, so a
+ * two-unit character (a GSM extension such as euro, or a surrogate pair) that would straddle a boundary moves whole into the
+ * next segment and leaves one unit unused.
+ */
+function packSegments(costs: Iterable<number>, capacity: number): number {
+  let segments = 1;
+  let used = 0;
+  for (const c of costs) {
+    if (used + c > capacity) { segments++; used = 0; }
+    used += c;
+  }
+  return segments;
+}
+
+/** Number of SMS segments the text will occupy (GSM 03.38 / UCS-2, concatenated segments carry a 6-byte UDH: 153 septets / 67 code units). */
 export function smsSegments(text: string): number {
   if (!text) return 0;
   if (isGsm7(text)) {
-    let septets = 0;
-    for (const ch of text) septets += GSM_EXT.has(ch) ? 2 : 1;
-    return septets <= 160 ? 1 : Math.ceil(septets / 153);
+    const costs = Array.from(text, (ch) => (GSM_EXT.has(ch) ? 2 : 1));
+    const septets = costs.reduce((a, b) => a + b, 0);
+    return septets <= 160 ? 1 : packSegments(costs, 153);
   }
+  const costs = Array.from(text, (ch) => ch.length); // code points: 1 code unit, or 2 for a surrogate pair
   const units = text.length; // UTF-16 code units, which is what UCS-2 segments count
-  return units <= 70 ? 1 : Math.ceil(units / 67);
+  return units <= 70 ? 1 : packSegments(costs, 67);
 }
 
 /** Only the exact footer counts as "already there" (free text like "text stop" must not suppress it). */

@@ -32,6 +32,7 @@ export { prisma };
 export { newId, nowIso } from './ids';
 export * from './events';
 export * from './locks';
+export * from './number-attempts';
 export * from './compliance';
 export * from './users';
 export * from './email-tokens';
@@ -272,6 +273,37 @@ export async function listAllBusinesses(): Promise<Business[]> {
     out.push(...page.items);
     cursor = page.next_cursor;
   } while (cursor);
+  return out;
+}
+
+/** The few columns the background jobs need to decide whether a tenant is due (never the whole row: hours, KB-sized json, tokens...). */
+export type JobBusiness = Pick<Business, 'id' | 'timezone' | 'billing_status' | 'past_due_since' | 'status'>;
+
+/**
+ * Live businesses for the job runner, narrow columns only, keyset-paged (indexed on status; walks every page so tenant #1001 is
+ * not skipped). `businessId` restricts to one. Jobs load a full row (`getBusiness`) only for a tenant they actually act on.
+ */
+export async function listLiveBusinessesForJobs(opts: { businessId?: ID } = {}): Promise<JobBusiness[]> {
+  const out: JobBusiness[] = [];
+  let cursor: string | null = null;
+  for (;;) {
+    const rows: { id: string; timezone: string; billingStatus: string; pastDueSince: Date | null }[] = await prisma.business.findMany({
+      where: { status: 'live', ...(opts.businessId ? { id: opts.businessId } : {}) },
+      select: { id: true, timezone: true, billingStatus: true, pastDueSince: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: MAX_PAGE_SIZE_RANGE,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    for (const r of rows) {
+      out.push({
+        id: r.id, status: 'live', timezone: r.timezone,
+        billing_status: r.billingStatus as Business['billing_status'],
+        past_due_since: r.pastDueSince ? r.pastDueSince.toISOString() : null,
+      });
+    }
+    if (rows.length < MAX_PAGE_SIZE_RANGE) break;
+    cursor = rows[rows.length - 1].id;
+  }
   return out;
 }
 

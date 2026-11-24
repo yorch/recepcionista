@@ -84,6 +84,7 @@ model Business {
   @@index([ownerPhoneE164])
   @@index([agentId])
   @@index([stripeCustomerId])
+  @@index([status])
   @@map("businesses")
 }
 

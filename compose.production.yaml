@@ -170,6 +170,10 @@ services:
       # JOBS=off disables all of them (and the retention purge). RETENTION_JOB still defaults to off (docs/compliance.md).
       JOBS: ${JOBS:-}
       JOBS_TICK_SECONDS: ${JOBS_TICK_SECONDS:-}
+      # Owner texts a caller can trigger (emergency / handoff) per business per hour, separate from the SMS plan cap (default 6).
+      OWNER_ALERT_HOURLY_LIMIT: ${OWNER_ALERT_HOURLY_LIMIT:-}
+      # Default area code for newly bought numbers (default 305); a business's own owner-phone area code wins.
+      TWILIO_AREA_CODE: ${TWILIO_AREA_CODE:-}
       # Lower caps while a business is trialing (docs/billing.md). Empty = defaults (50 texts / 30 minutes).
       TRIAL_SMS_CAP: ${TRIAL_SMS_CAP:-}
       TRIAL_CALL_MINUTES_CAP: ${TRIAL_CALL_MINUTES_CAP:-}

@@ -86,4 +86,48 @@ integration('sms metering in segments (postgres)', () => {
       expect(await used(b.id)).toBe(1 + smsSegments(text));
     });
   });
+
+  test('F2: the cap is reserved atomically: 20 concurrent sends with cap 5 / used 4 let exactly 1 through', async () => {
+    const b = await biz('active', { smsCapOverride: 5 });
+    await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
+      await db.recordSms(b.id, 4);
+      const res = await Promise.all(Array.from({ length: 20 }, () => send(b.id, 'Hi')));
+      const sent = res.filter((r) => !r.blocked);
+      expect(sent.length).toBe(1);
+      expect(res.filter((r) => r.blocked === 'blocked_cap').length).toBe(19);
+      expect(await used(b.id)).toBe(5);
+    });
+  });
+
+  test('F2: multi-segment sends reserve their whole size; many concurrent sends never exceed the cap', async () => {
+    const b = await biz('active', { smsCapOverride: 10 });
+    await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
+      const body = 'c'.repeat(200); // 2 segments with the footer
+      const each = smsSegments(withStopFooter(body));
+      const res = await Promise.all(Array.from({ length: 12 }, () => send(b.id, body)));
+      const sent = res.filter((r) => !r.blocked).length;
+      expect(sent).toBe(Math.floor(10 / each));
+      expect(await used(b.id)).toBe(sent * each);
+      expect(await used(b.id)).toBeLessThanOrEqual(10);
+    });
+  });
+
+  test('F2: a failed send gives its reservation back', async () => {
+    const b = await biz('active', { smsCapOverride: 5 });
+    await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
+      const res = await messaging.sendAndLog({ business_id: b.id, to: '+999999999999999', body: 'Hi', kind: 'confirmation' });
+      expect(res.result.status).toBe('failed');
+      expect(await used(b.id)).toBe(0);
+      expect((await send(b.id, 'Hi')).blocked).toBeUndefined();
+      expect(await used(b.id)).toBe(1);
+    });
+  });
+
+  test('F2: without enforcement the segments are still counted (no cap)', async () => {
+    const b = await biz('active', { smsCapOverride: 1 });
+    await withEnv({ BILLING_ENFORCED: 'false', NODE_ENV: 'test' }, async () => {
+      await Promise.all([send(b.id, 'Hi'), send(b.id, 'Hi'), send(b.id, 'Hi')]);
+      expect(await used(b.id)).toBe(3);
+    });
+  });
 });

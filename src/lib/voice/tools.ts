@@ -21,7 +21,7 @@ import { normalizePhone } from '@/lib/providers/twilio';
 import { E164 } from '@/lib/messaging/recipient';
 import { sendAndLog } from '@/lib/messaging';
 import { CALL_911_EN, CALL_911_ES } from '@/lib/voice/emergency';
-import { alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
+import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
 import { isOwnerNumber } from '@/lib/messaging/owner';
 import { countryForBusiness } from '@/lib/db';
 import { TOOL_NAMES, type ToolName } from '@/lib/kb';
@@ -717,7 +717,7 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
-    const reason = str(args.reason) || 'Emergency reported on call';
+    const reason = alertField(str(args.reason), 300) || 'Emergency reported on call';
     const callerName = str(args.customer_name);
     const callerPhone = str(args.customer_phone);
     const address = str(args.address);
@@ -740,15 +740,16 @@ export async function flagEmergency(args: FlagEmergencyArgs): Promise<ToolResult
       // call.caller_phone is only ever set from the platform caller id; the relayed number appears in the alert text only.
     });
 
+    // Caller-controlled text is clamped field by field (the whole alert is also capped at 320 GSM-safe characters by alertOwner).
     const alertBody = [
-      `EMERGENCY — ${business.name}`,
-      callerName ? `Caller: ${callerName}` : '',
-      callerPhone ? `Phone: ${normalizePhone(callerPhone)}` : call.caller_phone ? `Phone: ${call.caller_phone}` : '',
-      address ? `Address: ${address}` : '',
-      `Reason: ${reason}`,
+      `EMERGENCY - ${alertField(business.name, 50)}`,
+      callerName ? `Caller: ${alertField(callerName, 50)}` : '',
+      callerPhone ? `Phone: ${alertField(normalizePhone(callerPhone), 20)}` : call.caller_phone ? `Phone: ${call.caller_phone}` : '',
+      address ? `Address: ${alertField(address, 100)}` : '',
+      `Reason: ${alertField(reason, 140)}`,
       'Call them back now.',
     ].filter(Boolean).join('\n');
-    const alert = await alertOwner(business, alertBody);
+    const alert = await alertOwner(business, alertBody, { class: 'emergency', callId: call.id });
 
     if (alert.notified) {
       return {
@@ -904,7 +905,7 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
-    const reason = str(args.reason) || 'Caller asked for a human';
+    const reason = alertField(str(args.reason), 300) || 'Caller asked for a human';
     let call = await resolveCall(business, args);
     if (!call) call = await createCall({ business_id: business.id, caller_phone: platformCaller(args), status: 'in_progress' });
 
@@ -924,14 +925,14 @@ export async function handoffToHuman(args: HandoffArgs): Promise<ToolResult> {
     const callbackLast4 = altDiffers ? alt!.slice(-4) : verified ? verified.slice(-4) : null;
 
     const alertBody = [
-      `HANDOFF — ${business.name}`,
-      call.caller_name ? `Caller: ${call.caller_name}` : '',
+      `HANDOFF - ${alertField(business.name, 50)}`,
+      call.caller_name ? `Caller: ${alertField(call.caller_name, 50)}` : '',
       call.caller_phone ? `Phone: ${call.caller_phone}` : verified ? `Phone: ${verified}` : '',
       altDiffers ? `Asked to be called back on: ${alt} (said by the caller)` : '',
-      `Reason: ${reason}`,
+      `Reason: ${alertField(reason, 140)}`,
       'Please call them back.',
     ].filter(Boolean).join('\n');
-    const alert = await alertOwner(business, alertBody);
+    const alert = await alertOwner(business, alertBody, { class: 'handoff', callId: call.id });
 
     if (alert.notified) {
       // This does NOT transfer the line: the owner was texted and will call back.

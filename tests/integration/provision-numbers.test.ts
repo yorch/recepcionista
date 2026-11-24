@@ -5,7 +5,7 @@
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { cleanup, loadDb, loadPrisma, newBusiness } from '../helpers/fixtures';
-import { fakeNumberAllowed, isMockPoolNumber, provisionNumber } from '../../src/lib/providers/twilio';
+import { attemptFriendlyName, fakeNumberAllowed, isMockPoolNumber, provisionNumber, type NumberAttemptStore } from '../../src/lib/providers/twilio';
 
 const TWILIO_ENV = { TWILIO_ACCOUNT_SID: 'ACtest0000000000000000000000000000', TWILIO_PHONE_NUMBER: '+15005550006' };
 const BOUGHT = '+13057770199';
@@ -15,20 +15,33 @@ interface FakeTwilio {
   fetch: typeof fetch;
   calls: string[];
   buys: () => number;
+  deletes: () => string[];
 }
 
 /** A scriptable Twilio: search result, purchase outcome, and what the account lists afterwards. */
 function fakeTwilio(opts: {
   search?: 'ok' | 'empty' | 500 | 'throw';
   buy?: 'ok' | 400 | 500 | 'throw';
-  /** Does the number exist on the account after an ambiguous purchase answer? */
+  /** Does the number exist on the account after an ambiguous purchase answer? (our purchase went through but the answer was lost) */
   existsAfter?: boolean;
+  /** FriendlyName the listing shows: 'ours' (the tag this fake received on purchase, default), or another tenant's tag. */
+  listedName?: 'ours' | string;
+  /** The first N listing calls return nothing (Twilio's listing lags the purchase). */
+  listLag?: number;
   /** The number on offer (phone numbers are unique per business, so each route test uses its own). */
   number?: string;
+  /** Several numbers on offer (first = default). */
+  offered?: string[];
+  /** Runs when a purchase request arrives (e.g. to simulate another tenant winning the race). */
+  onBuy?: (n: string) => Promise<void> | void;
+  /** Shared account state across fakes/concurrent tenants: numbers already bought. */
+  account?: Map<string, string>;
 } = {}): FakeTwilio {
   const num = opts.number ?? BOUGHT;
+  const account = opts.account ?? new Map<string, string>(); // number -> friendly name
   const calls: string[] = [];
-  const f = (async (input: unknown, init?: { method?: string }) => {
+  let lag = opts.listLag ?? 0;
+  const f = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
     const method = init?.method ?? 'GET';
     calls.push(`${method} ${url.replace(/^https:\/\/api\.twilio\.com\/2010-04-01\/Accounts\/[^/]+/, '')}`);
@@ -36,23 +49,53 @@ function fakeTwilio(opts: {
       const s = opts.search ?? 'ok';
       if (s === 'throw') throw new Error('network down');
       if (s === 500) return new Response(JSON.stringify({ message: 'boom' }), { status: 500 });
-      return Response.json({ available_phone_numbers: s === 'empty' ? [] : [{ phone_number: num }] });
+      const list = opts.offered ?? [num];
+      return Response.json({ available_phone_numbers: s === 'empty' ? [] : list.map((phone_number) => ({ phone_number })) });
     }
     if (url.includes('/IncomingPhoneNumbers.json') && method === 'POST') {
+      const body = new URLSearchParams(String(init?.body ?? ''));
+      const want = body.get('PhoneNumber') ?? num;
+      await opts.onBuy?.(want);
       const b = opts.buy ?? 'ok';
-      if (b === 'throw') throw new Error('timeout');
+      if (b === 'throw') { if (opts.existsAfter) account.set(want, body.get('FriendlyName') ?? ''); throw new Error('timeout'); }
       if (b === 400) return new Response(JSON.stringify({ message: 'number unavailable' }), { status: 400 });
-      if (b === 500) return new Response(JSON.stringify({ message: 'oops' }), { status: 500 });
-      return Response.json({ phone_number: num, sid: 'PN1' }, { status: 201 });
+      if (b === 500) { if (opts.existsAfter) account.set(want, body.get('FriendlyName') ?? ''); return new Response(JSON.stringify({ message: 'oops' }), { status: 500 }); }
+      if (account.has(want)) return new Response(JSON.stringify({ message: 'number already purchased' }), { status: 400 });
+      account.set(want, body.get('FriendlyName') ?? '');
+      return Response.json({ phone_number: want, sid: `PN_${want.slice(-4)}` }, { status: 201 });
     }
     if (url.includes('/IncomingPhoneNumbers.json') && method === 'GET') {
-      return Response.json({ incoming_phone_numbers: opts.existsAfter ? [{ phone_number: num, sid: 'PN1' }] : [] });
+      if (lag > 0) { lag--; return Response.json({ incoming_phone_numbers: [] }); }
+      const q = new URL(url).searchParams.get('PhoneNumber') ?? num;
+      const listedOther = opts.listedName !== undefined && opts.listedName !== 'ours';
+      if (!account.has(q) && !(opts.existsAfter && listedOther)) return Response.json({ incoming_phone_numbers: [] });
+      return Response.json({ incoming_phone_numbers: [{ phone_number: q, sid: `PN_${q.slice(-4)}`, friendly_name: listedOther ? opts.listedName : account.get(q) }] });
     }
     if (method === 'DELETE') return new Response(null, { status: 204 });
     return Response.json({});
   }) as unknown as typeof fetch;
-  return { fetch: f, calls, buys: () => calls.filter((c) => c.startsWith('POST /IncomingPhoneNumbers')).length };
+  return {
+    fetch: f, calls,
+    buys: () => calls.filter((c) => c.startsWith('POST /IncomingPhoneNumbers')).length,
+    deletes: () => calls.filter((c) => c.startsWith('DELETE ')),
+  };
 }
+
+/** In-memory attempt store (the DB-backed one is exercised by the route tests below). */
+function memStore(opts: { held?: string[]; reserved?: string[]; id?: string } = {}): NumberAttemptStore & { recorded: string[] } {
+  const recorded: string[] = [];
+  const reserved = new Set(opts.reserved ?? []);
+  return {
+    id: opts.id ?? 'attempt-1',
+    recorded,
+    isHeld: async (n) => (opts.held ?? []).includes(n),
+    claim: async (n) => (reserved.has(n) ? false : (reserved.add(n), true)),
+    record: async (n) => { recorded.push(n); },
+    attempted: async (n) => recorded.includes(n),
+    finish: async () => undefined,
+  };
+}
+const noSleep = async () => undefined;
 
 describe('provisionNumber (pure, injected fetch/env)', () => {
   const configured = { ...TWILIO_ENV, TWILIO_AUTH_TOKEN: 'tok', NODE_ENV: 'test' } as unknown as NodeJS.ProcessEnv;
@@ -88,15 +131,64 @@ describe('provisionNumber (pure, injected fetch/env)', () => {
     expect((await provisionNumber('305', { env: configured, fetchImpl: refused.fetch })).ok).toBe(false);
     expect(refused.calls.some((c) => c.startsWith('GET /IncomingPhoneNumbers'))).toBe(false);
     const good = fakeTwilio();
-    expect(await provisionNumber('305', { env: configured, fetchImpl: good.fetch })).toEqual({ ok: true, phone: BOUGHT, mock: false });
+    expect(await provisionNumber('305', { env: configured, fetchImpl: good.fetch })).toEqual({ ok: true, phone: BOUGHT, mock: false, bought: true });
   });
 
-  test('an ambiguous purchase (timeout / 5xx) that actually went through is adopted, not bought twice', async () => {
+  test('an ambiguous purchase (timeout / 5xx) that went through is adopted ONLY with this attempt\'s proof, never bought twice', async () => {
     for (const buy of ['throw', 500] as const) {
       const t = fakeTwilio({ buy, existsAfter: true });
-      expect(await provisionNumber('305', { env: configured, fetchImpl: t.fetch })).toEqual({ ok: true, phone: BOUGHT, mock: false });
+      const store = memStore();
+      expect(await provisionNumber('305', { env: configured, fetchImpl: t.fetch, attempts: store, sleep: noSleep })).toEqual({ ok: true, phone: BOUGHT, mock: false, bought: true });
       expect(t.buys()).toBe(1);
+      expect(store.recorded).toEqual([BOUGHT]); // recorded BEFORE the purchase
     }
+  });
+
+  test('F1: a listed number is NOT adopted when it is tagged by another attempt, held by a business, or there is no attempt store', async () => {
+    // another tenant bought it (listing shows THEIR tag): hands off, nothing deleted
+    const other = fakeTwilio({ buy: 500, existsAfter: true, listedName: attemptFriendlyName('somebody-else') });
+    const r1 = await provisionNumber('305', { env: configured, fetchImpl: other.fetch, attempts: memStore(), sleep: noSleep });
+    expect(r1.ok).toBe(false);
+    expect(other.deletes()).toEqual([]);
+    // the number became held by a business between purchase and reconcile
+    let heldNow = false;
+    const store = memStore();
+    store.isHeld = async () => heldNow;
+    const t2 = fakeTwilio({ buy: 500, existsAfter: true, onBuy: () => { heldNow = true; } });
+    expect((await provisionNumber('305', { env: configured, fetchImpl: t2.fetch, attempts: store, sleep: noSleep })).ok).toBe(false);
+    // no store at all: no proof, no adoption
+    const t3 = fakeTwilio({ buy: 500, existsAfter: true });
+    const r3 = await provisionNumber('305', { env: configured, fetchImpl: t3.fetch, sleep: noSleep });
+    expect(r3).toMatchObject({ ok: false, stage: 'purchase', unsettled: BOUGHT });
+    // the platform sender is never a candidate
+    const t4 = fakeTwilio({ number: '+15005550006' });
+    expect(await provisionNumber('305', { env: configured, fetchImpl: t4.fetch, attempts: memStore(), sleep: noSleep })).toMatchObject({ ok: false, stage: 'search' });
+    expect(t4.buys()).toBe(0);
+  });
+
+  test('F1: candidates held by a business or reserved by another in-flight attempt are skipped; the next free one is bought', async () => {
+    const t = fakeTwilio({ offered: ['+13057770001', '+13057770002', '+13057770003'] });
+    const store = memStore({ held: ['+13057770001'], reserved: ['+13057770002'] });
+    expect(await provisionNumber('305', { env: configured, fetchImpl: t.fetch, attempts: store })).toEqual({ ok: true, phone: '+13057770003', mock: false, bought: true });
+    const none = fakeTwilio({ offered: ['+13057770001'] });
+    const r = await provisionNumber('305', { env: configured, fetchImpl: none.fetch, attempts: memStore({ held: ['+13057770001'] }) });
+    expect(r).toMatchObject({ ok: false, stage: 'search' });
+    expect(none.buys()).toBe(0);
+  });
+
+  test('Twilio listing lag: the reconcile retries with backoff before giving up', async () => {
+    const waits: number[] = [];
+    const lagging = fakeTwilio({ buy: 'throw', existsAfter: true, listLag: 2 });
+    const r = await provisionNumber('305', { env: configured, fetchImpl: lagging.fetch, attempts: memStore(), sleep: async (ms) => { waits.push(ms); } });
+    expect(r).toMatchObject({ ok: true, phone: BOUGHT, bought: true });
+    expect(waits.length).toBe(2);
+    expect(waits[1]).toBeGreaterThan(waits[0]); // backoff grows
+    expect(lagging.buys()).toBe(1);
+    // never listed: gives up (bounded), reports the candidate as unsettled instead of adopting or re-buying
+    const never = fakeTwilio({ buy: 'throw', existsAfter: false });
+    const r2 = await provisionNumber('305', { env: configured, fetchImpl: never.fetch, attempts: memStore(), sleep: noSleep });
+    expect(r2).toMatchObject({ ok: false, stage: 'purchase', unsettled: BOUGHT });
+    expect(never.buys()).toBe(1);
   });
 });
 
@@ -115,8 +207,11 @@ integration('provision route: failure is a failure (postgres)', () => {
   afterAll(async () => {
     await cleanup();
   });
+  const wipeAttempts = () => prisma.processedEvent.deleteMany({ where: { source: { in: ['number-candidate', 'number-attempt'] } } });
+  beforeAll(async () => { await wipeAttempts(); });
   afterEach(async () => {
     await prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'businesses/provision' } } });
+    await wipeAttempts(); // candidate reservations are 'done' for 30 days: tests reuse the same fake numbers
   });
 
   const headers = { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: 'https://app.example.test', authorization: `Bearer ${SECRETS.adminToken}` };
@@ -213,21 +308,87 @@ integration('provision route: failure is a failure (postgres)', () => {
     });
   });
 
-  test('a bought number that cannot be saved is released, not orphaned', async () => {
+  test('F1: a number another business already holds is never bought, adopted, or released (stale search result)', async () => {
     const holder = await bare();
     const biz = await bare();
     const taken = '+13057770177';
-    // already used by another business: the unique constraint makes saving it fail
-    await prisma.business.update({ where: { id: holder.id }, data: { phone: taken, phoneKey: taken.slice(-10), phoneE164: taken } });
+    await prisma.business.update({ where: { id: holder.id }, data: { phone: taken, phoneKey: taken.slice(-10), phoneE164: taken, status: 'live' } });
     await withEnv({ ...TWILIO_ENV }, async () => {
-      const twilio = fakeTwilio({ number: taken, existsAfter: true });
+      // the exact repro of docs/review/08 F1: search offers the holder's live number, the purchase answers 503, the account lists it
+      const twilio = fakeTwilio({ number: taken, buy: 500, existsAfter: true, listedName: attemptFriendlyName('the-holders-attempt') });
       const res = await withFetch(twilio.fetch, () => post(biz.id));
       expect(res.status).toBe(502);
-      expect(((await res.json()) as any).code).toBe('number_record_failed');
-      expect(twilio.calls.some((c) => c.startsWith('DELETE /IncomingPhoneNumbers/PN1'))).toBe(true); // released
+      expect(((await res.json()) as any).code).toBe('number_purchase_failed');
+      expect(twilio.buys()).toBe(0); // skipped before any purchase
+      expect(twilio.deletes()).toEqual([]); // and above all: NOTHING deleted at Twilio
     });
+    expect(await row(holder.id)).toMatchObject({ phone: taken, status: 'live' });
     expect((await row(biz.id)).phone).toBeNull();
-    expect((await events(biz.id)).map((e) => e.action)).toEqual(['provision.number_record_failed']);
+  });
+
+  test('F1: another tenant wins the DB row between our purchase and our save: kept, 502 number_taken, never released', async () => {
+    const holder = await bare();
+    const biz = await bare();
+    const raced = '+13057770178';
+    await withEnv({ ...TWILIO_ENV }, async () => {
+      const twilio = fakeTwilio({
+        number: raced,
+        onBuy: async () => { await prisma.business.update({ where: { id: holder.id }, data: { phone: raced, phoneKey: raced.slice(-10), phoneE164: raced } }); },
+      });
+      const res = await withFetch(twilio.fetch, () => post(biz.id));
+      expect(res.status).toBe(502);
+      expect(((await res.json()) as any).code).toBe('number_taken');
+      expect(twilio.deletes()).toEqual([]);
+    });
+    expect((await row(holder.id)).phone).toBe(raced);
+    expect((await events(biz.id)).map((e) => e.action)).toEqual(['provision.number_conflict']);
+  });
+
+  test('F1: two tenants provisioning at once in the same area code get DIFFERENT numbers, each bought once, nothing released', async () => {
+    const a = await bare();
+    const b = await bare();
+    const N1 = '+13057770181';
+    const N2 = '+13057770182';
+    await withEnv({ ...TWILIO_ENV }, async () => {
+      const account = new Map<string, string>();
+      // both searches return the SAME first candidate (Twilio does that for simultaneous searches)
+      const twilio = fakeTwilio({ offered: [N1, N2], account });
+      const [ra, rb] = await withFetch(twilio.fetch, () => Promise.all([post(a.id), post(b.id)]));
+      expect([ra.status, rb.status]).toEqual([200, 200]);
+      const pa = (await row(a.id)).phone;
+      const pb = (await row(b.id)).phone;
+      expect(new Set([pa, pb])).toEqual(new Set([N1, N2]));
+      expect(twilio.buys()).toBe(2);
+      expect(twilio.deletes()).toEqual([]);
+      expect([...account.keys()].sort()).toEqual([N1, N2]);
+    });
+  });
+
+  test('F1: a purchase whose answer is lost is adopted with this attempt\'s tag (listing lag included), and retries do not buy again', async () => {
+    const biz = await bare();
+    const lost = '+13057770183';
+    await withEnv({ ...TWILIO_ENV }, async () => {
+      const twilio = fakeTwilio({ number: lost, buy: 500, existsAfter: true, listLag: 1 });
+      const res = await withFetch(twilio.fetch, () => post(biz.id));
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as any).data).toMatchObject({ phone: lost, mock: false });
+      expect(twilio.buys()).toBe(1);
+    });
+  });
+
+  test('area code: the business owner phone\'s area code is used when valid, TWILIO_AREA_CODE otherwise', async () => {
+    const withOwner = await bare();
+    await prisma.business.update({ where: { id: withOwner.id }, data: { ownerPhone: '+17865550123', ownerPhoneE164: '+17865550123' } });
+    const noOwner = await bare();
+    await prisma.business.update({ where: { id: noOwner.id }, data: { ownerPhone: null, ownerPhoneE164: null, ownerPhoneVerifiedAt: null } });
+    await withEnv({ ...TWILIO_ENV, TWILIO_AREA_CODE: '212' }, async () => {
+      for (const [biz, expected, n] of [[withOwner, '786', '+17867770191'], [noOwner, '212', '+12127770192']] as const) {
+        const twilio = fakeTwilio({ number: n });
+        const res = await withFetch(twilio.fetch, () => post(biz.id));
+        expect(res.status).toBe(200);
+        expect(twilio.calls.find((c) => c.includes('AvailablePhoneNumbers'))).toContain(`AreaCode=${expected}`);
+      }
+    });
   });
 
   test('production without Twilio: 503, nothing stored, never live, no outbound call', async () => {

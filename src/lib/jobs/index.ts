@@ -21,7 +21,7 @@
  */
 import {
   claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, EMAIL_TOKEN_GRACE_MS,
-  getBusiness, isProvisioningAllowed, listAllBusinesses, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
+  getBusiness, isProvisioningAllowed, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
   checkSmsAllowed, withLease,
 } from '@/lib/db';
 import { appBaseUrl } from '@/lib/email/templates';
@@ -34,11 +34,12 @@ import { CLEANUP_HORIZON_MS, cleanupRateLimitBuckets } from '@/lib/ratelimit';
 import { retentionJobEnabled, logRetentionPreview, runRetentionNow } from '@/lib/retention-job';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import type { Briefing, Business } from '@/lib/types';
+import type { JobBusiness } from '@/lib/db';
 import {
   briefingSlot, hourBucket, inQuietHours, JOB_NAMES, jobsSetting, nextBriefingAt, tickSeconds, type JobName,
 } from './schedule';
 
-export { JOB_NAMES, isJobName, jobsSetting, tickSeconds, briefingSlot, nextBriefingAt } from './schedule';
+export { JOB_NAMES, isJobName, jobsSetting, tickSeconds, briefingSlot, nextBriefingAt, hourBucket } from './schedule';
 export type { JobName } from './schedule';
 
 const log = logger('jobs');
@@ -87,14 +88,15 @@ export interface JobReport {
 export interface JobDeps {
   generateBriefing(businessId: string, date: string): Promise<Briefing>;
   notifyOwner(business: Business, briefing: Briefing, now: Date): Promise<string>;
-  sweepGratitude(businessId: string): Promise<Record<string, unknown>>;
+  /** `signal` aborts when the job lease is lost: stop before the next side effect. */
+  sweepGratitude(businessId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
   countGratitudeCandidates(businessId: string): Promise<number>;
 }
 
 export const defaultDeps: JobDeps = {
   generateBriefing: (id, date) => generateBriefing(id, date),
   notifyOwner: (b, br, now) => notifyOwnerOfBriefing(b, br, now),
-  sweepGratitude: async (id) => ({ ...(await runGratitudeSweep(id)) }),
+  sweepGratitude: async (id, signal) => ({ ...(await runGratitudeSweep(id, { signal })) }),
   countGratitudeCandidates: async (id) => (await findGratitudeCandidates(id)).length,
 };
 
@@ -107,6 +109,8 @@ export interface RunOptions {
   force?: boolean;
   deps?: Partial<JobDeps>;
   env?: NodeJS.ProcessEnv;
+  /** Test seam: how often the per-business job lease is renewed (default ttl/3). */
+  leaseRenewMs?: number;
 }
 
 // ---- state ------------------------------------------------------------------------------------
@@ -142,9 +146,19 @@ async function auditRun(report: JobReport): Promise<void> {
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err)).slice(0, 200);
 
-function liveBusinesses(all: Business[], businessId?: string): Business[] {
-  return all.filter((b) => b.status === 'live' && (!businessId || b.id === businessId));
+/**
+ * The tenants a tick must look at: live ones only, NARROW columns (id, time zone, billing state), straight from an indexed query.
+ * A job loads a tenant's full row (`getBusiness`) only when it is about to act on it, and never its sms/booking history.
+ */
+function liveBusinesses(businessId?: string): Promise<JobBusiness[]> {
+  return listLiveBusinessesForJobs(businessId ? { businessId } : {});
 }
+
+/** Thrown inside a lease-held job when the lease was lost: nothing paid or user-visible may happen after it. */
+export class JobLeaseLostError extends Error {
+  constructor(job: string) { super(`${job}: lease lost; stopping before the next side effect`); this.name = 'JobLeaseLostError'; }
+}
+const assertLease = (signal: AbortSignal, job: string): void => { if (signal.aborted) throw new JobLeaseLostError(job); };
 
 // ---- daily briefing ---------------------------------------------------------------------------
 
@@ -177,45 +191,63 @@ export async function runDailyBriefings(opts: RunOptions = {}): Promise<JobRepor
   const dryRun = opts.dryRun === true;
   const report: JobReport = { job: 'daily_briefing', dry_run: dryRun, at: now.toISOString(), processed: 0, errors: 0, items: [] };
 
-  const businesses = opts.businessId
-    ? liveBusinesses([(await getBusiness(opts.businessId)) as Business].filter(Boolean), opts.businessId)
-    : liveBusinesses(await listAllBusinesses());
+  const businesses = await liveBusinesses(opts.businessId);
   if (opts.businessId && businesses.length === 0) report.items.push({ business_id: opts.businessId, outcome: 'skipped_not_live' });
 
+  // Cheap pass first (pure, no I/O): which tenants are due at all? After 18:00 local a finished tenant costs nothing per tick.
+  const due: Array<{ b: JobBusiness; slot: ReturnType<typeof briefingSlot>; claimId: string }> = [];
   for (const b of businesses) {
     const slot = briefingSlot(now, b.timezone);
     if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: 'skipped_billing' }); continue; }
     if (!slot.due && !opts.force) continue; // not yet 18:00 there: not worth a report row
-    if (report.processed >= MAX_BRIEFINGS_PER_TICK && !dryRun) { report.items.push({ business_id: b.id, outcome: 'deferred_to_next_tick' }); continue; }
-
-    // Already generated at/after the scheduled time (by a runner, or by hand this evening): nothing to do.
-    const existing = await prisma.briefing.findUnique({ where: { businessId_date: { businessId: b.id, date: slot.date } }, select: { createdAt: true } });
-    if (existing && existing.createdAt.getTime() >= slot.scheduled_at.getTime()) { report.items.push({ business_id: b.id, outcome: 'already_generated', detail: { date: slot.date } }); continue; }
     // A manual (forced) run has its own claim so it never uses up the scheduled 18:00 run of that day.
-    const claimId = `${b.id}:${slot.date}${opts.force ? ':manual' : ''}`;
-    const done = await prisma.processedEvent.findUnique({ where: { source_id: { source: BRIEFING_CLAIM_SOURCE, id: claimId } }, select: { status: true } });
-    if (done?.status === 'done') { report.items.push({ business_id: b.id, outcome: 'already_generated', detail: { date: slot.date } }); continue; }
+    due.push({ b, slot, claimId: `${b.id}:${slot.date}${opts.force ? ':manual' : ''}` });
+  }
+  // Two batched, indexed lookups for ALL due tenants (instead of two point queries per tenant per tick).
+  const generated = new Map<string, Date>();
+  const claimed = new Set<string>();
+  if (due.length > 0) {
+    const briefings = await prisma.briefing.findMany({
+      where: { businessId: { in: due.map((d) => d.b.id) }, date: { in: [...new Set(due.map((d) => d.slot.date))] } },
+      select: { businessId: true, date: true, createdAt: true },
+    });
+    for (const r of briefings) generated.set(`${r.businessId}:${r.date}`, r.createdAt);
+    const done = await prisma.processedEvent.findMany({
+      where: { source: BRIEFING_CLAIM_SOURCE, id: { in: due.map((d) => d.claimId) }, status: 'done' }, select: { id: true },
+    });
+    for (const r of done) claimed.add(r.id);
+  }
+
+  for (const { b, slot, claimId } of due) {
+    if (report.processed >= MAX_BRIEFINGS_PER_TICK && !dryRun) { report.items.push({ business_id: b.id, outcome: 'deferred_to_next_tick' }); continue; }
+    // Already generated at/after the scheduled time (by a runner, or by hand this evening): nothing to do.
+    const existing = generated.get(`${b.id}:${slot.date}`);
+    if (existing && existing.getTime() >= slot.scheduled_at.getTime()) { report.items.push({ business_id: b.id, outcome: 'already_generated', detail: { date: slot.date } }); continue; }
+    if (claimed.has(claimId)) { report.items.push({ business_id: b.id, outcome: 'already_generated', detail: { date: slot.date } }); continue; }
     if (dryRun) { report.items.push({ business_id: b.id, outcome: 'would_generate', detail: { date: slot.date } }); continue; }
 
     try {
-      const run = await withLease(`job:briefing:${b.id}`, BRIEFING_LEASE_MS, async () => {
+      const run = await withLease(`job:briefing:${b.id}`, BRIEFING_LEASE_MS, async (_lease, signal) => {
         if (!(await claimEvent(BRIEFING_CLAIM_SOURCE, claimId, BRIEFING_CLAIM_LEASE_MS))) return { outcome: 'already_claimed' } as const;
         try {
+          assertLease(signal, 'daily_briefing'); // never start the (paid) generation without the lease
           const briefing = await deps.generateBriefing(b.id, slot.date);
           await completeEvent(BRIEFING_CLAIM_SOURCE, claimId);
-          const notice = await deps.notifyOwner(b, briefing, now);
+          if (signal.aborted) return { outcome: 'generated', detail: { date: slot.date, owner_notice: 'skipped_lease_lost' } } as const; // no text from a stale holder
+          const full = await getBusiness(b.id);
+          const notice = full ? await deps.notifyOwner(full, briefing, now) : 'skipped_not_found';
           return { outcome: 'generated', detail: { date: slot.date, owner_notice: notice } } as const;
         } catch (err) {
           await releaseEvent(BRIEFING_CLAIM_SOURCE, claimId); // let the next tick retry
           throw err;
         }
-      });
+      }, { renewEveryMs: opts.leaseRenewMs });
       if (!run.acquired) { report.items.push({ business_id: b.id, outcome: 'busy' }); continue; }
       report.items.push({ business_id: b.id, outcome: run.value.outcome, ...('detail' in run.value ? { detail: run.value.detail } : {}) });
       if (run.value.outcome === 'generated') report.processed++;
     } catch (err) {
       report.errors++;
-      report.items.push({ business_id: b.id, outcome: 'error', detail: { error: errMsg(err) } });
+      report.items.push({ business_id: b.id, outcome: err instanceof JobLeaseLostError ? 'lease_lost' : 'error', detail: { error: errMsg(err) } });
       log.error('briefing.failed', { business: b.id, date: slot.date, err });
     }
   }
@@ -233,9 +265,7 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
   const report: JobReport = { job: 'gratitude_sweep', dry_run: dryRun, at: now.toISOString(), processed: 0, errors: 0, items: [] };
   const bucket = hourBucket(now);
 
-  const businesses = opts.businessId
-    ? liveBusinesses([(await getBusiness(opts.businessId)) as Business].filter(Boolean), opts.businessId)
-    : liveBusinesses(await listAllBusinesses());
+  const businesses = await liveBusinesses(opts.businessId);
   if (opts.businessId && businesses.length === 0) report.items.push({ business_id: opts.businessId, outcome: 'skipped_not_live' });
 
   // One query: which businesses were already swept this hour (skipped for free, no per-business round trip).
@@ -255,24 +285,27 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
       continue;
     }
     try {
-      const run = await withLease(`job:gratitude:${b.id}`, GRATITUDE_LEASE_MS, async () => {
+      const run = await withLease(`job:gratitude:${b.id}`, GRATITUDE_LEASE_MS, async (_lease, signal) => {
         // Manual runs do not take (or consume) the hourly claim: the sweep itself never double-texts.
         if (!opts.force && !(await claimEvent(GRATITUDE_CLAIM_SOURCE, claimId, GRATITUDE_LEASE_MS))) return { outcome: 'already_claimed' } as const;
         try {
-          const result = await deps.sweepGratitude(b.id);
+          assertLease(signal, 'gratitude_sweep'); // never start texting without the lease
+          const result = await deps.sweepGratitude(b.id, signal);
+          // Lease lost mid-sweep: the sweep stopped itself; give the hour back so the next tick finishes the rest.
+          if (signal.aborted) throw new JobLeaseLostError('gratitude_sweep');
           if (!opts.force) await completeEvent(GRATITUDE_CLAIM_SOURCE, claimId);
           return { outcome: 'swept', detail: result } as const;
         } catch (err) {
           if (!opts.force) await releaseEvent(GRATITUDE_CLAIM_SOURCE, claimId);
           throw err;
         }
-      });
+      }, { renewEveryMs: opts.leaseRenewMs });
       if (!run.acquired) { report.items.push({ business_id: b.id, outcome: 'busy' }); continue; }
       report.items.push({ business_id: b.id, outcome: run.value.outcome, ...('detail' in run.value ? { detail: run.value.detail } : {}) });
       if (run.value.outcome === 'swept') report.processed++;
     } catch (err) {
       report.errors++;
-      report.items.push({ business_id: b.id, outcome: 'error', detail: { error: errMsg(err) } });
+      report.items.push({ business_id: b.id, outcome: err instanceof JobLeaseLostError ? 'lease_lost' : 'error', detail: { error: errMsg(err) } });
       log.error('gratitude.failed', { business: b.id, err });
     }
   }
@@ -410,7 +443,7 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
 }> {
   const on = new Set(enabledJobs(env));
   const setting = jobsSetting(env);
-  const businesses = liveBusinesses(await listAllBusinesses()).filter((b) => isProvisioningAllowed(b, now, env));
+  const businesses = (await liveBusinesses()).filter((b) => isProvisioningAllowed(b, now, env));
   const jobs: JobStatus[] = [];
   for (const name of JOB_NAMES) {
     const last = await lastRunAt(name);

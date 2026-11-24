@@ -57,18 +57,26 @@ export interface SweepResult {
   skipped_quiet_hours: number;
   skipped_cap: number;
   skipped_error: number;
+  /** The job lease was lost mid-sweep: the sweep stopped early without sending the rest. */
+  aborted?: boolean;
 }
 
-export async function runGratitudeSweep(businessId?: string): Promise<SweepResult> {
+/**
+ * `signal` (the job runner's lease signal): once it aborts the lease is lost and a successor may be sweeping, so no further text
+ * is sent (`aborted` is set on the result; the unsent bookings are picked up by the next sweep).
+ */
+export async function runGratitudeSweep(businessId?: string, opts: { signal?: AbortSignal } = {}): Promise<SweepResult> {
   const started = Date.now();
   const candidates = await findGratitudeCandidates(businessId);
   const ids: string[] = [];
   const r: SweepResult = {
     sent: 0, skipped: 0, ids, skipped_no_consent: 0, skipped_opt_out: 0, skipped_quiet_hours: 0, skipped_cap: 0, skipped_error: 0,
   };
+  const aborted = () => opts.signal?.aborted === true;
   log.info('sweep.start', { business: businessId ?? 'all', candidates: candidates.length });
 
   for (const booking of candidates) {
+    if (aborted()) { r.aborted = true; break; } // lease lost: stop before the next text
     // No recorded consent: do not even attempt (no blocked row per sweep); the owner sees the count.
     if (!booking.followup_consent_at) { r.skipped++; r.skipped_no_consent++; continue; }
     try {

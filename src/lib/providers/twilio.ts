@@ -5,6 +5,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { insecureDevAllowed } from '@/lib/auth';
 import { validateRecipient } from '@/lib/messaging/recipient';
+import { toE164 } from '@/lib/phone';
 import { logger } from '@/lib/log';
 
 export interface SendSmsResult { id: string; status: 'sent' | 'mock' | 'failed'; error?: string }
@@ -116,13 +117,34 @@ export async function sendSms(to: string, body: string, opts: { anyCountry?: boo
 
 export type ProvisionNumberFailureStage = 'not_configured' | 'search' | 'purchase';
 
+/**
+ * What provisioning needs from the database to buy a number SAFELY on an account that every tenant shares. Implemented by
+ * `createNumberAttemptStore` (src/lib/db/number-attempts.ts); injected so this module stays free of database imports.
+ */
+export interface NumberAttemptStore {
+  id: string;
+  isHeld(e164: string): Promise<boolean>;
+  claim(e164: string): Promise<boolean>;
+  record(e164: string): Promise<void>;
+  attempted(e164: string): Promise<boolean>;
+  finish(e164: string, outcome: 'bought' | 'refused' | 'unknown'): Promise<void>;
+}
+
 export type ProvisionNumberResult =
-  | { ok: true; phone: string; mock: boolean }
+  | {
+    ok: true;
+    phone: string;
+    mock: boolean;
+    /** A real number that THIS call bought (or proved it bought): the only kind a failed save may release again. */
+    bought?: boolean;
+  }
   | {
     ok: false;
     stage: ProvisionNumberFailureStage;
     /** Operator-readable reason (never contains credentials). */
     error: string;
+    /** The candidate the purchase was attempted for, when the outcome could not be settled (operator may need to look). */
+    unsettled?: string;
   };
 
 /**
@@ -140,18 +162,48 @@ function mockNumber(areaCode: string): string {
   return `+1${areaCode}555${suffix}`;
 }
 
+/** Same number, whatever the formatting ("+1 305 777 0100", "13057770100"): compared as E.164, never as raw strings. */
+function sameE164(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = toE164(a);
+  return x !== null && x === toE164(b);
+}
+
 /**
- * Buy a local number. Never returns a fake number when Twilio is configured or in production (see fakeNumberAllowed):
- * those cases return `{ ok: false }` and the caller must fail the step. If the purchase request itself fails ambiguously
- * (timeout, 5xx) the account is checked for the candidate number first, so a purchase that actually went through is
- * adopted instead of being bought again on retry.
+ * Is `number` the platform's own SMS sender? TRUE when TWILIO_PHONE_NUMBER is set and either matches it as E.164 or is
+ * itself unparseable (fail closed: with a garbled sender we cannot prove a number is NOT the sender).
+ */
+export function isPlatformNumber(number: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const platform = (env.TWILIO_PHONE_NUMBER ?? '').trim();
+  if (!platform) return false;
+  if (toE164(platform) === null) return true;
+  return sameE164(platform, number);
+}
+
+const RECONCILE_DELAYS_MS = [0, 1_500, 4_000, 8_000];
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** The FriendlyName a purchase is tagged with: it proves, on the shared account, WHICH attempt bought the number. */
+export const attemptFriendlyName = (attemptId: string): string => `recepcionista:${attemptId}`;
+
+/**
+ * Buy a local number on the SHARED Twilio account. Never returns a fake number when Twilio is configured or in production
+ * (see fakeNumberAllowed): those cases return `{ ok: false }` and the caller must fail the step.
+ *
+ * Safety on a shared account (docs/review/08 F1): the candidate is skipped when a business already holds it, when it is the
+ * platform sender, or when another in-flight attempt reserved it; the attempt is RECORDED before the purchase is sent and
+ * the purchase is tagged with a per-attempt FriendlyName. If the purchase answer is ambiguous (timeout, 5xx) the account is
+ * checked (with backoff, because Twilio's listing can lag) and a number is adopted ONLY when it is on the account, held by
+ * no business, not the platform sender, recorded as this attempt's candidate AND tagged with this attempt's FriendlyName.
+ * Without an attempt store there is no proof, so nothing is ever adopted.
  */
 export async function provisionNumber(
   areaCode = '305',
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv; attempts?: NumberAttemptStore; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<ProvisionNumberResult> {
   const env = deps.env ?? process.env;
   const doFetch = deps.fetchImpl ?? fetch;
+  const sleep = deps.sleep ?? defaultSleep;
+  const attempts = deps.attempts;
   const sid = env.TWILIO_ACCOUNT_SID;
   const token = env.TWILIO_AUTH_TOKEN;
   const configured = Boolean(sid && token && env.TWILIO_PHONE_NUMBER);
@@ -173,54 +225,102 @@ export async function provisionNumber(
       { headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS) },
     );
     const list = (await search.json().catch(() => ({}))) as { available_phone_numbers?: Array<{ phone_number?: string }>; message?: string };
-    candidate = list.available_phone_numbers?.[0]?.phone_number;
-    if (!search.ok || !candidate) {
+    const offered = (list.available_phone_numbers ?? []).map((n) => n.phone_number).filter((n): n is string => typeof n === 'string' && n.length > 0);
+    if (!search.ok || offered.length === 0) {
       log.warn('number.search_failed', { area_code: areaCode, status: search.status, error: list.message });
       return { ok: false, stage: 'search', error: search.ok ? `no numbers available in area code ${areaCode}` : `number search failed (${search.status})` };
+    }
+    // First offered number that is safe to try: not the platform sender, not held by a business, not reserved by another attempt.
+    let skippedAll = 0;
+    for (const n of offered.slice(0, 10)) {
+      if (isPlatformNumber(n, env)) { skippedAll++; continue; }
+      if (attempts) {
+        if (await attempts.isHeld(n)) { skippedAll++; log.warn('number.candidate_held', { phone: n }); continue; }
+        if (!(await attempts.claim(n))) { skippedAll++; log.warn('number.candidate_reserved', { phone: n }); continue; }
+      }
+      candidate = n;
+      break;
+    }
+    if (!candidate) {
+      log.warn('number.no_free_candidate', { area_code: areaCode, offered: offered.length, skipped: skippedAll });
+      return { ok: false, stage: 'search', error: `no unreserved numbers available in area code ${areaCode}, try again` };
     }
   } catch (err) {
     log.error('number.search_error', { area_code: areaCode, err });
     return { ok: false, stage: 'search', error: 'number search failed (network)' };
   }
   log.debug('number.candidate', { area_code: areaCode, phone: candidate });
+  // Written BEFORE the purchase is sent: if we crash or time out mid-purchase this row says what we were buying.
+  if (attempts) {
+    try {
+      await attempts.record(candidate);
+    } catch (err) {
+      log.error('number.attempt_record_failed', { phone: candidate, err });
+      await attempts.finish(candidate, 'refused').catch(() => undefined);
+      return { ok: false, stage: 'purchase', error: 'number purchase not started (could not record the attempt)' };
+    }
+  }
+  const friendlyName = attempts ? attemptFriendlyName(attempts.id) : undefined;
   let failure = 'number purchase failed';
   try {
     const buy = await doFetch(`${base}/IncomingPhoneNumbers.json`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ PhoneNumber: candidate }),
+      body: new URLSearchParams({ PhoneNumber: candidate, ...(friendlyName ? { FriendlyName: friendlyName } : {}) }),
       signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
     });
     const bought = (await buy.json().catch(() => ({}))) as { phone_number?: string; message?: string };
     if (buy.ok && bought.phone_number) {
       log.info('number.bought', { phone: bought.phone_number, area_code: areaCode });
-      return { ok: true, phone: bought.phone_number, mock: false };
+      await attempts?.finish(candidate, 'bought').catch(() => undefined);
+      return { ok: true, phone: bought.phone_number, mock: false, bought: true };
     }
     failure = `number purchase failed (${buy.status})`;
     log.warn('number.buy_failed', { phone: candidate, status: buy.status, error: bought.message });
     // A 4xx is a definite refusal (nothing was bought); only an ambiguous answer needs the reconciliation below.
-    if (buy.status >= 400 && buy.status < 500) return { ok: false, stage: 'purchase', error: failure };
+    if (buy.status >= 400 && buy.status < 500) {
+      await attempts?.finish(candidate, 'refused').catch(() => undefined);
+      return { ok: false, stage: 'purchase', error: failure };
+    }
   } catch (err) {
     failure = 'number purchase failed (network)';
     log.error('number.buy_error', { phone: candidate, err });
   }
-  // Ambiguous outcome: did Twilio create it anyway? Adopt it rather than leave an orphan that a retry would duplicate.
-  try {
-    const found = await doFetch(`${base}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(candidate)}`, {
-      headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
-    });
-    if (found.ok) {
-      const rows = (await found.json().catch(() => null)) as { incoming_phone_numbers?: Array<{ phone_number?: string }> } | null;
-      const hit = (rows?.incoming_phone_numbers ?? []).find((n) => n.phone_number === candidate);
-      if (hit?.phone_number) {
-        log.warn('number.bought_adopted', { phone: hit.phone_number, reason: 'purchase answer was lost but the number exists' });
-        return { ok: true, phone: hit.phone_number, mock: false };
-      }
-    }
-  } catch (err) {
-    log.error('number.reconcile_error', { phone: candidate, err });
+  // Ambiguous outcome: did Twilio create it anyway? Adopt it ONLY with proof it was this attempt's purchase.
+  if (!attempts) {
+    log.error('number.unsettled', { phone: candidate, reason: 'no attempt store: nothing can be proven, so nothing is adopted' });
+    return { ok: false, stage: 'purchase', error: failure, unsettled: candidate };
   }
-  return { ok: false, stage: 'purchase', error: failure };
+  for (const delay of RECONCILE_DELAYS_MS) {
+    if (delay > 0) await sleep(delay);
+    try {
+      const found = await doFetch(`${base}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(candidate)}`, {
+        headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
+      });
+      if (!found.ok) continue;
+      const rows = (await found.json().catch(() => null)) as { incoming_phone_numbers?: Array<{ phone_number?: string; friendly_name?: string; sid?: string }> } | null;
+      const hit = (rows?.incoming_phone_numbers ?? []).find((n) => n.phone_number === candidate);
+      if (!hit?.phone_number) continue; // not listed (yet): the listing can lag the purchase
+      const ours = hit.friendly_name === friendlyName
+        && (await attempts.attempted(candidate))
+        && !isPlatformNumber(candidate, env)
+        && !(await attempts.isHeld(candidate));
+      if (!ours) {
+        // It exists, but nothing proves this attempt bought it (another tenant's purchase, or a number that is in use): hands off.
+        log.error('number.adopt_refused', { phone: candidate, attempt: attempts.id, reason: 'listed on the account but not proven to be this attempt\'s purchase' });
+        await attempts.finish(candidate, 'unknown').catch(() => undefined);
+        return { ok: false, stage: 'purchase', error: `${failure}; the number is on the account but was not bought by this request, so it was not adopted` };
+      }
+      log.warn('number.bought_adopted', { phone: hit.phone_number, attempt: attempts.id, reason: 'purchase answer was lost but the number carries this attempt\'s tag' });
+      await attempts.finish(candidate, 'bought').catch(() => undefined);
+      return { ok: true, phone: hit.phone_number, mock: false, bought: true };
+    } catch (err) {
+      log.error('number.reconcile_error', { phone: candidate, err });
+    }
+  }
+  log.error('number.unsettled', { phone: candidate, attempt: attempts.id, reason: 'purchase answer lost and the number is not (yet) listed: it may exist; check the Twilio console' });
+  await attempts.finish(candidate, 'unknown').catch(() => undefined);
+  return { ok: false, stage: 'purchase', error: failure, unsettled: candidate };
 }
 
 /** Numbers issued by the mock pool (+1<area>555xxxx): nothing exists at Twilio for them. */
@@ -234,34 +334,71 @@ export interface ReleaseNumberResult {
   already_released?: boolean;
   /** Twilio incoming-phone-number sid that was deleted. */
   sid?: string;
-  /** Refused on purpose (e.g. it is the platform SMS sender number). Not an error to retry. */
+  /** Refused on purpose (e.g. it is the platform SMS sender number, or another business holds it). Not an error to retry. */
   refused?: string;
   error?: string;
 }
 
+/** Default holder check: does a business OTHER than `callerBusinessId` hold this number? (dynamic import keeps this module free of the database at load) */
+async function heldByOtherBusiness(e164: string, callerBusinessId: string | null | undefined): Promise<boolean> {
+  const { numberHeldByBusiness } = await import('@/lib/db/number-attempts');
+  return numberHeldByBusiness(e164, callerBusinessId ?? null);
+}
+
 /**
  * Release (delete) a number this platform bought for a tenant. IDEMPOTENT: a number Twilio no longer lists, or a 404
- * on delete, is success. Mock mode (no TWILIO_* credentials, or a mock-pool number) calls nothing and succeeds.
- * Never releases TWILIO_PHONE_NUMBER (the platform's own SMS sender). The caller must have checked that no other
- * business uses the number. Never throws.
+ * on delete, is success. Never throws.
+ *
+ * Refuses (never calls Twilio) when:
+ *  - it is TWILIO_PHONE_NUMBER (the platform's SMS sender), compared as E.164, or that variable is set but unparseable;
+ *  - ANOTHER business than `callerBusinessId` holds the number in our database (the Twilio account is shared: a number
+ *    that is listed there is not necessarily this caller's; docs/review/08 F1). If that check itself fails, it refuses.
+ * Mock-pool numbers (+1<area>555xxxx) succeed without a call. With NO Twilio variables at all (explicit mock mode, not
+ * production) a number is "released" without a call; with PARTIAL credentials, or in production, it is an error and the
+ * caller must keep its database reference (a real paid number would otherwise be orphaned).
  */
 export async function releaseNumber(
   e164: string,
-  deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  deps: {
+    fetchImpl?: typeof fetch;
+    env?: NodeJS.ProcessEnv;
+    /** The business releasing it (its own row is not a conflict). Omit when no business is releasing: any holder blocks. */
+    callerBusinessId?: string | null;
+    /** Test seam for the holder check. */
+    heldByOther?: (e164: string, callerBusinessId: string | null | undefined) => Promise<boolean>;
+  } = {},
 ): Promise<ReleaseNumberResult> {
   const env = deps.env ?? process.env;
   const doFetch = deps.fetchImpl ?? fetch;
   const number = (e164 || '').trim();
   if (!/^\+[1-9]\d{6,14}$/.test(number)) return { ok: false, error: 'not an E.164 number' };
-  if (env.TWILIO_PHONE_NUMBER && env.TWILIO_PHONE_NUMBER.trim() === number) {
-    log.error('number.release_refused', { phone: number, reason: 'TWILIO_PHONE_NUMBER (platform SMS sender)' });
+  if (isPlatformNumber(number, env)) {
+    log.error('number.release_refused', { phone: number, reason: 'TWILIO_PHONE_NUMBER (platform SMS sender) or unparseable sender' });
     return { ok: false, refused: 'this is the platform SMS sender number (TWILIO_PHONE_NUMBER)' };
+  }
+  if (isMockPoolNumber(number)) {
+    log.warn('number.release_mock', { phone: number, reason: 'mock-pool number' });
+    return { ok: true, mock: true };
+  }
+  try {
+    if (await (deps.heldByOther ?? heldByOtherBusiness)(number, deps.callerBusinessId)) {
+      log.error('number.release_refused', { phone: number, reason: 'another business holds this number' });
+      return { ok: false, refused: 'another business holds this number; it is kept at the provider' };
+    }
+  } catch (err) {
+    log.error('number.release_refused', { phone: number, reason: 'could not verify that no other business holds it', err });
+    return { ok: false, refused: 'could not verify that no other business holds this number; nothing was deleted' };
   }
   const sid = env.TWILIO_ACCOUNT_SID;
   const token = env.TWILIO_AUTH_TOKEN;
-  if (!sid || !token || !env.TWILIO_PHONE_NUMBER || isMockPoolNumber(number)) {
-    log.warn('number.release_mock', { phone: number, reason: isMockPoolNumber(number) ? 'mock-pool number' : 'TWILIO_* incomplete' });
-    return { ok: true, mock: true };
+  if (!sid || !token || !env.TWILIO_PHONE_NUMBER) {
+    const none = !sid && !token && !env.TWILIO_PHONE_NUMBER;
+    if (none && env.NODE_ENV !== 'production') {
+      log.warn('number.release_mock', { phone: number, reason: 'no TWILIO_* at all (mock mode, not production)' });
+      return { ok: true, mock: true };
+    }
+    log.error('number.release_unconfigured', { phone: number, reason: 'TWILIO_* incomplete: cannot release a real number; fix the configuration and retry' });
+    return { ok: false, error: 'Twilio credentials are incomplete (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER); the number was NOT released and the database reference is kept' };
   }
   const auth = { authorization: `Basic ${btoa(`${sid}:${token}`)}` };
   const base = `https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers`;

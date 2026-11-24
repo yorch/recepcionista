@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
-import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase, recordAudit } from '@/lib/db';
+import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase, recordAudit, createNumberAttemptStore, numberHeldByBusiness } from '@/lib/db';
+import { areaCodeForBusiness } from '@/lib/phone';
+import crypto from 'node:crypto';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
 import { isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
@@ -97,7 +99,7 @@ function lostLeaseCheck(signal: AbortSignal): void {
 function provisionFailure(
   status: 502 | 503,
   error: string,
-  extra: { code: string; stage: string; phone?: string | null },
+  extra: { code: string; stage: string; phone?: string | null; retry?: string },
 ): ReturnType<typeof fail> {
   return NextResponse.json({
     ok: false,
@@ -106,9 +108,9 @@ function provisionFailure(
     stage: extra.stage,
     retryable: true,
     ...(extra.phone ? { partial: { phone: extra.phone, number_kept: true } } : {}),
-    retry: extra.phone
+    retry: extra.retry ?? (extra.phone
       ? 'Your phone number is reserved for this business. Try again in a minute: the retry reuses it and will not buy another.'
-      : 'Nothing was purchased or charged. Try again in a minute; if it keeps failing, contact support.',
+      : 'Nothing was purchased or charged. Try again in a minute; if it keeps failing, contact support.'),
   }, { status }) as unknown as ReturnType<typeof fail>;
 }
 
@@ -217,29 +219,52 @@ async function provision(
     let mock = true;
     if (!phone) {
       lostLeaseCheck(signal); // never buy a number after the lease was lost: a successor may already hold it
-      const provisioned = await provisionNumber('305');
+      // Area code: the business's own (its owner phone's) when valid, else TWILIO_AREA_CODE (default 305).
+      const areaCode = areaCodeForBusiness(business);
+      const provisioned = await provisionNumber(areaCode, { attempts: createNumberAttemptStore(crypto.randomUUID()) });
       if (!provisioned.ok) {
         // Never a fake number once Twilio is configured or in production: fail the step, stay 'onboarding'.
-        await auditProvision(principal, id, 'provision.number_failed', { stage: provisioned.stage, error: provisioned.error });
+        await auditProvision(principal, id, 'provision.number_failed', { stage: provisioned.stage, error: provisioned.error, area_code: areaCode, ...(provisioned.unsettled ? { unsettled_candidate: provisioned.unsettled } : {}) });
         log.error('number.failed', { business: id, stage: provisioned.stage, error: provisioned.error });
         return provisionFailure(
           provisioned.stage === 'not_configured' ? 503 : 502,
           provisioned.stage === 'not_configured'
             ? 'Phone provider is not configured on this server. Contact support.'
             : `We could not get a phone number from the carrier (${provisioned.error}).`,
-          { code: provisioned.stage === 'not_configured' ? 'phone_provider_not_configured' : 'number_purchase_failed', stage: 'number' },
+          {
+            code: provisioned.stage === 'not_configured' ? 'phone_provider_not_configured' : 'number_purchase_failed',
+            stage: 'number',
+            // The purchase answer was lost and the number could not be proven ours: it may exist at the carrier. Say so.
+            ...(provisioned.unsettled ? { retry: 'The carrier did not confirm the purchase. If a number was bought it will be reconciled by support; try again in a few minutes.' } : {}),
+          },
         );
       }
       phone = provisioned.phone;
       mock = provisioned.mock;
+      const boughtThisCall = provisioned.mock || provisioned.bought === true;
       // Record the number IMMEDIATELY (status unchanged: it is not 'live' until the agent exists), so a failure below can
       // never lose a paid number and a retry reuses it.
       const saved = await updateBusiness(id, { phone }).catch(() => null);
       if (!saved) {
-        log.error('number.record_failed', { business: id, phone, action: 'releasing the number so it is not orphaned' });
-        const released = await releaseNumber(phone);
-        await auditProvision(principal, id, 'provision.number_record_failed', { phone, released: released.ok });
-        return provisionFailure(502, 'We bought a number but could not save it, so it was released. Try again.', { code: 'number_record_failed', stage: 'number' });
+        // Another business may hold the number (unique constraint): it is THEIR live line, never release it.
+        const heldElsewhere = await numberHeldByBusiness(phone, id).catch(() => true);
+        if (heldElsewhere) {
+          log.error('number.record_conflict', { business: id, phone, action: 'kept: another business holds this number' });
+          await auditProvision(principal, id, 'provision.number_conflict', { phone, released: false });
+          return provisionFailure(502, 'That number was claimed by another account at the same moment, so it was not assigned to you. Try again.', {
+            code: 'number_taken', stage: 'number', retry: 'Nothing was released and no other account was affected. Try again in a minute; you will be offered a different number.',
+          });
+        }
+        // Not held by anyone: only a number THIS call bought may be given back.
+        log.error('number.record_failed', { business: id, phone, action: boughtThisCall ? 'releasing the number so it is not orphaned' : 'not released: not bought by this call' });
+        const released = boughtThisCall ? await releaseNumber(phone, { callerBusinessId: id }) : null;
+        await auditProvision(principal, id, 'provision.number_record_failed', { phone, released: Boolean(released?.ok) });
+        return provisionFailure(502, released?.ok
+          ? 'We bought a number but could not save it, so it was released. Try again.'
+          : 'We bought a number but could not save it, and it could not be released automatically. Support has been alerted; try again in a minute.', {
+          code: 'number_record_failed', stage: 'number',
+          retry: released?.ok ? 'The number was released; you are not charged for it. Try again in a minute.' : 'Try again in a minute; if it keeps failing, contact support.',
+        });
       }
       await auditProvision(principal, id, 'provision.number_purchased', { phone, mock });
     } else {

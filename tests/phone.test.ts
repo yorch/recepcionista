@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { phoneCountry, sameNumber, toE164 } from '../src/lib/phone';
+import { areaCodeForBusiness, areaCodeOf, configuredAreaCode, isValidAreaCode, phoneCountry, sameNumber, toE164 } from '../src/lib/phone';
 
 describe('toE164', () => {
   test('US formats', () => {
@@ -35,5 +35,34 @@ describe('phoneCountry / sameNumber', () => {
     expect(sameNumber('+44 7911 123456', '+1 791-112-3456')).toBe(false);
     expect(sameNumber('abc', 'abc')).toBe(false);
     expect(sameNumber(null, null)).toBe(false);
+  });
+});
+
+describe('area codes for number purchase (docs/review/08 F10)', () => {
+  const env = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
+  test('isValidAreaCode: geographic NANP codes only', () => {
+    for (const ok of ['305', '786', '212', '415', '647']) expect(isValidAreaCode(ok)).toBe(true);
+    for (const bad of ['', '30', '3055', '055', '105', '911', '411', '555', '800', '888', '900', 'abc', ' 305']) expect(isValidAreaCode(bad)).toBe(false);
+    expect(isValidAreaCode(null)).toBe(false);
+  });
+  test('areaCodeOf reads US/Canada numbers in any format, and nothing else', () => {
+    expect(areaCodeOf('+13055550142')).toBe('305');
+    expect(areaCodeOf('(786) 555-0123')).toBe('786');
+    expect(areaCodeOf('1 212 555 0100')).toBe('212');
+    expect(areaCodeOf('+442071838750')).toBeNull();
+    expect(areaCodeOf('garbage')).toBeNull();
+    expect(areaCodeOf(null)).toBeNull();
+  });
+  test('TWILIO_AREA_CODE configures the default, 305 when unset or invalid', () => {
+    expect(configuredAreaCode(env({}))).toBe('305');
+    expect(configuredAreaCode(env({ TWILIO_AREA_CODE: '415' }))).toBe('415');
+    expect(configuredAreaCode(env({ TWILIO_AREA_CODE: '  212 ' }))).toBe('212');
+    for (const bad of ['0', '1234', 'abc', '800', '']) expect(configuredAreaCode(env({ TWILIO_AREA_CODE: bad }))).toBe('305');
+  });
+  test('a business is bought a number in its own owner phone area code when valid, else the configured default', () => {
+    expect(areaCodeForBusiness({ owner_phone: '+17865550123' }, env({ TWILIO_AREA_CODE: '212' }))).toBe('786');
+    expect(areaCodeForBusiness({ owner_phone: null }, env({ TWILIO_AREA_CODE: '212' }))).toBe('212');
+    expect(areaCodeForBusiness({ owner_phone: '+442071838750' }, env({}))).toBe('305');
+    expect(areaCodeForBusiness(null, env({}))).toBe('305');
   });
 });

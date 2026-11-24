@@ -8,7 +8,7 @@ import { emailConfigured } from '@/lib/email';
 import { accountId } from '@/lib/login-throttle';
 import { hashPassword } from '@/lib/password';
 import { rateLimit } from '@/lib/ratelimit';
-import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, signupAvailability, turnstileEnabled, verifyTurnstile } from '@/lib/signup';
+import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, captchaRequired, signupAvailability, verifyTurnstile } from '@/lib/signup';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -27,7 +27,7 @@ const fail = (status: number, error: string) => NextResponse.json({ ok: false, e
  * new owner signs in after verifying (a cookie here would tell new from existing addresses apart).
  *
  * Abuse controls: per-IP and per-address Postgres limits, a honeypot field, Cloudflare Turnstile when
- * TURNSTILE_SECRET_KEY is set (fails closed), and graceful platform-wide capacity (SIGNUP_MAX_PER_HOUR, default 60): only
+ * Turnstile is fully configured, secret + site key (fails closed), and graceful platform-wide capacity (SIGNUP_MAX_PER_HOUR, default 60): only
  * CREATED accounts count, each client has its own smaller share, signup degrades at 70% and stops only at 100%
  * (lib/signup checkSignupCapacity). A stale (>24h) UNVERIFIED account holding the address is replaced, so squatting a
  * victim's address never locks them out; a verified account is never replaced.
@@ -50,7 +50,7 @@ export async function POST(req: Request) {
     return accepted(); // pretend; a bot learns nothing and nothing is created
   }
 
-  if (turnstileEnabled() && !(await verifyTurnstile(input.turnstileToken, auditIp(req)))) {
+  if (captchaRequired() && !(await verifyTurnstile(input.turnstileToken, auditIp(req)))) {
     return fail(400, 'captcha_failed');
   }
   if (!(await allowPerEmail('auth/signup', input.email, 3))) return fail(429, 'too many attempts, try again later');

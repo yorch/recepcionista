@@ -174,9 +174,61 @@ async function decide(businessId: string, kind: 'sms' | 'call', now: Date, units
   return { ok: true, used, cap };
 }
 
+export interface SmsReservation extends AllowResult {
+  /** The period the segments were reserved in ('YYYY-MM-DD'); pass it to releaseSmsReservation so a refund hits the same row. */
+  period_start?: string;
+}
+
+/** Highest value the cap check can take: used when billing is not enforced (counting only). */
+const NO_CAP = 2_147_483_647;
+
+/**
+ * ATOMICALLY reserve `segments` SMS segments: one `INSERT .. ON CONFLICT DO UPDATE .. WHERE used + n <= cap RETURNING`, so
+ * concurrent sends (parallel dashboard texts, voice tools, several app instances) can never exceed the cap: exactly as many
+ * reservations succeed as fit. The reservation IS the metering: after a successful send nothing more is recorded; when the send
+ * fails, give it back with `releaseSmsReservation`. Plan gate (no plan / past-due beyond grace) is checked first. When billing
+ * is not enforced the segments are counted without a cap.
+ */
+export async function reserveSms(businessId: string, segments = 1, now: Date = new Date()): Promise<SmsReservation> {
+  const n = Math.max(1, positiveInt(segments, 'reserveSms segments'));
+  const b = await billingRow(businessId);
+  if (!b) return { ok: false, reason: 'no_plan', used: 0, cap: 0 };
+  const cap = smsCapFor({ sms_cap_override: b.smsCapOverride, billing_status: b.billingStatus });
+  const enforced = billingEnforced();
+  if (enforced) {
+    const plan = billingStateAllows({ billing_status: b.billingStatus as Business['billing_status'], past_due_since: b.pastDueSince ? b.pastDueSince.toISOString() : null }, now);
+    if (!plan) return { ok: false, reason: 'no_plan', used: (await getUsage(businessId, now))?.sms_count ?? 0, cap };
+  }
+  const limit = enforced ? cap : NO_CAP;
+  const rows = await prisma.$queryRaw<{ period_start: string; sms_count: number }[]>`
+    INSERT INTO "usage_counters" ("id", "business_id", "period_start", "sms_count", "call_seconds", "updated_at")
+    SELECT ${crypto.randomUUID()}, b."id", date_trunc('month', timezone(b."timezone", ${now}::timestamptz))::date,
+           ${n}::int, 0, clock_timestamp()
+      FROM "businesses" b WHERE b."id" = ${businessId} AND ${n}::bigint <= ${limit}::bigint
+    ON CONFLICT ("business_id", "period_start") DO UPDATE
+      SET "sms_count" = "usage_counters"."sms_count" + EXCLUDED."sms_count", "updated_at" = EXCLUDED."updated_at"
+      WHERE "usage_counters"."sms_count"::bigint + EXCLUDED."sms_count"::bigint <= ${limit}::bigint
+    RETURNING to_char("period_start", 'YYYY-MM-DD') AS period_start, "sms_count"`;
+  if (rows.length === 1) return { ok: true, used: rows[0].sms_count, cap, period_start: rows[0].period_start };
+  const usage = await getUsage(businessId, now);
+  return { ok: false, reason: usage ? 'cap_reached' : 'no_plan', used: usage?.sms_count ?? 0, cap };
+}
+
+/** Give back segments reserved with reserveSms (the provider send failed). Never goes below zero; never throws. */
+export async function releaseSmsReservation(businessId: string, segments: number, periodStart: string): Promise<void> {
+  try {
+    const n = Math.max(1, positiveInt(segments, 'releaseSmsReservation segments'));
+    await prisma.$executeRaw`
+      UPDATE "usage_counters" SET "sms_count" = GREATEST(0, "sms_count" - ${n}::int), "updated_at" = clock_timestamp()
+       WHERE "business_id" = ${businessId} AND "period_start" = ${periodStart}::date`;
+  } catch {
+    /* the counter stays slightly high (conservative); never turn a failed send into an error */
+  }
+}
+
 /**
  * May this business send a text of `segments` SMS segments (default 1) this period? Blocks when used + segments would
- * exceed the cap. (Advisory: pair with recordSms(segments) after sending.)
+ * exceed the cap. ADVISORY (a read): senders must use reserveSms, which is atomic; this is for pre-checks that do not send.
  */
 export const checkSmsAllowed = (businessId: string, now: Date = new Date(), segments = 1): Promise<AllowResult> => decide(businessId, 'sms', now, segments);
 
