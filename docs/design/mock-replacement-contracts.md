@@ -2,8 +2,8 @@
 
 Everything Phase 2 builds on. Phase 1 owns `prisma/**`, `src/lib/db/**` additions, `src/lib/types.ts`, `src/lib/business-config.ts`,
 `src/lib/crews.ts`, `src/lib/tz-infer.ts`. Phase 2 adds BEHAVIOUR (routes, UI, jobs, provider calls) only and must not change the schema without
-a new migration owned by the same person. Migration: `prisma/migrations/20261208120000_mock_replacement_schema` (hand written, re-runnable,
-additive, zero drift; upgrade test `tests/db/mock-replacement-migration.test.ts`).
+a new migration owned by the same person. Migrations: `prisma/migrations/20261208120000_mock_replacement_schema` (columns, tables, NOT VALID checks; short locks) and `20261209120000_review19_fixes` (validation of those checks, `briefing_audio.text_hash`, the `sms_log (to_e164, created_at)` index and the per-crew overlap rebuild, last); hand written, re-runnable,
+additive, zero drift; upgrade test `tests/db/mock-replacement-migration.test.ts`.
 
 Conventions kept: money is integer cents; all times are timestamptz (JS `Date` / ISO strings in the domain types); every helper that takes a
 `businessId` is tenant scoped (a row of another business is "not found"); invalid values given to `updateBusiness` are ignored (never written),
@@ -17,8 +17,8 @@ dedicated helpers return `{ ok: false, reason }`.
 |---|---|---|
 | `elevenlabs_phone_number_id` | text null, UNIQUE | `phnum_...`; 1..100 chars. The tenant's own AI line. Env `ELEVENLABS_PHONE_NUMBER_ID` is a fallback only (`resolveElevenLabsPhoneNumberId`). |
 | `twilio_phone_sid` | text null, UNIQUE | `PN...`; 1..64 chars. |
-| `review_url` | text null | https only, no whitespace, <= 300 chars (CHECK). |
-| `assistant_name` | text null | 1..40 chars after trim (CHECK). NULL = platform default name. |
+| `review_url` | text null | https only, no whitespace, <= 120 chars in the API (the CHECK still allows 300 for links saved before: the text builder never cuts a link). |
+| `assistant_name` | text null | 1..40 chars after trim (CHECK); in the API one to three words of letters (`'` and `-` inside a word), never a sentence; a stored value without that shape is read as the default. NULL = platform default name. |
 | `deposit_enabled` | bool, false | false = NO policy = the legacy behaviour (amount is whatever the agent / owner asks). |
 | `deposit_mode` | text, `'fixed'` | `fixed` or `percent`. |
 | `deposit_fixed_cents` | int null | 100..100000. |
@@ -32,7 +32,7 @@ dedicated helpers return `{ ok: false, reason }`.
 | `crews` | smallint, 1 | 1..20. |
 | `content_confirmed_at` / `content_confirmed_hash` | timestamptz null / text null | both null or both set (CHECK). |
 | `native_transfer_enabled` | bool, false | opt-in. |
-| `timezone` | existing | new CHECK: `UTC` or an `Area/Location` shaped name. Legacy non-IANA values were repaired to `America/New_York` (what `tzOf` already did on read). |
+| `timezone` | existing | new CHECK: `UTC` or an `Area/Location` shaped name. Legacy non-IANA values are mapped by the migration to their IANA zone (`PST8PDT` to Los Angeles, `GMT` to UTC, `Japan` to Tokyo ...; unknown names fall back to `America/New_York`, what `tzOf` does on read) and every repair is audited `business.timezone_repaired` (reviews 22 L2). |
 
 Defaults reproduce the code that existed before: hourly grid (`SLOT_STEP_MIN = 60`), 60 minutes lead (`nextAvailable` used `leadMin: 60`),
 14 days (`nextAvailable` looked 14 days ahead), no buffer, a single resource. NOTE: `slotsForDate` and booking validation (`validateSlot`) used
@@ -66,7 +66,7 @@ Rules: STOP/START-class keywords are NOT stored (they stay with `messaging/inbou
 
 ### briefing_audio
 
-`id, briefing_id (FK cascade, UNIQUE), content_type (audio/mpeg|mp4|aac|wav|ogg), bytes bytea (CHECK 1..5 MiB), voice_id, created_at`.
+`id, briefing_id (FK cascade, UNIQUE), content_type (audio/mpeg|mp4|aac|wav|ogg), bytes bytea (CHECK 1..5 MiB), voice_id, text_hash (SHA-256 of the transcript it was made from; migration 20261209120000), created_at`.
 `briefings.audio_url` semantics preserved: legacy rows keep `/audio/<file>`; stored audio uses `briefingAudioUrl(id)` = `/api/briefings/<id>/audio`
 (`saveBriefingAudio` sets it in the same transaction; `isStoredBriefingAudioUrl` tells them apart). Cascades with its briefing (retention purge,
 erasure, business delete). `pruneBriefingAudio({keepDays})` removes older clips and nulls the pointer; `BRIEFING_AUDIO_KEEP_DAYS` (default 30)
@@ -93,7 +93,7 @@ No table (decision L). The tenant release job stays audit-only: use `recordAudit
 
 `createBooking` / `rescheduleBooking` are now crew aware: with `crews = 1` they behave exactly as before. `createBooking` accepts `crew` (explicit; refused
 `invalid_crew` outside 1..crews, `slot_taken` when busy) and `created_via`; without `crew` it assigns the first free crew. `rescheduleBooking` keeps the
-booking's crew when free, else the first free crew, else `slot_taken`. `markDepositPaid` (Stripe/demo) now stamps `deposit_source = 'stripe'` and clears a manual mark.
+booking's crew when free, else the first free crew, else `slot_taken`. `markDepositPaid` (Stripe/demo) stamps `deposit_source = 'stripe'` (the demo checkout: NULL) and REPLACES a manual mark, even for the same amount; it returns `replaced_manual` so the webhook can tell the owner the customer paid twice, and it resets a manual refund recorded on that row (the manual record stays in the audit trail). `setDepositAmountIfUnpaid` is the only writer of a requested amount (conditional on `deposit_paid = false`).
 `updateBusiness` accepts (validated, invalid ignored): `elevenlabs_phone_number_id`, `twilio_phone_sid` (P2002 if owned elsewhere; prefer `setBusinessLine`),
 `review_url`, `assistant_name`, `native_transfer_enabled`, `timezone` (IANA only), and the five scheduling fields. The deposit policy is NOT patchable through
 `updateBusiness` (it must be validated as a whole): use `setDepositPolicy`.
@@ -112,12 +112,11 @@ booking's crew when free, else the first free crew, else `slot_taken`. `markDepo
 * **Crews.** One crew = old behaviour. `setSchedulingConfig` refuses to lower `crews` while a non-cancelled upcoming booking sits above the new count (`crew_in_use`); it takes the
   same advisory lock as `createBooking`. The buffer is NOT stored in the constraint: slot offering extends each busy interval by `buffer_minutes` in code (Phase 2), the DB only
   guarantees raw non-overlap per crew. A slot is available while `hasFreeCrew(crews, slot, listBlockingIntervalsByCrew(...))`.
-* **Content confirmation.** `confirmContent` stores the time and a SHA-256 fingerprint of (services name/price/duration, pricing notes, service area). No writer has to reset
-  anything: `contentConfirmationState` is `unconfirmed` (never), `confirmed` (fingerprint matches) or `stale` (services, prices, pricing notes or service area changed).
-  FAQs / descriptions do not count. Go-live gating (refuse `status = 'live'` unless `confirmed`, or show "re-confirm" on `stale`) is Phase 2. Switching vertical template should call `clearContentConfirmation`.
+* **Content confirmation.** `confirmContent` stores the time and a SHA-256 fingerprint of (services name/price/duration/description, FAQ questions and answers, pricing notes, service area). No writer has to reset
+  anything: `contentConfirmationState` is `unconfirmed` (never), `confirmed` (fingerprint matches) or `stale` (any of those changed). `confirmContent(..., { expected_hash })` refuses (`{ changed: true }`) when the stored content is no longer what the owner saw. Go-live gating (refuse `status = 'live'` unless `confirmed`, or show "re-confirm" on `stale`) is Phase 2. Switching vertical template should call `clearContentConfirmation`.
 * **Native transfer.** `native_transfer_enabled` is only a flag; with it false (default) behaviour is unchanged. Phase 2 wires the provider call and keeps the Twilio dial leg as the default.
 * **Inbox.** `markInboundForwarded` / `markInboundAutoReplied` are first-stamp-wins (return `true` once): use them as the "do it exactly once" gate before sending the owner alert / auto reply.
-  Outbound replies are logged with `logSms({ kind: 'owner_inbox_reply' | 'inbox_autoreply' })` and still go through opt-out / quiet-hours / cap checks (`sendAndLog`).
+  Outbound replies are logged with `logSms({ kind: 'owner_inbox_reply' | 'inbox_autoreply' })` and still go through opt-out / quiet-hours / cap checks (`sendAndLog`), and are sent FROM the tenant's own number (`messaging/sender.ts`; the shared sender is the fallback). The owner-forward `owner_alert` row stores a redacted line, never the customer's words (`sendAndLog({ log_body })`).
 * **Retention / erasure / export.** `PurgeCounts.inbound_messages`, `EraseCounts.inbound_messages` and `CustomerExport.inbound_messages` are new fields. `clearAll()` wipes `inbound_messages` and `briefing_audio`
   (`tests/db/clear-all.test.ts` fills both).
 

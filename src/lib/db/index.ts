@@ -1178,31 +1178,66 @@ export async function getBookedSlots(businessId: ID, date: string, tz?: string):
   return intervals.map((iv) => new Date(iv.start).toISOString());
 }
 
+export interface MarkDepositPaidResult {
+  updated: boolean;
+  /** The deposit was ALREADY marked paid by hand (cash, Zelle...) and this card payment replaced that mark: the customer paid twice. */
+  replaced_manual: { amount_cents: number | null; marked_by: string | null; refund_status: string; refund_amount_cents: number | null } | null;
+}
+
 /**
  * Record a successful deposit (Stripe webhook / demo checkout). Idempotent; sets
  * deposit_paid + deposit_amount (integer cents); only a `pending` booking becomes
  * `confirmed` — cancelled/completed bookings keep their status.
+ *
+ * Stripe is the source of truth. A card payment that arrives for a deposit the owner had marked as received by hand REPLACES that mark (the
+ * row becomes `deposit_source = 'stripe'`, so it can be refunded through Stripe) and is reported in `replaced_manual` so the caller can tell the
+ * owner the customer paid twice. A manual REFUND recorded earlier is reset (`refund_status = 'none'`; the manual record stays in the audit trail)
+ * so the card payment is not blocked as "already refunded". `opts.source: null` (the demo checkout) leaves the source empty: nothing was charged.
  */
-export async function markDepositPaid(bookingId: string, amountCents: number): Promise<{ updated: boolean }> {
+export async function markDepositPaid(bookingId: string, amountCents: number, opts: { source?: 'stripe' | null } = {}): Promise<MarkDepositPaidResult> {
   if (!Number.isInteger(amountCents) || amountCents <= 0) {
     log.warn('deposit.invalid_amount', { booking: bookingId, amount_cents: amountCents });
-    return { updated: false };
+    return { updated: false, replaced_manual: null };
   }
-  const paid = await prisma.booking.updateMany({
-    where: {
-      id: bookingId,
-      OR: [{ depositPaid: false }, { depositAmount: null }, { depositAmount: { not: amountCents } }],
-    },
-    // Stripe is the source of truth: a card payment replaces any earlier manual mark.
-    data: { depositPaid: true, depositAmount: amountCents, depositSource: 'stripe', depositMarkedBy: null, depositMarkedAt: null },
+  const source = opts.source === undefined ? 'stripe' : opts.source;
+  const { paid, replaced } = await prisma.$transaction(async (tx) => {
+    const cur = await tx.booking.findUnique({ where: { id: bookingId }, select: { depositPaid: true, depositSource: true, depositAmount: true, depositMarkedBy: true, refundStatus: true, refundAmountCents: true } });
+    if (!cur) return { paid: { count: 0 }, replaced: null };
+    const wasManual = cur.depositPaid && cur.depositSource === 'manual';
+    const res = await tx.booking.updateMany({
+      where: {
+        id: bookingId,
+        OR: [{ depositPaid: false }, { depositAmount: null }, { depositAmount: { not: amountCents } }, { depositSource: 'manual' }],
+      },
+      // Stripe is the source of truth: a card payment replaces any earlier manual mark (and the manual refund bookkeeping that went with it).
+      data: {
+        depositPaid: true, depositAmount: amountCents, depositSource: source, depositMarkedBy: null, depositMarkedAt: null,
+        ...(wasManual && cur.refundStatus === 'refunded' ? { refundStatus: 'none', refundAmountCents: null, stripeRefundId: null, refundedAt: null, refundRequestedAt: null } : {}),
+      },
+    });
+    return {
+      paid: res,
+      replaced: wasManual && res.count > 0
+        ? { amount_cents: cur.depositAmount, marked_by: cur.depositMarkedBy, refund_status: cur.refundStatus, refund_amount_cents: cur.refundAmountCents } : null,
+    };
   });
   const confirmed = await prisma.booking.updateMany({
     where: { id: bookingId, status: 'pending' },
     data: { status: 'confirmed' },
   });
   const updated = paid.count > 0 || confirmed.count > 0;
-  if (updated) log.info('deposit.paid', { booking: bookingId, amount_cents: amountCents, confirmed: confirmed.count > 0 });
-  return { updated };
+  if (updated) log.info('deposit.paid', { booking: bookingId, amount_cents: amountCents, confirmed: confirmed.count > 0, replaced_manual: Boolean(replaced) });
+  return { updated, replaced_manual: replaced };
+}
+
+/**
+ * Remember what a payment link asks for (integer cents) on a booking that is NOT paid. Conditional on `deposit_paid = false` in the same statement:
+ * a stale snapshot (the owner marked the deposit paid in another tab, or while the voice tool ran) can never rewrite the amount of a paid deposit.
+ * Returns false when the booking is paid or gone.
+ */
+export async function setDepositAmountIfUnpaid(bookingId: ID, amountCents: number): Promise<boolean> {
+  if (!Number.isInteger(amountCents) || amountCents <= 0) return false;
+  return (await prisma.booking.updateMany({ where: { id: bookingId, depositPaid: false }, data: { depositAmount: amountCents } })).count === 1;
 }
 
 // ---------- reschedule, notification and refunds ----------

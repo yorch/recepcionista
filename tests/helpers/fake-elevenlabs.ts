@@ -15,6 +15,8 @@ export function fakeElevenLabs(opts: { failToolsOnce?: boolean; failImport?: boo
   /** Imported phone numbers (POST /convai/phone-numbers), by phone_number_id. `importBodies` keeps what was sent (the Twilio token is in it: tests assert it never leaks elsewhere). */
   const phones = new Map<string, { phone_number_id: string; phone_number: string; label: string; agent_id: string | null }>();
   const importBodies: any[] = [];
+  /** Bodies of PATCH { sid, token } (credential refresh): the token is in them, tests assert it goes nowhere else. */
+  const credentialPatches: any[] = [];
   const registerCalls: any[] = [];
   const calls: string[] = [];
   let failTools = opts.failToolsOnce === true;
@@ -74,6 +76,7 @@ export function fakeElevenLabs(opts: { failToolsOnce?: boolean; failImport?: boo
       const ph = phones.get(decodeURIComponent(phoneOne[1]));
       if (!ph) return new Response('not found', { status: 404 });
       if (method === 'GET') return Response.json({ phone_number_id: ph.phone_number_id, phone_number: ph.phone_number, assigned_agent: ph.agent_id ? { agent_id: ph.agent_id } : null });
+      if (method === 'PATCH' && ('sid' in body || 'token' in body)) { credentialPatches.push(body); return Response.json({ phone_number_id: ph.phone_number_id }); } // refresh of the stored Twilio credentials: the agent binding is untouched
       if (method === 'PATCH') { ph.agent_id = body.agent_id ?? null; return Response.json({ phone_number_id: ph.phone_number_id }); }
       if (method === 'DELETE') { phones.delete(ph.phone_number_id); return Response.json({}); }
     }
@@ -87,7 +90,7 @@ export function fakeElevenLabs(opts: { failToolsOnce?: boolean; failImport?: boo
 
   let prev: typeof fetch | undefined;
   return {
-    tools, agents, settings, calls, fetchImpl, phones, importBodies, registerCalls,
+    tools, agents, settings, calls, fetchImpl, phones, importBodies, credentialPatches, registerCalls,
     install() { prev = globalThis.fetch; globalThis.fetch = fetchImpl; },
     restore() { if (prev) globalThis.fetch = prev; },
     toolNames: () => [...tools.values()].map((t) => t.config.name as string).sort(),

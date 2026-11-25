@@ -379,6 +379,26 @@ export interface CustomerRecords {
 /** Names worth matching in free text: long enough not to hit common words. */
 const MIN_NAME_LEN = 4;
 
+/** Lowercase ASCII letters and digits only (accents folded): what survives the GSM-7 clamp, the quote swap and the link masking of an owner alert. */
+const alnum = (s: string): string => s.normalize('NFD').replace(/\p{M}+/gu, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/**
+ * Owner-forward alerts written BEFORE the log kept only a redacted line (`Customer text (...1234): "<their words>". Reply from Messages ...`): they
+ * carry the customer's own words but no number, booking or name. Matched by the shape + last 4 digits AND the opening words of one of THIS
+ * customer's inbox messages, so another customer with the same last 4 digits is never matched. New forwards store no words (messaging/inbox).
+ */
+async function legacyOwnerForwardIds(db: Reader, businessId: string, e164: string): Promise<string[]> {
+  const inbound = await db.$queryRaw<{ body: string }[]>`SELECT "body" FROM "inbound_messages" WHERE "business_id" = ${businessId} AND "from_e164" = ${e164}`;
+  const fragments = inbound.map((m) => alnum(m.body).slice(0, 24)).filter((f) => f.length >= 8);
+  if (fragments.length === 0) return [];
+  const last4 = e164.slice(-4);
+  const rows = await db.$queryRaw<{ id: string; body: string }[]>`
+    SELECT "id", "body" FROM "sms_log"
+     WHERE "business_id" = ${businessId} AND "kind" = 'owner_alert'
+       AND ("body" LIKE ${`Customer text (...${last4}): "%`} OR "body" LIKE ${`Mensaje de un cliente (...${last4}): "%`})`;
+  return rows.filter((r) => { const a = alnum(r.body); return fragments.some((f) => a.includes(f)); }).map((r) => r.id);
+}
+
 /**
  * Locate a customer's records, matched on the customer's E.164 number (legacy rows without an E.164 match on the last
  * 10 digits only when both numbers are US/Canada-shaped; free text is parsed with libphonenumber, so a +44 number
@@ -418,7 +438,9 @@ export async function locateCustomerRecords(db: Reader, businessId: string, id: 
             OR "booking_id" = ANY(${bookingIds}::text[])
             OR regexp_replace("body", '[^0-9]', '', 'g') LIKE ${likeDigits}
             OR ("kind" = 'owner_alert' AND "body" ILIKE ANY(${namePatterns}::text[])))`;
-  const smsIds = smsRows.filter((r) => r.matched || textMentions(r.body, e164, country)).map((r) => r.id);
+  const smsIdSet = new Set(smsRows.filter((r) => r.matched || textMentions(r.body, e164, country)).map((r) => r.id));
+  for (const id2 of await legacyOwnerForwardIds(db, businessId, e164)) smsIdSet.add(id2);
+  const smsIds = [...smsIdSet];
   const briefingRows = await db.$queryRaw<{ id: string; transcript: string; by_day: boolean }[]>`
     SELECT br."id", br."transcript",
            (br."transcript" ILIKE ANY(${namePatterns}::text[])
@@ -478,6 +500,8 @@ export async function eraseCustomerData(businessId: string, phone: string, count
       DELETE FROM "inbound_messages" WHERE "business_id" = ${businessId} AND "from_e164" = ${id.e164}`;
     await tx.$executeRaw`
       DELETE FROM "owner_replies" WHERE "business_id" = ${businessId} AND "to_e164" = ${id.e164}`; // voice replies to this customer (number + text)
+    // Limiter keys that embed the number (`inbox:sender:<business>:<e164>`, `manual-sms:to:...`, `inbox-forward:sender:...`): nothing derived from it outlives erasure.
+    await tx.$executeRaw`DELETE FROM "rate_limit_buckets" WHERE "key" LIKE ${`%:${businessId}:${id.e164}`}`;
     // The keyed "lead handled" markers of the owner voice-reply channel (both trust classes): nothing derived from the number outlives erasure.
     await tx.processedEvent.deleteMany({ where: { source: HANDLED_SOURCE, id: { in: (['v', 'u'] as const).map((c) => handledMarkerId(businessId, id.e164 as string, c)) } } });
     const events = await tx.$executeRaw`

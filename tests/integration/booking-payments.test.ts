@@ -537,6 +537,8 @@ integration('dashboard bookings and deposits (postgres)', () => {
     try {
       await withEnv({ STRIPE_SECRET_KEY: 'sk_test_x' }, async () => {
         expect((await markRoute.POST(req(`/api/bookings/${b.id}/deposit/mark-paid`, owner, {}), ctx(b.id))).status).toBe(200);
+        // the deactivation is durable and runs in the background (review 21 H1): wait for it
+        await (await import('@/lib/payments/link-store')).flushLinkDeactivations();
       });
     } finally { globalThis.fetch = saved; }
     expect(calls).toEqual(['https://api.stripe.com/v1/payment_links/plink_manual1234 active=false']);

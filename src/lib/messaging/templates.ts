@@ -205,16 +205,25 @@ export interface ReviewRequestArgs {
   language?: Lang;
 }
 
+/** Room for ". Reply STOP to opt out" (the footer the send path adds) inside the 300-character text. */
+const REVIEW_BODY_MAX = SMS_LIMIT - 26;
+
 export function reviewRequestSms({ business, booking, reviewUrl, language = 'en' }: ReviewRequestArgs): string {
   const name = firstName(booking.customer_name);
   const who = `${assistantNameOf(business)}, ${business.name}`;
   const link = reviewUrl?.trim() || null;
-  if (language === 'es') {
-    return clip(link ? `¡Gracias ${name}! ¿Nos deja una reseña de 30 segundos? ${link} — ${who}` : `¡Gracias ${name}! Nos alegra que le haya ido bien. — ${who}`);
+  const es = language === 'es';
+  if (!link) {
+    return clip(es ? `¡Gracias ${name}! Nos alegra que le haya ido bien. — ${who}` : `Thank you ${name}! We are glad it went well. ¡Gracias! — ${who}`);
   }
-  return clip(link
-    ? `Thank you ${name}! 30 seconds for a quick review? ${link} ¡Gracias! — ${who}`
-    : `Thank you ${name}! We are glad it went well. ¡Gracias! — ${who}`);
+  // The link is never cut: when the text is too long the words AROUND it shrink (the signature, then the greeting), in this order.
+  const tiers = es
+    ? [`¡Gracias ${name}! ¿Nos deja una reseña de 30 segundos? ${link} — ${who}`, `¡Gracias ${name}! ¿Una reseña de 30 segundos? ${link} — ${business.name}`, `¡Gracias! Reseña: ${link} — ${business.name}`]
+    : [`Thank you ${name}! 30 seconds for a quick review? ${link} ¡Gracias! — ${who}`, `Thank you ${name}! Quick review? ${link} — ${business.name}`, `Thank you! Review: ${link} — ${business.name}`];
+  const fit = tiers.find((t) => [...t].length <= REVIEW_BODY_MAX);
+  if (fit) return fit;
+  // Even the shortest wording does not fit (a very long business name or a legacy link): the text without the link, never a cut one.
+  return clip(es ? `¡Gracias ${name}! Nos alegra que le haya ido bien. — ${business.name}` : `Thank you ${name}! We are glad it went well. — ${business.name}`);
 }
 
 export interface OwnerEscalationArgs {

@@ -319,6 +319,8 @@ model BriefingAudio {
   contentType String   @map("content_type")
   bytes       Bytes
   voiceId     String?  @map("voice_id")
+  /// SHA-256 of the transcript the clip was synthesized from: a failed regeneration never deletes a clip of the SAME text, and a repeat request for the same text and voice is not synthesized again.
+  textHash    String?  @map("text_hash")
   createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   briefing Briefing @relation(fields: [briefingId], references: [id], onDelete: Cascade)
@@ -376,6 +378,8 @@ model SmsLog {
 
   @@index([businessId, createdAt])
   @@index([businessId, toE164])
+  /// Routes a customer's reply to the shared sender to the business that texted them last (messaging/sender resolveInboundBusinesses).
+  @@index([toE164, createdAt])
   @@index([consentBasis, createdAt])
   @@index([bookingId])
   @@map("sms_log")

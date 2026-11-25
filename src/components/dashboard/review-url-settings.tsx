@@ -34,7 +34,7 @@ export function ReviewUrlSettings({ businessId, initial }: { businessId: string;
 
   return (
     <form onSubmit={save} className="flex flex-col gap-3">
-      <TextField label={t('rv.label')} hint={saved ? t('rv.hint') : `${t('rv.unset')} ${t('rv.hint')}`} error={error} type="url" inputMode="url" autoComplete="off" maxLength={300} value={url} onChange={(e) => setUrl(e.target.value)} />
+      <TextField label={t('rv.label')} hint={saved ? t('rv.hint') : `${t('rv.unset')} ${t('rv.hint')}`} error={error} type="url" inputMode="url" autoComplete="off" maxLength={120} value={url} onChange={(e) => setUrl(e.target.value)} />
       <div><Button type="submit" disabled={busy || url.trim() === saved}>{busy ? t('common.saving') : t('rv.save')}</Button></div>
     </form>
   );

@@ -22,6 +22,7 @@ export const OnboardingTimeZone = forwardRef<TimeZoneFieldHandle, { businessId: 
   const t = useT();
   const lang = useLocale();
   const [stored, setStored] = useState<string | null>(null);
+  const [chosen, setChosen] = useState(true); // until the server says otherwise, never override
   const [zone, setZone] = useState<string>('');
   const [touched, setTouched] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,13 +33,14 @@ export const OnboardingTimeZone = forwardRef<TimeZoneFieldHandle, { businessId: 
     apiRequest<TimeZoneView>(`/api/businesses/${businessId}/timezone`).then((v) => {
       if (!live) return;
       setStored(v.timezone);
+      setChosen(v.chosen !== false);
       setZone((z) => z || v.timezone);
     }).catch((err) => { if (live) setError(errorText(t, err)); });
     return () => { live = false; };
   }, [businessId, t]);
 
-  // The suggestion pre-selects until the owner picks something themselves.
-  useEffect(() => { if (stored && suggested && !touched) setZone(suggested); }, [stored, suggested, touched]);
+  // The suggestion pre-selects only while the zone is still the untouched default: a zone the owner already chose (Settings, an earlier visit) is never overridden.
+  useEffect(() => { if (stored && suggested && !touched && !chosen) setZone(suggested); }, [stored, suggested, touched, chosen]);
 
   useImperativeHandle(ref, () => ({
     async flush() {
@@ -46,6 +48,7 @@ export const OnboardingTimeZone = forwardRef<TimeZoneFieldHandle, { businessId: 
       try {
         const res = await apiRequest<TimeZoneView>(`/api/businesses/${businessId}/timezone`, { method: 'PUT', body: { timezone: zone } });
         setStored(res.timezone);
+        setChosen(true);
         setError(null);
         return true;
       } catch (err) {
@@ -56,7 +59,7 @@ export const OnboardingTimeZone = forwardRef<TimeZoneFieldHandle, { businessId: 
   }), [stored, zone, businessId, t]);
 
   if (!stored) return error ? <p role="alert" className="text-[13px] text-danger">{error}</p> : <div className="skeleton h-16" aria-busy="true" />;
-  const fromPhone = suggested !== null && zone === suggested && !touched;
+  const fromPhone = suggested !== null && zone === suggested && !touched && !chosen;
   return (
     <div>
       <SelectField

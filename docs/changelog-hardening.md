@@ -458,3 +458,22 @@ No migration (the Phase 1 columns are used as built).
 | #28 tenant jobs | `tenant_release` and `grandfather` admin jobs, dry run by default, `TENANT_RELEASE_JOB=on` to act, audit-only report | `tests/integration/platform-d.test.ts` |
 | #31 progress | real two-stage progress instead of timer labels | review |
 
+
+## Reviews 19-22 (`docs/review/19-adv-voice-line.md`, `20-adv-inbox-privacy.md`, `21-adv-bookings-payments.md`, `22-adv-platform-scheduling.md`)
+
+One migration, `20261209120000_review19_fixes` (hand written, re-runnable, zero drift; the unreleased `20261208120000` was edited: its constraint rebuild and CHECK validation moved here so the `businesses` locks are short). Evidence: `tests/review19-pure.test.ts`, `tests/integration/review19.test.ts`, `tests/db/mock-replacement-migration.test.ts` (populated upgrade from main, and from the first version of 20261208), plus the updated suites named in each report's "Resolution" section.
+
+| Report / finding | Fix |
+| --- | --- |
+| 20 H1 sender | Customer-facing and owner texts are sent from the tenant's own number (`messaging/sender.ts`, `sendSms({from})`); retry once from the shared sender when Twilio refuses it (21212/21606/21659/21660); a reply or STOP to the shared sender is routed by the last outbound text (index `sms_log (to_e164, created_at)`), a STOP applies to every business that texted the customer |
+| 20 H2 erasure / export | The owner-forward sms_log row keeps no customer words (`log_body`); legacy rows are matched by shape + last 4 + the customer's own opening words; erasure also deletes limiter keys derived from the number (L2) |
+| 20 M1 / M4 | The sender budget is spent before the business budget; at most 2 owner forwards per sender per hour |
+| 20 M2 | No auto-reply to a text that looks like an opt-out request; flagged `possible_opt_out`, the owner is told, one-tap `POST .../messages/:id/opt-out` |
+| 20 M3 | Bare domains, shorteners and IPs in the owner forward are masked |
+| 20 L1 / L3 | No auto-reply (and manual texts only to a booking) for Caribbean / territory / premium NANP numbers; review link limit 120 characters and a review text that never cuts the link |
+| 21 H1 / M1 | A card payment over a manual mark converts the row to `stripe`, resets the manual refund bookkeeping, audits `payment.paid_over_manual_deposit` and always texts the owner; mark-paid deactivates the link through the durable queue; unmark refused when a card payment is on file |
+| 21 M2 / M3 / L1-L3 | Conditional amount write and dead-on-arrival link deactivation; the AI deposit uses the catalog price and only for a booking made on the call; monotonic percentage deposits; price lookup single-flight + stale-while-revalidate; demo checkout leaves `deposit_source` empty |
+| 19 F1-F7 | Repair never writes the Voice URL of an imported number and skips forward-mode tenants; call-mode surfaces use the business's own line (`effectiveLineKindFor`); `line:<id>` lease + duplicate-import cleanup; the shared fallback line is never adopted or deleted and an import bound to another business's agent is not adopted; assistant name must be a name; `refresh_credentials` repair option |
+| 22 M1-M4 | Migration split with `lock_timeout`; release cap counts every acted business + circuit breaker + agent kept while the line cannot be removed; owner slot list without notice / window; content fingerprint covers FAQs and descriptions |
+| 22 L1-L6 | Confirm with `expected_hash`; legacy time zones mapped to their IANA zone with audit rows; onboarding suggestion never overrides a chosen zone, options for St Thomas / Guam, split area codes ambiguous; honest "no slots" wording; briefing audio kept on a failed regeneration, metadata-only 304, ranges cut in Postgres, daily synthesis cap; horizon copy |
+

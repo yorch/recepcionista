@@ -14,6 +14,7 @@ import { sendAndLog } from '@/lib/messaging';
 import { smsDelivered } from '@/lib/messaging/delivery';
 import { MANUAL_TEXT_MAX } from '@/lib/messaging/manual-limits';
 import { isQuietHour } from '@/lib/messaging/policy';
+import { highRateNanpDestination } from '@/lib/voice/forward-number';
 import type { Business, SmsLog } from '@/lib/types';
 
 export { MANUAL_TEXT_MAX };
@@ -28,7 +29,7 @@ export const MANUAL_RECIPIENT_HOURLY_LIMIT = 6;
 
 export type ManualTextResult =
   | { ok: true; sms: SmsLog; delivered: boolean }
-  | { ok: false; reason: 'invalid_recipient' | 'unknown_recipient' | 'empty' | 'too_long' | 'rate_limited' | 'quiet_hours' | 'opted_out' | 'cap_reached' | 'not_allowed' | 'send_failed'; sms?: SmsLog };
+  | { ok: false; reason: 'invalid_recipient' | 'unknown_recipient' | 'empty' | 'too_long' | 'rate_limited' | 'quiet_hours' | 'opted_out' | 'cap_reached' | 'not_allowed' | 'high_rate_destination' | 'send_failed'; sms?: SmsLog };
 
 /** Is `e164` a customer of this business (booking, call or inbox message), erased or anonymised records excluded? */
 export async function isKnownCustomerNumber(businessId: string, e164: string): Promise<boolean> {
@@ -62,6 +63,11 @@ export async function sendManualText(input: ManualTextInput): Promise<ManualText
   if (!e164) return { ok: false, reason: 'invalid_recipient' };
   if (e164 === business.owner_phone_e164 || e164 === business.phone_e164) return { ok: false, reason: 'not_allowed' };
   if (!input.trustedRecipient && !(await isKnownCustomerNumber(business.id, e164))) return { ok: false, reason: 'unknown_recipient' };
+  // Caribbean / Pacific-territory / premium NANP numbers cost far more per text and are the SMS-pumping destinations: an owner text goes there only to a
+  // number that has a booking with this business (an inbox message or a call alone is not enough: anyone can text the business line from such a number).
+  if (highRateNanpDestination(e164) && !(await prisma.booking.findFirst({ where: { businessId: business.id, phoneE164: e164, anonymizedAt: null }, select: { id: true } }))) {
+    return { ok: false, reason: 'high_rate_destination' };
+  }
   // Quiet hours apply to every owner-typed text (the policy itself only blocks kind 'manual'; replies are held to the same rule here).
   if (isQuietHour(now, tzOf(business))) return { ok: false, reason: 'quiet_hours' };
 

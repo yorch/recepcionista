@@ -16,6 +16,8 @@
  *          -> 200 [ { phone_number_id, phone_number, label, provider, assigned_agent?: { agent_id } | null } ]   (read tolerantly)
  *   GET    /v1/convai/phone-numbers/{id}                -> 200 { ...same fields... } | 404
  *   PATCH  /v1/convai/phone-numbers/{id}   { agent_id: string | null }   (bind / detach the agent)
+ *   PATCH  /v1/convai/phone-numbers/{id}   { sid, token }  (refresh the stored Twilio credentials after a rotation; UNVERIFIED: when the provider refuses it,
+ *          the documented fallback is delete + import again)
  *   DELETE /v1/convai/phone-numbers/{id}                -> 200 | 404 (already gone = success)
  *   POST   /v1/convai/twilio/register-call
  *          { agent_id, from_number, to_number, direction: "inbound", conversation_initiation_client_data?: { dynamic_variables } }
@@ -93,7 +95,11 @@ export async function getRemoteNumber(phoneNumberId: string, deps: PhoneDeps = {
  * environment (the SAME account that bought the number) and go to the provider only in this body.
  */
 export async function importTwilioNumber(
-  input: { phone: string; label: string; isOwnedElsewhere?: (phoneNumberId: string) => Promise<boolean> },
+  input: {
+    phone: string; label: string; isOwnedElsewhere?: (phoneNumberId: string) => Promise<boolean>;
+    /** The agent this import is for: an existing import bound to ANOTHER business's agent is never adopted. */
+    agentId?: string | null; agentBelongsElsewhere?: (agentId: string) => Promise<boolean>;
+  },
   deps: PhoneDeps = {},
 ): Promise<PhoneResult<{ phone_number_id: string; adopted: boolean }>> {
   const env = deps.env ?? process.env;
@@ -110,6 +116,13 @@ export async function importTwilioNumber(
   if (hit) {
     if (input.isOwnedElsewhere && (await input.isOwnedElsewhere(hit.phone_number_id).catch(() => true))) {
       return fail('that number is already imported for another account; it was not touched', 409);
+    }
+    // The shared single-line fallback (ELEVENLABS_PHONE_NUMBER_ID) has no owner row by design: it is never adopted (and so never rebound to a tenant's agent, nor deleted at release).
+    const shared = (env.ELEVENLABS_PHONE_NUMBER_ID ?? '').trim();
+    if (shared && hit.phone_number_id === shared) return fail('that number is the shared ELEVENLABS_PHONE_NUMBER_ID fallback line; it was not adopted', 409);
+    // An import already bound to an agent that belongs to another business is theirs, not an orphan to adopt.
+    if (hit.agent_id && hit.agent_id !== input.agentId && input.agentBelongsElsewhere && (await input.agentBelongsElsewhere(hit.agent_id).catch(() => true))) {
+      return fail('that number is already bound to another business\'s agent; it was not touched', 409);
     }
     log.info('import.adopted', { phone_number_id: hit.phone_number_id });
     return { ok: true, phone_number_id: hit.phone_number_id, adopted: true };
@@ -144,6 +157,29 @@ export async function setNumberAgent(phoneNumberId: string, agentId: string | nu
     return { ok: true, bound: true };
   } catch (err) {
     return fail(`bind phone number: ${errName(err)}`);
+  }
+}
+
+/**
+ * Refresh the Twilio credentials stored on an imported number (after TWILIO_AUTH_TOKEN was rotated: the provider keeps the token it was given at import,
+ * and its Twilio-side actions such as the native cold transfer fail with the old one). The token is sent ONLY in this body; never logged or returned.
+ * UNVERIFIED shape (see the header): on a refusal the runbook's fallback is delete + import again.
+ */
+export async function refreshNumberCredentials(phoneNumberId: string, deps: PhoneDeps = {}): Promise<PhoneResult<{ refreshed: true }>> {
+  const env = deps.env ?? process.env;
+  const key = apiKeyOf(env);
+  if (!key) return fail('ELEVENLABS_API_KEY is not set');
+  const sid = (env.TWILIO_ACCOUNT_SID ?? '').trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? '').trim();
+  if (!sid || !token) return fail('Twilio credentials are not configured');
+  try {
+    const res = await (deps.fetchImpl ?? fetch)(`${ELEVENLABS_API}/convai/phone-numbers/${encodeURIComponent(phoneNumberId)}`, {
+      method: 'PATCH', headers: hdrs(key), body: JSON.stringify({ sid, token }), signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) { log.warn('refresh.failed', { phone_number_id: phoneNumberId, status: res.status }); return fail(`refresh credentials ${res.status}`, res.status); }
+    return { ok: true, refreshed: true };
+  } catch (err) {
+    return fail(`refresh credentials: ${errName(err)}`);
   }
 }
 

@@ -20,6 +20,7 @@ const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const MIGRATIONS = path.join(ROOT, 'prisma/migrations');
 const PRISMA = path.join(ROOT, 'node_modules/.bin/prisma');
 const NEW = '20261208120000_mock_replacement_schema';
+const FIX = '20261209120000_review19_fixes';
 
 
 /** Split the migration into executable statements: DO blocks stay whole; everything else is split on ';' at the end of a line. */
@@ -75,7 +76,7 @@ suite('migration mock_replacement_schema (postgres)', () => {
     const c = client(name);
     const t0 = `now() + interval '3 days'`;
     try {
-      await c.$executeRawUnsafe(`INSERT INTO businesses(id,name,timezone) VALUES ('m1','Old Co','EST'), ('m2','Good Co','America/Chicago')`);
+      await c.$executeRawUnsafe(`INSERT INTO businesses(id,name,timezone) VALUES ('m1','Old Co','EST'), ('m2','Good Co','America/Chicago'), ('m4','Pacific Co','PST8PDT'), ('m5','Tokyo Co','Japan'), ('m6','Odd Co','Not/A_Zone!')`);
       // bookings: a stripe-paid deposit, a mock-paid deposit (no stripe ref), an unpaid one, an adjacent one and a cancelled overlapping one
       await c.$executeRawUnsafe(`INSERT INTO bookings(id,business_id,customer_name,customer_phone,service,scheduled_at,duration_minutes,deposit_amount,deposit_paid,stripe_payment_intent_id,status) VALUES
         ('k1','m1','Ann','+13055550101','AC', ${t0}, 60, 5000, true, 'pi_1', 'confirmed'),
@@ -94,8 +95,13 @@ suite('migration mock_replacement_schema (postgres)', () => {
 
     const d = client(name);
     try {
-      // every row survived; the legacy zone was repaired to the default the app already used, a good zone is untouched
-      expect((await d.$queryRawUnsafe(`SELECT id, timezone FROM businesses ORDER BY id`)).map((r: any) => `${r.id}:${r.timezone}`)).toEqual(['m1:America/New_York', 'm2:America/Chicago']);
+      // every row survived; a legacy zone that Intl knows keeps its meaning (mapped to its IANA name, never silently moved to New York), an unknown one falls back to the
+      // default the app already used, every repair is audited, and a good zone is untouched
+      expect((await d.$queryRawUnsafe(`SELECT id, timezone FROM businesses ORDER BY id`)).map((r: any) => `${r.id}:${r.timezone}`)).toEqual(['m1:America/Panama', 'm2:America/Chicago', 'm4:America/Los_Angeles', 'm5:Asia/Tokyo', 'm6:America/New_York']);
+      expect((await d.$queryRawUnsafe(`SELECT business_id, meta->>'from' AS f, meta->>'to' AS t, meta->>'mapped' AS m FROM audit_events WHERE action='business.timezone_repaired' ORDER BY business_id`))).toEqual([
+        { business_id: 'm1', f: 'EST', t: 'America/Panama', m: 'true' }, { business_id: 'm4', f: 'PST8PDT', t: 'America/Los_Angeles', m: 'true' },
+        { business_id: 'm5', f: 'Japan', t: 'Asia/Tokyo', m: 'true' }, { business_id: 'm6', f: 'Not/A_Zone!', t: 'America/New_York', m: 'false' },
+      ]);
       expect((await d.$queryRawUnsafe(`SELECT id FROM bookings ORDER BY id`)).map((r: any) => r.id)).toEqual(['k1', 'k2', 'k3', 'k4']);
       expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM briefings WHERE audio_url = '/audio/briefing-m1-2030-01-01.mp3'`)).toEqual([{ n: 1 }]); // audio_url semantics preserved
       expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM sms_log`)).toEqual([{ n: 2 }]);
@@ -128,11 +134,11 @@ suite('migration mock_replacement_schema (postgres)', () => {
       expect(await d.$queryRawUnsafe(`SELECT (SELECT count(*)::int FROM inbound_messages) AS i, (SELECT count(*)::int FROM briefing_audio) AS a`)).toEqual([{ i: 0, a: 0 }]);
       expect(await d.$queryRawUnsafe(`SELECT conname FROM pg_constraint WHERE contype='c' AND NOT convalidated`)).toEqual([]);
       // re-runnable: the whole migration SQL again changes nothing and fails nowhere
-      const sql = readFileSync(path.join(MIGRATIONS, NEW, 'migration.sql'), 'utf8');
       await d.$executeRawUnsafe(`INSERT INTO businesses(id,name) VALUES ('m3','Again Co')`);
-      for (const stmt of splitSql(sql)) await d.$executeRawUnsafe(stmt);
+      for (const dir of [NEW, FIX]) for (const stmt of splitSql(readFileSync(path.join(MIGRATIONS, dir, 'migration.sql'), 'utf8'))) await d.$executeRawUnsafe(stmt);
       expect(await d.$queryRawUnsafe(`SELECT conname FROM pg_constraint WHERE contype='c' AND NOT convalidated`)).toEqual([]);
-      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM businesses`)).toEqual([{ n: 2 }]);
+      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM businesses`)).toEqual([{ n: 5 }]); // m1 was deleted above; m2 m3 m4 m5 m6 remain
+      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE action='business.timezone_repaired'`)).toEqual([{ n: 4 }]); // the four repairs of the first run (the audit trail outlives the deleted business); the re-run repaired nothing again
     } finally { await d.$disconnect(); }
 
     // zero drift: the migrations produce exactly schema.prisma
@@ -140,6 +146,31 @@ suite('migration mock_replacement_schema (postgres)', () => {
     const diff = rawPrisma(['migrate', 'diff', '--from-migrations', path.join(ROOT, 'prisma/migrations'), '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--shadow-database-url', dbUrl(shadow), '--exit-code'], dbUrl(name));
     expect(diff.out).toContain('No difference detected');
     expect(diff.code).toBe(0);
+  }, 180_000);
+
+  test('a database that already applied the FIRST version of 20261208 (before the lock split) upgrades through 20261209 as a no-op for the parts it already has', async () => {
+    const oldSchema = historyBefore('old2', NEW);
+    const name = await newDb('v1');
+    expect(prisma(['migrate', 'deploy'], dbUrl(name), oldSchema).code).toBe(0);
+    const c = client(name);
+    try {
+      await c.$executeRawUnsafe(`INSERT INTO businesses(id,name,timezone) VALUES ('v1','V1 Co','America/Chicago')`);
+      // the first version of the migration, applied by hand exactly as `migrate deploy` would have (a fixture: the file in git history)
+      for (const stmt of splitSql(readFileSync(path.join(ROOT, 'tests/db/fixtures/20261208120000_mock_replacement_schema.v1.sql'), 'utf8'))) await c.$executeRawUnsafe(stmt);
+    } finally { await c.$disconnect(); }
+    expect(rawPrisma(['migrate', 'resolve', '--applied', NEW, '--schema', path.join(ROOT, 'prisma/schema.prisma')], dbUrl(name)).code).toBe(0);
+    const up = prisma(['migrate', 'deploy'], dbUrl(name));
+    expect(up.code).toBe(0);
+    expect(up.out).toContain(FIX);
+    const d = client(name);
+    try {
+      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM businesses`)).toEqual([{ n: 1 }]);
+      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name='briefing_audio' AND column_name='text_hash'`)).toEqual([{ n: 1 }]);
+      expect(await d.$queryRawUnsafe(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname='bookings_no_overlap'`)).toEqual([{ d: expect.stringContaining('crew') }]);
+      expect(await d.$queryRawUnsafe(`SELECT conname FROM pg_constraint WHERE contype='c' AND NOT convalidated`)).toEqual([]);
+    } finally { await d.$disconnect(); }
+    const diff = rawPrisma(['migrate', 'diff', '--from-url', dbUrl(name), '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--exit-code'], dbUrl(name));
+    expect(diff.out).toContain('No difference detected');
   }, 180_000);
 
   test('a fresh database (all migrations from scratch) has the new defaults and no legacy repair side effects', async () => {

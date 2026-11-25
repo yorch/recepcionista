@@ -29,6 +29,8 @@ export function tenantReleaseSetting(env: NodeJS.ProcessEnv = process.env): Tena
 
 /** Max businesses one run acts on (the rest wait for the next run): a runaway selection cannot release the whole customer base in one pass. */
 export const MAX_RELEASES_PER_RUN = 10;
+/** Circuit breaker: after this many businesses with a provider error in ONE run the rest wait for the next run (a provider outage must not be hammered business by business). */
+export const MAX_RELEASE_ERRORS_PER_RUN = 3;
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err)).slice(0, 200);
 
@@ -61,8 +63,12 @@ export async function runTenantReleaseJob(opts: RunOptions & { graceDays?: numbe
   try {
     const ids = opts.businessId ? [opts.businessId] : await listReleaseCandidates();
     counts.candidates = ids.length;
+    // The cap counts every business the run ACTED on (a provider call was attempted), whether or not it ended clean: a failing provider must not lift it.
+    let acted = 0;
+    let erroring = 0;
     for (const id of ids) {
-      if (apply && report.processed >= MAX_RELEASES_PER_RUN) { counts.deferred++; report.items.push({ business_id: id, outcome: 'deferred_to_next_run' }); continue; }
+      if (apply && acted >= MAX_RELEASES_PER_RUN) { counts.deferred++; report.items.push({ business_id: id, outcome: 'deferred_to_next_run' }); continue; }
+      if (apply && erroring >= MAX_RELEASE_ERRORS_PER_RUN) { counts.deferred++; report.items.push({ business_id: id, outcome: 'deferred_to_next_run', detail: { reason: 'circuit_breaker: too many provider errors in this run' } }); continue; }
       const r = await processBusiness(id, {
         apply, now, graceDays: opts.graceDays ?? DEFAULT_GRACE_DAYS, notifyDays: opts.notifyDays ?? DEFAULT_NOTIFY_DAYS, includeRecent: opts.includeRecent === true,
         actor: { kind: 'system' }, script: 'jobs.tenant_release',
@@ -70,7 +76,8 @@ export async function runTenantReleaseJob(opts: RunOptions & { graceDays?: numbe
       if (!r) continue;
       const item = describe(r);
       report.items.push(item);
-      if (r.error || (r.outcome && r.outcome.errors.length)) report.errors++;
+      if (r.applied) acted++;
+      if (r.error || (r.outcome && r.outcome.errors.length)) { report.errors++; if (r.applied) erroring++; }
       switch (item.outcome) {
         case 'released': counts.released++; report.processed++; break;
         case 'notified': counts.notified++; report.processed++; break;

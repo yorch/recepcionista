@@ -45,6 +45,20 @@ export const tenantLinesDefault = (env: Record<string, string | undefined> = pro
 export const lineKindFor = (business: { elevenlabs_phone_number_id?: string | null } | null | undefined, env: Record<string, string | undefined> = process.env): LineKind =>
   business?.elevenlabs_phone_number_id ? 'native' : lineKind(env);
 
+/**
+ * What answers THIS business's calls RIGHT NOW (call-mode surfaces: is forwarding offered, the dashboard label, setCallMode, resolveCallRoute):
+ *  - a tenant that owns an imported number: native (ElevenLabs answers it), whatever the deployment default is;
+ *  - otherwise the deployment's kind, EXCEPT the unforced tenant-lines default (ELEVENLABS_API_KEY set, no shared line id): a number that is not imported yet still
+ *    has OUR Voice URL (voice/incoming), so it answers on the webhook line and keeps forwarding until `repair-numbers` imports it.
+ * `lineKindFor` stays the TARGET (should this number be imported?): provisioning, agent creation and repair use that one.
+ */
+export const effectiveLineKindFor = (business: { elevenlabs_phone_number_id?: string | null } | null | undefined, env: Record<string, string | undefined> = process.env): LineKind => {
+  if (business?.elevenlabs_phone_number_id) return 'native';
+  const kind = lineKind(env);
+  if (kind === 'native' && (env.VOICE_LINE_KIND ?? '').trim().toLowerCase() !== 'native' && !nativeLineConfigured(env)) return 'webhook';
+  return kind;
+};
+
 /** Is a native ElevenLabs phone line configured (the API key AND the imported phone number id)? */
 export const nativeLineConfigured = (env: Record<string, string | undefined> = process.env): boolean =>
   Boolean((env.ELEVENLABS_API_KEY ?? '').trim() && (env.ELEVENLABS_PHONE_NUMBER_ID ?? '').trim());

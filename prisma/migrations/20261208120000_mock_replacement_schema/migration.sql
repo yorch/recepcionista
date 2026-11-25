@@ -7,8 +7,13 @@
 --  3. briefing_audio: briefing audio kept in Postgres (<= 5 MB), cascades with its briefing.
 --  4. inbound_messages: the owner's inbox of customer texts (deduped on the Twilio MessageSid).
 --  5. sms_log.kind additionally allows 'owner_inbox_reply' and 'inbox_autoreply' ('manual' was already allowed).
---  6. businesses.timezone only accepts IANA-shaped names (a legacy non-IANA value is repaired to the default the app already fell back to).
--- All CHECK constraints are added NOT VALID and validated at the end, so an unexpected row fails loudly with its count.
+--  6. businesses.timezone only accepts IANA-shaped names (a legacy name that Intl knows is mapped to its canonical IANA zone; an unknown one falls back to the
+--     default the app already used, and every repaired row is recorded in audit_events as `business.timezone_repaired`).
+-- All CHECK constraints are added NOT VALID here. Their VALIDATION and the rebuild of the overlap exclusion constraint (a GiST build over every booking, under an
+-- ACCESS EXCLUSIVE lock) live in the NEXT migration (20261209120000_review19_fixes), so the locks of this file (column adds on `businesses`, which every request
+-- reads) are held for milliseconds, not for the length of a table scan. `lock_timeout` makes a busy table fail the deploy (re-run it) instead of queueing every
+-- request behind the ALTER.
+SET lock_timeout = '10s';
 
 -- 1. businesses ---------------------------------------------------------------------------------------------------------------------
 ALTER TABLE "public"."businesses"
@@ -34,9 +39,32 @@ ALTER TABLE "public"."businesses"
 CREATE UNIQUE INDEX IF NOT EXISTS "businesses_elevenlabs_phone_number_id_key" ON "public"."businesses"("elevenlabs_phone_number_id");
 CREATE UNIQUE INDEX IF NOT EXISTS "businesses_twilio_phone_sid_key" ON "public"."businesses"("twilio_phone_sid");
 
--- A legacy zone that is not IANA-shaped (e.g. 'EST', '+01:00') already fell back to America/New_York in every read (tzOf); make that explicit.
-UPDATE "public"."businesses" SET "timezone" = 'America/New_York'
- WHERE "timezone" !~ '^(UTC|[A-Za-z][A-Za-z_-]*(/[A-Za-z0-9_+-]+)+)$';
+-- A legacy zone that is not IANA-shaped (the CHECK below refuses it). Names that Intl accepts keep their meaning: they are mapped to the canonical IANA zone
+-- (PST8PDT -> America/Los_Angeles, MST -> America/Phoenix, GMT -> UTC, Japan -> Asia/Tokyo ...). Only a name with no known meaning falls back to
+-- America/New_York, which is what the app already did on read. Every repaired row leaves an audit event with the old and the new value.
+DO $$
+DECLARE
+  legacy CONSTANT jsonb := '{
+    "EST": "America/Panama", "MST": "America/Phoenix", "HST": "Pacific/Honolulu",
+    "EST5EDT": "America/New_York", "CST6CDT": "America/Chicago", "MST7MDT": "America/Denver", "PST8PDT": "America/Los_Angeles",
+    "GMT": "UTC", "UCT": "UTC", "Zulu": "UTC", "Universal": "UTC", "Greenwich": "UTC",
+    "Japan": "Asia/Tokyo", "Eire": "Europe/Dublin", "GB": "Europe/London", "Israel": "Asia/Jerusalem", "Cuba": "America/Havana",
+    "Egypt": "Africa/Cairo", "Hongkong": "Asia/Hong_Kong", "Iceland": "Atlantic/Reykjavik", "Iran": "Asia/Tehran", "Jamaica": "America/Jamaica",
+    "Navajo": "America/Denver", "NZ": "Pacific/Auckland", "PRC": "Asia/Shanghai", "Poland": "Europe/Warsaw", "Portugal": "Europe/Lisbon",
+    "ROC": "Asia/Taipei", "ROK": "Asia/Seoul", "Singapore": "Asia/Singapore", "Turkey": "Europe/Istanbul", "W-SU": "Europe/Moscow",
+    "Libya": "Africa/Tripoli", "Kwajalein": "Pacific/Kwajalein"
+  }'::jsonb;
+  r RECORD;
+  target TEXT;
+BEGIN
+  FOR r IN SELECT "id", "timezone" FROM "public"."businesses" WHERE "timezone" !~ '^(UTC|[A-Za-z][A-Za-z_-]*(/[A-Za-z0-9_+-]+)+)$' LOOP
+    target := COALESCE(legacy ->> r."timezone", 'America/New_York');
+    INSERT INTO "public"."audit_events" ("id", "actor_kind", "business_id", "action", "target", "meta")
+    VALUES (gen_random_uuid()::text, 'system', r."id", 'business.timezone_repaired', 'business:' || r."id",
+            jsonb_build_object('from', r."timezone", 'to', target, 'mapped', (legacy ->> r."timezone") IS NOT NULL));
+    UPDATE "public"."businesses" SET "timezone" = target WHERE "id" = r."id";
+  END LOOP;
+END $$;
 
 -- 2. bookings -----------------------------------------------------------------------------------------------------------------------
 ALTER TABLE "public"."bookings"
@@ -50,24 +78,8 @@ ALTER TABLE "public"."bookings"
 UPDATE "public"."bookings" SET "deposit_source" = 'stripe'
  WHERE "deposit_source" IS NULL AND "deposit_paid" AND ("stripe_payment_intent_id" IS NOT NULL OR "stripe_checkout_session_id" IS NOT NULL);
 
--- The overlap guard becomes per (business, crew). Every existing row is crew 1, so single-crew data behaves exactly as before.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'bookings_no_overlap' AND conrelid = 'public.bookings'::regclass AND pg_get_constraintdef(oid) LIKE '%crew%'
-  ) THEN
-    ALTER TABLE "public"."bookings" DROP CONSTRAINT IF EXISTS "bookings_no_overlap";
-    ALTER TABLE "public"."bookings"
-      ADD CONSTRAINT "bookings_no_overlap"
-      EXCLUDE USING gist (
-        "business_id" WITH =,
-        "crew" WITH =,
-        tsrange("scheduled_at", "scheduled_at" + make_interval(mins => "duration_minutes"), '[)') WITH &&
-      )
-      WHERE ("status" <> 'cancelled');
-  END IF;
-END $$;
+-- The overlap guard becomes per (business, crew) in the next migration (20261209120000_review19_fixes): rebuilding it scans and indexes every booking under an
+-- ACCESS EXCLUSIVE lock, which must not run in the same transaction as the ALTERs of `businesses` above. Every row is crew 1, so until then nothing changes.
 
 -- 3. briefing_audio -----------------------------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS "public"."briefing_audio" (
@@ -185,24 +197,6 @@ BEGIN
   END LOOP;
 END $$;
 
--- 7. Validate every CHECK still NOT VALID (the ones above, plus the sms_log kind list), failing loudly with the offending row count --------
-DO $$
-DECLARE
-  c RECORD;
-  bad BIGINT;
-BEGIN
-  FOR c IN
-    SELECT con.conname, con.conrelid::regclass AS rel, pg_get_expr(con.conbin, con.conrelid) AS expr
-      FROM pg_constraint con
-      JOIN pg_namespace ns ON ns.oid = con.connamespace
-     WHERE ns.nspname = 'public' AND con.contype = 'c' AND NOT con.convalidated
-     ORDER BY con.conname
-  LOOP
-    EXECUTE format('SELECT count(*) FROM %s WHERE NOT COALESCE(%s, true)', c.rel, c.expr) INTO bad;
-    IF bad > 0 THEN
-      RAISE EXCEPTION 'Migration aborted: CHECK constraint % on % is violated by % row(s) (condition: %). Fix or delete those rows, then re-run the migration.',
-        c.conname, c.rel, bad, c.expr;
-    END IF;
-    EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT %I', c.rel, c.conname);
-  END LOOP;
-END $$;
+-- 7. (the validation of every CHECK added here moved to 20261209120000_review19_fixes, which runs it under SHARE UPDATE EXCLUSIVE locks, before the overlap rebuild.)
+
+RESET lock_timeout;

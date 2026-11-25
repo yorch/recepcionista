@@ -6,6 +6,7 @@
 import { createHash } from 'node:crypto';
 import { isIanaTimeZone } from './tz-infer';
 import { normalizeCrews, MAX_CREWS, MIN_CREWS } from './crews';
+import { isAssistantNameShape } from './voice/assistant-name';
 import type { Business, DepositMode, KnowledgeBase } from './types';
 
 export type Validated<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -13,7 +14,8 @@ const good = <T>(value: T): Validated<T> => ({ ok: true, value });
 const bad = (error: string): Validated<never> => ({ ok: false, error });
 
 // ---------------------------------------------------------------- limits
-export const REVIEW_URL_MAX = 300;
+/** Longest review link the dashboard accepts. The DB CHECK still allows 300 (rows saved earlier); the text builder never cuts a link, it drops words around it instead. */
+export const REVIEW_URL_MAX = 120;
 export const ASSISTANT_NAME_MAX = 40;
 /** Platform deposit limits, in integer cents (the same numbers as the CHECKs). The call script still caps AI-requested deposits lower. */
 export const DEPOSIT_MIN_CENTS = 100;
@@ -28,7 +30,7 @@ export const BRIEFING_AUDIO_MAX_BYTES = 5 * 1024 * 1024;
 export const BRIEFING_AUDIO_TYPES = ['audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/ogg'] as const;
 
 // ---------------------------------------------------------------- strings
-/** Google review link: https only, no whitespace, at most 300 chars. `null` / empty clears it. */
+/** Google review link: https only, no whitespace, at most 120 chars (Google's short `g.page/r/...` links fit; long search-result share links do not). `null` / empty clears it. */
 export function validateReviewUrl(v: unknown): Validated<string | null> {
   if (v === null || v === undefined) return good(null);
   if (typeof v !== 'string') return bad('review_url must be a text');
@@ -42,7 +44,7 @@ export function validateReviewUrl(v: unknown): Validated<string | null> {
   return good(s);
 }
 
-/** Assistant name: 1-40 chars after trimming; control characters and line breaks are refused. `null` / empty clears it. */
+/** Assistant name: 1-40 chars after trimming, one to three words of letters (a name, never a sentence); control characters and line breaks are refused. `null` / empty clears it. */
 export function validateAssistantName(v: unknown): Validated<string | null> {
   if (v === null || v === undefined) return good(null);
   if (typeof v !== 'string') return bad('assistant_name must be a text');
@@ -50,6 +52,7 @@ export function validateAssistantName(v: unknown): Validated<string | null> {
   if (!s) return good(null);
   if (s.length > ASSISTANT_NAME_MAX) return bad(`assistant_name must be at most ${ASSISTANT_NAME_MAX} characters`);
   if (/[\u0000-\u001f\u007f]/.test(s)) return bad('assistant_name must not contain control characters');
+  if (!isAssistantNameShape(s)) return bad('assistant_name must be a name: one to three words of letters (apostrophes and hyphens allowed), no digits, punctuation or sentences');
   return good(s);
 }
 
@@ -135,12 +138,13 @@ export function computeDepositCents(policy: DepositPolicy, priceEstimateCents: n
   if (policy.mode === 'fixed') {
     cents = policy.fixed_cents;
   } else {
-    if (policy.percent === null || priceEstimateCents == null || !Number.isFinite(priceEstimateCents) || priceEstimateCents <= 0) return null;
+    // A job under the platform minimum ($1) gives no deposit: an estimate that small is not a price (and below it the clamp to the owner's min would jump back up).
+    if (policy.percent === null || priceEstimateCents == null || !Number.isFinite(priceEstimateCents) || priceEstimateCents < DEPOSIT_MIN_CENTS) return null;
     cents = Math.round((priceEstimateCents * policy.percent) / 100);
     const lo = policy.min_cents ?? DEPOSIT_MIN_CENTS;
     const hi = policy.max_cents ?? DEPOSIT_MAX_CENTS;
     cents = Math.min(hi, Math.max(lo, cents));
-    if (priceEstimateCents >= DEPOSIT_MIN_CENTS) cents = Math.min(cents, Math.round(priceEstimateCents)); // never more than the whole job
+    cents = Math.min(cents, Math.round(priceEstimateCents)); // never more than the whole job
   }
   return cents !== null && cents >= DEPOSIT_MIN_CENTS && cents <= DEPOSIT_MAX_CENTS ? cents : null;
 }
@@ -198,22 +202,44 @@ export function schedulingOf(b: Partial<Pick<Business, 'slot_minutes' | 'min_lea
  * Fingerprint of what the owner confirms at go-live: the services (name, price, duration), the pricing notes and the service area.
  * Order-insensitive for services and areas; descriptions and FAQs do not count (editing prose does not invalidate a confirmation).
  */
-export function contentFingerprint(input: { services?: ReadonlyArray<{ name?: string; base_price?: number | null; duration_minutes?: number }> | null; pricing_notes?: string | null; service_area?: readonly string[] | null }): string {
+export type FingerprintInput = {
+  services?: ReadonlyArray<{ name?: string; description?: string | null; base_price?: number | null; duration_minutes?: number }> | null;
+  faqs?: ReadonlyArray<{ question?: string; answer?: string }> | null;
+  pricing_notes?: string | null;
+  service_area?: readonly string[] | null;
+};
+
+const squash = (v: unknown): string => String(v ?? '').replace(/\s+/g, ' ').trim();
+
+/**
+ * SHA-256 over everything the AI QUOTES from the owner's content: services (name, price, duration, description), the FAQ questions and answers (the
+ * vertical templates put literal prices and coverage claims there: "Drain cleaning starts around $125"), the pricing notes and the service area.
+ * Editing any of them after the owner confirmed makes the confirmation `stale`.
+ */
+export function contentFingerprint(input: FingerprintInput): string {
   const services = (input.services ?? [])
-    .map((s) => [String(s.name ?? '').trim().toLowerCase(), s.base_price ?? null, s.duration_minutes ?? null] as const)
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    .map((s) => [String(s.name ?? '').trim().toLowerCase(), s.base_price ?? null, s.duration_minutes ?? null, squash(s.description)] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[3] < b[3] ? -1 : a[3] > b[3] ? 1 : 0));
+  const faqs = (input.faqs ?? []).map((f) => [squash(f.question), squash(f.answer)] as const).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
   const area = [...(input.service_area ?? [])].map((a) => String(a).trim().toLowerCase()).filter(Boolean).sort();
-  const canonical = JSON.stringify({ s: services, p: String(input.pricing_notes ?? '').trim(), a: area });
+  const canonical = JSON.stringify({ s: services, f: faqs, p: String(input.pricing_notes ?? '').trim(), a: area });
   return createHash('sha256').update(canonical).digest('hex');
 }
 
 export type ContentConfirmation = 'unconfirmed' | 'confirmed' | 'stale';
 
-/** unconfirmed (never confirmed) | confirmed (the confirmed fingerprint still matches) | stale (services / prices / service area changed since). */
+/** The fingerprint of a business's current content (what `confirmContent` stores and what the dashboard sends back as `expected_hash`). */
+export function contentFingerprintOf(
+  b: Pick<Business, 'service_area'>, kb: (Pick<KnowledgeBase, 'services' | 'pricing_notes'> & Partial<Pick<KnowledgeBase, 'faqs'>>) | null | undefined,
+): string {
+  return contentFingerprint({ services: kb?.services, faqs: kb?.faqs, pricing_notes: kb?.pricing_notes, service_area: b.service_area });
+}
+
+/** unconfirmed (never confirmed) | confirmed (the confirmed fingerprint still matches) | stale (services / prices / FAQs / service area changed since). */
 export function contentConfirmationState(
   b: Pick<Business, 'content_confirmed_at' | 'content_confirmed_hash' | 'service_area'>,
-  kb: Pick<KnowledgeBase, 'services' | 'pricing_notes'> | null | undefined,
+  kb: Pick<KnowledgeBase, 'services' | 'pricing_notes'> & Partial<Pick<KnowledgeBase, 'faqs'>> | null | undefined,
 ): ContentConfirmation {
   if (!b.content_confirmed_at || !b.content_confirmed_hash) return 'unconfirmed';
-  return contentFingerprint({ services: kb?.services, pricing_notes: kb?.pricing_notes, service_area: b.service_area }) === b.content_confirmed_hash ? 'confirmed' : 'stale';
+  return contentFingerprintOf(b, kb) === b.content_confirmed_hash ? 'confirmed' : 'stale';
 }

@@ -29,7 +29,7 @@ export function ContentCheck({ checked, onChange, state, disabled }: { checked: 
 }
 
 /** Dashboard card (Knowledge page): shown while the template content is unconfirmed or stale. Owner only (the route refuses anyone else). */
-export function ContentConfirmCard({ businessId, initialState }: { businessId: string; initialState: ContentState }) {
+export function ContentConfirmCard({ businessId, initialState, contentHash }: { businessId: string; initialState: ContentState; /** Fingerprint of the content this page was rendered with: the server refuses the confirmation when the stored content is no longer that. */ contentHash: string }) {
   const t = useT();
   const router = useRouter();
   const [state, setState] = useState<ContentState>(initialState);
@@ -41,12 +41,13 @@ export function ContentConfirmCard({ businessId, initialState }: { businessId: s
     if (busy || !checked) return;
     setBusy(true);
     try {
-      await apiRequest(`/api/businesses/${businessId}/content-confirmation`, { method: 'POST', body: {} });
+      await apiRequest(`/api/businesses/${businessId}/content-confirmation`, { method: 'POST', body: { expected_hash: contentHash } });
       setState('confirmed');
       toast.success(t('pd.cc.saved'));
       router.refresh();
     } catch (err) {
       toast.error(errorText(t, err));
+      router.refresh(); // a 409 means the content changed: show it again with its new fingerprint
     } finally {
       setBusy(false);
     }

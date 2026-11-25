@@ -6,6 +6,9 @@ import { countryForBusiness, countInboundByStatus, getBooking, getInboundMessage
 import type { Page } from '@/lib/db/paging';
 import type { Business, InboundMessage, InboundStatus, SmsLog } from '@/lib/types';
 
+/** `handled_by` marker of a text that may be an opt-out request (set by messaging/inbox). */
+export const POSSIBLE_REVOCATION = 'auto:possible_revocation';
+
 export interface InboxItem {
   id: string;
   from_last4: string;
@@ -16,6 +19,8 @@ export interface InboxItem {
   booking_id: string | null;
   forwarded: boolean;
   auto_replied: boolean;
+  /** The text looks like a request to stop receiving texts (no automatic reply was sent): the owner decides whether to opt the number out. */
+  possible_opt_out: boolean;
 }
 
 export interface InboxDetail extends InboxItem {
@@ -45,6 +50,7 @@ export const toInboxItem = (m: InboundMessage): InboxItem => ({
   booking_id: m.booking_id,
   forwarded: Boolean(m.forwarded_to_owner_at),
   auto_replied: Boolean(m.auto_replied_at),
+  possible_opt_out: m.handled_by === POSSIBLE_REVOCATION,
 });
 
 export interface InboxPage { items: InboxItem[]; next_cursor: string | null; counts: Record<InboundStatus, number> }

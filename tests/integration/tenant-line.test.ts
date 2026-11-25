@@ -184,8 +184,9 @@ integration('tenant line (postgres)', () => {
         deleteAgentTools: async () => ({ ok: true, deleted: 0, already_deleted: 0 }),
         releaseNumber: async () => { order.push('number'); return { ok: true }; },
       });
-      expect(order).toEqual(['line', 'agent']); // the Twilio number is NOT released while the import could not be removed
+      expect(order).toEqual(['line']); // review 22 M2: while the import could not be removed NEITHER the Twilio number NOR the agent is touched (nothing half torn down)
       expect(failing.errors.join()).toContain('line: delete 500');
+      expect(failing.cleared.agent).toBe(false);
       expect(failing.cleared.phone).toBe(false);
 
       const order2: string[] = [];
@@ -198,7 +199,7 @@ integration('tenant line (postgres)', () => {
       expect(done.errors).toEqual([]);
       expect(p.eleven.phones.has(lineId)).toBe(false); // really deleted at the provider (real releaseTenantLine)
       expect((await db.getBusiness(t.id))!.elevenlabs_phone_number_id).toBeNull();
-      expect(order2).toEqual(['number']); // (the agent was already released by the first round)
+      expect(order2).toEqual(['agent', 'number']); // the retry finishes both, agent first
       expect(await prisma.auditEvent.count({ where: { businessId: t.id, action: 'line.released' } })).toBe(1);
     }));
   });

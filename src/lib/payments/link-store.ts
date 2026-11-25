@@ -20,10 +20,13 @@ export async function rememberPaymentLink(bookingId: string, linkId: string): Pr
     const { stored, previous } = await replaceBookingPaymentLink(bookingId, linkId);
     if (!stored) return;
     const booking = await getBooking(bookingId);
-    const stale = [previous, booking?.status === 'cancelled' && !booking.deposit_paid ? linkId : null].filter((x): x is string => Boolean(x));
+    // The new link is dead on arrival when the booking was cancelled OR its deposit was paid (the owner marked it received, or a card payment landed)
+    // while the link was being made: a stale snapshot must never leave a live link on a paid deposit.
+    const deadOnArrival = booking?.status === 'cancelled' && !booking.deposit_paid ? 'booking_cancelled' : booking?.deposit_paid ? 'deposit_already_paid' : null;
+    const stale = [previous, deadOnArrival ? linkId : null].filter((x): x is string => Boolean(x));
     for (const id of stale) {
       if (await deactivatePaymentLink(id) && booking) {
-        await recordAudit({ actor_kind: 'system', business_id: booking.business_id, action: 'booking.payment_link_deactivated', target: `booking:${bookingId}`, meta: { link: id, reason: id === linkId ? 'booking_cancelled' : 'replaced' } });
+        await recordAudit({ actor_kind: 'system', business_id: booking.business_id, action: 'booking.payment_link_deactivated', target: `booking:${bookingId}`, meta: { link: id, reason: id === linkId ? deadOnArrival : 'replaced' } });
       }
     }
   } catch (err) {
@@ -78,7 +81,7 @@ async function runQueued(booking: { id: string; business_id: string }, fetchImpl
 }
 
 /**
- * Cancel path: a cancelled, unpaid booking's deposit link must stop taking money, but a cancel (the dashboard, the customer's SMS, a live VOICE call)
+ * Cancel path AND manual-mark path (the owner marked the deposit received by hand): the booking's deposit link must stop taking money, but a cancel (the dashboard, the customer's SMS, a live VOICE call)
  * never waits for Stripe and never pages Stripe's account-wide link list inline. Only a booking that HAD a deposit link attempt (a stored link id, or
  * a texted payment-link message) is queued at all; the queue row is durable (processed_events), the first attempt runs in the background right away
  * with strict short timeouts, and the reconcile job (drainLinkDeactivations) retries what failed for up to 3 days. Never throws.
@@ -111,8 +114,10 @@ export async function drainLinkDeactivations(opts: { now?: Date; limit?: number;
     out.considered = rows.length;
     for (const r of rows) {
       await prisma.processedEvent.updateMany({ where: { source: QUEUE_SOURCE, id: r.id }, data: { claimedAt: now } }); // rotate: a failing one does not starve the rest
-      const b = await prisma.booking.findUnique({ where: { id: r.id }, select: { id: true, businessId: true, status: true, depositPaid: true } });
-      if (!b || b.status !== 'cancelled' || b.depositPaid) { await prisma.processedEvent.deleteMany({ where: { source: QUEUE_SOURCE, id: r.id } }); out.dropped++; continue; }
+      const b = await prisma.booking.findUnique({ where: { id: r.id }, select: { id: true, businessId: true, status: true, depositPaid: true, depositSource: true } });
+      // Two reasons to stop a booking's link: it was cancelled unpaid, or its deposit was marked received by hand. A card-paid deposit has nothing to stop.
+      const stop = b && ((b.status === 'cancelled' && !b.depositPaid) || (b.depositPaid && b.depositSource === 'manual'));
+      if (!b || !stop) { await prisma.processedEvent.deleteMany({ where: { source: QUEUE_SOURCE, id: r.id } }); out.dropped++; continue; }
       if (await runQueued({ id: b.id, business_id: b.businessId }, opts.fetchImpl)) out.done++;
     }
   } catch (err) {

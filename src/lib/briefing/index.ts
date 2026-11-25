@@ -3,9 +3,10 @@
  * telling you about your day, not a report — so the deterministic fallback is
  * written with as much care as the LLM path.
  */
+import { createHash } from 'node:crypto';
 import { generateTextSafe } from '@/lib/providers/llm';
 import {
-  createBriefing, deleteBriefingAudio, getBusiness, listBookingsForDay, listCalls, saveBriefingAudio,
+  briefingAudioUrl, createBriefing, deleteBriefingAudio, getBriefingAudioMeta, getBusiness, listBookingsForDay, listCalls, saveBriefingAudio,
 } from '@/lib/db';
 import { isDateKey, localDateKey, tzOf } from '@/lib/time';
 import { formatCents } from '@/lib/money';
@@ -311,22 +312,35 @@ async function narrate(
 
 /** Outcome of the audio step of a briefing: the dashboard shows an honest "audio unavailable" for anything but `ready`. */
 export type BriefingAudioOutcome =
-  | { status: 'ready'; bytes: number }
-  | { status: 'unavailable'; reason: TtsFailure };
+  | { status: 'ready'; bytes: number; /** The clip already stored for this text and voice was kept: nothing was synthesized. */ reused?: boolean }
+  | { status: 'unavailable'; reason: TtsFailure; /** The synthesis failed but the clip already stored for this same text is still there. */ kept_previous?: boolean };
+
+export const transcriptHash = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 
 /**
- * Synthesize the briefing's audio with the business's voice and store it in the database (briefing_audio). On ANY failure the briefing has no audio
- * (stale audio of an older transcript is deleted too) and the reason is returned: nothing is faked and nothing is written to disk.
+ * Synthesize the briefing's audio with the business's voice and store it in the database (briefing_audio).
+ *  - A clip already stored for THIS transcript and THIS voice is reused (`opts.reuse`, the owner's "regenerate" button): no text-to-speech spend.
+ *  - On a failure the briefing keeps a clip made from the SAME transcript (a transient provider error must not destroy good audio); a clip of an OLDER
+ *    transcript (or of unknown origin) is deleted, so a new text is never played with old audio. The reason is returned either way.
+ * Nothing is faked and nothing is written to disk.
  */
-export async function attachBriefingAudio(business: Business, briefing: Briefing): Promise<{ briefing: Briefing; audio: BriefingAudioOutcome }> {
+export async function attachBriefingAudio(business: Business, briefing: Briefing, opts: { reuse?: boolean } = {}): Promise<{ briefing: Briefing; audio: BriefingAudioOutcome }> {
+  const hash = transcriptHash(briefing.transcript);
+  const existing = await getBriefingAudioMeta(business.id, briefing.id);
+  const sameText = existing !== null && existing.text_hash === hash;
+  if (opts.reuse && sameText && (existing.voice_id ?? null) === (business.voice_id ?? existing.voice_id ?? null)) {
+    return { briefing: { ...briefing, audio_url: briefingAudioUrl(briefing.id) }, audio: { status: 'ready', bytes: existing.size_bytes, reused: true } };
+  }
   const voice = await synthesizeBriefing(briefing.transcript, { voiceId: business.voice_id });
   if (!voice.ok) {
+    if (sameText) return { briefing: { ...briefing, audio_url: briefingAudioUrl(briefing.id) }, audio: { status: 'unavailable', reason: voice.reason, kept_previous: true } };
     await deleteBriefingAudio(business.id, briefing.id); // never leave the audio of a previous transcript next to a new one
     return { briefing: { ...briefing, audio_url: null }, audio: { status: 'unavailable', reason: voice.reason } };
   }
-  const saved = await saveBriefingAudio(business.id, briefing.id, { content_type: voice.content_type, bytes: voice.bytes, voice_id: voice.voice_id });
+  const saved = await saveBriefingAudio(business.id, briefing.id, { content_type: voice.content_type, bytes: voice.bytes, voice_id: voice.voice_id, text_hash: hash });
   if (!saved.ok) {
     log.warn('audio.save_failed', { business: business.id, briefing: briefing.id, reason: saved.reason });
+    if (sameText) return { briefing: { ...briefing, audio_url: briefingAudioUrl(briefing.id) }, audio: { status: 'unavailable', reason: 'store_failed', kept_previous: true } };
     await deleteBriefingAudio(business.id, briefing.id);
     return { briefing: { ...briefing, audio_url: null }, audio: { status: 'unavailable', reason: 'store_failed' } };
   }

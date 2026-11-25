@@ -19,10 +19,12 @@ import { tzOf } from '@/lib/time';
 import { logger } from '@/lib/log';
 import { sendAndLog } from '@/lib/messaging';
 import { mockSmsAllowed, smsDelivered } from '@/lib/messaging/delivery';
-import { autoReplyText, ownerForwardText } from '@/lib/messaging/inbox-copy';
+import { autoReplyText, ownerForwardLogText, ownerForwardText } from '@/lib/messaging/inbox-copy';
 import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
+import { POSSIBLE_REVOCATION } from '@/lib/messaging/inbox-view';
 import { isQuietHour } from '@/lib/messaging/policy';
-import { normalizeInbound } from '@/lib/messaging/keywords';
+import { looksLikeRevocation, normalizeInbound } from '@/lib/messaging/keywords';
+import { highRateNanpDestination } from '@/lib/voice/forward-number';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import type { Business, InboundMessage } from '@/lib/types';
 
@@ -35,6 +37,8 @@ const DAY_MS = 24 * HOUR_MS;
 export const INBOX_SENDER_HOURLY_LIMIT = 10;
 export const INBOX_BUSINESS_HOURLY_LIMIT = 300;
 export const DEFAULT_INBOX_FORWARD_HOURLY_LIMIT = 10;
+/** Owner texts about ONE sender per hour: one number can never spend the whole business forward budget (the rest stays in the dashboard inbox). */
+export const INBOX_SENDER_FORWARD_HOURLY_LIMIT = 2;
 
 /** INBOX_FORWARD_HOURLY_LIMIT: owner texts about customer messages per business per hour (default 10, at least 1). */
 export function inboxForwardHourlyLimit(env: NodeJS.ProcessEnv = process.env): number {
@@ -59,9 +63,9 @@ export type InboundTextOutcome = {
   dropped?: 'no_sid' | 'invalid_sender' | 'owner_number' | 'business_line' | 'empty' | 'sender_rate_limited' | 'business_rate_limited' | 'rejected';
   message?: InboundMessage;
   /** The owner alert: 'sent', or why it was not texted (the message is in the inbox either way). */
-  forward?: 'sent' | 'duplicate' | 'quiet_hours' | 'budget' | 'no_owner_phone' | 'owner_unverified' | 'failed';
+  forward?: 'sent' | 'duplicate' | 'quiet_hours' | 'budget' | 'sender_budget' | 'no_owner_phone' | 'owner_unverified' | 'failed';
   trivial?: boolean;
-  autoReply?: 'sent' | 'skipped_recent' | 'skipped_opted_out' | 'skipped_duplicate' | 'skipped_ineligible' | 'blocked' | 'failed';
+  autoReply?: 'sent' | 'skipped_recent' | 'skipped_opted_out' | 'skipped_duplicate' | 'skipped_ineligible' | 'skipped_possible_revocation' | 'skipped_high_rate' | 'blocked' | 'failed';
 };
 
 const e164Eligible = (e164: string): boolean => /^\+[1-9]\d{9,14}$/.test(e164); // a real handset-length number: never a short code
@@ -82,10 +86,12 @@ export async function handleInboundText(business: Business, fields: InboundTextF
   // A redelivery of a text we already hold is not new traffic: it does not spend the flood budgets.
   const known = await getInboundMessageBySid(sid);
   const redelivery = known !== null && known.business_id === business.id;
-  const bizBudget = redelivery ? { allowed: true } : await rateLimit(`inbox:biz:${business.id}`, INBOX_BUSINESS_HOURLY_LIMIT, HOUR_MS);
-  if (!bizBudget.allowed) { log.warn('inbound.business_rate_limited', { business: business.id }); return { stored: false, dropped: 'business_rate_limited' }; }
+  // The SENDER's budget is spent first and the business budget only for texts it lets through: one number flooding the line can burn its own 10 per hour
+  // and nothing more, so it can never lock every other customer out of the inbox (rejected attempts count against the limiter that rejected them).
   const sender = redelivery ? { allowed: true } : await rateLimit(`inbox:sender:${business.id}:${e164}`, INBOX_SENDER_HOURLY_LIMIT, HOUR_MS);
   if (!sender.allowed) { log.warn('inbound.sender_rate_limited', { business: business.id }); return { stored: false, dropped: 'sender_rate_limited' }; }
+  const bizBudget = redelivery ? { allowed: true } : await rateLimit(`inbox:biz:${business.id}`, INBOX_BUSINESS_HOURLY_LIMIT, HOUR_MS);
+  if (!bizBudget.allowed) { log.warn('inbound.business_rate_limited', { business: business.id }); return { stored: false, dropped: 'business_rate_limited' }; }
 
   const rec = await recordInboundMessage({ business_id: business.id, from, body, twilio_message_sid: sid, received_at: now, country });
   if (!rec.ok) { log.warn('inbound.rejected', { business: business.id, reason: rec.reason }); return { stored: false, dropped: 'rejected' }; }
@@ -107,8 +113,14 @@ export async function handleInboundText(business: Business, fields: InboundTextF
     if (message.status === 'new') await setInboundStatus(business.id, message.id, 'ignored', 'auto:acknowledgement', now);
     return { ...out, trivial: true };
   }
-  out.forward = await forwardToOwner(business, message, now);
-  out.autoReply = await autoReply(business, message, e164, now);
+  // "Don't text me again" / "remove me from your list" / "Stop. Who is this?": no automatic reply (a reply to an opt-out request is a compliance risk);
+  // the text is flagged for the owner, who is told in the forward.
+  const revocation = looksLikeRevocation(body);
+  if (revocation && message.status === 'new') {
+    await prisma.inboundMessage.updateMany({ where: { id: message.id, businessId: business.id, status: 'new' }, data: { handledBy: POSSIBLE_REVOCATION } }).catch(() => undefined);
+  }
+  out.forward = await forwardToOwner(business, message, now, revocation);
+  out.autoReply = revocation ? 'skipped_possible_revocation' : await autoReply(business, message, e164, now);
   return out;
 }
 
@@ -117,12 +129,15 @@ async function unstampForwarded(businessId: string, id: string): Promise<void> {
   await prisma.inboundMessage.updateMany({ where: { id, businessId }, data: { forwardedToOwnerAt: null } }).catch(() => undefined);
 }
 
-async function forwardToOwner(business: Business, message: InboundMessage, now: Date): Promise<NonNullable<InboundTextOutcome['forward']>> {
+async function forwardToOwner(business: Business, message: InboundMessage, now: Date, possibleOptOut = false): Promise<NonNullable<InboundTextOutcome['forward']>> {
   if (message.forwarded_to_owner_at) return 'duplicate';
   const status = ownerAlertStatus(business);
   if (status !== 'ok') return status === 'no_owner_phone' ? 'no_owner_phone' : 'owner_unverified';
   // Not at night: the message waits in the dashboard inbox (the badge counts it) instead of waking the owner.
   if (isQuietHour(now, tzOf(business))) return 'quiet_hours';
+  // At most 2 owner texts per sender per hour: the rest waits in the inbox (and the badge), and the business budget below is not spent on it.
+  const perSender = await rateLimit(`inbox-forward:sender:${business.id}:${message.from_e164}`, INBOX_SENDER_FORWARD_HOURLY_LIMIT, HOUR_MS, { failClosed: true });
+  if (!perSender.allowed) return 'sender_budget';
   if (!(await markInboundForwarded(business.id, message.id, now))) return 'duplicate'; // another delivery owns the alert
   const budget = await rateLimit(`inbox-forward:hour:${business.id}`, inboxForwardHourlyLimit(), HOUR_MS, { failClosed: true });
   if (!budget.allowed) {
@@ -131,7 +146,8 @@ async function forwardToOwner(business: Business, message: InboundMessage, now: 
     return 'budget';
   }
   const last4 = message.from_e164.slice(-4);
-  const alert = await alertOwner(business, ownerForwardText(business, { last4 }, message.body), { class: 'notice' });
+  // The sms_log row keeps NO copy of the customer's words (they are only in the inbox row): privacy export and erasure of the customer cover every copy.
+  const alert = await alertOwner(business, ownerForwardText(business, { last4 }, message.body, { possibleOptOut }), { class: 'notice', logBody: ownerForwardLogText(business, { last4 }) });
   if (!alert.notified) {
     await unstampForwarded(business.id, message.id);
     return alert.reason === 'owner_unverified' ? 'owner_unverified' : alert.reason === 'no_owner_phone' ? 'no_owner_phone' : 'failed';
@@ -142,6 +158,8 @@ async function forwardToOwner(business: Business, message: InboundMessage, now: 
 async function autoReply(business: Business, message: InboundMessage, e164: string, now: Date): Promise<NonNullable<InboundTextOutcome['autoReply']>> {
   if (message.auto_replied_at) return 'skipped_duplicate';
   if (!e164Eligible(e164)) return 'skipped_ineligible';
+  // Caribbean / Pacific-territory / premium NANP numbers (the SMS-pumping destinations): an inbound text from one is stored and forwarded, never answered.
+  if (highRateNanpDestination(e164)) return 'skipped_high_rate';
   const country = countryForBusiness(business);
   if (await isOptedOut(business.id, e164, country)) return 'skipped_opted_out';
   // Serialise the check-then-send for one sender (two texts arriving together must get one reply).

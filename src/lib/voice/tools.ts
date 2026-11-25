@@ -9,10 +9,10 @@
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall, upsertCallForConversation,
-  updateCall, setTransferStatus, createBooking as dbCreateBooking, BookingRejectedError,
+  updateCall, setTransferStatus, createBooking as dbCreateBooking, BookingRejectedError, prisma, toBooking,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
-import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
+import { clampDuration, DEFAULT_DURATION_MIN, openWindow } from '@/lib/availability';
 import {
   addDaysToDateKey, isDateKey, localDateKey, parseScheduledAt, partsInTz, spokenTimeInTz, tzOf,
 } from '@/lib/time';
@@ -307,11 +307,15 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
     }
 
     let slots: TimeSlot[];
-    let dayFull = false;
+    // Why the asked day has nothing: beyond the booking window, in the past, a closed day, or really full. The caller is told the true one.
+    let whyNone: 'full' | 'too_far' | 'closed' | 'past' | null = null;
     if (dateStr) {
       slots = (await slotsForDate(business, dateStr, duration)).filter((s) => s.available).slice(0, 3);
       if (slots.length === 0) {
-        dayFull = true;
+        const today = localDateKey(Date.now(), tz);
+        whyNone = dateStr < today ? 'past'
+          : dateStr >= addDaysToDateKey(today, schedulingOf(business).horizon_days) ? 'too_far'
+            : openWindow(business.hours, dateStr, tz, business.closed_dates) ? 'full' : 'closed';
         slots = await nextAvailable(business, 3, duration);
       }
     } else {
@@ -330,9 +334,11 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
 
     const list = describeSlots(slots, lang, tz);
     const multiple = slots.length > 1;
-    const prefix = dayFull
-      ? say(lang, `That day is full, but I have ${list}`, `Ese día está lleno, pero tengo ${list}`)
-      : say(lang, `I have ${list}`, `Tengo ${list}`);
+    const prefix = whyNone === 'full' ? say(lang, `That day is full, but I have ${list}`, `Ese día está lleno, pero tengo ${list}`)
+      : whyNone === 'too_far' ? say(lang, `That is further ahead than we are booking right now, but I have ${list}`, `Eso está más lejos de lo que estamos agendando ahora, pero tengo ${list}`)
+        : whyNone === 'closed' ? say(lang, `We are closed that day, but I have ${list}`, `Ese día estamos cerrados, pero tengo ${list}`)
+          : whyNone === 'past' ? say(lang, `That day has already passed, but I have ${list}`, `Ese día ya pasó, pero tengo ${list}`)
+            : say(lang, `I have ${list}`, `Tengo ${list}`);
     const message = multiple
       ? say(lang, `${prefix} — which works better?`, `${prefix} — ¿cuál le queda mejor?`)
       : say(lang, `${prefix} open — does that work for you?`, `${prefix} disponible — ¿le queda bien?`);
@@ -645,9 +651,28 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const found = bookingId ? await getBooking(bookingId) : null;
     const call = await resolveCall(business, args);
     // Only a booking made on THIS call can take a deposit from here (a booking id the model invents or reuses from elsewhere is ignored).
-    const booking = found && found.business_id === business.id && call && found.call_id === call.id ? found : null;
+    let booking = found && found.business_id === business.id && call && found.call_id === call.id ? found : null;
+    // No (valid) booking id: the call's single open booking is the one (a link must always be tied to a booking, or its payment can never be matched).
+    if (!booking && call) {
+      const mine = await prisma.booking.findMany({ where: { businessId: business.id, callId: call.id, status: { not: 'cancelled' } }, orderBy: { createdAt: 'desc' }, take: 2 });
+      if (mine.length === 1) booking = toBooking(mine[0]);
+    }
+    if (!booking) {
+      return {
+        ok: false,
+        message: say(lang,
+          'I cannot set up a deposit without a booking made on this call — let me have the owner call you about it.',
+          'No puedo preparar un depósito sin una cita hecha en esta llamada — voy a pedirle al dueño que le llame para eso.'),
+        data: { reason: 'no_booking' },
+      };
+    }
+    // The price behind a PERCENTAGE deposit is the owner's catalog price for the service, never the model's estimate (the caller, or an injected
+    // prompt, could otherwise pick the deposit by saying the job costs a dollar). No catalog price = no amount (the owner is asked to call).
+    const kb = await getKnowledgeBase(business.id);
+    const listed = kb ? matchService(kb.services, booking.service)[0] : undefined;
+    const catalogCents = listed?.base_price != null && listed.base_price > 0 ? dollarsToCents(listed.base_price) : null;
     const decision = resolveDepositAmount({
-      policy: depositPolicyOf(business), priceEstimateCents: booking?.price_estimate ?? null, actor: 'ai',
+      policy: depositPolicyOf(business), priceEstimateCents: catalogCents, actor: 'ai',
     });
     if (!decision.ok) {
       return {

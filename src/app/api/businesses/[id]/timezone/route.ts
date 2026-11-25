@@ -1,11 +1,11 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { clientKey } from '@/lib/auth';
-import { getBusiness, recordAudit, setBusinessTimeZone } from '@/lib/db';
+import { getBusiness, prisma, recordAudit, setBusinessTimeZone } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { inferTimeZoneFromPhone } from '@/lib/tz-infer';
 import { syncPromptAfterEdit, type PromptSyncOutcome } from '@/lib/voice/agent-resync';
-import { tzOf } from '@/lib/time';
+import { DEFAULT_TIMEZONE, tzOf } from '@/lib/time';
 import type { Business } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -16,10 +16,13 @@ export interface TimeZoneView {
   /** A hint from the owner's phone area code (null when unknown or ambiguous): it is never applied without the owner saving it. */
   suggested: string | null;
   now: string;
+  /** The owner (or an admin) already chose this zone (it differs from the default, or a change was audited): the onboarding suggestion must never override it. */
+  chosen: boolean;
 }
 
-const view = (b: Business): TimeZoneView => ({
+const view = (b: Business, chosen: boolean): TimeZoneView => ({
   timezone: tzOf(b),
+  chosen,
   suggested: inferTimeZoneFromPhone(b.owner_phone_e164 ?? b.owner_phone ?? null),
   now: new Date().toISOString(),
 });
@@ -32,7 +35,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     requireBusinessAccess(auth.principal, id);
     const b = await getBusiness(id);
     if (!b) return fail('business not found', 404);
-    return ok<TimeZoneView>(view(b));
+    const chosen = tzOf(b) !== DEFAULT_TIMEZONE || (await prisma.auditEvent.count({ where: { businessId: id, action: 'business.timezone_changed' } })) > 0;
+    return ok<TimeZoneView>(view(b, chosen));
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 500);
   }
@@ -68,7 +72,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
     const agentSync: PromptSyncOutcome | null = changed ? await syncPromptAfterEdit(id) : null;
     const after = await getBusiness(id);
     return ok<TimeZoneView & { changed: boolean; hours_recheck: boolean; agent_sync?: PromptSyncOutcome }>({
-      ...view(after ?? before), changed, hours_recheck: changed, ...(agentSync ? { agent_sync: agentSync } : {}),
+      ...view(after ?? before, true), changed, hours_recheck: changed, ...(agentSync ? { agent_sync: agentSync } : {}),
     });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 500);

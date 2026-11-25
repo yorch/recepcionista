@@ -17,19 +17,22 @@ import type { Business, TimeSlot } from '@/lib/types';
  * Slots of one local date, per the business's scheduling configuration (slot grid, minimum lead, horizon, buffer, crews):
  * a slot is available while it starts after now + lead, falls inside the booking horizon, keeps `buffer` minutes clear of the owner's Google
  * Calendar blocks and has at least one free crew (each crew's own bookings, buffer included). The same lead and horizon are applied by
- * `nextAvailable` and by `validateSlot` inside createBooking, so what is offered is what can be booked.
+ * `nextAvailable` and by `validateSlot` inside createBooking, so what is offered is what can be booked. `opts.ownerInitiated` (the dashboard's
+ * New booking list) offers what the owner's own booking can take: no minimum notice, no horizon.
  */
 export async function slotsForDate(
   business: Business,
   dateStr: string,
   durationMinutes = 60,
   nowMs: number = Date.now(),
+  opts: { ownerInitiated?: boolean } = {},
 ): Promise<TimeSlot[]> {
   if (!isDateKey(dateStr)) return [];
   const tz = tzOf(business);
   const cfg = schedulingOf(business);
   const duration = clampDuration(durationMinutes);
-  if (dateStr >= addDaysToDateKey(localDateKey(nowMs, tz), cfg.horizon_days)) return []; // beyond the booking horizon: nothing is offered
+  // beyond the booking horizon nothing is offered to CUSTOMERS; the owner's own bookings (dashboard) skip the horizon and the minimum notice, like createBooking does
+  if (!opts.ownerInitiated && dateStr >= addDaysToDateKey(localDateKey(nowMs, tz), cfg.horizon_days)) return [];
   const { gte, lt } = dayRange(dateStr, tz);
   const pad = cfg.buffer_minutes * 60_000;
   const from = gte.getTime() - pad;
@@ -37,7 +40,7 @@ export async function slotsForDate(
   const crewBusy = await listBlockingIntervalsByCrew(business.id, from, to);
   const blocks = await calendarBusyIntervals(business.id, from, to); // owner's Google Calendar (healthy connection + switch on): stops every crew
   return buildSlots(business.hours, dateStr, tz, duration, blocks, {
-    nowMs, leadMin: cfg.min_lead_minutes, closedDates: business.closed_dates,
+    nowMs, leadMin: opts.ownerInitiated ? 0 : cfg.min_lead_minutes, closedDates: business.closed_dates,
     stepMin: cfg.slot_minutes, bufferMin: cfg.buffer_minutes, crews: cfg.crews, crewBusy,
   });
 }

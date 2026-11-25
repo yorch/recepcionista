@@ -40,13 +40,28 @@ export function autoReplyText(business: Business, body: string): string {
   return clip(`${business.name}: Hi, this is ${assistant}, the assistant. We got your message and the team will see it.${call}`);
 }
 
-const URL_RE = /\b(?:https?:\/\/|www\.)\S+/gi;
+/**
+ * Anything a phone would turn into a tappable link: a scheme or www. link, a bare domain with an optional path (`evil.com/login`, `bit.ly/x`),
+ * or a bare IPv4 address. A stranger's text must never arrive on the owner's phone, from the number the owner trusts, as a clickable link.
+ */
+const URL_RE = /\b(?:https?:\/\/|www\.)\S+|(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:\/\S*)?|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:\/\S*)?/gi;
 
 /** What the owner is texted when a customer writes in (the full text stays in the dashboard inbox). */
-export function ownerForwardText(business: Pick<Business, 'locale_default'>, from: { last4: string }, body: string): string {
+export function ownerForwardText(business: Pick<Business, 'locale_default'>, from: { last4: string }, body: string, opts: { possibleOptOut?: boolean } = {}): string {
   const quoted = safeForward(body, 140);
-  if (business.locale_default === 'es') return `Mensaje de un cliente (...${from.last4}): "${quoted}". Responda desde Mensajes en el panel.`;
-  return `Customer text (...${from.last4}): "${quoted}". Reply from Messages in the dashboard.`;
+  if (business.locale_default === 'es') {
+    return `${opts.possibleOptOut ? 'Posible baja: ' : ''}Mensaje de un cliente (...${from.last4}): "${quoted}". ${opts.possibleOptOut ? 'No se le respondio solo: revise Mensajes. ' : ''}Responda desde Mensajes en el panel.`;
+  }
+  return `${opts.possibleOptOut ? 'Possible opt-out: ' : ''}Customer text (...${from.last4}): "${quoted}". ${opts.possibleOptOut ? 'No automatic reply was sent: check Messages. ' : ''}Reply from Messages in the dashboard.`;
+}
+
+/**
+ * What the sms_log row of the owner forward keeps: NOT the customer's words (they live only in the inbox row, so erasing or exporting the customer
+ * covers every copy). `revocation` marks a text that may be an opt-out request.
+ */
+export function ownerForwardLogText(business: Pick<Business, 'locale_default'>, from: { last4: string }): string {
+  if (business.locale_default === 'es') return `Mensaje de un cliente (...${from.last4}) reenviado al propietario. El texto solo se conserva en Mensajes.`;
+  return `Customer text (...${from.last4}) forwarded to the owner. The words are kept only in Messages.`;
 }
 
 /** Links typed by a stranger are replaced (the owner opens the dashboard for the original), whitespace collapsed, length capped. */

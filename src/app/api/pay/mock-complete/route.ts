@@ -25,7 +25,10 @@ export async function POST(req: Request) {
     const amount = booking.deposit_amount;
     if (!amount || amount <= 0) return fail('booking has no deposit due', 422);
 
-    const result = await markDepositPaid(booking.id, amount);
+    // A deposit that is already paid (by any means) is never touched by the demo button: it would rewrite a real payment record.
+    if (booking.deposit_paid) return ok({ updated: false, amount_cents: amount });
+    // Nothing is charged in the demo: the source stays empty (it is not a Stripe payment, so it can never be refunded through Stripe).
+    const result = await markDepositPaid(booking.id, amount, { source: null });
     if (result.updated) await emitBookingChanged(booking.id, 'updated', booking.business_id);
     return ok({ updated: result.updated, amount_cents: amount });
   } catch (err) {

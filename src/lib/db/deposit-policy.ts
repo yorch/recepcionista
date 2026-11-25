@@ -6,7 +6,7 @@
  * `computeDepositCents(policy, price_estimate)` (src/lib/business-config.ts).
  *
  * Manual ops: the owner may mark a deposit as paid outside Stripe (cash, Zelle...) and undo that. `bookings.deposit_source` says which: 'stripe' (set by
- * markDepositPaid) | 'manual' (these helpers) | NULL. A manual mark never overrides a Stripe payment, and Stripe's webhook replaces a manual mark.
+ * markDepositPaid) | 'manual' (these helpers) | NULL. A manual mark never overrides a Stripe payment, and Stripe's webhook replaces a manual mark (and tells the owner the customer paid twice: markDepositPaid / payments webhook).
  */
 import { prisma } from './client';
 import { toBooking, toBusiness } from './index';
@@ -44,7 +44,7 @@ export interface DepositActor { kind: AuditActorKind; user_id?: string | null; i
 
 export type ManualDepositResult =
   | { ok: true; booking: Booking; changed: boolean }
-  | { ok: false; reason: 'not_found' | 'cancelled' | 'already_paid' | 'invalid_amount' | 'not_manual' | 'refunded' };
+  | { ok: false; reason: 'not_found' | 'cancelled' | 'already_paid' | 'invalid_amount' | 'not_manual' | 'refunded' | 'card_payment_on_file' };
 
 const actorId = (a: DepositActor): string => (a.kind === 'user' && a.user_id ? a.user_id : a.kind).slice(0, 100);
 
@@ -87,7 +87,7 @@ export async function markDepositPaidManually(
 
 /**
  * Undo a MANUAL mark (the money did not arrive after all). Only a manual deposit can be undone (`not_manual` otherwise: a Stripe payment is
- * refunded, not unmarked) and not one that has a refund recorded (`refunded`). The requested `deposit_amount` stays so a payment link can still be sent.
+ * refunded, not unmarked), not one that has a refund recorded (`refunded`) and not one with a card payment reference on file (`card_payment_on_file`). The requested `deposit_amount` stays so a payment link can still be sent.
  */
 export async function unmarkManualDeposit(businessId: ID, bookingId: ID, actor: DepositActor): Promise<ManualDepositResult> {
   return prisma.$transaction(async (tx) => {
@@ -95,6 +95,8 @@ export async function unmarkManualDeposit(businessId: ID, bookingId: ID, actor: 
     if (!cur) return { ok: false, reason: 'not_found' } as const;
     if (!cur.depositPaid || cur.depositSource !== 'manual') return { ok: false, reason: 'not_manual' } as const;
     if (cur.refundStatus !== 'none') return { ok: false, reason: 'refunded' } as const;
+    // A card payment reference on the row means Stripe took money for this deposit as well: unmarking would leave a captured payment behind an unpaid booking.
+    if (cur.stripePaymentIntentId || cur.stripeCheckoutSessionId) return { ok: false, reason: 'card_payment_on_file' } as const;
     const row = await tx.booking.update({
       where: { id: bookingId },
       data: { depositPaid: false, depositSource: null, depositMarkedBy: null, depositMarkedAt: null },

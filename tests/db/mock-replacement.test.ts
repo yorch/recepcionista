@@ -103,9 +103,12 @@ suite('mock-replacement db helpers (postgres)', () => {
     expect(await db.unmarkManualDeposit(b.id, bk.id, actor)).toEqual({ ok: false, reason: 'not_manual' });
     // a Stripe payment is not "manual": refuse to mark over it, and stripe replaces an earlier manual mark
     await db.markDepositPaidManually(b.id, bk.id, actor);
-    await db.markDepositPaid(bk.id, 5000); // no-op (same amount, already paid) ...
-    expect((await db.getBooking(bk.id)).deposit_source).toBe('manual');
-    await db.markDepositPaid(bk.id, 6000); // ... a different amount from Stripe replaces the mark
+    // a card payment of the SAME amount also replaces the mark (review 21 H1: the customer paid twice, the caller is told through `replaced_manual`) ...
+    expect(await db.markDepositPaid(bk.id, 5000)).toEqual({ updated: true, replaced_manual: { amount_cents: 5000, marked_by: 'user', refund_status: 'none', refund_amount_cents: null } });
+    expect(await db.getBooking(bk.id)).toMatchObject({ deposit_source: 'stripe', deposit_marked_by: null, deposit_marked_at: null, deposit_amount: 5000 });
+    expect(await db.markDepositPaid(bk.id, 5000)).toEqual({ updated: false, replaced_manual: null }); // ... and a repeat of the same payment (the second Stripe event) is a no-op
+    // ... a different amount from Stripe replaces the amount
+    await db.markDepositPaid(bk.id, 6000);
     expect(await db.getBooking(bk.id)).toMatchObject({ deposit_source: 'stripe', deposit_marked_by: null, deposit_marked_at: null, deposit_amount: 6000 });
     expect(await db.unmarkManualDeposit(b.id, bk.id, actor)).toEqual({ ok: false, reason: 'not_manual' });
     const cancelled = await db.createBooking({ business_id: b.id, customer_name: 'Zed', customer_phone: '+13055550141', service: 'AC', scheduled_at: futureAt(17), status: 'cancelled', deposit_amount: 5000 }, { enforce: false });
@@ -247,14 +250,18 @@ suite('mock-replacement db helpers (postgres)', () => {
     expect(await db.prisma.briefingAudio.count({ where: { briefingId: old.id } })).toBe(0);
   });
 
-  test('content confirmation: unconfirmed -> confirmed -> stale when services / prices / area change; FAQ edits do not matter', async () => {
+  test('content confirmation: unconfirmed -> confirmed -> stale when services / prices / FAQs / area change', async () => {
     const b = await biz({ service_area: ['Miami'] });
     await db.upsertKnowledgeBase(b.id, { services: [{ name: 'AC repair', base_price: 120 }], faqs: [], pricing_notes: 'est free' });
-    expect(await db.getContentConfirmation(b.id)).toEqual({ state: 'unconfirmed', confirmed_at: null });
+    const first = await db.getContentConfirmation(b.id);
+    expect(first).toMatchObject({ state: 'unconfirmed', confirmed_at: null });
+    expect(first!.content_hash).toMatch(/^[0-9a-f]{64}$/);
     const c = await db.confirmContent(b.id, { kind: 'user', user_id: null });
     expect(c.state).toBe('confirmed');
     expect((await db.getContentConfirmation(b.id)).state).toBe('confirmed');
-    await db.upsertKnowledgeBase(b.id, { faqs: [{ question: 'q', answer: 'a' }] });
+    await db.upsertKnowledgeBase(b.id, { faqs: [{ question: 'q', answer: 'a' }] }); // FAQs carry prices too (review 22 M4): editing one makes the confirmation stale
+    expect((await db.getContentConfirmation(b.id)).state).toBe('stale');
+    await db.confirmContent(b.id, { kind: 'user', user_id: null });
     expect((await db.getContentConfirmation(b.id)).state).toBe('confirmed');
     await db.upsertKnowledgeBase(b.id, { services: [{ name: 'AC repair', base_price: 150 }] });
     expect((await db.getContentConfirmation(b.id)).state).toBe('stale');

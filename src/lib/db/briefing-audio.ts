@@ -20,8 +20,8 @@ export type SaveBriefingAudioResult =
   | { ok: true; meta: BriefingAudioMeta; audio_url: string }
   | { ok: false; reason: 'briefing_not_found' | 'empty' | 'too_large' | 'bad_type' };
 
-const metaOf = (a: { briefingId: string; contentType: string; voiceId: string | null; createdAt: Date }, size: number): BriefingAudioMeta => ({
-  briefing_id: a.briefingId, content_type: a.contentType, size_bytes: size, voice_id: a.voiceId, created_at: a.createdAt.toISOString(),
+const metaOf = (a: { briefingId: string; contentType: string; voiceId: string | null; textHash: string | null; createdAt: Date }, size: number): BriefingAudioMeta => ({
+  briefing_id: a.briefingId, content_type: a.contentType, size_bytes: size, voice_id: a.voiceId, text_hash: a.textHash, created_at: a.createdAt.toISOString(),
 });
 
 /**
@@ -29,7 +29,7 @@ const metaOf = (a: { briefingId: string; contentType: string; voiceId: string | 
  * Refused when the briefing is not this business's, the clip is empty / over 5 MB, or the type is not an audio type we serve.
  */
 export async function saveBriefingAudio(
-  businessId: ID, briefingId: ID, input: { content_type: string; bytes: Uint8Array | ArrayBuffer; voice_id?: string | null },
+  businessId: ID, briefingId: ID, input: { content_type: string; bytes: Uint8Array | ArrayBuffer; voice_id?: string | null; text_hash?: string | null },
 ): Promise<SaveBriefingAudioResult> {
   const data = input.bytes instanceof Uint8Array ? input.bytes : new Uint8Array(input.bytes);
   if (data.byteLength === 0) return { ok: false, reason: 'empty' };
@@ -38,13 +38,14 @@ export async function saveBriefingAudio(
   const copy = new Uint8Array(data); // detach from any shared buffer; also gives Prisma a plain Uint8Array<ArrayBuffer>
   const url = briefingAudioUrl(briefingId);
   const voiceId = input.voice_id ? String(input.voice_id).slice(0, 100) : null;
+  const textHash = input.text_hash && /^[0-9a-f]{64}$/.test(input.text_hash) ? input.text_hash : null;
   return prisma.$transaction(async (tx) => {
     const briefing = await tx.briefing.findFirst({ where: { id: briefingId, businessId }, select: { id: true } });
     if (!briefing) return { ok: false, reason: 'briefing_not_found' } as const;
     const row = await tx.briefingAudio.upsert({
       where: { briefingId },
-      create: { briefingId, contentType: input.content_type, bytes: copy, voiceId },
-      update: { contentType: input.content_type, bytes: copy, voiceId, createdAt: new Date() },
+      create: { briefingId, contentType: input.content_type, bytes: copy, voiceId, textHash },
+      update: { contentType: input.content_type, bytes: copy, voiceId, textHash, createdAt: new Date() },
     });
     await tx.briefing.update({ where: { id: briefingId }, data: { audioUrl: url } });
     log.info('briefing_audio.saved', { business: businessId, briefing: briefingId, bytes: copy.byteLength });
@@ -55,17 +56,31 @@ export async function saveBriefingAudio(
 /** The audio of a briefing of this business, or null (none stored, or another tenant's briefing). */
 export async function getBriefingAudio(businessId: ID, briefingId: ID): Promise<{ content_type: string; bytes: Buffer } | null> {
   const row = await prisma.briefingAudio.findFirst({ where: { briefingId, briefing: { businessId } } });
-  return row ? { content_type: row.contentType, bytes: Buffer.from(row.bytes) } : null;
+  return row ? { content_type: row.contentType, bytes: Buffer.from(row.bytes.buffer, row.bytes.byteOffset, row.bytes.byteLength) } : null; // no copy
+}
+
+/**
+ * One byte range [start, end] (inclusive, 0-based) of the clip, cut INSIDE Postgres (`substring(bytea from .. for ..)`): a Range request reads only the
+ * bytes it sends, never the whole clip. Null when there is no such clip for this business.
+ */
+export async function getBriefingAudioSlice(businessId: ID, briefingId: ID, start: number, end: number): Promise<Buffer | null> {
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) return null;
+  const rows = await prisma.$queryRaw<{ chunk: Uint8Array }[]>`
+    SELECT substring(a."bytes" from ${start + 1}::int for ${end - start + 1}::int) AS chunk
+      FROM "briefing_audio" a JOIN "briefings" b ON b."id" = a."briefing_id"
+     WHERE a."briefing_id" = ${briefingId} AND b."business_id" = ${businessId}`;
+  const c = rows[0]?.chunk;
+  return c ? Buffer.from(c.buffer, c.byteOffset, c.byteLength) : null;
 }
 
 /** Metadata only (no bytes are read from the table beyond their length). */
 export async function getBriefingAudioMeta(businessId: ID, briefingId: ID): Promise<BriefingAudioMeta | null> {
-  const rows = await prisma.$queryRaw<{ briefing_id: string; content_type: string; voice_id: string | null; created_at: Date; size: number }[]>`
-    SELECT a."briefing_id", a."content_type", a."voice_id", a."created_at", octet_length(a."bytes")::int AS size
+  const rows = await prisma.$queryRaw<{ briefing_id: string; content_type: string; voice_id: string | null; text_hash: string | null; created_at: Date; size: number }[]>`
+    SELECT a."briefing_id", a."content_type", a."voice_id", a."text_hash", a."created_at", octet_length(a."bytes")::int AS size
       FROM "briefing_audio" a JOIN "briefings" b ON b."id" = a."briefing_id"
      WHERE a."briefing_id" = ${briefingId} AND b."business_id" = ${businessId}`;
   const r = rows[0];
-  return r ? { briefing_id: r.briefing_id, content_type: r.content_type, size_bytes: r.size, voice_id: r.voice_id, created_at: r.created_at.toISOString() } : null;
+  return r ? { briefing_id: r.briefing_id, content_type: r.content_type, size_bytes: r.size, voice_id: r.voice_id, text_hash: r.text_hash, created_at: r.created_at.toISOString() } : null;
 }
 
 /** Remove the stored audio of one briefing (and clear its audio_url when that pointed at the stored audio). True when a clip was removed. */

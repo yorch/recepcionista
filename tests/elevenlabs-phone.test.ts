@@ -119,8 +119,9 @@ describe('assistant name', () => {
     expect(assistantNameOf({ assistant_name: null })).toBe('Maria');
     expect(assistantNameOf({ assistant_name: '   ' })).toBe('Maria');
     expect(assistantNameOf({ assistant_name: 'Sofía' })).toBe('Sofía');
-    expect(cleanAssistantName('Ana\n{{x}} "quoted" <b>')).toBe('Ana x quoted b');
-    expect(cleanAssistantName('x'.repeat(100))).toHaveLength(40);
+    expect(cleanAssistantName('Ana\n{{x}}')).toBe('Ana x');
+    expect(cleanAssistantName('Ana\n{{x}} "quoted" <b>')).toBeNull(); // four words: not a name, the default is used
+    expect(cleanAssistantName('x'.repeat(100))).toBe('x'.repeat(40));
     expect(cleanAssistantName(null)).toBeNull();
   });
 });

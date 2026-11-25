@@ -1,7 +1,7 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { clientKey } from '@/lib/auth';
-import { getBooking, getBusiness, recordAudit, updateBooking } from '@/lib/db';
+import { getBooking, getBusiness, recordAudit, setDepositAmountIfUnpaid } from '@/lib/db';
 import { limitRequest } from '@/lib/ratelimit';
 import { depositPolicyOf } from '@/lib/business-config';
 import { resolveDepositAmount } from '@/lib/payments/deposit';
@@ -75,7 +75,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         const made = await createPaymentLink(decision.cents, `${business.name} deposit — ${booking.service}`, business.name, {
           bookingId: booking.id, businessId: business.id, refundNote: checkoutRefundNote(business, appUrl()),
         });
-        await updateBooking(booking.id, { deposit_amount: decision.cents });
+        await setDepositAmountIfUnpaid(booking.id, decision.cents);
         if (!made.mock) await rememberPaymentLink(booking.id, made.id);
         link = { id: made.id, url: made.url, mock: made.mock };
       }

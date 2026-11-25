@@ -1,7 +1,7 @@
 import { fail, ok } from '@/lib/http';
 import { clientKey } from '@/lib/auth';
 import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
-import { getBriefingAudio, getBriefingAudioMeta, getBusiness, recordAudit } from '@/lib/db';
+import { getBriefingAudio, getBriefingAudioMeta, getBriefingAudioSlice, getBusiness, recordAudit } from '@/lib/db';
 import { prisma } from '@/lib/db/client';
 import { rateLimit } from '@/lib/ratelimit';
 import { attachBriefingAudio, type BriefingAudioOutcome } from '@/lib/briefing';
@@ -12,6 +12,8 @@ export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** Text-to-speech calls the owner's "Generate audio" button may spend per business per day (a clip for the same text and voice is never synthesized again). */
+export const BRIEFING_AUDIO_DAILY_LIMIT = 10;
 
 /** The briefing's tenant, or null (no such briefing). Callers answer 404 for a briefing of another business, exactly like a missing one. */
 async function briefingOf(id: string) {
@@ -19,6 +21,9 @@ async function briefingOf(id: string) {
   const row = await prisma.briefing.findUnique({ where: { id } });
   return row;
 }
+
+/** A zero-copy view of a Buffer as a response body. */
+const asBody = (b: Buffer): Uint8Array<ArrayBuffer> => new Uint8Array(b.buffer as ArrayBuffer, b.byteOffset, b.byteLength);
 
 /** One Range header value against a clip of `size` bytes: [start, end] inclusive, 'invalid' (416) or null (not a single range: send it all). */
 export function parseRange(header: string | null, size: number): { start: number; end: number } | 'invalid' | null {
@@ -53,25 +58,29 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     const briefing = await briefingOf(id);
     requireBusinessAccess(auth.principal, briefing?.businessId);
     if (!briefing) return fail('no audio for this briefing', 404);
-    const [meta, audio] = await Promise.all([getBriefingAudioMeta(briefing.businessId, id), getBriefingAudio(briefing.businessId, id)]);
-    if (!meta || !audio) return fail('no audio for this briefing', 404);
+    const meta = await getBriefingAudioMeta(briefing.businessId, id); // metadata only: the clip itself is read only when it is actually sent
+    if (!meta) return fail('no audio for this briefing', 404);
 
     const etag = `"${new Date(meta.created_at).getTime().toString(36)}-${meta.size_bytes.toString(36)}"`;
     const headers: Record<string, string> = {
-      'content-type': audio.content_type, 'accept-ranges': 'bytes', 'cache-control': 'private, max-age=3600, must-revalidate',
+      'content-type': meta.content_type, 'accept-ranges': 'bytes', 'cache-control': 'private, max-age=3600, must-revalidate',
       etag, 'x-content-type-options': 'nosniff', vary: 'Cookie',
     };
     if (req.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
 
-    const size = audio.bytes.length;
+    const size = meta.size_bytes;
     const range = parseRange(req.headers.get('range'), size);
     if (range === 'invalid') return new Response(null, { status: 416, headers: { ...headers, 'content-range': `bytes */${size}` } });
     if (range) {
-      return new Response(new Uint8Array(audio.bytes.subarray(range.start, range.end + 1)), {
-        status: 206, headers: { ...headers, 'content-range': `bytes ${range.start}-${range.end}/${size}`, 'content-length': String(range.end - range.start + 1) },
+      const part = await getBriefingAudioSlice(briefing.businessId, id, range.start, range.end); // cut inside Postgres: only these bytes are read
+      if (!part) return fail('no audio for this briefing', 404);
+      return new Response(asBody(part), {
+        status: 206, headers: { ...headers, 'content-range': `bytes ${range.start}-${range.end}/${size}`, 'content-length': String(part.byteLength) },
       });
     }
-    return new Response(new Uint8Array(audio.bytes), { headers: { ...headers, 'content-length': String(size) } });
+    const audio = await getBriefingAudio(briefing.businessId, id);
+    if (!audio) return fail('no audio for this briefing', 404);
+    return new Response(asBody(audio.bytes), { headers: { ...headers, 'content-length': String(audio.bytes.byteLength) } });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 500);
   }
@@ -79,7 +88,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
 /**
  * POST /api/briefings/:id/audio   OWNER. Regenerates the audio of an existing briefing from its stored text with the business's voice
- * (the text is not rewritten). Rate limited (it spends text-to-speech budget), audited. The answer is honest: `status: 'unavailable'` plus a
+ * (the text is not rewritten). A clip already stored for this text and voice is kept (no synthesis); a failed regeneration never deletes a good clip of the same text.
+ * Rate limited per user and per hour, and capped per business per day (it spends text-to-speech budget), audited. The answer is honest: `status: 'unavailable'` plus a
  * `reason` when the provider is not configured or failed (the briefing then has no audio, never a stale one).
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -101,11 +111,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       id: row.id, business_id: row.businessId, date: row.date, audio_url: row.audioUrl, transcript: row.transcript,
       stats: row.stats as unknown as Briefing['stats'], created_at: row.createdAt.toISOString(),
     };
-    const out = await attachBriefingAudio(business, briefing);
+    // Spend guard: a clip that already exists for this exact text and voice is kept (no synthesis), and real synthesis is capped per business per day.
+    const since = new Date(Date.now() - 24 * 60 * 60_000);
+    const spentToday = await prisma.auditEvent.count({ where: { businessId: business.id, action: 'briefing.audio_regenerated', at: { gte: since }, meta: { path: ['synthesized'], equals: true } } });
+    const existing = await getBriefingAudioMeta(business.id, id);
+    const wouldReuse = existing !== null && existing.text_hash !== null;
+    if (!wouldReuse && spentToday >= BRIEFING_AUDIO_DAILY_LIMIT) {
+      return Response.json({ ok: false, error: 'Daily audio limit reached for this business. Try again tomorrow.', code: 'audio_daily_limit' }, { status: 429, headers: { 'retry-after': '3600' } });
+    }
+    const out = await attachBriefingAudio(business, briefing, { reuse: true });
+    const synthesized = !(out.audio.status === 'ready' && out.audio.reused);
     const actor = auditActorOf(auth.principal);
     await recordAudit({
       actor_kind: actor.actor_kind, actor_user_id: actor.actor_user_id, business_id: business.id, action: 'briefing.audio_regenerated', target: `briefing:${id}`, ip: clientKey(req),
-      meta: { ...actor.meta, status: out.audio.status, ...(out.audio.status === 'unavailable' ? { reason: out.audio.reason } : {}) },
+      meta: { ...actor.meta, status: out.audio.status, synthesized, ...(out.audio.status === 'unavailable' ? { reason: out.audio.reason } : {}) },
     });
     return ok<{ briefing_id: string; audio_url: string | null; audio: BriefingAudioOutcome }>({ briefing_id: id, audio_url: out.briefing.audio_url ?? null, audio: out.audio });
   } catch (err) {

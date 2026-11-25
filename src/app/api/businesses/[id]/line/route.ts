@@ -6,7 +6,7 @@ import { validateAssistantName } from '@/lib/business-config';
 import { limitRequest } from '@/lib/ratelimit';
 import { syncPromptAfterEdit, type PromptSyncOutcome } from '@/lib/voice/agent-resync';
 import { assistantNameOf, DEFAULT_ASSISTANT_NAME } from '@/lib/voice/assistant-name';
-import { lineKindFor, type LineKind } from '@/lib/voice/line';
+import { effectiveLineKindFor, type LineKind } from '@/lib/voice/line';
 import { nativeTransferEnabled } from '@/lib/voice/transfer';
 import type { Business } from '@/lib/types';
 
@@ -35,7 +35,7 @@ const view = (b: Business): LineSettings => ({
   default_assistant_name: DEFAULT_ASSISTANT_NAME,
   native_transfer_enabled: b.native_transfer_enabled === true,
   transfer_capability: nativeTransferEnabled(),
-  line_kind: lineKindFor(b),
+  line_kind: effectiveLineKindFor(b),
   own_line: Boolean(b.elevenlabs_phone_number_id),
   has_number: Boolean(b.phone),
   forward_number_verified: Boolean(b.forward_number_e164 && (b.forward_number_verified_at || (b.owner_phone_verified_at && b.owner_phone_e164 === b.forward_number_e164))),

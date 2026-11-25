@@ -10,6 +10,7 @@ const FAILURES: Record<Reason, { status: number; error: string; code: string }> 
   invalid_recipient: { status: 422, error: 'That is not a valid phone number.', code: 'invalid_recipient' },
   unknown_recipient: { status: 422, error: 'You can only text people who called, booked or texted this business.', code: 'unknown_recipient' },
   not_allowed: { status: 422, error: 'That number cannot be texted from here.', code: 'not_allowed' },
+  high_rate_destination: { status: 422, error: 'That number cannot be texted from here.', code: 'not_allowed' },
   rate_limited: { status: 429, error: 'Too many texts in the last hour. Try again later.', code: 'rate_limited' },
   quiet_hours: { status: 409, error: 'It is quiet hours (9pm to 8am) for this business. Try again in the morning.', code: 'quiet_hours' },
   opted_out: { status: 409, error: 'This customer opted out of texts.', code: 'opted_out' },

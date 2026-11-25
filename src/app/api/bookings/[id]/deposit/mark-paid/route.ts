@@ -1,9 +1,9 @@
 import { fail, ok, readJson } from '@/lib/http';
 import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess, requireRecentAuth } from '@/lib/session';
 import { clientKey } from '@/lib/auth';
-import { getBooking, getBookingPaymentLinkId, markDepositPaidManually, recordAudit } from '@/lib/db';
+import { getBooking, markDepositPaidManually } from '@/lib/db';
 import { emitBookingChanged } from '@/lib/booking-hooks';
-import { deactivatePaymentLink } from '@/lib/providers/stripe';
+import { scheduleLinkDeactivation } from '@/lib/payments/link-store';
 import { limitRequest } from '@/lib/ratelimit';
 import type { Booking } from '@/lib/types';
 
@@ -19,7 +19,7 @@ export interface MarkPaidResult { booking: Booking; changed: boolean; amount_cen
  * POST /api/bookings/:id/deposit/mark-paid   { amount_cents?: number }   OWNER (or admin), STEP-UP (recent password / 2FA): the owner says the deposit
  * arrived outside Stripe (cash, Zelle...). Stored with deposit_source = 'manual', who and when, audited (`booking.deposit_marked_manual`).
  * Never touches Stripe money: a manual deposit can never be refunded through Stripe (refund answers 409 `manual_deposit`; the owner records a manual refund).
- * The booking's open Stripe link is deactivated so the customer cannot pay twice. Idempotent for the same amount. A deposit already paid by Stripe is 409.
+ * The booking's open Stripe link is deactivated (durable queue) so the customer cannot pay twice. Idempotent for the same amount. A deposit already paid by Stripe is 409.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await authenticate(req, { role: 'owner' });
@@ -48,17 +48,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const map: Record<string, [number, string]> = {
         not_found: [404, 'booking not found'], cancelled: [409, 'the booking is cancelled; a deposit cannot be marked as paid'],
         already_paid: [409, 'the deposit of this booking is already paid'], invalid_amount: [422, 'enter the amount received (the booking has no deposit amount yet)'],
-        not_manual: [409, 'the deposit was not paid manually'], refunded: [409, 'a refund is recorded for this deposit'],
+        not_manual: [409, 'the deposit was not paid manually'], refunded: [409, 'a refund is recorded for this deposit'], card_payment_on_file: [409, 'a card payment is on file for this deposit'],
       };
       const [status, error] = map[out.reason] ?? [409, 'could not mark the deposit as paid'];
       return fail(error, status);
     }
     if (out.changed) {
-      // The open Stripe link must stop taking money (best effort, short timeout; the webhook still alerts the owner if it is paid anyway).
-      const linkId = await getBookingPaymentLinkId(id).catch(() => null);
-      if (linkId && await deactivatePaymentLink(linkId, fetch, 4_000)) {
-        await recordAudit({ actor_kind: 'system', business_id: booking.business_id, action: 'booking.payment_link_deactivated', target: `booking:${id}`, meta: { link: linkId, reason: 'deposit_marked_manual' } });
-      }
+      // The open Stripe link must stop taking money. Durable, like the cancel path: queued (processed_events), tried in the background right away with
+      // strict timeouts and retried by the reconcile job for up to 3 days; a link whose id was never stored is found in Stripe by its booking_id.
+      // If the customer pays it anyway the payments webhook converts the row to a card payment and tells the owner they paid twice.
+      await scheduleLinkDeactivation(out.booking);
       await emitBookingChanged(id, 'updated', booking.business_id);
     }
     return ok<MarkPaidResult>({ booking: out.booking, changed: out.changed, amount_cents: out.booking.deposit_amount ?? 0 });

@@ -94,6 +94,22 @@ export function MessagesInbox({ businessId, tz, initial, initialFilter }: { busi
     }
   }
 
+  async function optOut() {
+    if (!detail || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiRequest(`${base}/${detail.id}/opt-out`, { method: 'POST', body: {} });
+      toast.success(t('msg.optout.done'));
+      await Promise.all([loadList(filter, null), loadDetail(detail.id)]);
+      router.refresh();
+    } catch (e) {
+      setError(messageErrorText(t, e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function sendReply(e: React.FormEvent) {
     e.preventDefault();
     if (!detail || busy || !reply.trim()) return;
@@ -177,6 +193,7 @@ export function MessagesInbox({ businessId, tz, initial, initialFilter }: { busi
                 <Badge tone={statusTone(detail.status)}>{t(`msg.status.${detail.status}` as MessageKey)}</Badge>
                 {detail.forwarded ? <Badge tone="neutral">{t('msg.badge.forwarded')}</Badge> : null}
                 {detail.auto_replied ? <Badge tone="neutral">{t('msg.badge.autoReplied')}</Badge> : null}
+                {detail.possible_opt_out ? <Badge tone="emergency">{t('msg.badge.possibleOptOut')}</Badge> : null}
               </div>
             </div>
             {detail.booking ? <p className="mt-2 text-xs text-mute">{t('msg.detail.booking', { service: detail.booking.service, when: when(detail.booking.scheduled_at) })}</p> : null}
@@ -199,6 +216,13 @@ export function MessagesInbox({ businessId, tz, initial, initialFilter }: { busi
               {detail.status === 'new' ? <Button variant="ghost" disabled={busy} onClick={() => void setStatus('ignored')}>{t('msg.action.ignore')}</Button> : null}
               {detail.status !== 'new' ? <Button variant="ghost" disabled={busy} onClick={() => void setStatus('new')}>{t('msg.action.reopen')}</Button> : null}
             </div>
+
+            {detail.possible_opt_out && !detail.opted_out ? (
+              <div className="mt-4 rounded-lg border border-warn-line bg-warn-bg px-3 py-2 text-xs text-warn">
+                <p>{t('msg.optout.hint')}</p>
+                <div className="mt-2"><Button variant="outline" disabled={busy} onClick={() => void optOut()}>{t('msg.optout.action')}</Button></div>
+              </div>
+            ) : null}
 
             {detail.opted_out ? (
               <p className="mt-4 rounded-lg border border-warn-line bg-warn-bg px-3 py-2 text-xs text-warn">{t('msg.reply.optedOut')}</p>

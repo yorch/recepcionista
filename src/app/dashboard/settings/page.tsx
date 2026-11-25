@@ -21,7 +21,7 @@ import { ReviewUrlSettings } from '@/components/dashboard/review-url-settings';
 import { PrivacyTools } from '@/components/dashboard/privacy-tools';
 import { LineSettingsCard } from '@/components/dashboard/line-settings';
 import { assistantNameOf, DEFAULT_ASSISTANT_NAME } from '@/lib/voice/assistant-name';
-import { lineKindFor } from '@/lib/voice/line';
+import { effectiveLineKindFor } from '@/lib/voice/line';
 import { nativeTransferEnabled } from '@/lib/voice/transfer';
 import { TimezoneSettings } from '@/components/dashboard/timezone-settings';
 import { SchedulingSettings } from '@/components/dashboard/scheduling-settings';
@@ -93,7 +93,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             businessId={biz.id}
             initial={{
               assistant_name: biz.assistant_name ?? null, assistant_name_effective: assistantNameOf(biz), default_assistant_name: DEFAULT_ASSISTANT_NAME,
-              native_transfer_enabled: biz.native_transfer_enabled === true, transfer_capability: nativeTransferEnabled(), line_kind: lineKindFor(biz),
+              native_transfer_enabled: biz.native_transfer_enabled === true, transfer_capability: nativeTransferEnabled(), line_kind: effectiveLineKindFor(biz),
               own_line: Boolean(biz.elevenlabs_phone_number_id), has_number: Boolean(biz.phone),
               forward_number_verified: Boolean(biz.forward_number_e164 && (biz.forward_number_verified_at || (biz.owner_phone_verified_at && biz.owner_phone_e164 === biz.forward_number_e164))),
             }}

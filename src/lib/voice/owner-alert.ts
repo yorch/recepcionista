@@ -89,6 +89,8 @@ export interface AlertOptions {
   class?: OwnerAlertClass;
   /** The call this alert is about: identical alerts for one call are sent once, and the first emergency of a call is never starved. */
   callId?: string | null;
+  /** What the sms_log row keeps instead of the text sent (an alert that QUOTES a customer keeps no copy of their words: privacy export / erasure). */
+  logBody?: string;
 }
 
 async function claimStatus(source: string, id: string): Promise<string | null> {
@@ -142,7 +144,7 @@ export async function alertOwner(business: Business, body: string, opts: AlertOp
       }
     }
     const { sms, result: sent, blocked } = await sendAndLog({
-      business_id: business.id, to: business.owner_phone as string, body: text, kind: 'owner_alert',
+      business_id: business.id, to: business.owner_phone as string, body: text, kind: 'owner_alert', ...(opts.logBody ? { log_body: opts.logBody } : {}),
     });
     if (blocked) {
       log.error('owner_alert.blocked', { business: business.id, blocked });

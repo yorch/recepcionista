@@ -204,7 +204,10 @@ export async function executeRelease(
   }
   // 1) the agent first: it stops answering before the line disappears.
   let agentGone = false;
-  if (f.agent_id && !lostLease('agent')) {
+  if (f.agent_id && !lineGone) {
+    // The line could not be removed (a provider outage): the agent stays too, so nothing is half torn down; the next run does both.
+    out.agent.result = { skipped: 'the imported voice line could not be removed yet; the agent is kept until it is' };
+  } else if (f.agent_id && !lostLease('agent')) {
     if (f.agent_shared) {
       out.agent.result = { skipped: 'another business uses this agent; kept at the provider' };
       agentGone = true; // only this business's reference is dropped

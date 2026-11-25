@@ -14,6 +14,7 @@ export const TIME_ZONE_OPTIONS: readonly TzOption[] = Object.freeze([
   { id: 'America/Indiana/Indianapolis', en: 'Eastern - Indianapolis', es: 'Este - Indianápolis' },
   { id: 'America/Kentucky/Louisville', en: 'Eastern - Louisville', es: 'Este - Louisville' },
   { id: 'America/Puerto_Rico', en: 'Atlantic - Puerto Rico (no daylight saving)', es: 'Atlántico - Puerto Rico (sin horario de verano)' },
+  { id: 'America/St_Thomas', en: 'Atlantic - U.S. Virgin Islands (no daylight saving)', es: 'Atlántico - Islas Vírgenes de EE. UU. (sin horario de verano)' },
   { id: 'America/Halifax', en: 'Atlantic - Halifax', es: 'Atlántico - Halifax' },
   { id: 'America/St_Johns', en: 'Newfoundland - St. John\'s', es: 'Terranova - St. John\'s' },
   { id: 'America/Chicago', en: 'Central - Chicago', es: 'Centro - Chicago' },
@@ -27,6 +28,7 @@ export const TIME_ZONE_OPTIONS: readonly TzOption[] = Object.freeze([
   { id: 'America/Vancouver', en: 'Pacific - Vancouver', es: 'Pacífico - Vancouver' },
   { id: 'America/Anchorage', en: 'Alaska - Anchorage', es: 'Alaska - Anchorage' },
   { id: 'America/Adak', en: 'Hawaii-Aleutian - Adak', es: 'Hawái-Aleutianas - Adak' },
+  { id: 'Pacific/Guam', en: 'Chamorro - Guam (no daylight saving)', es: 'Chamorro - Guam (sin horario de verano)' },
   { id: 'Pacific/Honolulu', en: 'Hawaii - Honolulu (no daylight saving)', es: 'Hawái - Honolulu (sin horario de verano)' },
 ]);
 

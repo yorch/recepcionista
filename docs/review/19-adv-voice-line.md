@@ -151,3 +151,20 @@ Reach is narrow, because a tenant's E.164 comes only from a fresh purchase. It n
 - The JSON demo branch in production: it still needs a valid Twilio signature.
 - Fail-open on the native line when the initiation webhook is down: this is pre-existing and not changed by this branch.
 - `forwardingSupported` with a null business toggle: the column is NOT NULL, default false.
+
+## Resolution
+
+Every finding is fixed; nothing is deferred without a reason. Tests: `tests/review19-pure.test.ts` (pure), `tests/integration/review19.test.ts` (database + fake providers), `tests/integration/tenant-line.test.ts`, `tests/db/mock-replacement-migration.test.ts`.
+
+| Finding | Status | Fix and evidence |
+| --- | --- | --- |
+| F1 repair overwrites the Voice URL of an imported line (Medium) | Fixed | `repair-numbers` loads the business first and passes `skipVoiceUrl` when it already imported its number (or its target kind is native). Test `19 F1` (webhook-kind deployment: SmsUrl repaired, no POST ever carries a VoiceUrl; a tenant without an import still gets it). |
+| F2 call-mode surfaces use the global kind (Medium) | Fixed | `effectiveLineKindFor(business)` (imported number: native; otherwise the deployment kind) is the default of `resolveCallRoute`, `callModeView`, `callModeLabel*`, `setCallMode`, the Settings line card and the dashboard. Tests `19 F2+F3` and the pure `19 F2/F3` block. |
+| F3 native-by-default flip silently disables forwarding (Medium) | Fixed | Two changes. A business whose number is not imported yet still answers on OUR Voice URL, so under the unforced tenant-lines default its effective kind stays `webhook` and forwarding keeps working (`lineKindFor` stays the import TARGET for provisioning / repair). `repair-numbers` skips a `call_mode=forward` tenant (`skipped`, `would_change_behaviour`) while the native line cannot forward; the operator switches it, then repairs it. Documented: `docs/env-vars.md` (`ELEVENLABS_TENANT_LINES`), runbook section 8, known-limitations. Test `19 F2+F3`. |
+| F4 concurrent `ensureTenantLine` imports twice (Low-Medium) | Fixed | `ensureTenantLine` takes the lease `line:<businessId>` (a loser gets a retryable `import_failed`), and after a fresh import removes another import of the same E.164 that no business owns (never the shared fallback id). Test `19 F4` (three parallel runs: one POST, one stored id). The provider's behaviour on a duplicate E.164 stays unverified. |
+| F5 adoption of the shared fallback / another agent's import (Low) | Fixed | `importTwilioNumber` refuses (409) an import equal to `ELEVENLABS_PHONE_NUMBER_ID` or bound to another business's agent; `releaseTenantLine` refuses to delete the env id. Test `19 F5`. |
+| F6 assistant name is an instruction channel (Low) | Fixed | The name must be one to three words of letters (`'` and `-` inside a word), in the API validator and when read (a legacy sentence reads as the default); the prompt's Security block says the name is a label, not an instruction. Settings copy updated (EN/ES). Pure test `19 F6`, `tests/elevenlabs-phone.test.ts`. |
+| F7 master Twilio token with no rotation path (Low) | Fixed / documented | `repair-numbers` has `refresh_credentials` (dry run reports `would_refresh`; the token is sent only in the PATCH body, never returned or audited; the PATCH shape is UNVERIFIED, fallback delete + import documented). A restricted API key / subaccount cannot be chosen here: whether the import accepts one is a provider fact to check in the live test (runbook section 8); recorded in known-limitations. Test `19 F7`. |
+| Doc nits (18f Resolution #5 claim) | Fixed | The claim now holds (F1); runbook, env-vars, CONTRACTS and the changelog describe it. |
+
+Verification: `prisma migrate diff` (migrations vs schema, shadow database) reports no difference; the full suite, tsc, eslint, `bash -n deploy.sh` and `next build` were run at the end (see the final report of the fixing pass).

@@ -34,7 +34,7 @@ export async function GET(req: Request) {
     const raw = q.get('duration');
     const duration = raw === null || raw === '' ? 60 : Number(raw);
     if (!Number.isInteger(duration) || duration < 15 || duration > 720) return fail('duration must be a whole number of minutes from 15 to 720', 422);
-    return ok<NewBookingSlotsResult>({ date, timezone: tzOf(business), duration_minutes: duration, slots: await slotsForDate(business, date, duration) });
+    return ok<NewBookingSlotsResult>({ date, timezone: tzOf(business), duration_minutes: duration, slots: await slotsForDate(business, date, duration, Date.now(), { ownerInitiated: true }) });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 500);
   }

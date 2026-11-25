@@ -10,7 +10,7 @@ import { toE164 } from '@/lib/phone';
 import { lineKind } from '@/lib/voice/line';
 import { logger } from '@/lib/log';
 
-export interface SendSmsResult { id: string; status: 'sent' | 'mock' | 'failed'; error?: string }
+export interface SendSmsResult { id: string; status: 'sent' | 'mock' | 'failed'; error?: string; /** Which number sent the text: the tenant's own line or the platform's shared sender. */ sender?: 'tenant' | 'shared' }
 
 const log = logger('twilio');
 
@@ -67,7 +67,20 @@ export function verifyTwilioSignature(
   return { ok: false, error: 'invalid signature' };
 }
 
-export async function sendSms(to: string, body: string, opts: { anyCountry?: boolean } = {}): Promise<SendSmsResult> {
+/** Twilio error codes that mean "this From number cannot send": the tenant number is not an SMS-capable number of THIS account. */
+const FROM_REJECTED_CODES = new Set([21212, 21606, 21659, 21660]);
+
+export interface SendSmsOptions {
+  anyCountry?: boolean;
+  /**
+   * The sender (E.164): the TENANT's own Twilio number, so a customer's STOP / reply comes back to the number that routes to the right business.
+   * Omitted (or equal to the shared sender): TWILIO_PHONE_NUMBER. If Twilio refuses the number as a sender (not on the account, not SMS capable) the text is
+   * retried ONCE from the shared sender, and `result.sender` says which one was used.
+   */
+  from?: string | null;
+}
+
+export async function sendSms(to: string, body: string, opts: SendSmsOptions = {}): Promise<SendSmsResult> {
   // Single enforcement point for E.164 + SMS_ALLOWED_COUNTRY_CODES: every text
   // (tools, confirmations, payment links, alerts, routes) ends up here.
   const check = validateRecipient(to, undefined, { anyCountry: opts.anyCountry });
@@ -90,35 +103,39 @@ export async function sendSms(to: string, body: string, opts: { anyCountry?: boo
   }
   try {
     const started = Date.now();
-    const sid = process.env.TWILIO_ACCOUNT_SID as string;
-    const token = process.env.TWILIO_AUTH_TOKEN as string;
-    const res = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: `Basic ${btoa(`${sid}:${token}`)}`,
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          To: e164,
-          From: process.env.TWILIO_PHONE_NUMBER as string,
-          Body: body,
-        }),
-        signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
-      },
-    );
-    const json = await res.json();
-    if (!res.ok) {
-      log.warn('sms.failed', { to: e164, status: res.status, error: json.message ?? String(res.status) });
-      return { id: '', status: 'failed', error: json.message ?? String(res.status) };
+    const shared = process.env.TWILIO_PHONE_NUMBER as string;
+    const own = opts.from && toE164(opts.from) && !sameE164(shared, opts.from) ? (toE164(opts.from) as string) : null;
+    let from = own ?? shared;
+    let res = await postMessage(e164, from, body);
+    if (!res.ok && own && FROM_REJECTED_CODES.has(Number(res.json.code))) {
+      // The tenant number cannot send SMS on this account: fall back to the shared sender (replies then route by the last outbound text, see sms/inbound).
+      log.warn('sms.tenant_sender_rejected', { to: e164, from: own, code: res.json.code });
+      from = shared;
+      res = await postMessage(e164, from, body);
     }
-    log.info('sms.sent', { to: e164, sid: json.sid, ms: Date.now() - started });
-    return { id: json.sid, status: 'sent' };
+    if (!res.ok) {
+      log.warn('sms.failed', { to: e164, status: res.status, error: res.json.message ?? String(res.status) });
+      return { id: '', status: 'failed', error: res.json.message ?? String(res.status) };
+    }
+    log.info('sms.sent', { to: e164, sid: res.json.sid, ms: Date.now() - started, sender: from === shared ? 'shared' : 'tenant' });
+    return { id: res.json.sid ?? '', status: 'sent', sender: from === shared ? 'shared' : 'tenant' };
   } catch (err) {
     log.error('sms.error', { to: e164, err });
     return { id: '', status: 'failed', error: (err as Error).message };
   }
+}
+
+async function postMessage(to: string, from: string, body: string): Promise<{ ok: boolean; status: number; json: { sid?: string; message?: string; code?: number } }> {
+  const sid = process.env.TWILIO_ACCOUNT_SID as string;
+  const token = process.env.TWILIO_AUTH_TOKEN as string;
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+    method: 'POST',
+    headers: { authorization: `Basic ${btoa(`${sid}:${token}`)}`, 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ To: to, From: from, Body: body }),
+    signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
+  });
+  const json = (await res.json().catch(() => ({}))) as { sid?: string; message?: string; code?: number };
+  return { ok: res.ok, status: res.status, json };
 }
 
 /**

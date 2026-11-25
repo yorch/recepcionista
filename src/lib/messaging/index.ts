@@ -10,6 +10,7 @@ import { decide, smsSegments, withStopFooter } from '@/lib/messaging/policy';
 import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
 import { forwardVerificationText, ownerVerificationText, type VerifyPurpose } from '@/lib/messaging/owner-verify';
 import { smsDelivered } from '@/lib/messaging/delivery';
+import { tenantSmsSender } from '@/lib/messaging/sender';
 import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
@@ -28,6 +29,11 @@ export interface SendAndLogInput {
   consent_basis?: string | null;
   /** Longest text INCLUDING the STOP footer (default 300). Owner-typed texts raise it so their words are never cut. */
   max_chars?: number;
+  /**
+   * What sms_log stores instead of the text that was sent. Used when the text quotes a customer (the owner forward): the customer's words live ONLY
+   * in their inbox row, so erasing / exporting that customer finds every copy.
+   */
+  log_body?: string;
   /** Test seam. */
   now?: Date;
 }
@@ -80,7 +86,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     const sms = await logSms({
       business_id: input.business_id,
       to_phone: to,
-      body: input.body,
+      body: input.log_body ?? input.body,
       kind: input.kind,
       booking_id: input.booking_id ?? null,
       provider_id: null,
@@ -128,7 +134,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
   // The country allow-list does not apply to the owner's verified number (proven by possession).
   let result: SendSmsResult;
   try {
-    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass });
+    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass, from: tenantSmsSender(business) });
   } catch (err) {
     await refund();
     throw err;
@@ -161,7 +167,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     sms = await logSms({
       business_id: input.business_id,
       to_phone: to,
-      body: text,
+      body: input.log_body ?? text,
       kind: input.kind,
       booking_id: input.booking_id ?? null,
       provider_id: result.id || null,

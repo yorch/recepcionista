@@ -7,15 +7,15 @@ import {
 import { firstFreeCrew, hasFreeCrew, normalizeCrews } from '../src/lib/crews';
 
 describe('validators', () => {
-  test('review url: https only, <= 300, no spaces, clearable', () => {
+  test('review url: https only, <= 120, no spaces, clearable', () => {
     expect(validateReviewUrl('https://g.page/r/abc/review')).toEqual({ ok: true, value: 'https://g.page/r/abc/review' });
     expect(validateReviewUrl('  https://g.page/r/abc  ')).toEqual({ ok: true, value: 'https://g.page/r/abc' });
     expect(validateReviewUrl('')).toEqual({ ok: true, value: null });
     expect(validateReviewUrl(null)).toEqual({ ok: true, value: null });
-    for (const bad of ['http://g.page/r/x', 'javascript:alert(1)', 'https://', 'https://localhost', 'https://a b.com/x', 'https://u:p@g.page/x', 'g.page/r/x', 5, `https://g.page/${'a'.repeat(300)}`]) {
+    for (const bad of ['http://g.page/r/x', 'javascript:alert(1)', 'https://', 'https://localhost', 'https://a b.com/x', 'https://u:p@g.page/x', 'g.page/r/x', 5, `https://g.page/${'a'.repeat(120)}`]) {
       expect(validateReviewUrl(bad).ok).toBe(false);
     }
-    expect(validateReviewUrl(`https://g.page/${'a'.repeat(284)}`).ok).toBe(true); // exactly 300
+    expect(validateReviewUrl(`https://g.page/${'a'.repeat(105)}`).ok).toBe(true); // exactly 120
   });
   test('assistant name: 1-40 chars, trimmed, no control characters', () => {
     expect(validateAssistantName('  Sofia  ')).toEqual({ ok: true, value: 'Sofia' });

@@ -30,6 +30,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!out.ok) {
       if (out.reason === 'not_found') return fail('booking not found', 404);
       if (out.reason === 'refunded') return fail('a refund is recorded for this deposit', 409);
+      if (out.reason === 'card_payment_on_file') return fail('a card payment is on file for this deposit: refund it instead of unmarking', 409);
       return fail('only a deposit marked as paid manually can be unmarked', 409);
     }
     await emitBookingChanged(id, 'updated', booking.business_id);

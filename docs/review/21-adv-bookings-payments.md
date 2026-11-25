@@ -130,3 +130,17 @@ B row stripe 5000 refunded 4000
 B refund {"ok":false,"code":"already_refunded"}
 C row true manual 9000
 ```
+
+## Resolution
+
+Every finding is fixed. Tests: `tests/integration/review19.test.ts`, `tests/integration/booking-payments.test.ts`, `tests/integration/voice-tools.test.ts`, `tests/review19-pure.test.ts`.
+
+| Finding | Status | Fix and evidence |
+| --- | --- | --- |
+| H1 card payment on a manually marked deposit vanishes (High) | Fixed | `markDepositPaid` now also matches `deposit_source = 'manual'`: the card payment REPLACES the mark (`deposit_source='stripe'`, refundable through Stripe), returns `replaced_manual`, and the webhook audits `payment.paid_over_manual_deposit` and ALWAYS texts the owner ("they paid twice: refund one of them"; the owner refunds the cash / Zelle part off-platform, the card part from the booking). Mark-paid now queues the link deactivation in the durable `link-deactivate` queue (stored id, or a lookup by `booking_id` when none was stored; `drainLinkDeactivations` accepts manual-paid rows); `unmarkManualDeposit` refuses when a card payment reference is on file (`card_payment_on_file`). Tests `21 H1+M1`, `21 H1 (same amount)`, `21 H1 ... DURABLE` (a Stripe outage is retried by the reconcile pass; a card-paid booking is left alone), `booking-payments` (manual mark deactivates the link). |
+| M1 manual refund blocks the card refund (Medium) | Fixed | The conversion resets `refund_status`, amount, refund id and timestamps; the manual record stays in the audit trail (`booking.refund_recorded_manual`, and `manual_refund_cents` in `payment.paid_over_manual_deposit`). Test `21 H1+M1` (the refund reaches the provider step). |
+| M2 stale snapshot rewrites a paid amount and leaves a live link (Medium) | Fixed | `setDepositAmountIfUnpaid` (conditional `updateMany`) replaces the three unconditional writes; `rememberPaymentLink` deactivates the new link when the booking is paid (`deposit_already_paid`). The optional advisory lock was not added: both effects are covered by the conditional write and the dead-on-arrival rule. Test `21 M2`. |
+| M3 the model's price estimate sets the deposit (Medium) | Fixed | The AI deposit in percent mode uses the owner's CATALOG price of the matched service (no catalog price = no AI deposit); `computeDepositCents` returns no amount below the $1 platform minimum, so it is monotonic (the jump back to the owner's minimum is gone). Tests `create_payment_link, percentage policy`, pure `21 M3`. |
+| L1 fixed-mode links tied to no booking (Low) | Fixed | The tool needs a booking made on THIS call (the call's single non-cancelled booking is attached automatically, a foreign or missing id is ignored), else `no_booking`. Test `create_payment_link: the amount comes from the deposit policy...`. |
+| L2 plan price lookup blocks the landing page (Low) | Fixed | Single-flight per price id and stale-while-revalidate (an expired good price is served at once and refreshed in the background, for at most an hour). Pure `21 L2`. |
+| L3 demo payment stamped `stripe` (Low) | Fixed | The demo checkout passes `source: null` and never touches an already paid deposit. Test `21 L3`. |

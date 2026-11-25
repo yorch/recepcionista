@@ -301,6 +301,8 @@ export interface BriefingAudioMeta {
   content_type: string;
   size_bytes: number;
   voice_id: string | null;
+  /** SHA-256 of the transcript the clip was made from (null: a clip stored before this was recorded). */
+  text_hash: string | null;
   created_at: string;
 }
 

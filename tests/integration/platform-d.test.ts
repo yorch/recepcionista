@@ -421,8 +421,16 @@ integration('platform D (postgres)', () => {
     expect(first.audio?.status).toBe('ready');
     ttsStub(() => new Response('boom', { status: 503 }));
     const failed = await withEnv({ ELEVENLABS_API_KEY: 'xi-test' }, () => generateBriefing(biz.id, '2030-02-03'));
-    expect(failed.audio).toEqual({ status: 'unavailable', reason: 'provider_failed' });
+    // review 22 L5: the same day is the same row with the SAME transcript here, so a transient provider error keeps the good clip (and says so)
+    expect(failed.audio).toEqual({ status: 'unavailable', reason: 'provider_failed', kept_previous: true });
     expect(failed.id).toBe(first.id); // same day = same row, regenerated
+    expect(await prisma.briefingAudio.count({ where: { briefingId: first.id } })).toBe(1);
+    expect((await route.GET(new Request('http://app.test/x', { headers: headers(owner) }), ctx(first.id))).status).toBe(200);
+    // a clip of an OLDER transcript is never left next to a new text: when the text differs, a failed synthesis removes it
+    await prisma.briefing.update({ where: { id: first.id }, data: { transcript: 'A different text of the day.' } });
+    ttsStub(() => new Response('boom', { status: 503 }));
+    const changed = await withEnv({ ELEVENLABS_API_KEY: 'xi-test' }, () => route.POST(new Request('http://app.test/x', { method: 'POST', headers: headers(owner), body: '{}' }), ctx(first.id)));
+    expect(((await changed.json()) as any).data.audio).toEqual({ status: 'unavailable', reason: 'provider_failed' });
     expect(await prisma.briefingAudio.count({ where: { briefingId: first.id } })).toBe(0);
     expect((await prisma.briefing.findUnique({ where: { id: first.id } }))!.audioUrl).toBeNull();
     const gone = await route.GET(new Request('http://app.test/x', { headers: headers(owner) }), ctx(first.id));
@@ -430,7 +438,17 @@ integration('platform D (postgres)', () => {
     const seen3 = ttsStub(() => new Response(mp3(), { headers: { 'content-type': 'audio/mpeg' } }));
     await withEnv({ ELEVENLABS_API_KEY: 'xi-test', ELEVENLABS_VOICE_ID: undefined }, () => generateBriefing(biz.id, '2030-02-03'));
     expect(seen3[0].url).toContain(`/${DEFAULT_VOICE_ID}`);
-    // the regenerate route reports the failure and the missing configuration honestly
+    // the regenerate route: a clip that exists for this text and voice is kept (no synthesis, no spend) ...
+    await prisma.briefing.update({ where: { id: first.id }, data: { transcript: 'A different text of the day.' } }); // generateBriefing re-narrated it above; pin a known text
+    const stub = ttsStub(() => new Response(mp3(), { headers: { 'content-type': 'audio/mpeg' } }));
+    await withEnv({ ELEVENLABS_API_KEY: 'xi-test' }, () => route.POST(new Request('http://app.test/x', { method: 'POST', headers: headers(owner), body: '{}' }), ctx(first.id)));
+    const callsAfterFirst = stub.length;
+    const reused = await withEnv({ ELEVENLABS_API_KEY: 'xi-test' }, () => route.POST(new Request('http://app.test/x', { method: 'POST', headers: headers(owner), body: '{}' }), ctx(first.id)));
+    expect(((await reused.json()) as any).data.audio).toMatchObject({ status: 'ready', reused: true });
+    expect(stub.length).toBe(callsAfterFirst);
+    // ... and the failure and the missing configuration are reported honestly when there is no clip
+    await prisma.briefingAudio.deleteMany({ where: { briefingId: first.id } });
+    await prisma.briefing.update({ where: { id: first.id }, data: { audioUrl: null } });
     ttsStub(() => new Response('boom', { status: 500 }));
     const r = await withEnv({ ELEVENLABS_API_KEY: 'xi-test' }, () => route.POST(new Request('http://app.test/x', { method: 'POST', headers: headers(owner), body: '{}' }), ctx(first.id)));
     expect(((await r.json()) as any).data.audio).toEqual({ status: 'unavailable', reason: 'provider_failed' });
