@@ -85,6 +85,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `OWNER_REPLY_ENABLED` | no | follows `OWNER_CALLIN_ENABLED` | owner voice reply (docs/owner-call-in.md "Voice reply"): the owner lists recent leads by phone and has the assistant text a customer back after a YES code. Unset = on when owner call-in is on; `false` turns only replies off (the four reply tools are then not registered on the agent and are refused); never on while call-in is off | no |
 | `OWNER_REPLY_DAILY_LIMIT` | no | `10` | texts to customers sent through the owner line per business per rolling 24 hours (counted atomically with the send claim: sent, sending and unknown rows count), and drafts per caller-identity class per 24 hours (1-100; invalid falls back to 10). The per-day lead disclosure and handled-mark budgets are fixed in `reply-config.ts`, not env vars | no |
 | `OWNER_REPLY_REQUIRE_ATTESTATION` | no | `false` | `true`: the reply tools work only on a call with STIR/SHAKEN attestation A (lines whose carrier sends no verdict then cannot use them) | no |
+| `BRIEFING_AUDIO_KEEP_DAYS` | no | `30` | days the evening-briefing audio is kept in the database (`briefing_audio`); older clips are deleted (the briefing text follows `retention_days`). Invalid or `0` = the default | no |
 | `TRIAL_SMS_CAP` | no | `50` | monthly SMS segments while `billing_status='trialing'` (never above `PLAN_SMS_CAP`; per-business overrides win). Applies only while billing is enforced | no |
 | `TRIAL_CALL_MINUTES_CAP` | no | `30` | monthly call minutes while `billing_status='trialing'` (never above `PLAN_CALL_MINUTES_CAP`; overrides win) | no |
 
@@ -108,7 +109,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `ELEVENLABS_TOOL_SECRET_ID` | no | none | id of an ElevenLabs workspace secret holding the same value (tool header by reference) | no |
 | `ELEVENLABS_WEBHOOK_SECRET` | prod when `ELEVENLABS_API_KEY` is set | none | HMAC for the post-call webhook; shown once by provisioning | yes |
 | `ELEVENLABS_AGENT_ID` | no | none | bootstrap for a single-business install only | no |
-| `ELEVENLABS_PHONE_NUMBER_ID` | no | none | `phnum_...` id used to bind a number to an agent | no |
+| `ELEVENLABS_PHONE_NUMBER_ID` | no | none | `phnum_...` id used to bind a number to an agent. FALLBACK only: a business's own `businesses.elevenlabs_phone_number_id` wins (docs/design/mock-replacement-contracts.md) | no |
 | `ELEVENLABS_VOICE_ID` | no | `PStJ2DzQnh8zxG5PDf1s` | voice for briefings and the agent default (a business's own pick, `voice_id`, wins for its agent) | no |
 | `ELEVENLABS_VOICE_ALLOWLIST` | no | provider premade voices | voices an owner may choose in Settings: comma separated ids, each optionally `id:Display Name`; ids outside it are refused (422) | no |
 | `ELEVENLABS_INITIATION_WEBHOOK` | no | `auto` | `off` stops provisioning from configuring the initiation webhook by API | no |

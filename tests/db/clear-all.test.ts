@@ -36,7 +36,9 @@ suite('clearAll (postgres)', () => {
     await p.knowledgeBase.create({ data: { businessId: biz.id } });
     const call = await p.call.create({ data: { id: `c_${run}`, businessId: biz.id, conversationId: `conv_${run}`, recordingUrl: `https://api.twilio.com/2010-04-01/Accounts/AC${hex(1)}/Recordings/RE${hex(2)}` } });
     const booking = await p.booking.create({ data: { id: `k_${run}`, businessId: biz.id, callId: call.id, customerName: 'x', customerPhone: '+13055550101', service: 's', scheduledAt: new Date(Date.now() + 86_400_000) } });
-    await p.briefing.create({ data: { businessId: biz.id, date: '2030-01-01', transcript: 't' } });
+    const briefing = await p.briefing.create({ data: { businessId: biz.id, date: '2030-01-01', transcript: 't' } });
+    await p.briefingAudio.create({ data: { briefingId: briefing.id, contentType: 'audio/mpeg', bytes: Buffer.from([1, 2, 3]) } });
+    await p.inboundMessage.create({ data: { businessId: biz.id, fromE164: '+13055550101', fromPhone: '(305) 555-0101', body: 'hi', twilioMessageSid: `SM${run}`, bookingId: booking.id } });
     await p.smsLog.create({ data: { businessId: biz.id, toPhone: '+13055550101', body: 'b', kind: 'other', bookingId: booking.id } });
     await p.smsOptOut.create({ data: { businessId: biz.id, phoneKey: '3055550101', source: 'stop_keyword' } });
     await p.rateLimitBucket.create({ data: { key: `k_${run}`, windowStart: new Date(), count: 1 } });

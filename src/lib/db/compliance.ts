@@ -227,6 +227,8 @@ export interface PurgeCounts {
   sms_logs: number;
   briefings: number;
   bookings_anonymized: number;
+  /** Customer texts of the owner's inbox (inbound_messages) older than the window. */
+  inbound_messages: number;
   /** Briefing audio files removed from disk (0 on a dry run). */
   audio_files?: number;
   /** Provider-side voicemail recordings (Twilio) deleted along with the purged calls (0 on a dry run). */
@@ -241,7 +243,7 @@ export interface PurgeCounts {
  */
 export async function previewExpiredData(now: Date = new Date()): Promise<PurgeCounts> {
   const one = async (rows: Promise<{ n: number }[]>) => (await rows)[0]?.n ?? 0;
-  const [bookings, calls, sms, briefings, events] = await Promise.all([
+  const [bookings, calls, sms, briefings, events, inbound] = await Promise.all([
     one(prisma.$queryRaw`
       SELECT count(*)::int AS n FROM "bookings" bk JOIN "businesses" b ON bk."business_id" = b."id"
        WHERE bk."anonymized_at" IS NULL
@@ -258,8 +260,11 @@ export async function previewExpiredData(now: Date = new Date()): Promise<PurgeC
     one(prisma.$queryRaw`
       SELECT count(*)::int AS n FROM "call_transcript_events" e JOIN "calls" c ON c."id" = e."call_id" JOIN "businesses" b ON c."business_id" = b."id"
        WHERE c."started_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`),
+    one(prisma.$queryRaw`
+      SELECT count(*)::int AS n FROM "inbound_messages" m JOIN "businesses" b ON m."business_id" = b."id"
+       WHERE m."received_at" < ${now}::timestamptz - make_interval(days => b."retention_days")`),
   ]);
-  return { calls, transcript_events: events, sms_logs: sms, briefings, bookings_anonymized: bookings };
+  return { calls, transcript_events: events, sms_logs: sms, briefings, bookings_anonymized: bookings, inbound_messages: inbound };
 }
 
 /**
@@ -276,7 +281,7 @@ export async function previewExpiredData(now: Date = new Date()): Promise<PurgeC
 export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: boolean } = {}): Promise<PurgeCounts> {
   if (opts.dryRun) return previewExpiredData(now);
   // Cutoff per business, evaluated in UTC (timestamp columns hold UTC wall time).
-  const { bookings, calls, sms, briefingRows, queued, events } = await prisma.$transaction(async (tx) => {
+  const { bookings, calls, sms, briefingRows, queued, events, inbound } = await prisma.$transaction(async (tx) => {
     const bookings = await tx.$executeRaw`
       UPDATE "bookings" bk
          SET "customer_name" = ${REDACTED_NAME}, "customer_phone" = ${REDACTED_PHONE}, "phone_e164" = NULL, "address" = NULL,
@@ -300,6 +305,11 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
       DELETE FROM "sms_log" s USING "businesses" b
        WHERE s."business_id" = b."id"
          AND s."created_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`;
+    // The owner's inbox (customer texts) follows the same window. received_at is timestamptz: compared as an instant.
+    const inbound = await tx.$executeRaw`
+      DELETE FROM "inbound_messages" m USING "businesses" b
+       WHERE m."business_id" = b."id"
+         AND m."received_at" < ${now}::timestamptz - make_interval(days => b."retention_days")`;
     // Owner voice replies hold the customer's number and the words sent: they follow the same retention window.
     await tx.$executeRaw`
       DELETE FROM "owner_replies" r USING "businesses" b
@@ -315,13 +325,13 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
        WHERE br."business_id" = b."id"
          AND br."created_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")
       RETURNING br."audio_url"`;
-    return { bookings, calls, sms, briefingRows, queued, events };
+    return { bookings, calls, sms, briefingRows, queued, events, inbound };
   });
   const audio = removeBriefingAudio(briefingRows.map((r) => r.audio_url));
   const rec = await drainQueuedRecordings(queued);
   if (bookings > 0) await redactCalendarEvents(null); // sweep: Google events of every anonymised booking
   const counts: PurgeCounts = {
-    calls: calls.length, transcript_events: events, sms_logs: sms, briefings: briefingRows.length, bookings_anonymized: bookings, audio_files: audio,
+    calls: calls.length, transcript_events: events, sms_logs: sms, briefings: briefingRows.length, bookings_anonymized: bookings, inbound_messages: inbound, audio_files: audio,
     recordings: rec.deleted, recordings_pending: rec.pending,
   };
   log.info('retention.purged', { ...counts });
@@ -349,6 +359,8 @@ export interface EraseCounts {
   /** Texts to the customer PLUS owner alerts / other texts that mention them (by number, booking or name). */
   sms_logs: number;
   bookings_anonymized: number;
+  /** Texts the customer sent to the business (the owner's inbox), deleted by sender number. */
+  inbound_messages: number;
   /** Briefings whose narration/stats cover a day the customer appears in (deleted; the evening note is regenerable). */
   briefings: number;
   audio_files: number;
@@ -461,6 +473,9 @@ export async function eraseCustomerData(businessId: string, phone: string, count
     const briefings = await tx.$queryRaw<{ audio_url: string | null }[]>`
       DELETE FROM "briefings" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.briefingIds}::text[])
       RETURNING "audio_url"`;
+    // The customer's own texts to the business (inbox), by sender number: the words they wrote are theirs.
+    const inbound = await tx.$executeRaw`
+      DELETE FROM "inbound_messages" WHERE "business_id" = ${businessId} AND "from_e164" = ${id.e164}`;
     await tx.$executeRaw`
       DELETE FROM "owner_replies" WHERE "business_id" = ${businessId} AND "to_e164" = ${id.e164}`; // voice replies to this customer (number + text)
     // The keyed "lead handled" markers of the owner voice-reply channel (both trust classes): nothing derived from the number outlives erasure.
@@ -473,7 +488,7 @@ export async function eraseCustomerData(businessId: string, phone: string, count
     // Same transaction as the DELETE: the recordings are on the deletion queue before the last reference to them is gone.
     const queued = await enqueueRecordingDeletions(tx, calls.map((c) => ({ url: c.recording_url, businessId, conversationId: c.conversation_id })));
     return {
-      counts: { calls: calls.length, transcript_events: events, sms_logs: sms, bookings_anonymized: bookings, briefings: briefings.length },
+      counts: { calls: calls.length, transcript_events: events, sms_logs: sms, bookings_anonymized: bookings, inbound_messages: inbound, briefings: briefings.length },
       audio: briefings.map((r) => r.audio_url),
       queued,
       bookingIds: rec.bookingIds,

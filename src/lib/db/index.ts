@@ -14,11 +14,16 @@ import { prisma, type DbClient } from './client';
 import { clampLimit, encodeTimeCursor, MAX_LIST, parseTimeCursor, toPage, type Page } from './paging';
 import { logger } from '@/lib/log';
 import { closedDatesOf, normalizeClosedDates } from '@/lib/closures';
-import { dayRange as zonedDayRange, localDateKey, tzOf, DEFAULT_TIMEZONE, isValidTimeZone } from '@/lib/time';
+import { dayRange as zonedDayRange, localDateKey, tzOf, DEFAULT_TIMEZONE } from '@/lib/time';
 import {
-  bookingInterval, clampDuration, intervalsOverlap, validateSlot, MAX_DURATION_MIN,
+  bookingInterval, clampDuration, validateSlot, MAX_DURATION_MIN,
   type Interval, type SlotRejection,
 } from '@/lib/availability';
+import { isIanaTimeZone } from '@/lib/tz-infer';
+import { firstFreeCrew, type CrewBusy } from '@/lib/crews';
+import {
+  schedulingOf, validateAssistantName, validateElevenLabsPhoneNumberId, validateReviewUrl, validateSchedulingPatch, validateTwilioPhoneSid,
+} from '@/lib/business-config';
 import { phoneKey } from '@/lib/format';
 import { defaultPhoneCountry, toE164 } from '@/lib/phone';
 import { countryForBusiness, phoneIdent } from './compliance';
@@ -26,9 +31,9 @@ import { enqueueRecordingDeletions } from './recording-deletions';
 import type {
   Business, KnowledgeBase, Call, Booking, Briefing, SmsLog, ID, Hours,
   Service, FAQ, BriefingStats, ConsentStatus, BillingStatus, CallMode, CallKind, TransferStatus, RefundStatus, DisputeStatus,
-  Locale, Vertical, RefundPolicy, BillingInterval,
+  Locale, Vertical, RefundPolicy, BillingInterval, DepositMode, DepositSource, BookingCreatedVia,
 } from '@/lib/types';
-import { BILLING_INTERVALS, LOCALES, REFUND_POLICIES, REFUND_POLICY_TEXT_MAX, TRANSFER_STATUSES, VERTICALS } from '@/lib/types';
+import { BILLING_INTERVALS, BOOKING_CREATED_VIA, DEPOSIT_SOURCES, LOCALES, REFUND_POLICIES, REFUND_POLICY_TEXT_MAX, TRANSFER_STATUSES, VERTICALS } from '@/lib/types';
 import { sanitizeAuditMeta } from './audit';
 import { calendarBusyConflict } from '@/lib/integrations/google/busy';
 
@@ -54,6 +59,12 @@ export * from './transcript';
 export * from './call-trust';
 export * from './passkeys';
 export * from './memberships';
+export * from './inbound-messages';
+export * from './briefing-audio';
+export * from './scheduling-config';
+export * from './deposit-policy';
+export * from './content-confirmation';
+export * from './business-line';
 
 /** Every write logs what changed; reads stay quiet (they are the hot path). */
 const log = logger('db');
@@ -74,7 +85,7 @@ const callModeOf = (v: string | null | undefined): CallMode => (v === 'paused' |
 const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
 const isoReq = (d: Date): string => d.toISOString();
 
-function toBusiness(row: BusinessRow): Business {
+export function toBusiness(row: BusinessRow): Business {
   return {
     id: row.id,
     name: row.name,
@@ -116,6 +127,20 @@ function toBusiness(row: BusinessRow): Business {
     refund_policy: (REFUND_POLICIES.includes(row.refundPolicy as RefundPolicy) ? row.refundPolicy : 'full_24h') as RefundPolicy,
     refund_policy_text: row.refundPolicyText ?? null,
     billing_interval: (row.billingInterval === 'year' ? 'year' : 'month') as BillingInterval,
+    elevenlabs_phone_number_id: row.elevenlabsPhoneNumberId ?? null,
+    twilio_phone_sid: row.twilioPhoneSid ?? null,
+    review_url: row.reviewUrl ?? null,
+    assistant_name: row.assistantName ?? null,
+    deposit_enabled: row.depositEnabled ?? false,
+    deposit_mode: (row.depositMode === 'percent' ? 'percent' : 'fixed') as DepositMode,
+    deposit_fixed_cents: row.depositFixedCents ?? null,
+    deposit_percent: row.depositPercent ?? null,
+    deposit_min_cents: row.depositMinCents ?? null,
+    deposit_max_cents: row.depositMaxCents ?? null,
+    ...schedulingOf({ slot_minutes: row.slotMinutes as 15 | 30 | 60, min_lead_minutes: row.minLeadMinutes, horizon_days: row.horizonDays, buffer_minutes: row.bufferMinutes, crews: row.crews }),
+    content_confirmed_at: iso(row.contentConfirmedAt),
+    content_confirmed_hash: row.contentConfirmedHash ?? null,
+    native_transfer_enabled: row.nativeTransferEnabled ?? false,
   };
 }
 
@@ -161,7 +186,7 @@ function toCall(row: CallRow): Call {
   };
 }
 
-function toBooking(row: BookingRow): Booking {
+export function toBooking(row: BookingRow): Booking {
   return {
     id: row.id,
     call_id: row.callId ?? null,
@@ -192,6 +217,11 @@ function toBooking(row: BookingRow): Booking {
     stripe_refund_id: row.stripeRefundId ?? null,
     refunded_at: iso(row.refundedAt),
     dispute_status: (['open', 'won', 'lost'].includes(row.disputeStatus) ? row.disputeStatus : 'none') as DisputeStatus,
+    deposit_source: (DEPOSIT_SOURCES as readonly string[]).includes(row.depositSource ?? '') ? (row.depositSource as DepositSource) : null,
+    deposit_marked_by: row.depositMarkedBy ?? null,
+    deposit_marked_at: iso(row.depositMarkedAt),
+    created_via: ((BOOKING_CREATED_VIA as readonly string[]).includes(row.createdVia) ? row.createdVia : 'ai') as BookingCreatedVia,
+    crew: row.crew ?? 1,
   };
 }
 
@@ -264,6 +294,7 @@ function bookingPatch(patch: Partial<Booking>) {
   if (patch.customer_notified_at !== undefined) out.customerNotifiedAt = patch.customer_notified_at ? new Date(patch.customer_notified_at) : null;
   if (patch.stripe_payment_intent_id !== undefined) out.stripePaymentIntentId = patch.stripe_payment_intent_id;
   if (patch.stripe_checkout_session_id !== undefined) out.stripeCheckoutSessionId = patch.stripe_checkout_session_id;
+  if (patch.created_via !== undefined && (BOOKING_CREATED_VIA as readonly string[]).includes(patch.created_via)) out.createdVia = patch.created_via;
   if (patch.cancel_reason !== undefined) out.cancelReason = patch.cancel_reason ? patch.cancel_reason.slice(0, 500) : null;
   return out;
 }
@@ -273,7 +304,7 @@ function businessPatch(patch: Partial<Business>, country: string = defaultPhoneC
   if (patch.name !== undefined) out.name = patch.name;
   if (patch.url !== undefined) out.url = patch.url;
   if (patch.phone !== undefined) { out.phone = patch.phone; out.phoneKey = phoneKey(patch.phone); out.phoneE164 = toE164(patch.phone, country); }
-  if (patch.timezone !== undefined && isValidTimeZone(patch.timezone)) out.timezone = patch.timezone;
+  if (patch.timezone !== undefined && isIanaTimeZone(patch.timezone)) out.timezone = patch.timezone;
   if (patch.owner_phone !== undefined) { out.ownerPhone = patch.owner_phone; out.ownerPhoneE164 = toE164(patch.owner_phone, country); }
   if (patch.owner_name !== undefined) out.ownerName = patch.owner_name;
   if (patch.hours !== undefined) out.hours = patch.hours as Prisma.InputJsonObject;
@@ -294,6 +325,24 @@ function businessPatch(patch: Partial<Business>, country: string = defaultPhoneC
     out.refundPolicyText = patch.refund_policy_text && patch.refund_policy_text.trim() ? patch.refund_policy_text : null;
   }
   if (patch.billing_interval !== undefined && BILLING_INTERVALS.includes(patch.billing_interval)) out.billingInterval = patch.billing_interval;
+  // Mock-replacement configuration. Validated like every setting here: an invalid value is ignored (the CHECKs would reject it anyway).
+  // Provider ids are UNIQUE: setting one that another business owns throws Prisma P2002 (callers: see setBusinessLine in business-line.ts).
+  if (patch.elevenlabs_phone_number_id !== undefined) { const v = validateElevenLabsPhoneNumberId(patch.elevenlabs_phone_number_id); if (v.ok) out.elevenlabsPhoneNumberId = v.value; }
+  if (patch.twilio_phone_sid !== undefined) { const v = validateTwilioPhoneSid(patch.twilio_phone_sid); if (v.ok) out.twilioPhoneSid = v.value; }
+  if (patch.review_url !== undefined) { const v = validateReviewUrl(patch.review_url); if (v.ok) out.reviewUrl = v.value; }
+  if (patch.assistant_name !== undefined) { const v = validateAssistantName(patch.assistant_name); if (v.ok) out.assistantName = v.value; }
+  if (patch.native_transfer_enabled !== undefined && typeof patch.native_transfer_enabled === 'boolean') out.nativeTransferEnabled = patch.native_transfer_enabled;
+  const sched = validateSchedulingPatch({
+    slot_minutes: patch.slot_minutes, min_lead_minutes: patch.min_lead_minutes, horizon_days: patch.horizon_days,
+    buffer_minutes: patch.buffer_minutes, crews: patch.crews,
+  });
+  if (sched.ok) {
+    if (sched.value.slot_minutes !== undefined) out.slotMinutes = sched.value.slot_minutes;
+    if (sched.value.min_lead_minutes !== undefined) out.minLeadMinutes = sched.value.min_lead_minutes;
+    if (sched.value.horizon_days !== undefined) out.horizonDays = sched.value.horizon_days;
+    if (sched.value.buffer_minutes !== undefined) out.bufferMinutes = sched.value.buffer_minutes;
+    if (sched.value.crews !== undefined) out.crews = sched.value.crews;
+  }
   return out;
 }
 
@@ -489,7 +538,7 @@ export async function createBusiness(
       phone: input.phone ?? null,
       phoneKey: phoneKey(input.phone),
       phoneE164: toE164(input.phone),
-      timezone: isValidTimeZone(input.timezone) ? input.timezone : DEFAULT_TIMEZONE,
+      timezone: isIanaTimeZone(input.timezone) ? input.timezone : DEFAULT_TIMEZONE,
       ownerPhone: input.owner_phone ?? null,
       ownerPhoneE164: toE164(input.owner_phone),
       ownerName: input.owner_name ?? null,
@@ -792,7 +841,7 @@ export async function listCallsPage(businessId: ID, opts: { limit?: number; curs
 }
 
 // ---------- bookings ----------
-export type BookingRejection = SlotRejection | 'call_cap' | 'no_call' | 'slot_taken' | 'invalid_time' | 'business_not_found' | 'booking_not_found' | 'not_reschedulable' | 'calendar_busy';
+export type BookingRejection = SlotRejection | 'invalid_crew' | 'call_cap' | 'no_call' | 'slot_taken' | 'invalid_time' | 'business_not_found' | 'booking_not_found' | 'not_reschedulable' | 'calendar_busy';
 
 /** Thrown by createBooking when the slot cannot be booked; `reason` is machine-readable. */
 export class BookingRejectedError extends Error {
@@ -811,6 +860,11 @@ function isOverlapViolation(err: unknown): boolean {
     /bookings_no_overlap|exclusion constraint|23P01/i.test(text)
   );
 }
+
+const crewBusy = (rows: { scheduledAt: Date; durationMinutes: number; crew: number }[]): CrewBusy[] => rows.map((b) => {
+  const iv = bookingInterval({ scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes });
+  return { crew: b.crew, start: iv.start, end: iv.end };
+});
 
 /**
  * Atomically books a slot: advisory lock per business, re-validation (not in the past,
@@ -837,6 +891,7 @@ export async function createBooking(
   let row;
   try {
     row = await prisma.$transaction(async (tx) => {
+      let crew: number | null = input.crew != null && Number.isInteger(input.crew) ? input.crew : 1;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.business_id}))`;
       const biz = await tx.business.findUnique({ where: { id: input.business_id } });
       if (!biz) throw new BookingRejectedError('business_not_found');
@@ -864,12 +919,12 @@ export async function createBooking(
               lt: new Date(candidate.end),
             },
           },
-          select: { scheduledAt: true, durationMinutes: true },
+          select: { scheduledAt: true, durationMinutes: true, crew: true },
         });
-        const clash = near.some((b) => intervalsOverlap(candidate, bookingInterval({
-          scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes,
-        })));
-        if (clash) throw new BookingRejectedError('slot_taken');
+        // Per crew: the overlap rule (and the database exclusion constraint) is per (business, crew). With one crew this is the old rule.
+        if (input.crew != null && (!Number.isInteger(input.crew) || input.crew < 1 || input.crew > biz.crews)) throw new BookingRejectedError('invalid_crew');
+        crew = firstFreeCrew(biz.crews, candidate, crewBusy(near), input.crew ?? null);
+        if (crew === null || (input.crew != null && crew !== input.crew)) throw new BookingRejectedError('slot_taken');
         // Owner's Google Calendar busy time (healthy connection + "block on busy" on); same transaction, same advisory lock.
         if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
       }
@@ -894,6 +949,8 @@ export async function createBooking(
           rescheduledFromId: input.rescheduled_from_id ?? null,
           stripePaymentIntentId: input.stripe_payment_intent_id ?? null,
           stripeCheckoutSessionId: input.stripe_checkout_session_id ?? null,
+          crew: crew ?? 1,
+          createdVia: input.created_via && (BOOKING_CREATED_VIA as readonly string[]).includes(input.created_via) ? input.created_via : 'ai',
         },
       });
     });
@@ -1131,7 +1188,8 @@ export async function markDepositPaid(bookingId: string, amountCents: number): P
       id: bookingId,
       OR: [{ depositPaid: false }, { depositAmount: null }, { depositAmount: { not: amountCents } }],
     },
-    data: { depositPaid: true, depositAmount: amountCents },
+    // Stripe is the source of truth: a card payment replaces any earlier manual mark.
+    data: { depositPaid: true, depositAmount: amountCents, depositSource: 'stripe', depositMarkedBy: null, depositMarkedAt: null },
   });
   const confirmed = await prisma.booking.updateMany({
     where: { id: bookingId, status: 'pending' },
@@ -1198,15 +1256,15 @@ export async function rescheduleBooking(input: RescheduleInput, opts: { enforce?
           businessId: input.business_id, status: { not: 'cancelled' }, id: { not: cur.id },
           scheduledAt: { gte: new Date(candidate.start - MAX_DURATION_MIN * 60_000), lt: new Date(candidate.end) },
         },
-        select: { scheduledAt: true, durationMinutes: true },
+        select: { scheduledAt: true, durationMinutes: true, crew: true },
       });
-      if (near.some((b) => intervalsOverlap(candidate, bookingInterval({ scheduled_at: b.scheduledAt.toISOString(), duration_minutes: b.durationMinutes })))) {
-        throw new BookingRejectedError('slot_taken');
-      }
+      // Keep the booking on its crew when that crew is free at the new time, else move it to the first free crew; none free = slot_taken.
+      const crew = firstFreeCrew(biz.crews, candidate, crewBusy(near), cur.crew);
+      if (crew === null) throw new BookingRejectedError('slot_taken');
       if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
       const row = await tx.booking.update({
         where: { id: cur.id },
-        data: { scheduledAt: start, durationMinutes: duration, rescheduleCount: { increment: 1 }, customerNotifiedAt: null },
+        data: { scheduledAt: start, durationMinutes: duration, crew, rescheduleCount: { increment: 1 }, customerNotifiedAt: null },
       });
       await tx.auditEvent.create({
         data: {
@@ -1609,6 +1667,8 @@ export async function clearAll(): Promise<void> {
     await tx.ownerKbChange.deleteMany();
     await tx.smsLog.deleteMany();
     await tx.smsOptOut.deleteMany();
+    await tx.inboundMessage.deleteMany();
+    await tx.briefingAudio.deleteMany();
     await tx.briefing.deleteMany();
     await tx.booking.deleteMany();
     await tx.call.deleteMany();
