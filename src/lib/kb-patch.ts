@@ -146,7 +146,7 @@ export const OWNER_PATCH_KEYS = ['services', 'faqs', 'pricing_notes', 'hours', '
 /** Tool / function names the agent knows: the owner has no reason to put them in business text. */
 const TOOL_WORDS = [
   'check_availability', 'create_booking', 'send_sms', 'create_payment_link', 'flag_emergency', 'get_pricing', 'handoff_to_human',
-  'propose_kb_change', 'list_recent_changes', 'undo_last_change'
+  'propose_kb_change', 'list_recent_changes', 'undo_last_change', 'list_recent_leads', 'draft_reply', 'mark_lead_handled', 'get_callback_number',
 ];
 
 /** Fold text for phrase matching: NFKC, accents and case folded, leetspeak digits mapped, punctuation to spaces. */

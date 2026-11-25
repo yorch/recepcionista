@@ -4,11 +4,11 @@
  * prompt, first message and a short maximum duration. Owner calls are never blocked by the minute caps (only by that duration and the
  * daily session limit) and leave no customer-facing artifact (no transcript, summary, recording, briefing or gratitude trigger).
  */
-import { prisma, updateCall } from '@/lib/db';
+import { prisma, setCallTrust, updateCall } from '@/lib/db';
 import { logger } from '@/lib/log';
 import { attestationLevel } from '@/lib/stir';
 import { detectOwnerCaller } from './detect';
-import { ownerCallMaxSeconds, OWNER_SESSIONS_PER_DAY } from './config';
+import { ownerCallMaxSeconds, ownerTrustOf, OWNER_SESSIONS_PER_DAY, type OwnerTrust } from './config';
 import { ownerFirstMessage, ownerLimitMessage, ownerPrompt } from './prompt';
 import { auditOwnerKb } from './apply';
 import type { Business, Call } from '@/lib/types';
@@ -21,8 +21,14 @@ export interface OwnerEntry {
   limited: boolean;
 }
 
-export async function ownerSessionsToday(businessId: string, exceptCallId: string, now: Date = new Date()): Promise<number> {
-  return prisma.call.count({ where: { businessId, kind: 'owner', id: { not: exceptCallId }, startedAt: { gte: new Date(now.getTime() - 24 * 3600_000) } } });
+/** Owner sessions in the last 24 h of ONE identity class (STIR-verified calls and unverified calls are counted separately). */
+export async function ownerSessionsToday(businessId: string, exceptCallId: string, trust: OwnerTrust = 'unverified', now: Date = new Date()): Promise<number> {
+  return prisma.call.count({
+    where: {
+      businessId, kind: 'owner', id: { not: exceptCallId }, startedAt: { gte: new Date(now.getTime() - 24 * 3600_000) },
+      ...(trust === 'verified' ? { callerVerified: true } : { OR: [{ callerVerified: null }, { callerVerified: false }] }),
+    },
+  });
 }
 
 /**
@@ -48,11 +54,15 @@ export async function enterOwnerMode(
     return null;
   }
   const max = ownerCallMaxSeconds();
-  const sessions = await ownerSessionsToday(business.id, call.id);
+  // Persist the verdict first: the tools read the identity class from the row (budgets are per class), and a webhook that carried the
+  // verdict only to us would otherwise leave it unset.
+  const trust: OwnerTrust = ownerTrustOf({ caller_verified: attestationLevel(opts.stirStatus) === 'A' ? true : (opts.stirStatus ? false : call.caller_verified ?? null) });
+  if (opts.stirStatus) await setCallTrust(call.id, opts.stirStatus).catch((err) => log.warn('trust_store_failed', { call: call.id, err }));
+  const sessions = await ownerSessionsToday(business.id, call.id, trust);
   const limited = sessions >= OWNER_SESSIONS_PER_DAY;
   // kind 'owner' first: from here on every customer-facing path ignores this row.
   await updateCall(call.id, { kind: 'owner', caller_phone: who.e164 });
-  await auditOwnerKb('session', business.id, { actor_kind: 'system', via: 'voice' }, null, { call: call.id, limited });
+  await auditOwnerKb('session', business.id, { actor_kind: 'system', via: 'voice' }, null, { call: call.id, limited, trust });
   if (limited) {
     log.warn('session_limit', { business: business.id, call: call.id });
     return { override: { agent: { first_message: ownerLimitMessage(business) }, conversation: { max_duration_seconds: 30 } }, variables: { owner_mode: 'true' }, limited: true };

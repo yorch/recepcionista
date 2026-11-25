@@ -5,7 +5,11 @@
  * REFUSES every one of them unless the call row is kind 'owner' (set server-side from the verified owner caller id). They are kept
  * out of TOOL_NAMES on purpose, so the customer prompt and its tool list are unchanged.
  */
-export const OWNER_TOOL_NAMES = ['propose_kb_change', 'list_recent_changes', 'undo_last_change'] as const;
+export const OWNER_KB_TOOL_NAMES = ['propose_kb_change', 'list_recent_changes', 'undo_last_change'] as const;
+/** The voice REPLY channel (docs/owner-call-in.md "Voice reply"): registered only while OWNER_REPLY_ENABLED is not false (see expectedToolNames). */
+export const OWNER_REPLY_TOOL_NAMES = ['list_recent_leads', 'draft_reply', 'mark_lead_handled', 'get_callback_number'] as const;
+export type OwnerReplyToolName = (typeof OWNER_REPLY_TOOL_NAMES)[number];
+export const OWNER_TOOL_NAMES = [...OWNER_KB_TOOL_NAMES, ...OWNER_REPLY_TOOL_NAMES] as const;
 export type OwnerToolName = (typeof OWNER_TOOL_NAMES)[number];
 
 export interface OwnerToolSpec { description: string; properties: Record<string, unknown>; required: string[] }
@@ -42,5 +46,29 @@ export const OWNER_TOOL_SPECS: Record<OwnerToolName, OwnerToolSpec> = {
     description: 'OWNER LINE ONLY. Ask to revert the most recent applied change. It texts the owner a code; the change is reverted only when the owner replies UNDO with that code.',
     properties: {},
     required: [],
+  },
+  list_recent_leads: {
+    description: 'OWNER LINE ONLY. List the most recent customers who called, left a message, were handed off, had an emergency or booked, as numbered items (1-5) with first name, last 4 digits and time only. Call it before draft_reply, mark_lead_handled or get_callback_number: only the numbers it returns on this call are valid. Read the result to the owner as is; never add details the tool did not give.',
+    properties: {},
+    required: [],
+  },
+  draft_reply: {
+    description: 'OWNER LINE ONLY. Prepare ONE text to a customer from the list. You choose only the lead number and the words; the server finds the recipient. First call with confirmed=false: it returns a read-back to say to the owner. After the owner says yes, call again with the identical lead_ref and message and confirmed=true: the server texts the owner a code and the customer gets the text ONLY when the owner replies YES with that code. A sent text cannot be undone. Never include phone numbers, links, email addresses, codes or payment requests in the message.',
+    properties: {
+      lead_ref: { type: 'string', description: 'The lead number from list_recent_leads on this call, e.g. "2".' },
+      message: { type: 'string', description: 'The owner\'s words for the customer, max 120 characters, plain words, in the language the owner dictated. The business name and opt-out line are added by the server.' },
+      confirmed: { type: 'boolean', description: 'false = only read it back. true = ONLY after the owner clearly said yes to the exact read-back.' },
+    },
+    required: ['lead_ref', 'message', 'confirmed'],
+  },
+  mark_lead_handled: {
+    description: 'OWNER LINE ONLY. Mark a listed customer as handled so they are not listed again. Sends nothing to anyone.',
+    properties: { lead_ref: { type: 'string', description: 'The lead number from list_recent_leads on this call.' } },
+    required: ['lead_ref'],
+  },
+  get_callback_number: {
+    description: 'OWNER LINE ONLY. Text the owner the customer\'s phone number so the owner can call them back. The number is only texted to the owner phone, never spoken, and nothing is sent to the customer.',
+    properties: { lead_ref: { type: 'string', description: 'The lead number from list_recent_leads on this call.' } },
+    required: ['lead_ref'],
   },
 };

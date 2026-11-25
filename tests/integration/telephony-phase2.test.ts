@@ -817,4 +817,110 @@ integration('telephony phase 2 (postgres)', () => {
     expect(limited.headers.get('retry-after')).toBeTruthy();
     await prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: `live-poll:user:${staff.userId}` } } });
   });
+  // ------------------------------------------------------------------ residual gaps (reports 12 L2, 15 L3)
+
+  const xfer = (conv: string, sid: string, biz: { agent_id?: string | null }, o: { duration?: number; transferAt?: number; lead?: boolean } = {}) => ({ type: 'post_call_transcription', data: {
+    conversation_id: conv, agent_id: biz.agent_id!, call_sid: sid,
+    transcript: [
+      { role: 'agent', message: 'Hello', ...(o.lead === false ? {} : { time_in_call_secs: 0 }) }, { role: 'user', message: 'Connect me', ...(o.lead === false ? {} : { time_in_call_secs: 25 }) },
+      { role: 'agent', message: 'Connecting', ...(o.transferAt !== undefined ? { time_in_call_secs: o.transferAt } : {}), tool_calls: [{ tool_name: 'transfer_to_number' }], tool_results: [{ tool_name: 'transfer_to_number', result_value: 'ok' }] },
+    ],
+    metadata: { call_duration_secs: o.duration ?? 100 }, analysis: { transcript_summary: 's' },
+  } });
+  const usageOf = async (id: string) => { const u = (await db.getUsage(id))!; return [u.call_seconds, u.forward_seconds]; };
+
+  test('residual L2: a transferred call whose transfer turn has no time is split by the Twilio dial duration, else the last timed turn, else it stays forward time; AI + forward always equal the duration', async () => {
+    // (a) the dial-status callback reported 70 bridged seconds BEFORE the post-call report: forward = 70 (metered once, by the callback), AI = 30
+    const a = await newBusiness({ agent_id: uniq('agent') });
+    const callA = await newCall(a, { transferStatus: 'attempted' });
+    const dialStatus = (await import('@/app/api/voice/dial-status/route')).POST;
+    const url = `${SECRETS.publicBase}/api/voice/dial-status`;
+    const params = { ParentCallSid: callA.callSid!, CallSid: uniq('CAchild'), CallDuration: '70', DialCallStatus: 'completed' };
+    expect((await dialStatus(new Request(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': twilioSignature(url, params) }, body: new URLSearchParams(params).toString() }))).status).toBe(200);
+    expect((await prisma.call.findUnique({ where: { id: callA.id } }))!.dialSeconds).toBe(70);
+    expect(await usageOf(a.id)).toEqual([0, 70]);
+    await postcall.processPostCall(xfer(callA.conversationId!, callA.callSid!, a) as never);
+    expect(await usageOf(a.id)).toEqual([30, 70]); // never 100 forward (double bill) and never AI 100
+    expect((await prisma.call.findUnique({ where: { id: callA.id } }))!.forwardPendingSecs).toBeNull();
+
+    // (b) the dial duration arrives AFTER the post-call report: the whole-call fallback was already billed as forward, the callback is a duplicate
+    const b = await newBusiness({ agent_id: uniq('agent') });
+    const callB = await newCall(b, { transferStatus: 'attempted' });
+    await postcall.processPostCall(xfer(callB.conversationId!, callB.callSid!, b, { lead: false }) as never);
+    expect(await usageOf(b.id)).toEqual([0, 100]); // nothing readable: the documented fallback
+    const late = { ParentCallSid: callB.callSid!, CallSid: uniq('CAchild'), CallDuration: '70' };
+    await dialStatus(new Request(url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': twilioSignature(url, late) }, body: new URLSearchParams(late).toString() }));
+    expect(await usageOf(b.id)).toEqual([0, 100]);
+
+    // (c) no dial duration, but the turns before the transfer carry times: the AI part ends at the last of them (25 s)
+    const c = await newBusiness({ agent_id: uniq('agent') });
+    const callC = await newCall(c, { transferStatus: 'attempted' });
+    await postcall.processPostCall(xfer(callC.conversationId!, callC.callSid!, c) as never);
+    expect(await usageOf(c.id)).toEqual([25, 75]);
+
+    // (d) a dial duration larger than the call is clamped to it (no negative AI seconds, no extra forward seconds)
+    const d = await newBusiness({ agent_id: uniq('agent') });
+    const callD = await newCall(d, { transferStatus: 'attempted' });
+    await db.recordDialSeconds(callD.callSid!, 500);
+    await postcall.processPostCall(xfer(callD.conversationId!, callD.callSid!, d, { lead: false }) as never);
+    expect(await usageOf(d.id)).toEqual([0, 100]);
+    // (e) the transfer turn's own time still wins over everything else
+    const e = await newBusiness({ agent_id: uniq('agent') });
+    const callE = await newCall(e, { transferStatus: 'attempted' });
+    await db.recordDialSeconds(callE.callSid!, 90);
+    await postcall.processPostCall(xfer(callE.conversationId!, callE.callSid!, e, { transferAt: 40 }) as never);
+    expect(await usageOf(e.id)).toEqual([40, 60]);
+  });
+
+  test('residual L3: a forward write that failed after the AI part was recorded is marked and finished by the reconcile job (never lost, never twice)', async () => {
+    const biz = await newBusiness({ agent_id: uniq('agent') });
+    const call = await newCall(biz, { transferStatus: 'attempted' });
+    await db.recordForwardSeconds(biz.id, 1); // the usage row exists
+    await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters ADD CONSTRAINT resid_tmp_fail CHECK (forward_seconds < 30) NOT VALID`);
+    try {
+      await postcall.processPostCall(xfer(call.conversationId!, call.callSid!, biz, { transferAt: 40 }) as never);
+      const row = (await prisma.call.findUnique({ where: { id: call.id } }))!;
+      expect(row.meteredAt).not.toBeNull(); // the claim is kept: the AI part is in
+      expect(row.forwardPendingSecs).toBe(60); // ... and the forward part is remembered
+      expect(await usageOf(biz.id)).toEqual([40, 1]);
+      // still failing: the job reports it and keeps the marker
+      const stuck = await reconcile.settlePendingForwards({ now: new Date(Date.now() + 5000), afterMinutes: 0 });
+      expect(stuck.failed).toBeGreaterThanOrEqual(1);
+      expect((await prisma.call.findUnique({ where: { id: call.id } }))!.forwardPendingSecs).toBe(60);
+    } finally { await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters DROP CONSTRAINT resid_tmp_fail`); }
+    const done = await reconcile.settlePendingForwards({ now: new Date(Date.now() + 5000), afterMinutes: 0 });
+    expect(done.settled).toBeGreaterThanOrEqual(1);
+    expect(await usageOf(biz.id)).toEqual([40, 61]);
+    expect((await prisma.call.findUnique({ where: { id: call.id } }))!.forwardPendingSecs).toBeNull();
+    // idempotent: running again (or the dial-status callback arriving now) adds nothing
+    await reconcile.settlePendingForwards({ now: new Date(Date.now() + 5000), afterMinutes: 0 });
+    expect(await usageOf(biz.id)).toEqual([40, 61]);
+    // the same through the job wrapper
+    const { runReconcileJob } = await import('@/lib/jobs/reconcile');
+    const report = await runReconcileJob({ now: new Date(Date.now() + 5000), env: { ...process.env } as NodeJS.ProcessEnv });
+    expect(report.counts).toHaveProperty('forwards_pending');
+    expect(await usageOf(biz.id)).toEqual([40, 61]);
+
+    // a callback that metered the leg first makes the reconcile pass a no-op that just clears the marker
+    const biz2 = await newBusiness({ agent_id: uniq('agent') });
+    const call2 = await newCall(biz2, { transferStatus: 'attempted', meteredAt: new Date(Date.now() - 600_000), forwardPendingSecs: 60 });
+    await db.recordForwardSeconds(biz2.id, 60);
+    const { meterForwardedCall } = await import('@/lib/voice/forward-metering');
+    expect(await meterForwardedCall(call2.callSid!, biz2.id, 60)).toBe('metered'); // what the dial-status callback does
+    await reconcile.settlePendingForwards({ now: new Date(), afterMinutes: 1 });
+    expect(await usageOf(biz2.id)).toEqual([0, 120]); // 60 recorded directly above + 60 by the callback; the job added none
+    expect((await prisma.call.findUnique({ where: { id: call2.id } }))!.forwardPendingSecs).toBeNull();
+  });
+
+  test('residual L3: when the AI write itself fails nothing is pending and the claim is given back', async () => {
+    const biz = await newBusiness({ agent_id: uniq('agent') });
+    const call = await newCall(biz, { transferStatus: 'attempted' });
+    await db.recordForwardSeconds(biz.id, 1);
+    await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters ADD CONSTRAINT resid_tmp_fail2 CHECK (call_seconds < 30) NOT VALID`);
+    try { await postcall.processPostCall(xfer(call.conversationId!, call.callSid!, biz, { transferAt: 40 }) as never); }
+    finally { await prisma.$executeRawUnsafe(`ALTER TABLE usage_counters DROP CONSTRAINT resid_tmp_fail2`); }
+    const row = (await prisma.call.findUnique({ where: { id: call.id } }))!;
+    expect(row.meteredAt).toBeNull();
+    expect(row.forwardPendingSecs).toBeNull();
+  });
 });

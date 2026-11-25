@@ -25,3 +25,16 @@ export const OWNER_LOCKOUT_MS = 60 * 60_000;
 export const OWNER_BAD_CODES_LOCKOUT = 5;
 /** A read-back preview is good for this long (the owner must say yes within it). */
 export const OWNER_PREVIEW_TTL_MS = 10 * 60_000;
+
+/**
+ * Budgets are kept per CALLER-IDENTITY CLASS, not only per business (reports 11 L4, 12 L6). A call whose number carries STIR/SHAKEN
+ * attestation A is `verified`: the originating carrier vouches for the number, so it cannot be a spoof of the owner's number. Every other
+ * call (no verdict, B, C) is `unverified`: its caller id is spoofable. The two classes have SEPARATE session counts, proposal lockouts
+ * and confirmation-text budgets, so a spoofer who exhausts the unverified budget cannot touch the budget of an A-attested owner call.
+ * (A failed verdict never gets here: it is served as a stranger.) A real owner whose carrier gives no verdict shares the unverified
+ * budget with a spoofer; the dashboard is the fallback for them (docs/owner-call-in.md).
+ */
+export type OwnerTrust = 'verified' | 'unverified';
+export const ownerTrustOf = (call: { caller_verified?: boolean | null } | null | undefined): OwnerTrust => (call?.caller_verified === true ? 'verified' : 'unverified');
+/** The key a per-class budget (lockout, confirmation texts, strikes) is stored under. */
+export const ownerBudgetId = (businessId: string, trust: OwnerTrust): string => `${businessId}:${trust === 'verified' ? 'v' : 'u'}`;

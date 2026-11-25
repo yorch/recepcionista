@@ -4,7 +4,7 @@
  * minutes are always metered. Signed like every Twilio webhook; the business comes from the parent CallSid row, never from the
  * request; the seconds are added once per parent call (claimEvent), whichever callback arrives first.
  */
-import { getCallBySid } from '@/lib/db';
+import { getCallBySid, recordDialSeconds } from '@/lib/db';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { meterForwardedCall, parseSeconds } from '@/lib/voice/forward-metering';
 import { bridgedSeconds, screenOutcome } from '@/lib/voice/screening';
@@ -35,6 +35,8 @@ export async function POST(req: Request): Promise<Response> {
   }
   // Screened call: only the BRIDGED seconds count (0 when the owner never accepted).
   const seconds = bridgedSeconds(parseSeconds(form.CallDuration ?? form.DialCallDuration), await screenOutcome(parentSid));
+  // Remember what Twilio says the bridged leg lasted: the post-call split of a transferred call uses it when the transcript has no timing.
+  await recordDialSeconds(parentSid, seconds).catch((err) => log.warn('dial_seconds_failed', { call: call.id, err }));
   const outcome = await meterForwardedCall(parentSid, call.business_id, seconds);
   log.info('forward_metered', { business: call.business_id, call: call.id, seconds, outcome });
   // A failed write is retried by Twilio (non-2xx); everything else is final.

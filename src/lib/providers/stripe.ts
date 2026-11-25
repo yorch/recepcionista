@@ -116,6 +116,39 @@ export async function deactivatePaymentLink(linkId: string, fetchImpl: typeof fe
   }
 }
 
+/**
+ * Active Payment Links this app created for ONE booking, found through Stripe (GET /v1/payment_links?active=true, newest first, then matched on
+ * our `booking_id` metadata). Used only when the booking has no stored link id (a link texted before the id was stored). Bounded: at most
+ * `maxPages` pages of 100 and `budgetMs` in total, so a cancel never hangs on a big account. Returns [] when Stripe is not configured or fails.
+ * Stripe has no metadata filter for payment links, so an account with more than `maxPages * 100` active links is only searched that far (documented).
+ */
+export async function findActivePaymentLinksForBooking(bookingId: string, opts: { fetchImpl?: typeof fetch; maxPages?: number; budgetMs?: number } = {}): Promise<string[]> {
+  if (!hasStripe() || !/^[0-9a-f-]{36}$/i.test(bookingId)) return [];
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const deadline = Date.now() + (opts.budgetMs ?? 20_000);
+  const found: string[] = [];
+  let after: string | null = null;
+  try {
+    for (let page = 0; page < (opts.maxPages ?? 5) && Date.now() < deadline; page++) {
+      const qs = new URLSearchParams({ active: 'true', limit: '100' });
+      if (after) qs.set('starting_after', after);
+      const res = await fetchImpl(`https://api.stripe.com/v1/payment_links?${qs}`, {
+        headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` }, signal: AbortSignal.timeout(Math.min(STRIPE_TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
+      });
+      if (!res.ok) { log.warn('link.lookup_failed', { status: res.status }); break; }
+      const json = (await res.json()) as { data?: { id?: string; metadata?: Record<string, string> | null }[]; has_more?: boolean };
+      const rows = json.data ?? [];
+      for (const r of rows) if (typeof r.id === 'string' && r.metadata?.booking_id === bookingId) found.push(r.id);
+      if (!json.has_more || rows.length === 0) break;
+      after = rows[rows.length - 1].id ?? null;
+      if (!after) break;
+    }
+  } catch (err) {
+    log.warn('link.lookup_error', { err });
+  }
+  return found;
+}
+
 export function appUrl(): string {
   return process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 }

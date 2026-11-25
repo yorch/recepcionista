@@ -53,6 +53,8 @@ Events we push live in the **owner's own calendar** and contain the customer's f
 - **Erasure / retention purge**: the Google events of anonymised bookings are deleted (immediately after the erasure commits; any that fail stay linked and the `google_calendar` job retries them).
 - **Disconnect** (`DELETE /api/integrations/google/disconnect`): channel stopped, token revoked at Google, tokens, sync token and busy blocks wiped. Events already in the owner's calendar stay (they are the owner's appointments) unless `?delete_events=true` (the Settings dialog offers it). After a disconnect without deleting, erasure can no longer remove those events from Google: ask the owner to delete them, or disconnect with deletion first.
 
+- **Events that could not be removed from a previous account** (switching to a DIFFERENT Google account whose old tokens are dead, a calendar switch that Google refuses, or "disconnect + remove events" that fails): the pushed event ids are kept in `calendar_orphaned_events` (event id, old calendar id and account email, service and start time of the booking; no customer name / phone / address, no token) and the Google card says "N events from the previous account could not be removed. Remove them in Google Calendar." until the owner dismisses it (`DELETE /api/integrations/google/orphans`). We cannot delete them ourselves (no old token is kept); the events still contain what was pushed in the owner's old calendar. Customer erasure blanks the listed row's booking id and service (the reminder stays). Not recorded: events left on purpose by a plain disconnect.
+
 ## Routes
 
 | Route | Who | Notes |
@@ -60,7 +62,8 @@ Events we push live in the **owner's own calendar** and contain the customer's f
 | `GET /api/integrations/google/connect` | owner (admin with `?business_id=`) | 302 to Google |
 | `GET /api/integrations/google/callback` | owner session that started it | validates state + PKCE |
 | `DELETE /api/integrations/google/disconnect` | owner | CSRF checked for cookies |
-| `GET /api/integrations/google/status` | staff+ | health, last sync, external-change notices |
+| `GET /api/integrations/google/status` | staff+ | health, last sync, external-change notices, events that could not be removed from a previous account |
+| `DELETE /api/integrations/google/orphans` | owner | dismiss the "could not be removed" reminder (all, or `{ids}`); audited |
 | `GET /api/integrations/google/calendars` | owner | writable calendars |
 | `PATCH /api/integrations/google/calendar` | owner | `{ calendar_id?, block_on_busy? }` |
 | `GET /api/integrations/google/busy?from&to` | staff+ | times only, for the calendar overlay |

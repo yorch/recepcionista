@@ -6,8 +6,9 @@
  * (attempt n waits 2^n x 10 min after the base delay); after RECONCILE_MAX_ATTEMPTS the job gives up with an audit row and an error log.
  */
 import {
-  bumpReconcileAttempt, claimCallMetering, getCall, listCallsNeedingReconcile, prisma, recordAudit, recordCallSeconds, releaseCallMetering, updateCall,
+  bumpReconcileAttempt, claimCallMetering, getCall, listCallsNeedingReconcile, listPendingForwards, setForwardPending, prisma, recordAudit, recordCallSeconds, releaseCallMetering, updateCall,
 } from '@/lib/db';
+import { meterForwardedCall } from '@/lib/voice/forward-metering';
 import { fetchConversation, type ConversationFetch, type FetchDeps } from '@/lib/voice/conversations';
 import { logger } from '@/lib/log';
 
@@ -104,4 +105,28 @@ async function giveUp(c: { id: string; business_id: string }, why: string, attem
   report.items.push({ call_id: c.id, business_id: c.business_id, outcome: 'gave_up' });
   log.error('reconcile_gave_up', { business: c.business_id, call: c.id, attempts, why, action: 'this call\'s minutes were never metered: check the conversation in ElevenLabs and docs/runbook.md section 6' });
   await recordAudit({ actor_kind: 'system', business_id: c.business_id, action: 'voice.reconcile_gave_up', target: `call:${c.id}`, meta: { attempts, why } });
+}
+
+export interface PendingForwardReport { considered: number; settled: number; failed: number }
+
+/**
+ * Finish the forward part of transferred calls whose write failed after the AI part was recorded (postcall.ts marks `forward_pending_secs`
+ * BEFORE writing anything and clears it once the forward seconds are recorded). `meterForwardedCall` is deduplicated per parent call sid, so a
+ * dial-status callback that metered the leg in the meantime makes this a no-op ('duplicate'): the seconds are never written twice, and a
+ * failed write stays marked for the next pass instead of being lost. `afterMinutes` leaves the post-call handler's own retry alone.
+ */
+export async function settlePendingForwards(opts: { now?: Date; afterMinutes?: number; limit?: number; dryRun?: boolean } = {}): Promise<PendingForwardReport> {
+  const now = opts.now ?? new Date();
+  const out: PendingForwardReport = { considered: 0, settled: 0, failed: 0 };
+  const rows = await listPendingForwards({ olderThan: new Date(now.getTime() - (opts.afterMinutes ?? 2) * 60_000), limit: opts.limit });
+  out.considered = rows.length;
+  if (opts.dryRun) return out;
+  for (const r of rows) {
+    const outcome = await meterForwardedCall(r.call_sid ?? r.conversation_id ?? r.id, r.business_id, r.seconds);
+    if (outcome === 'failed') { out.failed++; continue; }
+    await setForwardPending(r.id, null);
+    out.settled++;
+    log.info('forward_settled', { business: r.business_id, call: r.id, seconds: r.seconds, outcome });
+  }
+  return out;
 }

@@ -99,3 +99,24 @@ export async function createRefund(input: CreateRefundInput, fetchImpl: typeof f
   if (!r.id) throw new RefundProviderError('Stripe returned no refund id', false);
   return { id: r.id, status: String(r.status ?? 'pending'), amount_cents: Math.round(Number(r.amount ?? input.amountCents)), payment_intent: r.payment_intent ?? pi, mock: false };
 }
+
+export interface ListedRefund {
+  id: string;
+  status: string;
+  amount_cents: number;
+  /** Our own `booking_id` metadata (set by createRefund); null for a refund made in the Stripe dashboard. */
+  booking_id: string | null;
+}
+
+/**
+ * The refunds Stripe has for one payment intent (GET /v1/refunds?payment_intent=...&limit=100). Read only: it never creates or changes
+ * anything. Throws RefundProviderError (not definite when Stripe could not be reached). In mock mode there is nothing to list: returns null.
+ */
+export async function listRefundsForPaymentIntent(paymentIntentId: string, fetchImpl: typeof fetch = fetch): Promise<ListedRefund[] | null> {
+  if (!/^pi_[A-Za-z0-9_]+$/.test(paymentIntentId)) throw new RefundProviderError('no Stripe payment is recorded for this deposit', true, undefined, 'no_payment_reference');
+  if (!stripeConfigured()) return null;
+  const r = await call<{ data?: { id?: string; status?: string; amount?: number; metadata?: Record<string, string> | null }[] }>('GET', `/refunds?payment_intent=${encodeURIComponent(paymentIntentId)}&limit=100`, undefined, undefined, fetchImpl);
+  return (r.data ?? []).filter((x) => typeof x.id === 'string').map((x) => ({
+    id: x.id as string, status: String(x.status ?? 'pending'), amount_cents: Math.round(Number(x.amount ?? 0)), booking_id: x.metadata?.booking_id ? String(x.metadata.booking_id) : null,
+  }));
+}

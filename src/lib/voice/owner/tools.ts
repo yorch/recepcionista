@@ -14,11 +14,12 @@ import { logger } from '@/lib/log';
 import { tzOf } from '@/lib/time';
 import { detectOwnerCaller } from './detect';
 import {
-  OWNER_BAD_PROPOSALS_LOCKOUT, OWNER_CONFIRM_SMS_PER_HOUR, OWNER_LOCKOUT_MS, OWNER_PREVIEW_TTL_MS, OWNER_PROPOSALS_PER_CALL, ownerCallMaxSeconds,
+  OWNER_BAD_PROPOSALS_LOCKOUT, OWNER_CONFIRM_SMS_PER_HOUR, OWNER_LOCKOUT_MS, OWNER_PREVIEW_TTL_MS, OWNER_PROPOSALS_PER_CALL, ownerBudgetId, ownerCallMaxSeconds, ownerTrustOf,
 } from './config';
 import { callClock, confirmationSms, ownerCode, undoBucket, undoScope, undoSms, withinTtl } from './code';
 import { buildOwnerChange } from './ops';
-import { OWNER_TOOL_NAMES, type OwnerToolName } from './specs';
+import { OWNER_REPLY_TOOL_NAMES, OWNER_TOOL_NAMES, type OwnerReplyToolName, type OwnerToolName } from './specs';
+import { runReplyTool } from './reply-tools';
 import { auditOwnerKb, type ChangeActor } from './apply';
 import type { Business, Call } from '@/lib/types';
 
@@ -70,19 +71,23 @@ export async function ownerGate(args: Record<string, unknown>, now: Date = new D
   return { ok: true, business, call, lang };
 }
 
-const lockedNow = async (businessId: string): Promise<boolean> => {
-  const row = await prisma.processedEvent.findUnique({ where: { source_id: { source: 'owner-lock', id: businessId } }, select: { claimedAt: true } });
+// Budgets (lockout, strikes, confirmation texts) are per identity class: STIR-verified calls and unverified (spoofable) ones never share.
+const budgetOf = (business: Business, call: Call): string => ownerBudgetId(business.id, ownerTrustOf(call));
+
+const lockedNow = async (budget: string): Promise<boolean> => {
+  const row = await prisma.processedEvent.findUnique({ where: { source_id: { source: 'owner-lock', id: budget } }, select: { claimedAt: true } });
   return Boolean(row && Date.now() - row.claimedAt.getTime() < OWNER_LOCKOUT_MS);
 };
 
 async function strike(business: Business, call: Call, why: string): Promise<boolean> {
-  const r = await rateLimit(`owner-callin:bad:${business.id}`, OWNER_BAD_PROPOSALS_LOCKOUT, OWNER_LOCKOUT_MS, { failClosed: true });
+  const budget = budgetOf(business, call);
+  const r = await rateLimit(`owner-callin:bad:${budget}`, OWNER_BAD_PROPOSALS_LOCKOUT, OWNER_LOCKOUT_MS, { failClosed: true });
   await auditOwnerKb('refused', business.id, actor, null, { call: call.id, why });
   if (r.allowed) return false;
   await prisma.processedEvent.upsert({
-    where: { source_id: { source: 'owner-lock', id: business.id } }, create: { source: 'owner-lock', id: business.id, status: 'done' }, update: { claimedAt: new Date() },
+    where: { source_id: { source: 'owner-lock', id: budget } }, create: { source: 'owner-lock', id: budget, status: 'done' }, update: { claimedAt: new Date() },
   });
-  await auditOwnerKb('locked', business.id, actor, null, { call: call.id });
+  await auditOwnerKb('locked', business.id, actor, null, { call: call.id, trust: ownerTrustOf(call) });
   return true;
 }
 
@@ -106,7 +111,7 @@ const refusal = (lang: Lang): OwnerToolResult => ({
 
 async function proposeTool(g: Extract<OwnerGate, { ok: true }>, args: Record<string, unknown>): Promise<OwnerToolResult> {
   const { business, call, lang } = g;
-  if (await lockedNow(business.id)) {
+  if (await lockedNow(budgetOf(business, call))) {
     return { ok: false, message: say(lang, 'Too many changes were refused, so the owner line is paused for a while. You can use the dashboard instead.', 'Se rechazaron demasiados cambios, así que la línea del dueño está en pausa un rato. Puede usar el panel.') };
   }
   const used = await prisma.ownerKbChange.count({ where: { businessId: business.id, callId: call.id } });
@@ -133,7 +138,7 @@ async function proposeTool(g: Extract<OwnerGate, { ok: true }>, args: Record<str
     await recordPreview(call.id, built.fingerprint);
     return { ok: false, message: say(lang, `Before I can send it, let me read it back. ${built.readback}`, `Antes de enviarlo, déjeme repetirlo. ${built.readback}`), data: { stage: 'read_back' } };
   }
-  const sms = await rateLimit(`owner-callin:sms:${business.id}`, OWNER_CONFIRM_SMS_PER_HOUR, 60 * 60_000, { failClosed: true });
+  const sms = await rateLimit(`owner-callin:sms:${budgetOf(business, call)}`, OWNER_CONFIRM_SMS_PER_HOUR, 60 * 60_000, { failClosed: true });
   if (!sms.allowed) {
     return { ok: false, message: say(lang, 'I have sent too many confirmation texts this hour. Please try again later or use the dashboard.', 'He enviado demasiados mensajes de confirmación esta hora. Intente más tarde o use el panel.') };
   }
@@ -171,11 +176,11 @@ async function listTool(g: Extract<OwnerGate, { ok: true }>): Promise<OwnerToolR
 
 async function undoTool(g: Extract<OwnerGate, { ok: true }>): Promise<OwnerToolResult> {
   const { business, call, lang } = g;
-  if (await lockedNow(business.id)) return { ok: false, message: say(lang, 'The owner line is paused for a while. Use the dashboard to undo.', 'La línea del dueño está en pausa. Use el panel para deshacer.') };
+  if (await lockedNow(budgetOf(business, call))) return { ok: false, message: say(lang, 'The owner line is paused for a while. Use the dashboard to undo.', 'La línea del dueño está en pausa. Use el panel para deshacer.') };
   const page = await listKbChanges(business.id, { limit: 1, status: 'applied' });
   const last = page.items[0];
   if (!last) return { ok: false, message: say(lang, 'There is no applied change to undo.', 'No hay ningún cambio aplicado para deshacer.') };
-  const sms = await rateLimit(`owner-callin:sms:${business.id}`, OWNER_CONFIRM_SMS_PER_HOUR, 60 * 60_000, { failClosed: true });
+  const sms = await rateLimit(`owner-callin:sms:${budgetOf(business, call)}`, OWNER_CONFIRM_SMS_PER_HOUR, 60 * 60_000, { failClosed: true });
   if (!sms.allowed) return { ok: false, message: say(lang, 'I have sent too many texts this hour. Please try again later.', 'He enviado demasiados mensajes esta hora. Intente más tarde.') };
   const now = new Date();
   const scope = withinTtl(last.applied_at, now) ? 'c' : undoScope(undoBucket(now));
@@ -209,6 +214,7 @@ export async function runOwnerTool(name: string, args: Record<string, unknown>):
     }
     if (tool === 'propose_kb_change') return await proposeTool(gate, args);
     if (tool === 'list_recent_changes') return await listTool(gate);
+    if ((OWNER_REPLY_TOOL_NAMES as readonly string[]).includes(tool)) return await runReplyTool(tool as OwnerReplyToolName, gate, args); // voice reply channel (reply-tools.ts)
     return await undoTool(gate);
   } catch (err) {
     log.error('failed', { tool, err });

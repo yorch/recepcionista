@@ -26,8 +26,8 @@ integration('agent sync (postgres)', () => {
   afterEach(async () => { await prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'admin/resync-agents' } } }); });
 
   const EXPECTED_TOOLS = [
-    'cancel-booking', 'check-availability', 'create-booking', 'create-payment-link', 'flag-emergency', 'get-pricing', 'handoff-to-human',
-    'list-recent-changes', 'propose-kb-change', 'reschedule-booking', 'send-sms', 'transfer-to-human', 'undo-last-change',
+    'cancel-booking', 'check-availability', 'create-booking', 'create-payment-link', 'draft-reply', 'flag-emergency', 'get-callback-number', 'get-pricing', 'handoff-to-human',
+    'list-recent-changes', 'list-recent-leads', 'mark-lead-handled', 'propose-kb-change', 'reschedule-booking', 'send-sms', 'transfer-to-human', 'undo-last-change',
   ];
 
   async function withFake<T>(fn: (f: ReturnType<typeof fakeElevenLabs>) => Promise<T>, env: Record<string, string | undefined> = {}): Promise<T> {
@@ -87,7 +87,7 @@ integration('agent sync (postgres)', () => {
     await withFake(async (fake) => {
       const biz = await newBusiness({ agent_id: null });
       const r = await el.syncAgent({ business: biz, kb: null });
-      expect(fake.agentToolNames(r.agent_id)).toEqual(EXPECTED_TOOLS.filter((n) => !['transfer-to-human', 'propose-kb-change', 'list-recent-changes', 'undo-last-change'].includes(n)));
+      expect(fake.agentToolNames(r.agent_id)).toEqual(EXPECTED_TOOLS.filter((n) => !['transfer-to-human', 'propose-kb-change', 'list-recent-changes', 'undo-last-change', 'draft-reply', 'get-callback-number', 'list-recent-leads', 'mark-lead-handled'].includes(n)));
       expect(fake.agents.get(r.agent_id)!.conversation_config.agent.prompt.built_in_tools.transfer_to_number).toBeUndefined();
     }, { NATIVE_TRANSFER: undefined, OWNER_CALLIN_ENABLED: 'false' });
   });

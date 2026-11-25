@@ -204,6 +204,8 @@ See [owner-call-in.md](owner-call-in.md). For compliance purposes:
 * Owner calls use AI minutes (counted in usage) but never create customer-facing artifacts: they are not in the Calls list, dashboard stats, daily briefing, gratitude or follow-up logic, known-caller and release-recency checks.
 * Confirmation texts go only to the **verified** owner phone, are not marketing, and are exempt from customer opt-outs like other owner alerts; a STOP from the owner phone still opts that number out first (STOP always wins), after which confirmations cannot be delivered and the dashboard buttons are the only path.
 
+* **Owner voice replies** (a text to a customer that the owner asked for on the owner line, [owner-call-in.md](owner-call-in.md) "Voice reply") are 1:1 `manual` texts to a customer who called or booked in the last 7 days: opt-out list, quiet hours (refused, not queued), plan cap, business name and STOP footer apply exactly as for other customer texts; the text is sent only after the owner's SMS YES. `owner_replies` (number, first name, words) is purged with retention and erased with the customer.
+
 
 ### Language switching and live transcript (Phase 2)
 - The agent's language-detection system tool (`LANGUAGE_DETECTION`, default on) lets it switch between English and Spanish mid-call. The disclosure is unchanged: the first message (and the `es` language preset's first message) always contains the notice in BOTH languages, and it is spoken before any switch can happen. `calls.language` is set from the post-call metadata (`en`, `es`, or `mixed`) and only when consent is `disclosed`.

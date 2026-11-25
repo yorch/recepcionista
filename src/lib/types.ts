@@ -304,6 +304,8 @@ export interface UserSession {
   user_agent: string | null;
   /** The business the session is working in (multi-business accounts); null = primary / only. */
   active_business_id?: ID | null;
+  /** Businesses this session may no longer act in or switch to (signed out of them, or the membership was disabled / removed). Empty = none. */
+  revoked_business_ids?: ID[];
 }
 
 export type EmailTokenPurpose = 'verify' | 'reset' | 'invite';

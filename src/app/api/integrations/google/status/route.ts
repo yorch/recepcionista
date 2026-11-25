@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db/client';
-import { getCalendarConnection } from '@/lib/db/calendar';
+import { getCalendarConnection, listOrphanedEvents, type OrphanedEvent } from '@/lib/db/calendar';
 import { fail, ok } from '@/lib/http';
 import { getBlockOnBusy } from '@/lib/integrations/google/busy';
 import { googleConfigured, googleMockEnabled, googleMockRefused } from '@/lib/integrations/google/config';
@@ -16,6 +16,8 @@ export interface GoogleStatus {
   /** True while blocks are NOT being applied to availability (reauth needed / disconnected). */
   ignoring_blocks: boolean;
   external_changes: { at: string; booking_id: string; change: string }[];
+  /** Pushed events of a previous account / calendar that could not be removed (business-side facts only). Dismissed by the owner. */
+  orphaned_events: { total: number; items: OrphanedEvent[] };
 }
 
 /** GET /api/integrations/google/status   Staff+ read. Never returns a token or an event title. */
@@ -39,6 +41,7 @@ export async function GET(req: Request) {
       push_channel: conn ? hasLiveChannel(conn) : false,
       block_on_busy: await getBlockOnBusy(businessId),
       ignoring_blocks: Boolean(conn && (conn.status === 'needs_reauth' || conn.status === 'revoked')),
+      orphaned_events: await listOrphanedEvents(businessId, 20),
       external_changes: changes.map((c) => ({ at: c.at.toISOString(), booking_id: c.target.replace(/^booking:/, ''), change: String((c.meta as { change?: unknown })?.change ?? 'changed') })),
     });
   } catch (err) {

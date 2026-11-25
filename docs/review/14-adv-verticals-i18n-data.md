@@ -246,3 +246,5 @@ Tests: `tests/review14-pure.test.ts`, `tests/integration/review14-data.test.ts`,
 | Nit: `OWNER_CALL_MAX_SECONDS` range text | **Fixed** | `docs/env-vars.md`: above 300 clamps to 300, missing / under-30 falls back to 300. |
 | Nit: i18n core header omits the cookie | **Fixed** | Header comment corrected. |
 | Nit: `docs/verticals.md` 911 floor list | **Fixed** | See L2. |
+
+**Residual-gaps pass.** L6: the usage-warning job visits only changed businesses (+ retry list, daily full sweep). M2: the agent-dirty retry rebuilds the generated call script. See `docs/changelog-hardening.md`.

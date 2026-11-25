@@ -1,6 +1,6 @@
 /** Privacy: remove the pushed Google events of erased / purged bookings. Durable: a failed deletion keeps its link and is retried by the job. */
 import { prisma } from '@/lib/db/client';
-import { deleteEventLink, getCalendarConnectionById } from '@/lib/db/calendar';
+import { anonymizeOrphanedEvents, deleteEventLink, getCalendarConnectionById } from '@/lib/db/calendar';
 import { logger } from '@/lib/log';
 import { calPath, gcal } from './api';
 
@@ -23,6 +23,8 @@ async function redactLinks(links: { bookingId: string; connectionId: string; goo
 export async function redactCalendarEventsForBookings(bookingIds: string[]): Promise<{ deleted: number; pending: number }> {
   try {
     if (bookingIds.length === 0) return { deleted: 0, pending: 0 };
+    // Events of a previous account that could not be removed stay on the owner's "remove by hand" list, but no longer say what they were.
+    await anonymizeOrphanedEvents(bookingIds).catch((err) => log.warn('orphan_anonymize_failed', { err }));
     const links = await prisma.calendarEventLink.findMany({ where: { bookingId: { in: bookingIds } }, select: { bookingId: true, connectionId: true, googleEventId: true } });
     return await redactLinks(links);
   } catch (err) { log.error('redact_failed', { err }); return { deleted: 0, pending: 0 }; }
@@ -31,6 +33,7 @@ export async function redactCalendarEventsForBookings(bookingIds: string[]): Pro
 /** Every link whose booking has been anonymised (retention purge, erasure, anything else): delete its event. Idempotent sweep. */
 export async function redactAnonymizedBookingEvents(limit = 200): Promise<{ deleted: number; pending: number }> {
   try {
+    await anonymizeOrphanedEvents(null).catch((err) => log.warn('orphan_anonymize_failed', { err }));
     const links = await prisma.calendarEventLink.findMany({
       where: { booking: { anonymizedAt: { not: null } } }, take: limit, select: { bookingId: true, connectionId: true, googleEventId: true },
     });

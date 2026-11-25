@@ -6,7 +6,7 @@
  */
 import { NextResponse } from 'next/server';
 import { getBusiness, prisma } from '@/lib/db';
-import { disableMembership, listBusinessMembers, listMembershipsForUser, removeMembership, setMembershipRole } from '@/lib/db/memberships';
+import { disableMembership, listBusinessMembers, listMembershipsForUser, removeMembership, revokeBusinessForSessions, setMembershipRole } from '@/lib/db/memberships';
 import { authenticate, type AuthenticateOptions, type Principal } from '@/lib/session';
 import type { Business, BusinessMember, User, UserRole } from '@/lib/types';
 
@@ -111,10 +111,15 @@ export async function changeTeamRole(
 export async function revokeTeamUserSessions(businessId: string, userId: string, opts: { everywhere?: boolean } = {}): Promise<number> {
   if (opts.everywhere) return (await prisma.userSession.deleteMany({ where: { userId } })).count;
   const primary = await prisma.user.findUnique({ where: { id: userId }, select: { businessId: true } });
-  const res = await prisma.userSession.deleteMany({
-    where: { userId, OR: [{ activeBusinessId: businessId }, ...(primary?.businessId === businessId ? [{ activeBusinessId: null }] : [])] },
+  return prisma.$transaction(async (tx) => {
+    const res = await tx.userSession.deleteMany({
+      where: { userId, OR: [{ activeBusinessId: businessId }, ...(primary?.businessId === businessId ? [{ activeBusinessId: null }] : [])] },
+    });
+    // The sessions that survive (working in ANOTHER business) may no longer act in or switch back to this one: the sign-out is real, not just
+    // "the sessions that happened to be here". Their next login (a new session) is the only way back in.
+    await revokeBusinessForSessions(tx, { userId }, businessId);
+    return res.count;
   });
-  return res.count;
 }
 
 /**

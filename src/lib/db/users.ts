@@ -34,6 +34,7 @@ type UserRow = {
 type SessionRow = {
   id: string; userId: string | null; kind: string; expiresAt: Date; createdAt: Date; lastUsedAt: Date;
   mfaVerifiedAt: Date | null; sudoAt: Date | null; ip: string | null; userAgent: string | null; activeBusinessId?: string | null;
+  revokedBusinessIds?: string[] | null;
 };
 
 function toUser(row: UserRow): User {
@@ -62,6 +63,7 @@ const toSession = (r: SessionRow): UserSession => ({
   ip: r.ip ?? null,
   user_agent: r.userAgent ?? null,
   active_business_id: r.activeBusinessId ?? null,
+  revoked_business_ids: r.revokedBusinessIds ?? [],
 });
 
 /**

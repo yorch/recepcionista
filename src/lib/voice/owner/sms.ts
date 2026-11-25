@@ -11,6 +11,7 @@ import { appSecretKey } from '@/lib/totp';
 import { logger } from '@/lib/log';
 import { ownerCallinEnabled } from './config';
 import { codesEqual, ownerCode, parseOwnerSms, undoBucket, undoScope, withinTtl } from './code';
+import { handleReplyCode } from './reply-sms';
 import { applyOwnerChange, auditOwnerKb, rejectOwnerChange, revertOwnerChange, type ChangeActor } from './apply';
 import type { Business, OwnerKbChange } from '@/lib/types';
 
@@ -61,6 +62,10 @@ export async function handleOwnerSms(business: Business, from: string, body: str
 
   const gate = await rateLimit(`owner-sms:attempts:${business.id}`, ATTEMPT_LIMIT, ATTEMPT_WINDOW_MS, { failClosed: true });
   if (!gate.allowed) return t('Too many attempts. Please wait a few minutes.', 'Demasiados intentos. Espere unos minutos.');
+
+  // A code from a drafted customer reply (voice reply channel) is handled there; any other code falls through to the knowledge changes.
+  const replyAnswer = await handleReplyCode(business, cmd, now);
+  if (replyAnswer !== null) return replyAnswer;
 
   const match = await findByCode(business.id, cmd.code, now);
   if (!match) {

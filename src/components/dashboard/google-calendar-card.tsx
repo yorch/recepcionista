@@ -45,6 +45,11 @@ export function GoogleCalendarCard({ initialResult }: { initialResult?: string |
 
   if (error) return <p role="alert" className="text-[13px] text-danger">{error}</p>;
   if (!st) return <p className="text-[13px] text-dim">{t('common.loading')}</p>;
+  async function dismissOrphans() {
+    const r = await call('/api/integrations/google/orphans', { method: 'DELETE', body: {} }, { success: t('gcal.orphansDismissed') });
+    if (r !== undefined) await load();
+  }
+
   if (!st.configured) return <p className="text-[13px] text-mute">{t('gcal.notConfigured')}</p>;
 
   const flash = initialResult === 'denied' ? t('gcal.denied')
@@ -54,6 +59,18 @@ export function GoogleCalendarCard({ initialResult }: { initialResult?: string |
     <div className="flex flex-col gap-4 text-[13px] text-soft">
       {st.mock ? <p className="rounded-xl border border-line-2 bg-sunken p-2 text-xs text-warn">{t('gcal.mock')}</p> : null}
       {flash ? <p role="status" className="text-warn">{flash}</p> : null}
+      {st.orphaned_events.total > 0 ? (
+        <div role="status" className="rounded-xl border border-line-2 bg-sunken p-3">
+          <p className="font-medium text-white">{t('gcal.orphans', { count: st.orphaned_events.total })}</p>
+          <ul className="mt-1 list-disc pl-5 text-xs">
+            {st.orphaned_events.items.slice(0, 10).map((o) => (
+              <li key={o.id}>{t('gcal.orphanLine', { what: o.service || t('gcal.orphanUnknown'), at: when(o.starts_at), account: o.account_email })}</li>
+            ))}
+            {st.orphaned_events.total > 10 ? <li>{t('gcal.orphansMore', { count: st.orphaned_events.total - 10 })}</li> : null}
+          </ul>
+          <div className="mt-2"><Button variant="outline" disabled={busy} onClick={dismissOrphans}>{t('gcal.orphansDismiss')}</Button></div>
+        </div>
+      ) : null}
 
       {!st.connected ? (
         <>

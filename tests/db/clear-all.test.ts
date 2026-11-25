@@ -57,6 +57,8 @@ suite('clearAll (postgres)', () => {
     await p.calendarEventLink.create({ data: { bookingId: booking.id, connectionId: conn.id, googleEventId: 'g1' } });
     await p.calendarBusyBlock.create({ data: { connectionId: conn.id, businessId: biz.id, googleEventId: 'g2', startsAt: new Date(), endsAt: new Date(Date.now() + 3600_000) } });
     await p.ownerKbChange.create({ data: { businessId: biz.id, callId: call.id, source: 'owner_voice', summary: 's' } });
+    await p.calendarOrphanedEvent.create({ data: { businessId: biz.id, bookingId: booking.id, googleEventId: 'g3', calendarId: 'primary', accountEmail: 'old@x.test', service: 'AC repair', startsAt: new Date() } });
+    await p.ownerReply.create({ data: { businessId: biz.id, callId: call.id, leadKind: 'call', leadCallId: call.id, toE164: '+13055550142', body: 'hi', expiresAt: new Date(Date.now() + 60_000) } });
     await p.callTranscriptEvent.create({ data: { callId: call.id, seq: 0, role: 'caller', text: 'hi', at: new Date() } });
     await p.passkeyCredential.create({ data: { userId: owner.id, credentialId: `cred1_${run}`, publicKey: Buffer.from([1, 2, 3]) } });
     await p.passkeyCredential.create({ data: { userId: admin.id, credentialId: `cred2_${run}`, publicKey: Buffer.from([1, 2, 3]) } });

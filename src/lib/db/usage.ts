@@ -349,3 +349,15 @@ export async function getUsageWarnings(businessId: string, now: Date = new Date(
 
 /** The integer percent of `cap` that `used` represents (0 when there is no cap); the jobs runner compares it with 80 / 100. */
 export const usagePercent = (used: number, cap: number): number => (cap > 0 ? Math.floor((used * 100) / cap) : used > 0 ? 100 : 0);
+
+/**
+ * Live businesses whose usage counter row was written after `since` (any period): the only ones that can have a NEW cap warning due, so the
+ * usage-warnings safety net visits just these instead of every business (a new month is a new row, written by its first usage). The comparison
+ * uses the database clock (`updated_at = clock_timestamp()`), so callers pass a wall-clock time, never a test clock.
+ */
+export async function listBusinessIdsWithUsageChangedSince(since: Date, limit = 5000): Promise<string[]> {
+  const rows = await prisma.$queryRaw<{ business_id: string }[]>`
+    SELECT DISTINCT uc."business_id" FROM "usage_counters" uc JOIN "businesses" b ON b."id" = uc."business_id"
+     WHERE b."status" = 'live' AND uc."updated_at" > ${since} LIMIT ${Math.max(1, Math.min(limit, 20000))}`;
+  return rows.map((r) => r.business_id);
+}

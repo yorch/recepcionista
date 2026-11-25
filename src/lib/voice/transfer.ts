@@ -123,8 +123,52 @@ export function transferStartSecs(transcript: unknown): number | null {
   for (const turn of transcript as Record<string, unknown>[]) {
     const calls = Array.isArray(turn?.tool_calls) ? (turn.tool_calls as Record<string, unknown>[]) : [];
     if (!calls.some((c) => String(c?.tool_name ?? c?.name ?? '') === 'transfer_to_number')) continue;
-    const t = Number(turn.time_in_call_secs);
-    return Number.isFinite(t) && t >= 0 ? Math.round(t) : null;
+    return secsOf(turn.time_in_call_secs);
   }
   return null;
+}
+
+const secsOf = (raw: unknown): number | null => {
+  if (raw === null || raw === undefined || raw === '') return null; // Number(null) is 0: absent must not read as "at second 0"
+  const t = Number(raw);
+  return Number.isFinite(t) && t >= 0 ? Math.round(t) : null;
+};
+
+/** The latest `time_in_call_secs` of any turn BEFORE the transfer turn (the AI's last spoken moment); null when no earlier turn carries one. */
+export function transferLeadInSecs(transcript: unknown): number | null {
+  if (!Array.isArray(transcript)) return null;
+  let last: number | null = null;
+  for (const turn of transcript as Record<string, unknown>[]) {
+    const calls = Array.isArray(turn?.tool_calls) ? (turn.tool_calls as Record<string, unknown>[]) : [];
+    if (calls.some((c) => String(c?.tool_name ?? c?.name ?? '') === 'transfer_to_number')) break;
+    const t = secsOf(turn?.time_in_call_secs);
+    if (t !== null && t > 0 && (last === null || t > last)) last = t;
+  }
+  return last;
+}
+
+export interface TransferSplit {
+  ai: number;
+  forward: number;
+  /** Where the boundary came from. 'whole_call': nothing readable, the whole call is forward time (the documented fallback). */
+  basis: 'transfer_turn' | 'dial_duration' | 'last_turn' | 'whole_call';
+}
+
+/**
+ * Split a connected transfer's duration into AI seconds and forward seconds. The two always add up to the call's duration, so neither
+ * double-bills nor loses a second. Boundary, best evidence first:
+ *  1. the transfer turn's own `time_in_call_secs` (everything before it was the AI);
+ *  2. the bridged duration a Twilio dial-status callback reported (`DialCallDuration`): that is forward time, the rest was the AI;
+ *  3. the last timed turn before the transfer turn (an estimate: the agent says "connecting you" and the transfer follows);
+ *  4. nothing readable: the whole call is forward time.
+ */
+export function splitTransferSeconds(i: { durationSec: number; transcript: unknown; dialSeconds?: number | null }): TransferSplit {
+  const total = Math.max(0, Math.round(i.durationSec));
+  const at = transferStartSecs(i.transcript);
+  if (at !== null) { const ai = Math.min(total, at); return { ai, forward: total - ai, basis: 'transfer_turn' }; }
+  const dial = i.dialSeconds ?? null;
+  if (dial !== null && dial > 0) { const forward = Math.min(total, Math.round(dial)); return { ai: total - forward, forward, basis: 'dial_duration' }; }
+  const lead = transferLeadInSecs(i.transcript);
+  if (lead !== null) { const ai = Math.min(total, lead); return { ai, forward: total - ai, basis: 'last_turn' }; }
+  return { ai: 0, forward: total, basis: 'whole_call' };
 }

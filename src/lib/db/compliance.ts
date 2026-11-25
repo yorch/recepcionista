@@ -299,6 +299,11 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
       DELETE FROM "sms_log" s USING "businesses" b
        WHERE s."business_id" = b."id"
          AND s."created_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`;
+    // Owner voice replies hold the customer's number and the words sent: they follow the same retention window.
+    await tx.$executeRaw`
+      DELETE FROM "owner_replies" r USING "businesses" b
+       WHERE r."business_id" = b."id"
+         AND r."created_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`;
     const briefingRows = await tx.$queryRaw<{ audio_url: string | null }[]>`
       DELETE FROM "briefings" br USING "businesses" b
        WHERE br."business_id" = b."id"
@@ -450,6 +455,8 @@ export async function eraseCustomerData(businessId: string, phone: string, count
     const briefings = await tx.$queryRaw<{ audio_url: string | null }[]>`
       DELETE FROM "briefings" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.briefingIds}::text[])
       RETURNING "audio_url"`;
+    await tx.$executeRaw`
+      DELETE FROM "owner_replies" WHERE "business_id" = ${businessId} AND "to_e164" = ${id.e164}`; // voice replies to this customer (number + text)
     const events = await tx.$executeRaw`
       DELETE FROM "call_transcript_events" WHERE "call_id" = ANY(${rec.callIds}::text[])
          AND "call_id" IN (SELECT "id" FROM "calls" WHERE "business_id" = ${businessId})`;

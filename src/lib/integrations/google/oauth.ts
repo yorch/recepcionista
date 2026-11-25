@@ -1,12 +1,13 @@
 /** OAuth 2.0 authorization-code + PKCE helpers, and disconnect. Tokens never appear in logs, audit meta or errors. */
 import { recordAudit } from '@/lib/db';
+import { prisma } from '@/lib/db/client';
 import { withLease } from '@/lib/db/locks';
 import {
-  deleteEventLink, getCalendarConnection, getCalendarConnectionById, getDecryptedTokens, listEventLinksForConnection, replaceBusyBlocks, setCalendarConnectionStatus,
+  deleteEventLink, getCalendarConnection, getCalendarConnectionById, getDecryptedTokens, listEventLinksForConnection, recordOrphanedEvents, replaceBusyBlocks, setCalendarConnectionStatus,
   updateCalendarSyncState,
 } from '@/lib/db/calendar';
 import { logger } from '@/lib/log';
-import type { CalendarConnection } from '@/lib/types';
+import type { CalendarConnection, CalendarEventLink } from '@/lib/types';
 import { calPath, gcal } from './api';
 import {
   clientCredentials, GOOGLE_API, GOOGLE_AUTH_URL, GOOGLE_REVOKE_URL, GOOGLE_SCOPES, googleMockEnabled, redirectUri,
@@ -76,24 +77,42 @@ export async function changeCalendar(connection: CalendarConnection, calendarId:
     // re-read under the lease: a sync that just finished may have stored a channel / token we must clean up
     const conn = (await getCalendarConnectionById(connection.id)) ?? connection;
     if (conn.status === 'revoked' || calendarId === conn.calendar_id) return;
-    await dropRemoteState(conn);
+    await dropRemoteState(conn, 'calendar_changed');
     await updateCalendarSyncState(conn.id, { calendar_id: calendarId, sync_token: null, watch_channel_id: null, watch_resource_id: null, watch_expires_at: null, last_sync_at: null, last_error: null });
   });
 }
 
+/**
+ * Remember the pushed events that could not be deleted (the tokens are dead or Google refused), so the owner is told to remove them by hand.
+ * Business-side facts only (service + start time of the booking); no token is kept. Never throws.
+ */
+async function rememberUndeleted(conn: CalendarConnection, links: CalendarEventLink[], reason: 'account_changed' | 'calendar_changed' | 'disconnected'): Promise<void> {
+  if (links.length === 0) return;
+  try {
+    const bookings = await prisma.booking.findMany({ where: { id: { in: links.map((l) => l.booking_id) }, businessId: conn.business_id }, select: { id: true, service: true, scheduledAt: true } });
+    const byId = new Map(bookings.map((b) => [b.id, b]));
+    await recordOrphanedEvents(conn.business_id, links.map((l) => ({
+      booking_id: l.booking_id, google_event_id: l.google_event_id, calendar_id: conn.calendar_id, account_email: conn.account_email,
+      service: byId.get(l.booking_id)?.service ?? '', starts_at: byId.get(l.booking_id)?.scheduledAt ?? null, reason,
+    })));
+  } catch (err) { log.warn('orphans_not_recorded', { connection: conn.id, err }); }
+}
+
 /** Stop the push channel, delete the events we pushed to the current calendar (best effort; the links go either way) and drop the mirrored blocks. */
-async function dropRemoteState(conn: CalendarConnection): Promise<number> {
+async function dropRemoteState(conn: CalendarConnection, reason: 'account_changed' | 'calendar_changed' = 'account_changed'): Promise<number> {
   await stopChannel(conn.id, conn.watch_channel_id, conn.watch_resource_id);
-  let notDeleted = 0;
+  const undeleted: CalendarEventLink[] = [];
   for (const l of await listEventLinksForConnection(conn.id, 5000)) {
     try {
       const res = await gcal(conn.id, 'DELETE', `${calPath(conn.calendar_id)}/events/${encodeURIComponent(l.google_event_id)}`);
-      if (!res.ok && res.status !== 404 && res.status !== 410) notDeleted++;
-    } catch { notDeleted++; }
+      if (!res.ok && res.status !== 404 && res.status !== 410) undeleted.push(l);
+    } catch { undeleted.push(l); }
     await deleteEventLink(l.booking_id);
   }
+  // A DISCONNECTED row's events were left in the owner's calendar on purpose (their appointments): only a live connection owes a cleanup.
+  if (conn.status !== 'revoked') await rememberUndeleted(conn, undeleted, reason);
   await replaceBusyBlocks(conn.id, []);
-  return notDeleted;
+  return undeleted.length;
 }
 
 /**
@@ -121,10 +140,15 @@ export async function disconnectGoogle(businessId: string, actor: { user_id: str
   if (!conn || conn.status === 'revoked') return false;
   try { await stopChannel(conn.id, conn.watch_channel_id, conn.watch_resource_id); } catch { /* best effort */ }
   if (deleteEvents) {
+    const undeleted: CalendarEventLink[] = [];
     for (const l of await listEventLinksForConnection(conn.id, 5000)) {
-      try { await gcal(conn.id, 'DELETE', `${calPath(conn.calendar_id)}/events/${encodeURIComponent(l.google_event_id)}`); } catch { /* best effort */ }
+      try {
+        const res = await gcal(conn.id, 'DELETE', `${calPath(conn.calendar_id)}/events/${encodeURIComponent(l.google_event_id)}`);
+        if (!res.ok && res.status !== 404 && res.status !== 410) undeleted.push(l);
+      } catch { undeleted.push(l); /* best effort: remembered below */ }
       await deleteEventLink(l.booking_id);
     }
+    await rememberUndeleted(conn, undeleted, 'disconnected');
   }
   try {
     const t = await getDecryptedTokens(conn.id);

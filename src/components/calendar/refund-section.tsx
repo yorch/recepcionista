@@ -9,6 +9,7 @@ import { intlTag } from '@/lib/i18n/core';
 import { money } from '@/lib/format';
 import { dollarsToCents } from '@/lib/money';
 import type { RefundRouteResult } from '@/app/api/bookings/[id]/refund/route';
+import type { RefundCheckRouteResult } from '@/app/api/bookings/[id]/refund/check/route';
 import type { BookingDetail } from '@/app/api/bookings/[id]/route';
 import type { Booking } from '@/lib/types';
 
@@ -64,6 +65,22 @@ export function RefundSection({ booking, refund, onChanged }: {
     }
   }, [booking.id, dollars, guard, onChanged, paid, partial, pendingAmount, t, locale]);
 
+  /** "Check with Stripe": resolves a refund that stayed pending (adopts Stripe's refund, or marks it failed so it can be sent again). Never refunds. */
+  const check = useCallback(async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      await guard(async () => {
+        const r = await apiRequest<RefundCheckRouteResult>(`/api/bookings/${booking.id}/refund/check`, { method: 'POST', body: {} });
+        onChanged(r.booking, { tone: 'ok', text: t(`refund.check.${r.result}` as 'refund.check.unchanged') });
+      });
+    } catch (err) {
+      setError(errorText(t, err));
+    } finally {
+      setBusy(false);
+    }
+  }, [booking.id, guard, onChanged, t]);
+
   if (!booking.deposit_paid || paid <= 0) return null;
 
   if (status === 'refunded') {
@@ -94,6 +111,12 @@ export function RefundSection({ booking, refund, onChanged }: {
         </div>
       ) : null}
       {error ? <p role="alert" className="mb-2 text-xs text-danger">{error}</p> : null}
+      {status === 'pending' ? (
+        <div className="mb-2">
+          <p className="mb-1 text-xs text-dim">{t('refund.check.hint')}</p>
+          <Button variant="outline" className="w-full" onClick={check} disabled={busy}>{t('refund.check.button')}</Button>
+        </div>
+      ) : null}
       {allowed ? (
         <Button className="w-full" onClick={() => run(false)} disabled={busy}>{busy ? t('refund.refunding') : t('refund.button', { amount: money(pendingAmount ?? (partial && dollarsToCents(dollars) ? dollarsToCents(dollars) : paid), locale) })}</Button>
       ) : confirm ? (
