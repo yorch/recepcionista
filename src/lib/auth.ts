@@ -46,6 +46,7 @@ const PUBLIC_API_EXACT = new Set([
   '/api/pay/mock-complete',
   '/api/sms/gratitude-reply',
   '/api/sms/inbound',
+  '/api/sms/status', // Twilio per-message delivery status callback: verifies the Twilio signature itself
   '/api/integrations/google/webhook', // Google Calendar push: authenticated by the channel id + resource id + HMAC channel token (constant time)
 ]);
 const PUBLIC_API_PREFIX = ['/api/voice/tools/'];

@@ -3,6 +3,7 @@
 ```bash
 bun test                  # everything; DB-backed suites are skipped without TEST_DATABASE_URL
 bun run test:integration  # only tests/integration (needs TEST_DATABASE_URL)
+TEST_CLOCK_SHIFT_HOURS=9 bun test <file>  # runs the suite as if the wall clock were 9 hours later (Date.now() and a bare new Date()); CI runs at any hour, so tests must not depend on it. Use a throwaway database per shifted run: rows written with shifted timestamps would otherwise confuse later unshifted runs.
 bunx tsc --noEmit && bunx eslint src tests
 ```
 

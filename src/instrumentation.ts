@@ -12,6 +12,7 @@ import { logger, serializeError } from '@/lib/log';
 import { ownerPhoneGrandfatherProblem } from '@/lib/messaging/owner';
 import { signupAvailability, signupConfigWarning } from '@/lib/signup-config';
 import { lineKindMismatch } from '@/lib/voice/line';
+import { smsSenderProblem } from '@/lib/messaging/sender-config';
 import { llmRequiredProblem } from '@/lib/providers/llm-required';
 
 const boot = logger('boot');
@@ -70,6 +71,8 @@ function startupWarnings(): void {
   if (lr) boot.error('llm_not_configured', { banner: `!!! ${lr}` });
   const lm = lineKindMismatch();
   if (lm) boot.error('voice_line_kind_mismatch', { banner: `!!! ${lm}` });
+  const ss = smsSenderProblem();
+  if (ss) boot.warn('sms_sender_a2p', { banner: `!!! ${ss}` });
   const og = ownerPhoneGrandfatherProblem();
   if (og) boot.warn('owner_phone_grandfather', { warning: og });
 }

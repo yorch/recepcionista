@@ -58,6 +58,7 @@ export async function markDepositPaidManually(
 ): Promise<ManualDepositResult> {
   const now = opts.now ?? new Date();
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "bookings" WHERE "id" = ${bookingId} FOR UPDATE`; // the booking row is locked for the whole transaction: markDepositPaid (card webhook), the manual mark and the unmark serialize on it (review 23 A7)
     const cur = await tx.booking.findFirst({ where: { id: bookingId, businessId } });
     if (!cur) return { ok: false, reason: 'not_found' } as const;
     if (cur.status === 'cancelled') return { ok: false, reason: 'cancelled' } as const;
@@ -68,7 +69,7 @@ export async function markDepositPaidManually(
       return { ok: false, reason: 'already_paid' } as const;
     }
     const row = await tx.booking.update({
-      where: { id: bookingId },
+      where: { id: bookingId, depositPaid: false }, // conditional as well as locked: a concurrent writer can never be overwritten
       data: {
         depositPaid: true, depositAmount: amount, depositSource: 'manual', depositMarkedBy: actorId(actor), depositMarkedAt: now,
         ...(cur.status === 'pending' ? { status: 'confirmed' } : {}),
@@ -91,6 +92,7 @@ export async function markDepositPaidManually(
  */
 export async function unmarkManualDeposit(businessId: ID, bookingId: ID, actor: DepositActor): Promise<ManualDepositResult> {
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "bookings" WHERE "id" = ${bookingId} FOR UPDATE`; // the booking row is locked for the whole transaction: markDepositPaid (card webhook), the manual mark and the unmark serialize on it (review 23 A7)
     const cur = await tx.booking.findFirst({ where: { id: bookingId, businessId } });
     if (!cur) return { ok: false, reason: 'not_found' } as const;
     if (!cur.depositPaid || cur.depositSource !== 'manual') return { ok: false, reason: 'not_manual' } as const;
@@ -98,7 +100,7 @@ export async function unmarkManualDeposit(businessId: ID, bookingId: ID, actor: 
     // A card payment reference on the row means Stripe took money for this deposit as well: unmarking would leave a captured payment behind an unpaid booking.
     if (cur.stripePaymentIntentId || cur.stripeCheckoutSessionId) return { ok: false, reason: 'card_payment_on_file' } as const;
     const row = await tx.booking.update({
-      where: { id: bookingId },
+      where: { id: bookingId, depositPaid: true, depositSource: 'manual', stripePaymentIntentId: null, stripeCheckoutSessionId: null }, // never a row a card payment converted meanwhile
       data: { depositPaid: false, depositSource: null, depositMarkedBy: null, depositMarkedAt: null },
     });
     await tx.auditEvent.create({

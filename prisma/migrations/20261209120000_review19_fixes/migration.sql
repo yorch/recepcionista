@@ -3,11 +3,12 @@
 --
 --  1. briefing_audio.text_hash: the transcript a clip was made from (a failed regeneration keeps a clip of the same text; the same text and voice is not
 --     synthesized twice).
---  2. sms_log (to_e164, created_at): routes a customer's reply to the shared sender to the business that texted them last.
---  3. Validation of every CHECK left NOT VALID by 20261208120000 (moved here: SHARE UPDATE EXCLUSIVE locks only, no reader or writer waits for the scans).
---  4. The overlap EXCLUSION constraint becomes per (business, crew). LAST, so its ACCESS EXCLUSIVE lock on `bookings` is held only while the GiST index is
---     built (no table scan of other tables runs under it). `lock_timeout` makes a busy table fail the deploy (re-run it) instead of queueing every request.
---     On a database with more than ~100k bookings run the deploy in a maintenance window (docs/runbook.md).
+--  2. Validation of every CHECK left NOT VALID by 20261208120000 (SHARE UPDATE EXCLUSIVE locks only, no reader or writer waits for the scans).
+--
+-- Prisma applies a migration file as ONE transaction, so every lock taken here is held until the END of this file. That is why this file holds nothing
+-- heavy (review 23 A3): the sms_log index that used to be step 2 is gone (the table is indexed by 20261210120100, CONCURRENTLY, in a file of its own) and
+-- the per-crew overlap rebuild (an ACCESS EXCLUSIVE lock on `bookings` for the length of a GiST build) moved to 20261209120100_bookings_overlap_per_crew.
+-- A database that applied the earlier, larger version of this file simply finds both later files already satisfied (they are guarded).
 SET lock_timeout = '10s';
 
 -- 1. briefing audio ------------------------------------------------------------------------------------------------------------------
@@ -19,10 +20,7 @@ BEGIN
   END IF;
 END $$;
 
--- 2. sms_log lookup by recipient number ----------------------------------------------------------------------------------------------
-CREATE INDEX IF NOT EXISTS "sms_log_to_e164_created_at_idx" ON "public"."sms_log"("to_e164", "created_at");
-
--- 3. validate every CHECK still NOT VALID, failing loudly with the offending row count ------------------------------------------------
+-- 2. validate every CHECK still NOT VALID, failing loudly with the offending row count ------------------------------------------------
 DO $$
 DECLARE
   c RECORD;
@@ -42,25 +40,6 @@ BEGIN
     END IF;
     EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT %I', c.rel, c.conname);
   END LOOP;
-END $$;
-
--- 4. the overlap guard becomes per (business, crew) (last: see the header) --------------------------------------------------------------
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'bookings_no_overlap' AND conrelid = 'public.bookings'::regclass AND pg_get_constraintdef(oid) LIKE '%crew%'
-  ) THEN
-    ALTER TABLE "public"."bookings" DROP CONSTRAINT IF EXISTS "bookings_no_overlap";
-    ALTER TABLE "public"."bookings"
-      ADD CONSTRAINT "bookings_no_overlap"
-      EXCLUDE USING gist (
-        "business_id" WITH =,
-        "crew" WITH =,
-        tsrange("scheduled_at", "scheduled_at" + make_interval(mins => "duration_minutes"), '[)') WITH &&
-      )
-      WHERE ("status" <> 'cancelled');
-  END IF;
 END $$;
 
 RESET lock_timeout;

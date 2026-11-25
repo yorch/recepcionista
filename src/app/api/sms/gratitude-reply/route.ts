@@ -1,7 +1,8 @@
 import { fail, ok } from '@/lib/http';
-import { isPlatformNumber, verifyTwilioSignature } from '@/lib/providers/twilio';
-import { resolveInboundBusinesses } from '@/lib/messaging/sender';
-import { defaultPhoneCountry, toE164 } from '@/lib/phone';
+import { verifyTwilioSignature } from '@/lib/providers/twilio';
+import { resolveInboundRoute } from '@/lib/messaging/sender';
+import { handleAmbiguousInbound } from '@/lib/messaging/inbound-ambiguous';
+import { mockSmsAllowed } from '@/lib/messaging/delivery';
 import { getBooking, getBusiness, getBusinessByPhone } from '@/lib/db';
 import { applyInboundKeyword } from '@/lib/messaging/inbound';
 import { routeGratitudeReply, GratitudeReplyError } from '@/lib/gratitude/reply';
@@ -41,9 +42,13 @@ export async function POST(req: Request) {
     if (!isJson && fields.From) {
       // Opt-out keywords first: a STOP must never be answered with "rating must be a number".
       const booking = booking_id ? await getBooking(booking_id) : null;
-      let business = booking ? await getBusiness(booking.business_id) : fields.To ? await getBusinessByPhone(fields.To) : null;
-      // A reply to the shared sender (no tenant owns it): the business that texted this customer last.
-      if (!business && fields.To && isPlatformNumber(fields.To)) business = (await resolveInboundBusinesses(toE164(fields.From, defaultPhoneCountry())))[0] ?? null;
+      let business = booking ? await getBusiness(booking.business_id) : null;
+      // No booking in the request: the number the text was sent to decides, exactly as in /api/sms/inbound (a tenant's own number, else the recorded sender only).
+      if (!business && fields.To) {
+        const route = await resolveInboundRoute(await getBusinessByPhone(fields.To), fields.To, fields.From, new Date(), mockSmsAllowed() ? ['sent', 'mock'] : ['sent']);
+        if (route.kind === 'ambiguous') return xml(await handleAmbiguousInbound(route.candidates, fields.From, fields.Body));
+        business = route.business;
+      }
       if (business) {
         const reply = await applyInboundKeyword(business, fields.From, fields.Body);
         if (reply) return xml(reply);

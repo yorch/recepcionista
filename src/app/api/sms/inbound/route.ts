@@ -1,11 +1,12 @@
-import { countryForBusiness, getBusinessByPhone, prisma, recordOptOut } from '@/lib/db';
-import { defaultPhoneCountry, sameNumber, toE164 } from '@/lib/phone';
+import { countryForBusiness, getBusinessByPhone, prisma } from '@/lib/db';
+import { sameNumber, toE164 } from '@/lib/phone';
 import { routeGratitudeReply } from '@/lib/gratitude/reply';
 import { applyInboundKeyword } from '@/lib/messaging/inbound';
-import { normalizeInbound, parseKeyword, twiml } from '@/lib/messaging/keywords';
+import { normalizeInbound, twiml } from '@/lib/messaging/keywords';
 import { mockSmsAllowed } from '@/lib/messaging/delivery';
-import { isPlatformNumber, verifyTwilioSignature } from '@/lib/providers/twilio';
-import { resolveInboundBusinesses } from '@/lib/messaging/sender';
+import { verifyTwilioSignature } from '@/lib/providers/twilio';
+import { resolveInboundRoute } from '@/lib/messaging/sender';
+import { handleAmbiguousInbound } from '@/lib/messaging/inbound-ambiguous';
 import { handleOwnerSms } from '@/lib/voice/owner/sms';
 import { handleCancelReply } from '@/lib/messaging/sms-cancel';
 import { handleInboundText } from '@/lib/messaging/inbox';
@@ -26,8 +27,8 @@ const xml = (body: string, status = 200) =>
  * one inbound URL). STOP-class keywords opt the sender out of this business's texts, START-class keywords opt
  * back in, HELP returns contact info, a bare C cancels the sender's single upcoming booking, and a 1-5 reply to a gratitude text is routed to the review/owner logic.
  * Any other text is stored in the owner's inbox, forwarded to the verified owner phone and acknowledged once (messaging/inbox).
- * Signature verified, fails closed. The business is resolved from the Twilio number the text was sent TO (its own line: customer-facing texts go out from it);
- * a text sent to the shared platform sender is routed by the last outbound text to that customer.
+ * Signature verified, fails closed. The business is resolved from the Twilio number the text was sent TO (its own line); a text sent to a number that is not a
+ * tenant's own is routed ONLY by the recorded sender (messaging/sender resolveInboundRoute); an ambiguous one runs nothing business-specific (inbound-ambiguous).
  */
 export async function POST(req: Request) {
   try {
@@ -43,26 +44,23 @@ export async function POST(req: Request) {
 
     const from = fields.From ?? '';
     const to = fields.To ?? '';
-    let business = to ? await getBusinessByPhone(to) : null;
-    // A text sent TO the shared platform sender (the customer answered a text that went out from it: a tenant without a number of its own, or one Twilio refused
-    // as a sender) belongs to no tenant by its `To`: it is routed by the LAST OUTBOUND text sent to that customer (messaging/sender).
-    let sharedSenderBusinesses: Awaited<ReturnType<typeof resolveInboundBusinesses>> = [];
-    if (!business && from && to && isPlatformNumber(to)) {
-      sharedSenderBusinesses = await resolveInboundBusinesses(toE164(from, defaultPhoneCountry()), new Date(), mockSmsAllowed() ? ['sent', 'mock'] : ['sent']);
-      business = sharedSenderBusinesses[0] ?? null;
-      if (business) log.info('routed_by_last_outbound', { business: business.id, candidates: sharedSenderBusinesses.length });
+    const tenant = to ? await getBusinessByPhone(to) : null;
+    // WHO is this text for? A tenant's own number: that tenant. Any other number (the shared platform sender, a number that left the pool): ONLY the businesses that
+    // actually sent a text FROM it TO this customer (sms_log.from_e164). Never "whichever business texted last". More than one candidate is never guessed:
+    // no cancel, no rating, no inbox row; STOP is honoured for all of them, anything else gets a neutral acknowledgement and the owners are flagged.
+    const route = await resolveInboundRoute(tenant, to, from, new Date(), mockSmsAllowed() ? ['sent', 'mock'] : ['sent']);
+    if (route.kind === 'ambiguous' && from) {
+      return xml(await handleAmbiguousInbound(route.candidates, from, fields.Body));
     }
+    const business = route.business;
     if (!business || !from) {
       log.warn('unrouted', { to: to || null, matched: Boolean(business) });
       return xml(twiml());
     }
+    if (route.kind === 'recorded_sender') log.info('routed_by_recorded_sender', { business: business.id });
 
     const reply = await applyInboundKeyword(business, from, fields.Body);
     if (reply) {
-      // A STOP to the shared sender stops EVERY business that texted this customer from it (the customer cannot tell them apart).
-      if (parseKeyword(fields.Body) === 'stop') {
-        for (const other of sharedSenderBusinesses.slice(1)) await recordOptOut(other.id, from, 'stop_keyword', countryForBusiness(other));
-      }
       return xml(reply);
     }
 

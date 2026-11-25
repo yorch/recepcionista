@@ -7,6 +7,7 @@ import { integration, outboundCalls, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { ALL_WEEK, awakeTimezone, cleanup, eventId, futureDateKey, loadDb, loadPrisma, newBusiness, phone, stripeSignature, twilioSignature, uniq } from '../helpers/fixtures';
 import { fakeElevenLabs } from '../helpers/fake-elevenlabs';
+import { zonedTimeToUtc } from '@/lib/time';
 
 const DEMO = { DEMO_MODE: 'true' };
 const PLATFORM = '+15005550006';
@@ -89,7 +90,7 @@ integration('review 19-22 fixes (postgres)', () => {
     });
   });
 
-  test('20 H1: a tenant without a real number (mock-pool) falls back to the shared sender; a reply or STOP to the shared sender is routed by the LAST OUTBOUND text', async () => {
+  test('20 H1 (review 23 A1): two tenants without a real number both text the customer from the shared sender: a reply to it is AMBIGUOUS (stored nowhere, neutral acknowledgement), STOP stops both, an unknown number is unrouted', async () => {
     const a = await biz({ phone: mockNumber() });
     const c = await biz({ phone: mockNumber() });
     const customer = phone();
@@ -97,11 +98,13 @@ integration('review 19-22 fixes (postgres)', () => {
       await text(a.phone!, customer, 'Hello from a customer of A');
       await text(c.phone!, customer, 'Hello from the same customer to C');
       expect(sends.filter((s) => s.to === customer).map((s) => s.from)).toEqual([PLATFORM, PLATFORM]); // both acknowledgements came from the shared sender
-      // an ordinary answer to the shared sender lands in the inbox of the business that texted last (C)
-      expect((await text(PLATFORM, customer, 'Yes tomorrow works for me')).res.status).toBe(200);
-      expect((await rows(c.id)).map((r) => r.body)).toContain('Yes tomorrow works for me');
-      expect((await rows(a.id)).map((r) => r.body)).not.toContain('Yes tomorrow works for me');
-      // STOP to the shared sender stops EVERY business that texted this customer from it
+      // the shared sender was used by BOTH businesses for this customer: an ordinary answer is never guessed ("whichever texted last" is gone)
+      const before = (await rows(a.id)).length + (await rows(c.id)).length;
+      const reply = await text(PLATFORM, customer, 'Yes tomorrow works for me');
+      expect(reply.res.status).toBe(200);
+      expect(await reply.res.text()).toContain('Thanks, we got your message');
+      expect((await rows(a.id)).length + (await rows(c.id)).length).toBe(before);
+      // STOP to the shared sender stops EVERY business that texted from it (each of them did: the customer is stopping that number)
       const stop = await text(PLATFORM, customer, 'STOP');
       expect(stop.res.status).toBe(200);
       expect(await stop.res.text()).toContain('unsubscribed');
@@ -109,7 +112,6 @@ integration('review 19-22 fixes (postgres)', () => {
       expect(await db.isOptedOut(c.id, customer)).toBe(true);
       // a number nobody texted is unrouted: nothing is recorded anywhere
       const stranger = phone();
-      const before = (await rows(a.id)).length + (await rows(c.id)).length;
       expect((await text(PLATFORM, stranger, 'STOP')).res.status).toBe(200);
       expect(await db.isOptedOut(a.id, stranger)).toBe(false);
       expect((await rows(a.id)).length + (await rows(c.id)).length).toBe(before);
@@ -250,7 +252,7 @@ integration('review 19-22 fixes (postgres)', () => {
       expect(refused).toMatchObject({ ok: false, reason: 'high_rate_destination' });
       const viaReply = await sendManualText({ business: b, to: carib, body: 'Yes we can come', kind: 'owner_inbox_reply', trustedRecipient: true });
       expect(viaReply).toMatchObject({ ok: false, reason: 'high_rate_destination' });
-      await db.createBooking({ business_id: b.id, customer_name: 'Caribbean Cust', customer_phone: carib, service: 'AC repair', scheduled_at: new Date(Date.now() + 5 * 86_400_000).toISOString(), status: 'pending' }).catch(() => undefined);
+      await db.createBooking({ business_id: b.id, customer_name: 'Caribbean Cust', customer_phone: carib, service: 'AC repair', scheduled_at: new Date(Date.now() + 5 * 86_400_000).toISOString(), status: 'pending' }, { enforce: false }).catch(() => undefined);
     });
   });
 
@@ -264,9 +266,13 @@ integration('review 19-22 fixes (postgres)', () => {
   const nextHour = new Map<string, number>();
   async function pendingBooking(businessId: string, extra: Record<string, unknown> = {}) {
     const n = nextHour.get(businessId) ?? 0; nextHour.set(businessId, n + 1); // a different slot for every booking of one business
+    // Business-LOCAL wall clock (never UTC hours: the fixture zone moves with the time of day the suite runs, awakeTimezone): 09:00..16:00 local, inside the 08:00-18:00
+    // opening hours and the one-hour lead, 3+ days ahead (inside the 14-day horizon), whatever the wall clock of the run.
+    if (n > 7) throw new Error('pendingBooking: at most 8 bookings per business');
+    const tz = (await db.getBusiness(businessId))!.timezone as string;
     return db.createBooking({
       business_id: businessId, customer_name: 'Dana Ruiz', customer_phone: phone(), service: 'AC repair',
-      scheduled_at: new Date(`${futureDateKey(2)}T${String(8 + n).padStart(2, '0')}:00:00Z`).toISOString(), status: 'pending', price_estimate: 18900, ...extra,
+      scheduled_at: zonedTimeToUtc(futureDateKey(2), `${String(9 + n).padStart(2, '0')}:00`, tz).toISOString(), status: 'pending', price_estimate: 18900, ...extra,
     } as any);
   }
 

@@ -11,7 +11,7 @@ import {
 import { isDateKey, localDateKey, tzOf } from '@/lib/time';
 import { formatCents } from '@/lib/money';
 import type { Booking, Briefing, Business, Call } from '@/lib/types';
-import { synthesizeBriefing, type TtsFailure } from './tts';
+import { briefingVoiceId, synthesizeBriefing, type TtsFailure } from './tts';
 import { logger } from '@/lib/log';
 import { packOf } from '@/lib/verticals';
 import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
@@ -318,6 +318,17 @@ export type BriefingAudioOutcome =
 export const transcriptHash = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
 
 /**
+ * THE reuse rule of a stored clip, shared by `attachBriefingAudio` (what is really synthesized) and the daily-cap check of POST /api/briefings/:id/audio (what counts as a
+ * synthesis): the clip was made from THIS transcript AND with the voice the business would use now (`briefingVoiceId`, the resolved id; an unknown stored voice never matches).
+ */
+export function canReuseBriefingAudio(
+  existing: { text_hash: string | null; voice_id: string | null } | null, transcript: string, business: { voice_id?: string | null } | null | undefined,
+): boolean {
+  return existing !== null && existing.text_hash !== null && existing.text_hash === transcriptHash(transcript)
+    && existing.voice_id !== null && existing.voice_id === briefingVoiceId(business);
+}
+
+/**
  * Synthesize the briefing's audio with the business's voice and store it in the database (briefing_audio).
  *  - A clip already stored for THIS transcript and THIS voice is reused (`opts.reuse`, the owner's "regenerate" button): no text-to-speech spend.
  *  - On a failure the briefing keeps a clip made from the SAME transcript (a transient provider error must not destroy good audio); a clip of an OLDER
@@ -328,7 +339,7 @@ export async function attachBriefingAudio(business: Business, briefing: Briefing
   const hash = transcriptHash(briefing.transcript);
   const existing = await getBriefingAudioMeta(business.id, briefing.id);
   const sameText = existing !== null && existing.text_hash === hash;
-  if (opts.reuse && sameText && (existing.voice_id ?? null) === (business.voice_id ?? existing.voice_id ?? null)) {
+  if (opts.reuse && existing && canReuseBriefingAudio(existing, briefing.transcript, business)) {
     return { briefing: { ...briefing, audio_url: briefingAudioUrl(briefing.id) }, audio: { status: 'ready', bytes: existing.size_bytes, reused: true } };
   }
   const voice = await synthesizeBriefing(briefing.transcript, { voiceId: business.voice_id });

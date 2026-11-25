@@ -1201,6 +1201,8 @@ export async function markDepositPaid(bookingId: string, amountCents: number, op
   }
   const source = opts.source === undefined ? 'stripe' : opts.source;
   const { paid, replaced } = await prisma.$transaction(async (tx) => {
+    // Lock the row: a concurrent manual mark / unmark (db/deposit-policy) serializes with this card payment, so `wasManual` below is what the row REALLY held (review 23 A7).
+    await tx.$queryRaw`SELECT 1 FROM "bookings" WHERE "id" = ${bookingId} FOR UPDATE`;
     const cur = await tx.booking.findUnique({ where: { id: bookingId }, select: { depositPaid: true, depositSource: true, depositAmount: true, depositMarkedBy: true, refundStatus: true, refundAmountCents: true } });
     if (!cur) return { paid: { count: 0 }, replaced: null };
     const wasManual = cur.depositPaid && cur.depositSource === 'manual';
@@ -1513,6 +1515,8 @@ export async function logSms(entry: Omit<SmsLog, 'id' | 'created_at'>, opts: { c
       providerId: entry.provider_id ?? null,
       status: entry.status,
       consentBasis: entry.consent_basis ?? null,
+      fromE164: entry.from_e164 ?? null,
+      senderKind: entry.sender_kind ?? null,
     },
   });
   log.debug('sms.logged', {

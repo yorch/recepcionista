@@ -371,6 +371,11 @@ model SmsLog {
   status       String   @default("queued")
   /// Why we were allowed to send: 'transactional_booking' | 'caller_initiated' | 'express_opt_in' | 'owner_alert' | ...
   consentBasis String?  @map("consent_basis")
+  /// The E.164 of the number that ACTUALLY sent the text (the tenant's own line, the shared platform sender, or the pool number a Messaging Service picked,
+  /// learned from Twilio's status callback). NULL: unknown (a Messaging Service text whose callback has not arrived), written before review 23, or nothing was sent.
+  fromE164     String?  @map("from_e164")
+  /// 'tenant' | 'shared' | 'service' (validated in the app: no CHECK, so adding the column stays a catalog-only change). NULL when nothing was sent.
+  senderKind   String?  @map("sender_kind")
   createdAt    DateTime @default(now()) @map("created_at")
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -378,8 +383,9 @@ model SmsLog {
 
   @@index([businessId, createdAt])
   @@index([businessId, toE164])
-  /// Routes a customer's reply to the shared sender to the business that texted them last (messaging/sender resolveInboundBusinesses).
-  @@index([toE164, createdAt])
+  /// Routes a customer's reply to a number that is not a tenant's own (messaging/sender resolveInboundRoute): by the RECORDED sender only. Built CONCURRENTLY
+  /// by 20261210120100_sms_log_from_index.
+  @@index([fromE164, toE164, createdAt])
   @@index([consentBasis, createdAt])
   @@index([bookingId])
   @@map("sms_log")

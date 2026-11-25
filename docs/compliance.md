@@ -168,7 +168,7 @@ failure and exception results, and still reports honestly whether the owner was 
   ElevenLabs agent receives the current first message (disclosure) and compliance prompt. On the native
   ElevenLabs number path nothing else pushes them (only `/api/voice/incoming` and a settings save do), so agents
   created before this version keep their old opening until then.
-- **10DLC registration** (brand + campaign) with Twilio before sending US application-to-person texts;
+- **10DLC registration** (brand + ONE platform campaign) with Twilio before sending US application-to-person texts; the tenant numbers join the campaign through a Messaging Service (`TWILIO_MESSAGING_SERVICE_SID`, runbook section 5). A customer's STOP to a number that several businesses texted from opts the customer out of every one of them (the customer is stopping that number);
   the campaign description must match the messages above, including the STOP/HELP language.
 - Have **counsel review the disclosure wording** and the consent bases for each state served; decide whether
   gratitude/review texts need express written consent for your use (this app only records the basis you

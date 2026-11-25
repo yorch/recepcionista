@@ -173,6 +173,45 @@ suite('migration mock_replacement_schema (postgres)', () => {
     expect(diff.out).toContain('No difference detected');
   }, 180_000);
 
+  test('review 23 (A1/A3): a populated database at 20261209 (the OLD larger version: its sms_log index and an interrupted CONCURRENT build left INVALID) upgrades through 20261210: rows kept, new nullable columns, the valid sender index built CONCURRENTLY by `migrate deploy`, old index gone, re-runnable, zero drift', async () => {
+    const R23 = '20261210120000_review23_fixes';
+    const IDX = '20261210120100_sms_log_from_index';
+    const oldSchema = historyBefore('old23', R23);
+    const name = await newDb('r23');
+    expect(prisma(['migrate', 'deploy'], dbUrl(name), oldSchema).code).toBe(0);
+    const c = client(name);
+    try {
+      await c.$executeRawUnsafe(`INSERT INTO businesses(id,name) VALUES ('r1','R23 Co')`);
+      await c.$executeRawUnsafe(`INSERT INTO sms_log(id,business_id,to_phone,to_e164,body,kind,status) VALUES ('s1','r1','+13055550101','+13055550101','x','manual','sent'), ('s2','r1','+13055550102','+13055550102','y','owner_alert','sent')`);
+      await c.$executeRawUnsafe(`CREATE INDEX sms_log_to_e164_created_at_idx ON sms_log(to_e164, created_at)`); // what the OLD 20261209 built
+      await c.$executeRawUnsafe(`CREATE INDEX sms_log_from_e164_to_e164_created_at_idx ON sms_log(to_e164)`); // an interrupted CONCURRENT build: invalid leftover with the final name
+      await c.$executeRawUnsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'sms_log_from_e164_to_e164_created_at_idx'::regclass`);
+      expect(await c.$queryRawUnsafe(`SELECT 1 FROM information_schema.columns WHERE table_name='sms_log' AND column_name='from_e164'`)).toEqual([]);
+    } finally { await c.$disconnect(); }
+
+    const up = prisma(['migrate', 'deploy'], dbUrl(name));
+    expect(up.out).toContain(IDX);
+    expect(up.code).toBe(0);
+
+    const d = client(name);
+    try {
+      expect(await d.$queryRawUnsafe(`SELECT id, from_e164, sender_kind FROM sms_log ORDER BY id`)).toEqual([{ id: 's1', from_e164: null, sender_kind: null }, { id: 's2', from_e164: null, sender_kind: null }]);
+      expect(await d.$queryRawUnsafe(`SELECT c.relname, i.indisvalid, pg_get_indexdef(c.oid) AS def FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'sms_log'::regclass AND c.relname LIKE 'sms_log_%e164%' ORDER BY c.relname`)).toEqual([
+        { relname: 'sms_log_business_id_to_e164_idx', indisvalid: true, def: (expect as any).stringMatching(/./) },
+        { relname: 'sms_log_from_e164_to_e164_created_at_idx', indisvalid: true, def: expect.stringContaining('(from_e164, to_e164, created_at)') },
+      ]);
+      await d.$executeRawUnsafe(`INSERT INTO sms_log(id,business_id,to_phone,to_e164,from_e164,sender_kind,body,kind,status) VALUES ('s3','r1','+13055550103','+13055550103','+17862081234','service','z','manual','sent')`);
+      // re-runnable: the whole of both migrations again changes nothing and fails nowhere (the index statement runs outside a transaction block)
+      for (const dir of [R23, IDX]) for (const stmt of splitSql(readFileSync(path.join(MIGRATIONS, dir, 'migration.sql'), 'utf8'))) await d.$executeRawUnsafe(stmt);
+      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM sms_log`)).toEqual([{ n: 3 }]);
+      // the review-23 migration itself takes only brief locks: nothing in it scans sms_log (no index build, no validation): asserted on the file in review23-pure
+    } finally { await d.$disconnect(); }
+    const shadow = await newDb('r23shadow');
+    const diff = rawPrisma(['migrate', 'diff', '--from-migrations', path.join(ROOT, 'prisma/migrations'), '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--shadow-database-url', dbUrl(shadow), '--exit-code'], dbUrl(name));
+    expect(diff.out).toContain('No difference detected');
+    expect(diff.code).toBe(0);
+  }, 180_000);
+
   test('a fresh database (all migrations from scratch) has the new defaults and no legacy repair side effects', async () => {
     const name = await newDb('fresh');
     expect(prisma(['migrate', 'deploy'], dbUrl(name)).code).toBe(0);

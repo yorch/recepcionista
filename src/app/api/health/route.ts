@@ -19,6 +19,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/client';
 import { logger } from '@/lib/log';
 import { llmRequiredProblem } from '@/lib/providers/llm-required';
+import { smsSenderProblem } from '@/lib/messaging/sender-config';
 
 const log = logger('health');
 
@@ -46,8 +47,10 @@ export async function GET() {
       log.error('llm_not_configured', { note: llm });
       return NextResponse.json({ ok: false, db: 'up', error: 'llm_not_configured', detail: llm }, { status: 503, headers: { 'cache-control': 'no-store' } });
     }
+    // A deployment that still sends customer texts from unregistered tenant numbers (no Messaging Service): still ready (200), but the warning is visible to whoever reads the probe.
+    const sms = smsSenderProblem();
     return NextResponse.json(
-      { ok: true, db: 'up', latency_ms: Date.now() - startedAt },
+      { ok: true, db: 'up', latency_ms: Date.now() - startedAt, ...(sms ? { warnings: [{ code: 'sms_a2p_registration_required', detail: sms }] } : {}) },
       { status: 200, headers: { 'cache-control': 'no-store' } },
     );
   } catch (err) {

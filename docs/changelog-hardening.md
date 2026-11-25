@@ -477,3 +477,20 @@ One migration, `20261209120000_review19_fixes` (hand written, re-runnable, zero 
 | 22 M1-M4 | Migration split with `lock_timeout`; release cap counts every acted business + circuit breaker + agent kept while the line cannot be removed; owner slot list without notice / window; content fingerprint covers FAQs and descriptions |
 | 22 L1-L6 | Confirm with `expected_hash`; legacy time zones mapped to their IANA zone with audit rows; onboarding suggestion never overrides a chosen zone, options for St Thomas / Guam, split area codes ambiguous; honest "no slots" wording; briefing audio kept on a failed regeneration, metadata-only 304, ranges cut in Postgres, daily synthesis cap; horizon copy |
 
+
+## Review 23 (`docs/review/23-adv-final-verification.md`)
+
+Migrations: `20261209120000` lost its sms_log index and its GiST rebuild; `20261209120100_bookings_overlap_per_crew` (the rebuild, alone), `20261210120000_review23_fixes` (two nullable `sms_log` columns, metadata only) and `20261210120100_sms_log_from_index` (one `CREATE INDEX CONCURRENTLY`). Evidence: `tests/integration/review23.test.ts`, `tests/review23-pure.test.ts`, `tests/db/mock-replacement-migration.test.ts`, `tests/integration/tenant-line.test.ts`. Resolution table: the report.
+
+| Finding | Fix |
+| --- | --- |
+| A1 shared-sender misrouting | `sms_log.from_e164` / `sender_kind` record the number that really sent each text; a reply to a number that is not a tenant's own is matched only by that recorded sender; several candidates are ambiguous (no cancel, rating or inbox row, neutral acknowledgement, STOP stops each, owners flagged); `gratitude-reply` uses the same resolver |
+| A2 A2P registration | optional `TWILIO_MESSAGING_SERVICE_SID`: customer texts use `MessagingServiceSid`; purchase / adoption / repair add the number to the pool, release removes it; `/api/sms/status` learns the pool sender and audits delivery failures; boot + health warning without it |
+| A3 migration locks | one transaction per file: the GiST rebuild and the CONCURRENT index each live in their own file; the earlier lock claims were wrong and are corrected in the runbook |
+| A4 release starvation | least-recently-attempted ordering; 5 consecutive failed attempts = `needs_operator` (audit `billing.release_stuck`), weekly retry |
+| A5 F3 guard | `lineImportBlockedReason` inside `ensureTenantLine`: provisioning, provision re-run, agent re-sync and repair obey it |
+| A6 briefing cap | `canReuseBriefingAudio` is the one predicate for reuse and for the cap |
+| A7 deposit races | `SELECT ... FOR UPDATE` on the booking row in `markDepositPaid`, the manual mark and the unmark, plus conditional updates |
+| A8 legacy forward erasure | the forward text is reproduced exactly (link mask, quote swap, GSM-7 clamp) to match emoji / non-Latin / link openings and the "Possible opt-out" prefix; the rest is documented |
+| A9 line lease | the lease was already renewed (ttl/3, `withLease`); the duplicate-import cleanup now stops when the lease signal is aborted (checked before each delete) |
+| CI time of day | review 19 bookings use business-local slots; `TEST_CLOCK_SHIFT_HOURS` shifts the clock for the whole suite |

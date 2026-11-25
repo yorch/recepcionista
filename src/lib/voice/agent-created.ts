@@ -4,7 +4,7 @@
  * endpoint and the automatic resync (vertical change, owner KB change, the agent-dirty drain). Never throws; returns what failed.
  */
 import { bindPhoneNumber } from '@/lib/voice/elevenlabs';
-import { ensureTenantLine, lineApplicable } from '@/lib/voice/tenant-line';
+import { ensureTenantLine, lineApplicable, lineImportBlockedReason } from '@/lib/voice/tenant-line';
 import { lineKindFor } from '@/lib/voice/line';
 import { getBusiness } from '@/lib/db';
 import { hasTwilio } from '@/lib/providers/twilio';
@@ -17,11 +17,12 @@ export async function finishCreatedAgent(agentId: string, businessId: string): P
   const notes: string[] = [];
   try {
     const business = await getBusiness(businessId);
-    if (business && lineKindFor(business) === 'native' && lineApplicable({ phone: business.phone, agent_id: agentId }).ok && hasTwilio()) {
+    if (business && lineKindFor(business) === 'native' && lineApplicable({ phone: business.phone, agent_id: agentId }).ok && hasTwilio() && !lineImportBlockedReason(business)) {
       // The tenant's own imported number follows its (new) agent; a missing import is made now.
       const line = await ensureTenantLine({ ...business, agent_id: agentId });
       if (!line.ok) notes.push(`phone line: ${line.error}`);
     } else {
+      if (business && lineKindFor(business) === 'native' && lineImportBlockedReason(business)) notes.push('phone line not imported: this business forwards calls (repair it after changing its call mode)');
       const bound = await bindPhoneNumber(agentId, business);
       if (!bound.ok && business?.phone && lineKindFor(business) === 'native') notes.push(`phone binding skipped (${bound.skipped})`);
     }

@@ -255,7 +255,7 @@ describe('21 L2: plan price single-flight and stale-while-revalidate', () => {
 describe('22 M1: the schema migration keeps its locks short', () => {
   const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'prisma', 'migrations');
   const sql = (d: string) => readFileSync(path.join(root, d, 'migration.sql'), 'utf8');
-  test('the column migration builds no index and validates nothing; the overlap rebuild is the LAST statement of the next migration, after the validation', () => {
+  test('the column migration builds no index and validates nothing; the validation file builds no index and holds no overlap rebuild (review 23 A3: that one lives in its own file)', () => {
     expect(readdirSync(root)).toContain('20261209120000_review19_fixes');
     const first = sql('20261208120000_mock_replacement_schema').replace(/^--.*$/gm, '');
     expect(first).toContain("SET lock_timeout");
@@ -263,8 +263,7 @@ describe('22 M1: the schema migration keeps its locks short', () => {
     expect(first).not.toMatch(/VALIDATE CONSTRAINT/);
     const second = sql('20261209120000_review19_fixes').replace(/^--.*$/gm, '');
     expect(second).toContain("SET lock_timeout");
-    expect(second.indexOf('VALIDATE CONSTRAINT')).toBeGreaterThan(-1);
-    expect(second.indexOf('EXCLUDE USING gist')).toBeGreaterThan(second.indexOf('VALIDATE CONSTRAINT'));
-    expect(second.slice(second.indexOf('EXCLUDE USING gist'))).not.toMatch(/VALIDATE CONSTRAINT|CREATE INDEX/);
+    expect(second).toContain('VALIDATE CONSTRAINT');
+    expect(second).not.toMatch(/EXCLUDE USING gist|CREATE INDEX/);
   });
 });

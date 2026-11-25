@@ -2,11 +2,11 @@ import { ok, fail, readJson } from '@/lib/http';
 import { authenticate } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
 import { prisma, recordAudit, getBusiness } from '@/lib/db';
-import { ensureTenantLine, lineApplicable } from '@/lib/voice/tenant-line';
-import { forwardingSupported, lineKindFor } from '@/lib/voice/line';
+import { ensureTenantLine, lineApplicable, lineImportBlockedReason } from '@/lib/voice/tenant-line';
+import { lineKindFor } from '@/lib/voice/line';
 import { hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { refreshNumberCredentials } from '@/lib/voice/elevenlabs-phone';
-import { configureNumberWebhooks, numberWebhooks, type NumberWebhookOutcome } from '@/lib/providers/twilio';
+import { configureNumberWebhooks, ensureNumberInMessagingService, numberWebhooks, type NumberWebhookOutcome, type PoolOutcome } from '@/lib/providers/twilio';
 import { toE164 } from '@/lib/phone';
 import { logger } from '@/lib/log';
 
@@ -22,7 +22,11 @@ export interface RepairLine {
   outcome: 'ok' | 'would_import' | 'would_bind' | 'imported' | 'adopted' | 'bound' | 'would_refresh' | 'refreshed' | 'skipped' | 'failed';
   detail?: string;
 }
-export interface RepairItem { business_id: string; phone: string; outcome: NumberWebhookOutcome; changed?: string[]; detail?: string; line?: RepairLine }
+export interface RepairItem {
+  business_id: string; phone: string; outcome: NumberWebhookOutcome; changed?: string[]; detail?: string; line?: RepairLine;
+  /** The Messaging Service sender pool (only with TWILIO_MESSAGING_SERVICE_SID): ok / added / would_add / skipped / not_found / failed. */
+  messaging_service?: { outcome: PoolOutcome; detail?: string };
+}
 export interface RepairResult {
   dry_run: boolean;
   /** The webhook addresses the numbers must carry (null: no public base URL is configured, nothing can be repaired). */
@@ -41,6 +45,8 @@ export interface RepairResult {
  *  - It also repairs each business's OWN AI line (native line only): the purchased number is imported into ElevenLabs and bound to ITS agent
  *    (`line` on each item; shapes UNVERIFIED, isolated in voice/elevenlabs-phone.ts). A number already imported at the provider is ADOPTED, never
  *    imported twice; one that another business owns is never touched. The dry run reports `would_import` / `would_bind`.
+ *  - With TWILIO_MESSAGING_SERVICE_SID set it also makes sure each number is in the Messaging Service sender pool (`messaging_service` on each item; idempotent, retries a failed
+ *    add of provisioning). The platform sender itself is never added or removed.
  *  - Never touches TWILIO_PHONE_NUMBER (the platform sender) or mock-pool numbers. Audited as `admin.repair_numbers` (counts + business ids).
  */
 export async function POST(req: Request) {
@@ -89,6 +95,9 @@ export async function POST(req: Request) {
       items.push({ business_id: r.id, phone, outcome: res.outcome, ...(res.changed ? { changed: res.changed } : {}), ...(res.detail ? { detail: res.detail } : {}) });
       if (res.outcome === 'failed') log.warn('repair.failed', { business: r.id, detail: res.detail });
       items[items.length - 1].line = await repairLine(r.id, dryRun, refreshCredentials);
+      // The number must be in the Messaging Service sender pool (a failed add at provisioning is retried here; idempotent). `skipped` without TWILIO_MESSAGING_SERVICE_SID.
+      const pool = await ensureNumberInMessagingService(phone, { dryRun, phoneSid: owner?.twilio_phone_sid ?? res.sid ?? null });
+      if (pool.outcome !== 'skipped') items[items.length - 1].messaging_service = { outcome: pool.outcome, ...(pool.detail ? { detail: pool.detail } : {}) };
     }
     const user = auth.principal.kind === 'admin' ? auth.principal.user : null;
     await recordAudit({
@@ -96,6 +105,7 @@ export async function POST(req: Request) {
       meta: {
         dry_run: dryRun, batch: batch.length, updated: items.filter((i) => i.outcome === 'updated').length,
         would_update: items.filter((i) => i.outcome === 'would_update').length, failed: items.filter((i) => i.outcome === 'failed').length,
+        pool_added: items.filter((i) => i.messaging_service?.outcome === 'added').length, pool_failed: items.filter((i) => i.messaging_service?.outcome === 'failed' || i.messaging_service?.outcome === 'not_found').length,
         line_would_import: items.filter((i) => i.line?.outcome === 'would_import').length, line_imported: items.filter((i) => i.line?.outcome === 'imported' || i.line?.outcome === 'adopted').length, line_failed: items.filter((i) => i.line?.outcome === 'failed').length,
         business_ids: batch.map((b) => b.id), has_more: nextCursor !== null,
       },
@@ -114,12 +124,9 @@ async function repairLine(businessId: string, dryRun: boolean, refreshCredential
     if (!hasElevenLabs()) return { outcome: 'skipped', detail: 'ELEVENLABS_API_KEY is not set' };
     const app = lineApplicable(business);
     if (!app.ok) return { outcome: 'skipped', detail: app.why };
-    // Importing hands the Voice URL to ElevenLabs. A tenant that forwards calls today would stop being forwarded (the native line cannot dial a human unless
-    // NATIVE_TRANSFER=on and the business opted in): never change a tenant's behaviour silently. The operator switches that tenant to AI / paused (or enables
-    // transfer for it) and repairs it again.
-    if (!business.elevenlabs_phone_number_id && business.call_mode === 'forward' && !forwardingSupported('native', process.env, business)) {
-      return { outcome: 'skipped', detail: 'would_change_behaviour: this business forwards calls (call_mode=forward) and the native AI line cannot forward them (NATIVE_TRANSFER off or not enabled for it); change its call mode or enable native transfer first, then repair it again' };
-    }
+    // Importing hands the Voice URL to ElevenLabs: a tenant that forwards calls would silently stop being forwarded (the shared guard, voice/tenant-line).
+    const blocked = lineImportBlockedReason(business);
+    if (blocked) return { outcome: 'skipped', detail: blocked };
     const r = await ensureTenantLine(business, { dryRun });
     if (!r.ok) return { outcome: 'failed', detail: `${r.code}: ${r.error}` };
     // After TWILIO_AUTH_TOKEN was rotated: re-send the current credentials to the provider for this business's imported number (the provider keeps the token it was given at import).

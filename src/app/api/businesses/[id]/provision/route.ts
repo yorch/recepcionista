@@ -7,9 +7,9 @@ import crypto from 'node:crypto';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
 import { readinessForGoLive } from '@/lib/kb/readiness-server';
-import { hasTwilio, isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
+import { ensureNumberInMessagingService, hasTwilio, isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
 import { syncAgent, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
-import { ensureTenantLine, lineApplicable } from '@/lib/voice/tenant-line';
+import { ensureTenantLine, lineApplicable, lineImportBlockedReason } from '@/lib/voice/tenant-line';
 import { lineKindFor } from '@/lib/voice/line';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
@@ -33,6 +33,11 @@ export interface ProvisionResult {
   regenerated?: boolean;
   /** True when the agent exists but the post-call webhook could not be attached (operator action needed: docs/runbook.md). Never carries a secret. */
   post_call_webhook_pending?: boolean;
+  /**
+   * With TWILIO_MESSAGING_SERVICE_SID set: the number could not be added to the Messaging Service sender pool (its texts are not covered by the A2P campaign until it is).
+   * The number is KEPT; POST /api/admin/repair-numbers retries it.
+   */
+  messaging_service_pending?: boolean;
   /** The tenant's own AI line: its number is imported into the voice provider and bound to its agent. */
   line?: { phone_number_id: string; adopted: boolean };
   /** Shown ONCE, ONLY to an admin principal, when this call created the ElevenLabs post-call webhook. Store as ELEVENLABS_WEBHOOK_SECRET; it is not persisted or logged. */
@@ -308,6 +313,18 @@ async function provision(
     let updated = (await getBusiness(id)) ?? business;
     log.info('number.assigned', { business: id, phone, mock });
 
+    // Customer texts go through the Messaging Service (TWILIO_MESSAGING_SERVICE_SID): the number joins its sender pool, under the platform's A2P campaign. Idempotent (a
+    // re-run, or an adopted number, is a no-op once it is a member). A failure KEEPS the number and is reported; repair-numbers retries it. No-op without the variable.
+    let messagingServicePending = false;
+    if (!mock) {
+      const pool = await ensureNumberInMessagingService(phone, { phoneSid: updated.twilio_phone_sid });
+      if (pool.outcome === 'failed' || pool.outcome === 'not_found') {
+        messagingServicePending = true;
+        await auditProvision(principal, id, 'provision.messaging_service_failed', { phone, outcome: pool.outcome, detail: pool.detail ?? null });
+        log.error('messaging_service.pool_failed', { business: id, phone, outcome: pool.outcome, detail: pool.detail ?? null, action: 'number kept; POST /api/admin/repair-numbers retries' });
+      }
+    }
+
     // Only rebuild the prompt when it genuinely fails our rules — a curated or
     // already-correct KB is left byte-identical so owners keep their edits.
     if (kbNeedsRegen(kb, updated)) {
@@ -352,7 +369,7 @@ async function provision(
         // The tenant's OWN line: import the purchased number into the voice provider and bind it to THIS agent (never a shared number).
         // Skipped for a mock-pool number (demo), without Twilio credentials (nothing to import from: the number was not bought by this platform) and
         // on a forced 'webhook' deployment (the Voice URL stays ours, voice/incoming).
-        if (lineKindFor(updated) === 'native' && lineApplicable(updated).ok && hasTwilio()) {
+        if (lineKindFor(updated) === 'native' && lineApplicable(updated).ok && hasTwilio() && !lineImportBlockedReason(updated)) {
           const lineRes = await ensureTenantLine(updated);
           if (!lineRes.ok) {
             lineFailure = lineRes;
@@ -423,6 +440,7 @@ async function provision(
       agent_mock: agentMock,
       regenerated,
       ...(postCallPending ? { post_call_webhook_pending: true } : {}),
+      ...(messagingServicePending ? { messaging_service_pending: true } : {}),
       ...(line ? { line } : {}),
       ...(webhookSecret && principal.kind === 'admin' ? {
         webhook_secret: webhookSecret,

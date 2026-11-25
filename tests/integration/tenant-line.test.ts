@@ -395,4 +395,72 @@ integration('tenant line (postgres)', () => {
       expect(p.eleven.agentToolNames(id)).toContain('transfer-to-human');
     }));
   });
+
+  // ------------------------------------------------------------------ review 23 A5: ONE forward-mode guard on every import path
+  test('23 A5: a tenant that FORWARDS calls is never imported (ensureTenantLine, the agent re-sync after a 404, a provision re-run) while the native line cannot forward; repair-numbers reports the same reason', async () => {
+    const { finishCreatedAgent } = await import('@/lib/voice/agent-created');
+    const t = await tenant();
+    await prisma.business.update({ where: { id: t.id }, data: { callMode: 'forward' } });
+    const fresh = (await db.getBusiness(t.id))!;
+    expect(line.lineImportBlockedReason(fresh, { ...process.env, NATIVE_TRANSFER: undefined } as NodeJS.ProcessEnv)).toContain('would_change_behaviour');
+    expect(line.lineImportBlockedReason({ ...fresh, elevenlabs_phone_number_id: 'phnum_x' })).toBeNull(); // already imported: nothing would change
+    const p = providers({}, [t.phone!]);
+    await withEnv(TW, () => withFetch(p.fetchImpl, async () => {
+      // 1) ensureTenantLine itself (what provisioning and a provision re-run call)
+      expect(await line.ensureTenantLine(fresh)).toMatchObject({ ok: false, code: 'would_change_behaviour', retryable: false });
+      expect(await line.ensureTenantLine(fresh, { dryRun: true })).toMatchObject({ ok: false, code: 'would_change_behaviour' });
+      // 2) the agent re-created after a 404
+      const notes = await finishCreatedAgent(fresh.agent_id!, t.id);
+      expect(notes.join(' ')).toContain('forwards calls');
+      expect(p.eleven.phones.size).toBe(0);
+      expect(p.eleven.importBodies).toHaveLength(0);
+      expect((await db.getBusiness(t.id))!.elevenlabs_phone_number_id).toBeNull();
+      // 3) repair-numbers (dry and real) says the same and imports nothing
+      for (const dry_run of [true, false]) {
+        await clear();
+        const res = await repairRoute.POST(new Request('https://app.example.test/api/admin/repair-numbers', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${SECRETS.adminToken}`, 'sec-fetch-site': 'same-origin', origin: 'https://app.example.test' }, body: JSON.stringify({ business_ids: [t.id], dry_run }) }));
+        const item = ((await res.json()) as any).data.items[0];
+        expect(item.line).toMatchObject({ outcome: 'skipped' });
+        expect(item.line.detail).toContain('would_change_behaviour');
+      }
+      expect(p.eleven.importBodies).toHaveLength(0);
+      // with native transfer on for this business the SAME call imports it
+      await prisma.business.update({ where: { id: t.id }, data: { nativeTransferEnabled: true } });
+      await withEnv({ ...TW, NATIVE_TRANSFER: 'on' }, async () => {
+        expect(await line.ensureTenantLine((await db.getBusiness(t.id))!)).toMatchObject({ ok: true, imported: true });
+      });
+    }));
+    expect(outboundCalls).toEqual([]);
+  });
+
+  // ------------------------------------------------------------------ review 23 A9: duplicate cleanup is safe against a lost lease
+  test('23 A9: the lease is renewed while the import runs; a holder whose lease was LOST deletes no duplicate import (a successor\'s unsaved import survives), a holder that still has it does', async () => {
+    for (const lose of [false, true]) {
+      const t = await tenant();
+      const p = providers({}, [t.phone!]);
+      let imported = false;
+      const wrapped = (async (input: unknown, init?: { method?: string; body?: unknown }) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+        const method = init?.method ?? 'GET';
+        if (url.includes('api.elevenlabs.io') && url.endsWith('/convai/phone-numbers') && method === 'POST') imported = true;
+        if (imported && url.includes('api.elevenlabs.io') && url.endsWith('/convai/phone-numbers') && method === 'GET') {
+          // the listing taken by the duplicate cleanup: another (un-owned) import of the same number is there
+          p.eleven.phones.set('phnum_dup_' + t.id.slice(0, 6), { phone_number_id: 'phnum_dup_' + t.id.slice(0, 6), phone_number: t.phone!, label: 'dup', agent_id: null });
+          if (lose) {
+            // a successor took the lease over; the next heartbeat of THIS run finds it gone and aborts the signal
+            await prisma.provisionLock.updateMany({ where: { key: `line:${t.id}` }, data: { holder: 'successor' } });
+            await new Promise((r) => setTimeout(r, 400));
+          }
+        }
+        return p.fetchImpl(input as any, init as any);
+      }) as unknown as typeof fetch;
+      await withEnv(TW, () => withFetch(wrapped, async () => {
+        const r = await line.ensureTenantLine(t, { leaseRenewMs: 100 });
+        expect(r).toMatchObject({ ok: true, imported: true });
+      }));
+      const dupDeleted = p.eleven.calls.some((c) => c.startsWith('DELETE /convai/phone-numbers/phnum_dup_'));
+      expect(dupDeleted).toBe(!lose);
+      await prisma.provisionLock.deleteMany({ where: { key: `line:${t.id}` } });
+    }
+  });
 });

@@ -389,14 +389,30 @@ const alnum = (s: string): string => s.normalize('NFD').replace(/\p{M}+/gu, '').
  */
 async function legacyOwnerForwardIds(db: Reader, businessId: string, e164: string): Promise<string[]> {
   const inbound = await db.$queryRaw<{ body: string }[]>`SELECT "body" FROM "inbound_messages" WHERE "business_id" = ${businessId} AND "from_e164" = ${e164}`;
+  if (inbound.length === 0) return [];
+  // The forward text was built from the inbox body by exactly these two functions (links masked as [link], quotes swapped, then clamped to GSM-7 where an emoji or a
+  // non-Latin letter became "?"), so the OPENING of the quoted words is reproduced exactly instead of guessed from Latin letters only. Dynamic imports: no module cycle.
+  const { safeForward } = await import('@/lib/messaging/inbox-copy');
+  const { clampAlertBody } = await import('@/lib/voice/owner-alert');
+  const keys = inbound.map((m) => clampAlertBody(safeForward(m.body, 140)).slice(0, 24)).filter((k) => k.replace(/[?\s]/g, '').length >= 4 || k.length >= 12);
   const fragments = inbound.map((m) => alnum(m.body).slice(0, 24)).filter((f) => f.length >= 8);
-  if (fragments.length === 0) return [];
+  if (fragments.length === 0 && keys.length === 0) return [];
   const last4 = e164.slice(-4);
+  const en = `Customer text (...${last4}): "`;
+  const es = `Mensaje de un cliente (...${last4}): "`;
+  // `%` in front: the alert may start with "Possible opt-out: " / "Posible baja: ".
   const rows = await db.$queryRaw<{ id: string; body: string }[]>`
     SELECT "id", "body" FROM "sms_log"
      WHERE "business_id" = ${businessId} AND "kind" = 'owner_alert'
-       AND ("body" LIKE ${`Customer text (...${last4}): "%`} OR "body" LIKE ${`Mensaje de un cliente (...${last4}): "%`})`;
-  return rows.filter((r) => { const a = alnum(r.body); return fragments.some((f) => a.includes(f)); }).map((r) => r.id);
+       AND ("body" LIKE ${`%${en}%`} OR "body" LIKE ${`%${es}%`})`;
+  return rows.filter((r) => {
+    const at = [en, es].map((m) => r.body.indexOf(m)).filter((i) => i >= 0).sort((x, y) => x - y)[0];
+    if (at === undefined) return false;
+    const quoted = r.body.slice(at + (r.body.startsWith(es, at) ? es.length : en.length));
+    if (keys.some((k) => quoted.startsWith(k))) return true;
+    const a = alnum(r.body);
+    return fragments.some((f) => a.includes(f));
+  }).map((r) => r.id);
 }
 
 /**

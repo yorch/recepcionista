@@ -2,7 +2,7 @@
 
 Everything Phase 2 builds on. Phase 1 owns `prisma/**`, `src/lib/db/**` additions, `src/lib/types.ts`, `src/lib/business-config.ts`,
 `src/lib/crews.ts`, `src/lib/tz-infer.ts`. Phase 2 adds BEHAVIOUR (routes, UI, jobs, provider calls) only and must not change the schema without
-a new migration owned by the same person. Migrations: `prisma/migrations/20261208120000_mock_replacement_schema` (columns, tables, NOT VALID checks; short locks) and `20261209120000_review19_fixes` (validation of those checks, `briefing_audio.text_hash`, the `sms_log (to_e164, created_at)` index and the per-crew overlap rebuild, last); hand written, re-runnable,
+a new migration owned by the same person. Migrations: `prisma/migrations/20261208120000_mock_replacement_schema` (columns, tables, NOT VALID checks; short locks) and `20261209120000_review19_fixes` (validation of those checks, `briefing_audio.text_hash`), `20261209120100_bookings_overlap_per_crew` (the per-crew overlap rebuild, alone: Prisma runs each file as one transaction), `20261210120000_review23_fixes` (`sms_log.from_e164` / `sender_kind`, metadata only) and `20261210120100_sms_log_from_index` (the `(from_e164, to_e164, created_at)` index, one `CREATE INDEX CONCURRENTLY` statement); hand written, re-runnable,
 additive, zero drift; upgrade test `tests/db/mock-replacement-migration.test.ts`.
 
 Conventions kept: money is integer cents; all times are timestamptz (JS `Date` / ISO strings in the domain types); every helper that takes a

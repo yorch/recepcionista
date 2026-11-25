@@ -310,8 +310,56 @@ export async function processBusiness(
   return report;
 }
 
-/** Ids of every business the script should look at (canceled/unpaid). */
-export async function listReleaseCandidates(): Promise<string[]> {
+/** After this many CONSECUTIVE failed release attempts a business is `stuck`: it needs an operator, so it stops competing for the run's budget. */
+export const STUCK_AFTER_FAILED_ATTEMPTS = 5;
+/** A stuck business is tried again only this often (a slow, cheap retry in case the operator fixed the cause). */
+export const STUCK_RETRY_DAYS = 7;
+export const STUCK_ACTION = 'billing.release_stuck';
+
+export interface CandidateState { id: string; last_attempt_at: Date | null; failed_attempts: number; stuck: boolean }
+
+/**
+ * The canceled / unpaid businesses in the order a run should work through them, with their attempt history (audit `billing.tenant_released`, one row per attempt, written
+ * whether or not it ended clean): never-attempted first (oldest first), then the LEAST recently attempted. So a business whose release fails for a reason that never clears
+ * on its own (the line is the shared id, ELEVENLABS_API_KEY is gone, the line belongs to another business) falls to the back after every attempt and can never starve the
+ * others (review 23 A4). `stuck` = STUCK_AFTER_FAILED_ATTEMPTS consecutive failures with the last one less than STUCK_RETRY_DAYS ago.
+ */
+export async function listReleaseCandidateStates(now: Date = new Date()): Promise<CandidateState[]> {
   const rows = await prisma.business.findMany({ where: { billingStatus: { in: ['canceled', 'unpaid'] } }, select: { id: true }, orderBy: { createdAt: 'asc' } });
-  return rows.map((r) => r.id);
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const hist = await prisma.$queryRaw<{ business_id: string; at: Date; failed: boolean }[]>`
+    SELECT business_id, at, failed FROM (
+      SELECT business_id, at,
+             (COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(meta->'errors') = 'array' THEN meta->'errors' ELSE '[]'::jsonb END), 0) > 0 OR meta->>'truncated' = 'true') AS failed,
+             ROW_NUMBER() OVER (PARTITION BY business_id ORDER BY at DESC) AS rn
+        FROM audit_events WHERE action = ${RELEASED_ACTION} AND business_id = ANY(${ids}::text[])
+    ) t WHERE rn <= ${STUCK_AFTER_FAILED_ATTEMPTS + 1} ORDER BY business_id, at DESC`;
+  const byBiz = new Map<string, { at: Date; failed: boolean }[]>();
+  for (const h of hist) byBiz.set(h.business_id, [...(byBiz.get(h.business_id) ?? []), { at: h.at, failed: h.failed }]);
+  const states = ids.map((id, index): CandidateState & { index: number } => {
+    const list = byBiz.get(id) ?? [];
+    let failed = 0;
+    for (const h of list) { if (!h.failed) break; failed++; }
+    const last = list[0]?.at ?? null;
+    return { id, index, last_attempt_at: last, failed_attempts: failed, stuck: failed >= STUCK_AFTER_FAILED_ATTEMPTS && last !== null && now.getTime() - last.getTime() < STUCK_RETRY_DAYS * DAY_MS };
+  });
+  states.sort((x, y) => (x.last_attempt_at?.getTime() ?? -Infinity) - (y.last_attempt_at?.getTime() ?? -Infinity) || x.index - y.index);
+  return states.map((st) => ({ id: st.id, last_attempt_at: st.last_attempt_at, failed_attempts: st.failed_attempts, stuck: st.stuck }));
+}
+
+/** Ids of every business the script should look at (canceled/unpaid), least recently attempted first (a manual run also tries a stuck business). */
+export async function listReleaseCandidates(): Promise<string[]> {
+  return (await listReleaseCandidateStates()).map((s) => s.id);
+}
+
+/** Alert (once per stuck episode: audit `billing.release_stuck`, and an error log line) that a business needs an operator. Never throws. */
+export async function flagStuckRelease(state: CandidateState, now: Date = new Date()): Promise<boolean> {
+  try {
+    const already = await prisma.auditEvent.findFirst({ where: { businessId: state.id, action: STUCK_ACTION, at: { gte: state.last_attempt_at ?? new Date(0) } }, select: { id: true } });
+    if (already) return false;
+    log.error('release.stuck', { business: state.id, failed_attempts: state.failed_attempts, action: `needs an operator: see the audit trail (${RELEASED_ACTION}) errors; retried in ${STUCK_RETRY_DAYS} days` });
+    await recordAudit({ actor_kind: 'system', business_id: state.id, action: STUCK_ACTION, target: `business:${state.id}`, meta: { failed_attempts: state.failed_attempts, last_attempt_at: state.last_attempt_at?.toISOString() ?? null, at: now.toISOString() } });
+    return true;
+  } catch (err) { log.warn('release.stuck_flag_failed', { err }); return false; }
 }

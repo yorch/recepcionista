@@ -4,7 +4,7 @@ import { auditActorOf, authenticate, authErrorResponse, requireBusinessAccess } 
 import { getBriefingAudio, getBriefingAudioMeta, getBriefingAudioSlice, getBusiness, recordAudit } from '@/lib/db';
 import { prisma } from '@/lib/db/client';
 import { rateLimit } from '@/lib/ratelimit';
-import { attachBriefingAudio, type BriefingAudioOutcome } from '@/lib/briefing';
+import { attachBriefingAudio, canReuseBriefingAudio, type BriefingAudioOutcome } from '@/lib/briefing';
 import type { Briefing } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -115,7 +115,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const since = new Date(Date.now() - 24 * 60 * 60_000);
     const spentToday = await prisma.auditEvent.count({ where: { businessId: business.id, action: 'briefing.audio_regenerated', at: { gte: since }, meta: { path: ['synthesized'], equals: true } } });
     const existing = await getBriefingAudioMeta(business.id, id);
-    const wouldReuse = existing !== null && existing.text_hash !== null;
+    const wouldReuse = canReuseBriefingAudio(existing, briefing.transcript, business); // the SAME predicate attachBriefingAudio applies: a clip it would re-synthesize counts toward the cap
     if (!wouldReuse && spentToday >= BRIEFING_AUDIO_DAILY_LIMIT) {
       return Response.json({ ok: false, error: 'Daily audio limit reached for this business. Try again tomorrow.', code: 'audio_daily_limit' }, { status: 429, headers: { 'retry-after': '3600' } });
     }

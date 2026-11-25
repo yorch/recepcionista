@@ -271,6 +271,9 @@ export interface SmsLog {
   status: 'queued' | 'sent' | 'failed' | 'mock' | 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent' | 'blocked_cap' | 'blocked_owner_unverified';
   /** Why this text was allowed, e.g. 'transactional_booking' | 'caller_initiated' | 'express_opt_in' | 'owner_alert'. */
   consent_basis?: string | null;
+  /** The E.164 that actually sent the text (null: unknown yet / not sent), and whether it was the tenant's own line, the shared sender or the Messaging Service pool. */
+  from_e164?: string | null;
+  sender_kind?: 'tenant' | 'shared' | 'service' | null;
   created_at: string;
 }
 

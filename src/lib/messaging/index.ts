@@ -134,7 +134,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
   // The country allow-list does not apply to the owner's verified number (proven by possession).
   let result: SendSmsResult;
   try {
-    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass, from: tenantSmsSender(business) });
+    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass, from: tenantSmsSender(business), messagingService: true });
   } catch (err) {
     await refund();
     throw err;
@@ -173,6 +173,8 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
       provider_id: result.id || null,
       status: mapStatus(result.status),
       consent_basis: decision.consent_basis,
+      // WHICH number sent it (inbound routing of a reply reads this; a Messaging Service text without a known sender is filled in by the status callback).
+      ...(smsDelivered(result.status) ? { from_e164: result.from ?? null, sender_kind: result.sender ?? null } : {}),
     }, { country });
   } catch (err) {
     if (!smsDelivered(result.status)) throw err; // nothing went out: an ordinary failure

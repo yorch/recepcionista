@@ -5,6 +5,7 @@
  */
 import { getBusiness, getBusinessByAgentId, getBusinessIdByElevenLabsPhoneNumberId, setBusinessLine, recordAudit, withLease } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
+import { forwardingSupported } from '@/lib/voice/line';
 import { configureNumberWebhooks, isMockPoolNumber, isPlatformNumber } from '@/lib/providers/twilio';
 import { deleteRemoteNumber, getRemoteNumber, importTwilioNumber, listRemoteNumbers, setNumberAgent, type PhoneDeps } from '@/lib/voice/elevenlabs-phone';
 import { logger } from '@/lib/log';
@@ -14,11 +15,13 @@ const log = logger('voice/tenant-line');
 
 export type TenantLineResult =
   | { ok: true; phone_number_id: string; adopted: boolean; imported: boolean; webhooks?: string; /** What was (or, in a dry run, would be) done. */ action: 'ok' | 'import' | 'bind' }
-  | { ok: false; code: 'not_applicable' | 'import_failed' | 'bind_failed' | 'conflict'; error: string; retryable: boolean };
+  | { ok: false; code: 'not_applicable' | 'import_failed' | 'bind_failed' | 'conflict' | 'would_change_behaviour'; error: string; retryable: boolean };
 
 export interface TenantLineDeps extends PhoneDeps {
   /** Dry run: report what would be done; no provider write, no database write. */
   dryRun?: boolean;
+  /** Test seam: lease renewal cadence (default ttl/3). */
+  leaseRenewMs?: number;
 }
 
 /** Can this business have an imported line at all (a real Twilio number, not a mock-pool or platform number, and a real agent)? */
@@ -31,6 +34,22 @@ export function lineApplicable(business: Pick<Business, 'phone' | 'agent_id'>, e
   return { ok: true, e164 };
 }
 
+/**
+ * THE guard every import path shares (ensureTenantLine itself, so provisioning, a provision re-run, the agent re-sync after a 404 and repair-numbers all obey it).
+ * Importing a number hands its Voice URL to ElevenLabs. A tenant that FORWARDS calls today (call_mode=forward) would silently stop being forwarded: the native line cannot
+ * dial a human unless NATIVE_TRANSFER=on and the business opted in. Never change a tenant's behaviour silently: the operator switches that tenant to AI / paused (or enables
+ * native transfer for it) and runs the repair again. A business that already owns an imported line is never blocked (nothing would change). Returns the reason, or null.
+ */
+export function lineImportBlockedReason(
+  business: Pick<Business, 'elevenlabs_phone_number_id' | 'call_mode' | 'native_transfer_enabled'> | null | undefined, env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (!business || business.elevenlabs_phone_number_id) return null;
+  if (business.call_mode === 'forward' && !forwardingSupported('native', env, business)) {
+    return 'would_change_behaviour: this business forwards calls (call_mode=forward) and the native AI line cannot forward them (NATIVE_TRANSFER off or not enabled for it); change its call mode or enable native transfer first, then repair it again';
+  }
+  return null;
+}
+
 const LINE_LEASE_MS = 90_000;
 
 /**
@@ -40,15 +59,20 @@ const LINE_LEASE_MS = 90_000;
  */
 export async function ensureTenantLine(business: Business, deps: TenantLineDeps = {}): Promise<TenantLineResult> {
   if (deps.dryRun === true) return ensureTenantLineUnlocked(business, deps);
-  const run = await withLease(`line:${business.id}`, LINE_LEASE_MS, () => ensureTenantLineUnlocked(business, deps));
+  // The lease is renewed every ttl/3 while this runs (db/locks withLease); `signal` fires if it is nevertheless lost, and then nothing destructive is done any more.
+  const run = await withLease(`line:${business.id}`, LINE_LEASE_MS, (_lease, signal) => ensureTenantLineUnlocked(business, deps, signal), { renewEveryMs: deps.leaseRenewMs });
   if (!run.acquired) return { ok: false, code: 'import_failed', error: 'another import of this line is already running; try again in a moment', retryable: true };
   return run.value;
 }
 
-async function ensureTenantLineUnlocked(business: Business, deps: TenantLineDeps): Promise<TenantLineResult> {
+async function ensureTenantLineUnlocked(business: Business, deps: TenantLineDeps, signal?: AbortSignal): Promise<TenantLineResult> {
   const env = deps.env ?? process.env;
   const app = lineApplicable(business, env);
   if (!app.ok) return { ok: false, code: 'not_applicable', error: app.why, retryable: false };
+  // The call mode is read AGAIN here (the caller's snapshot may be old): a tenant that switched to forwarding meanwhile is never imported.
+  const current = (await getBusiness(business.id)) ?? business;
+  const blocked = lineImportBlockedReason({ elevenlabs_phone_number_id: business.elevenlabs_phone_number_id ?? current.elevenlabs_phone_number_id, call_mode: current.call_mode, native_transfer_enabled: current.native_transfer_enabled }, env);
+  if (blocked) return { ok: false, code: 'would_change_behaviour', error: blocked, retryable: false };
   const agentId = business.agent_id as string;
   const dry = deps.dryRun === true;
   let phoneNumberId = business.elevenlabs_phone_number_id ?? null;
@@ -81,7 +105,7 @@ async function ensureTenantLineUnlocked(business: Business, deps: TenantLineDeps
     phoneNumberId = res.phone_number_id;
     adopted = res.adopted;
     imported = !res.adopted;
-    if (imported) await removeDuplicateImports(app.e164, phoneNumberId, deps);
+    if (imported) await removeDuplicateImports(app.e164, phoneNumberId, deps, signal);
     const saved = await setBusinessLine(business.id, { elevenlabs_phone_number_id: phoneNumberId });
     if (!saved.ok) {
       return { ok: false, code: saved.reason === 'in_use' ? 'conflict' : 'import_failed', error: saved.reason === 'in_use' ? 'that line already belongs to another business' : `could not store the line (${saved.reason})`, retryable: false };
@@ -105,14 +129,18 @@ async function ensureTenantLineUnlocked(business: Business, deps: TenantLineDeps
  * After a FRESH import: another import of the same E.164 that no business owns (and that is not the shared fallback line) is a leftover of a lost race or of a
  * lost answer; it holds the platform's Twilio token and is bound to nothing useful, so it is deleted. Best effort, never throws, never touches an owned id.
  */
-async function removeDuplicateImports(e164: string, keepId: string, deps: PhoneDeps): Promise<void> {
+async function removeDuplicateImports(e164: string, keepId: string, deps: PhoneDeps, signal?: AbortSignal): Promise<void> {
   try {
+    // A holder whose lease was lost may be racing a successor whose fresh import is not stored yet: it must not delete anything (review 23 A9).
+    if (signal?.aborted) { log.warn('line.duplicate_cleanup_skipped', { reason: 'lease lost' }); return; }
     const list = await listRemoteNumbers(deps);
     if (!list.ok) return;
     const shared = ((deps.env ?? process.env).ELEVENLABS_PHONE_NUMBER_ID ?? '').trim();
     for (const n of list.numbers) {
       if (n.phone_number !== e164 || n.phone_number_id === keepId || (shared && n.phone_number_id === shared)) continue;
       if ((await getBusinessIdByElevenLabsPhoneNumberId(n.phone_number_id)) !== null) continue;
+      // Checked again right before EACH delete: the listing and the ownership read above took time.
+      if (signal?.aborted) { log.warn('line.duplicate_cleanup_skipped', { reason: 'lease lost' }); return; }
       const del = await deleteRemoteNumber(n.phone_number_id, deps);
       log.warn('line.duplicate_import_removed', { kept: keepId, removed: n.phone_number_id, deleted: del.ok });
     }

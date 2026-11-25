@@ -14,7 +14,7 @@
 import { recordAudit } from '@/lib/db';
 import { logger } from '@/lib/log';
 import { compBusiness, planGrandfather } from '@/lib/billing/grandfather';
-import { DEFAULT_GRACE_DAYS, DEFAULT_NOTIFY_DAYS, listReleaseCandidates, processBusiness, type BusinessReport } from '@/lib/billing/release';
+import { DEFAULT_GRACE_DAYS, DEFAULT_NOTIFY_DAYS, flagStuckRelease, listReleaseCandidateStates, processBusiness, type BusinessReport, type CandidateState } from '@/lib/billing/release';
 import type { JobItem, JobReport, RunOptions } from './index';
 
 const log = logger('jobs.tenants');
@@ -61,8 +61,17 @@ export async function runTenantReleaseJob(opts: RunOptions & { graceDays?: numbe
   if (wantsApply && !apply) report.items.push({ outcome: 'refused_not_enabled', detail: { note: 'TENANT_RELEASE_JOB is not "on": reported as a dry run, nothing was sent or released' } });
   const counts: Record<string, number> = { candidates: 0, would_notify: 0, would_release: 0, waiting: 0, skipped: 0, notified: 0, released: 0, deferred: 0 };
   try {
-    const ids = opts.businessId ? [opts.businessId] : await listReleaseCandidates();
-    counts.candidates = ids.length;
+    // Least recently attempted first; a business that failed STUCK_AFTER_FAILED_ATTEMPTS times in a row needs an operator and sits out (flagged once) until its weekly retry,
+    // so one that can never succeed cannot starve the others.
+    const states: CandidateState[] = opts.businessId ? [{ id: opts.businessId, last_attempt_at: null, failed_attempts: 0, stuck: false }] : await listReleaseCandidateStates(now);
+    const ids = states.filter((st) => !st.stuck).map((st) => st.id);
+    counts.candidates = states.length;
+    counts.stuck = 0;
+    for (const st of states.filter((x) => x.stuck)) {
+      counts.stuck++;
+      if (apply) await flagStuckRelease(st, now);
+      report.items.push({ business_id: st.id, outcome: 'needs_operator', detail: { failed_attempts: st.failed_attempts, last_attempt_at: st.last_attempt_at?.toISOString() ?? null } });
+    }
     // The cap counts every business the run ACTED on (a provider call was attempted), whether or not it ended clean: a failing provider must not lift it.
     let acted = 0;
     let erroring = 0;
