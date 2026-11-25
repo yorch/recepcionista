@@ -9,7 +9,7 @@
  * (the owner's carrier voicemail) counts as unanswered; a caller who hung up while it rang gets nothing and costs nothing.
  * No tenant data is taken from the request: the call is found by its CallSid and the business comes from that row.
  */
-import { getBusiness, getCallBySid, updateCall } from '@/lib/db';
+import { getBusiness, getCallBySid, recordDialSeconds, updateCall } from '@/lib/db';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { classifyDial, meterForwardedCall, meterVoicemail, parseSeconds, voicemailAllowance } from '@/lib/voice/forward-metering';
 import { callerKey, isKnownCaller } from '@/lib/voice/caller-limits';
@@ -52,6 +52,7 @@ export async function POST(req: Request): Promise<Response> {
         ? { result: 'unanswered' as const, why: screen.declined ? 'owner declined the screening' : 'screening not accepted (no input / voicemail)' }
         : classifyDial(form);
       const secs = bridgedSeconds(parseSeconds(form.DialCallDuration), screen);
+      await recordDialSeconds(call.call_sid ?? callSid, secs).catch(() => undefined); // the post-call split of a transferred call may use it
       if (dial.result === 'answered') {
         await updateCall(call.id, { status: 'completed', ...(secs !== null ? { duration_sec: secs } : {}) });
         await meterForwardedCall(call.call_sid ?? callSid, business.id, secs);

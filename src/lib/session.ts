@@ -204,7 +204,9 @@ export async function resolvePrincipal(h: Headers, opts: { allowEnrollment?: boo
           sudoAt: session.sudo_at,
         };
       }
-      const memberships = await listMembershipsForUser(user.id);
+      // A business this session was signed out of (or whose membership was disabled / removed) never resolves again for THIS session.
+      const revoked = new Set(session.revoked_business_ids ?? []);
+      const memberships = (await listMembershipsForUser(user.id)).filter((m) => !revoked.has(m.business_id));
       const active = pickActiveMembership(memberships, session.active_business_id ?? null, user.business_id);
       if (active) {
         return {

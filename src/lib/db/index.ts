@@ -1287,6 +1287,8 @@ export interface RecordRefundInput {
   /** 'refunded' (default) once Stripe confirms; 'pending' while it is being processed. */
   status?: 'pending' | 'refunded';
   at?: Date;
+  /** A new pending attempt (the previous one failed, or none was made): drops the stored Stripe refund id of the earlier attempt. */
+  fresh_attempt?: boolean;
 }
 
 /**
@@ -1305,6 +1307,10 @@ export async function recordRefund(bookingId: ID, input: RecordRefundInput): Pro
     data: {
       refundStatus: status, refundAmountCents: input.amount_cents, ...(input.stripe_refund_id ? { stripeRefundId: input.stripe_refund_id.slice(0, 255) } : {}),
       refundedAt: status === 'refunded' ? at : null,
+      // The latest pending attempt: "check with Stripe" only treats it as never-sent once it has aged.
+      ...(status === 'pending' ? { refundRequestedAt: at } : {}),
+      // A NEW attempt (after a failure) must not inherit the id of the refund that failed: "check with Stripe" matches the booking's own refund by id first.
+      ...(status === 'pending' && !input.stripe_refund_id && input.fresh_attempt ? { stripeRefundId: null } : {}),
     },
   });
   if (res.count === 1) log.info('refund.recorded', { booking: bookingId, status, amount_cents: input.amount_cents });
@@ -1599,6 +1605,7 @@ export async function clearAll(): Promise<void> {
     await tx.calendarBusyBlock.deleteMany();
     await tx.calendarEventLink.deleteMany();
     await tx.calendarConnection.deleteMany();
+    await tx.ownerReply.deleteMany();
     await tx.ownerKbChange.deleteMany();
     await tx.smsLog.deleteMany();
     await tx.smsOptOut.deleteMany();

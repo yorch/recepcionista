@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { getKnowledgeBase, listAuditEvents, listKbChanges } from '@/lib/db';
+import { getKnowledgeBase, listAuditEvents, listKbChanges, prisma } from '@/lib/db';
 import { getLocale, getT } from '@/lib/i18n/server';
 import { formatPhoneDisplay } from '@/lib/i18n/core';
 import { hasRole } from '@/lib/session';
@@ -12,6 +12,8 @@ import { PageHeader } from '@/components/ui/page-header';
 import { KnowledgeEditor } from '@/components/dashboard/knowledge-editor';
 import { KbChanges } from '@/components/dashboard/kb-changes';
 import { publicKbChange } from '@/lib/voice/owner/view';
+import { OwnerReplies } from '@/components/dashboard/owner-replies';
+import { publicOwnerReply } from '@/lib/voice/owner/reply-view';
 import { ReadinessChecklist } from '@/components/knowledge/readiness-checklist';
 import { readinessOf } from '@/lib/kb/readiness';
 import { money } from '@/lib/format';
@@ -33,6 +35,7 @@ export default async function KnowledgePage() {
   const extracted = isOwner && kb ? (await listAuditEvents({ business_id: biz.id, action: 'knowledge.extracted', limit: 1 }))[0] : undefined;
   const meta = (extracted?.meta ?? {}) as { url?: unknown };
   const kbChanges = isOwner && kb ? await listKbChanges(biz.id, { limit: 10 }) : null;
+  const ownerReplies = isOwner && kb ? (await prisma.ownerReply.findMany({ where: { businessId: biz.id }, orderBy: { createdAt: 'desc' }, take: 10 })).map((r) => publicOwnerReply(r)) : null;
 
   return (
     <main className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
@@ -63,6 +66,11 @@ export default async function KnowledgePage() {
           {kbChanges ? (
             <div className="mt-6">
               <KbChanges businessId={biz.id} initial={{ items: kbChanges.items.map(publicKbChange), next_cursor: kbChanges.next_cursor }} nowMs={new Date().getTime()} />
+            </div>
+          ) : null}
+          {ownerReplies ? (
+            <div className="mt-6">
+              <OwnerReplies items={ownerReplies} nowMs={new Date().getTime()} locale={locale} t={t} />
             </div>
           ) : null}
         </div>

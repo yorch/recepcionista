@@ -51,6 +51,17 @@ export async function meterSms(businessId: string, segments = 1): Promise<void> 
   }
 }
 
+/**
+ * The provider ACCEPTED the text but writing the sms_log row failed. The text is out (and the plan counter was charged): callers that must not
+ * treat that as "not sent" (owner voice replies) catch this and carry the provider result on.
+ */
+export class SentNotLoggedError extends Error {
+  constructor(readonly result: SendSmsResult, readonly cause: unknown) {
+    super(`sms sent (${result.status}) but not logged: ${(cause as Error | undefined)?.message ?? 'unknown'}`);
+    this.name = 'SentNotLoggedError';
+  }
+}
+
 /** Status from the provider is already one of sent|mock|failed — pass it through. */
 export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutput> {
   const to = normalizePhone(input.to);
@@ -141,16 +152,23 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     if (!reservation) await meterSms(input.business_id, segments); // owner alerts: counted after the send
   }
 
-  const sms = await logSms({
-    business_id: input.business_id,
-    to_phone: to,
-    body: text,
-    kind: input.kind,
-    booking_id: input.booking_id ?? null,
-    provider_id: result.id || null,
-    status: mapStatus(result.status),
-    consent_basis: decision.consent_basis,
-  }, { country });
+  let sms: SmsLog;
+  try {
+    sms = await logSms({
+      business_id: input.business_id,
+      to_phone: to,
+      body: text,
+      kind: input.kind,
+      booking_id: input.booking_id ?? null,
+      provider_id: result.id || null,
+      status: mapStatus(result.status),
+      consent_basis: decision.consent_basis,
+    }, { country });
+  } catch (err) {
+    if (result.status === 'failed') throw err; // nothing went out: an ordinary failure
+    log.error('send.log_failed_after_send', { business: input.business_id, kind: input.kind, err });
+    throw new SentNotLoggedError(result, err);
+  }
 
   log.debug('send.logged', { sms: sms.id, status: sms.status });
   return { sms, result };

@@ -370,3 +370,85 @@ export async function listBusyBlocksInRange(
   });
   return rows.map(toBlock);
 }
+
+// ── events that could not be removed from a previous account ──────────────────────────────────────────────────
+
+export interface OrphanedEvent {
+  id: string;
+  /** Business-side facts only: what the booking was and when it started (never a customer's name, phone or address). */
+  service: string;
+  starts_at: string | null;
+  account_email: string;
+  reason: 'account_changed' | 'calendar_changed' | 'disconnected';
+  created_at: string;
+}
+
+export interface OrphanedEventInput {
+  booking_id: string | null;
+  google_event_id: string;
+  calendar_id: string;
+  account_email: string;
+  service: string;
+  starts_at: Date | null;
+  reason: 'account_changed' | 'calendar_changed' | 'disconnected';
+}
+
+/** Remember pushed events that could not be deleted. Idempotent per (business, account, calendar, event). Returns how many rows are new. */
+export async function recordOrphanedEvents(businessId: string, items: OrphanedEventInput[]): Promise<number> {
+  if (items.length === 0) return 0;
+  const res = await prisma.calendarOrphanedEvent.createMany({
+    data: items.map((i) => ({
+      businessId, bookingId: i.booking_id, googleEventId: i.google_event_id.slice(0, 200), calendarId: i.calendar_id.slice(0, 200),
+      accountEmail: i.account_email.toLowerCase().slice(0, 320), service: i.service.slice(0, 120), startsAt: i.starts_at, reason: i.reason,
+    })),
+    skipDuplicates: true,
+  });
+  return res.count;
+}
+
+export async function listOrphanedEvents(businessId: string, limit = 50): Promise<{ total: number; items: OrphanedEvent[] }> {
+  const [total, rows] = await Promise.all([
+    prisma.calendarOrphanedEvent.count({ where: { businessId } }),
+    prisma.calendarOrphanedEvent.findMany({ where: { businessId }, orderBy: [{ startsAt: 'asc' }, { id: 'asc' }], take: Math.min(Math.max(limit, 1), 200) }),
+  ]);
+  return {
+    total,
+    items: rows.map((r) => ({
+      id: r.id, service: r.service, starts_at: r.startsAt ? r.startsAt.toISOString() : null, account_email: r.accountEmail,
+      reason: r.reason as OrphanedEvent['reason'], created_at: r.createdAt.toISOString(),
+    })),
+  };
+}
+
+/** Dismiss (delete) the pending rows of ONE business: the named ids, or all of them. Returns how many were removed. */
+export async function dismissOrphanedEvents(businessId: string, ids?: string[]): Promise<number> {
+  const res = await prisma.calendarOrphanedEvent.deleteMany({ where: { businessId, ...(ids ? { id: { in: ids } } : {}) } });
+  return res.count;
+}
+
+/**
+ * Customer erasure / anonymisation: the event itself cannot be removed, but our record of it must not name what the booking was. The row stays
+ * as the reminder to delete the event by hand; its booking id and service are blanked. `bookingIds` null = every row whose booking is anonymised.
+ */
+export async function anonymizeOrphanedEvents(bookingIds: string[] | null, opts: { pageSize?: number } = {}): Promise<number> {
+  if (bookingIds !== null) {
+    if (bookingIds.length === 0) return 0;
+    return (await prisma.calendarOrphanedEvent.updateMany({ where: { bookingId: { in: bookingIds } }, data: { bookingId: null, service: '' } })).count;
+  }
+  // Sweep: walk every row that still names a booking, in id order with a cursor (so no row is skipped however many are linked to live
+  // bookings), and blank the ones whose booking is anonymised or gone. Bounded per call (MAX_PAGES x PAGE); the next sweep continues anyway,
+  // because blanked rows no longer match the filter.
+  const PAGE = opts.pageSize ?? 1000, MAX_PAGES = 50;
+  let after = '', total = 0;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const rows = await prisma.calendarOrphanedEvent.findMany({ where: { bookingId: { not: null }, id: { gt: after } }, orderBy: { id: 'asc' }, take: PAGE, select: { id: true, bookingId: true } });
+    if (rows.length === 0) break;
+    after = rows[rows.length - 1].id;
+    const refs = [...new Set(rows.map((r) => r.bookingId as string))];
+    const live = new Set((await prisma.booking.findMany({ where: { id: { in: refs }, anonymizedAt: null }, select: { id: true } })).map((r) => r.id));
+    const dead = refs.filter((id) => !live.has(id)); // anonymised OR the booking row is gone
+    if (dead.length) total += (await prisma.calendarOrphanedEvent.updateMany({ where: { id: { in: rows.map((r) => r.id) }, bookingId: { in: dead } }, data: { bookingId: null, service: '' } })).count;
+    if (rows.length < PAGE) break;
+  }
+  return total;
+}

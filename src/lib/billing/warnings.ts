@@ -95,7 +95,7 @@ const defaultDeps: Required<Omit<WarningDeps, 'now'>> = {
   ownerEmails: async (id) => (await listBusinessUsers(id)).filter((u) => u.role === 'owner' && !u.disabled_at).map((u) => u.email),
 };
 
-export interface WarningResult { kind: WarnKind; level: WarnLevel; outcome: 'sent' | 'already_sent' | 'deferred_quiet_hours' | 'failed' | 'skipped_not_due'; email: number; sms: boolean }
+export interface WarningResult { kind: WarnKind; level: WarnLevel; outcome: 'sent' | 'already_sent' | 'deferred_quiet_hours' | 'failed' | 'skipped_not_due' | 'error'; email: number; sms: boolean }
 
 /**
  * Send whatever warnings are due for one business (idempotent, safe to call on every usage write). Never throws.
@@ -138,6 +138,8 @@ export async function checkUsageWarnings(businessId: string, deps: WarningDeps =
     }
   } catch (err) {
     log.error('check_failed', { business: businessId, err });
+    // A visit that could not even read the business or its counters is NOT a clean visit: the job keeps the business on its retry list.
+    results.push({ kind: WARN_KINDS[0], level: 80, outcome: 'error', email: 0, sms: false });
   }
   return results;
 }

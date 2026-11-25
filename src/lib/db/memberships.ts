@@ -60,7 +60,7 @@ export class MembershipError extends Error {
  * another business. Pass a transaction client to make it part of the caller's unit of work.
  */
 export async function addMembership(
-  input: { user_id: string; business_id: string; role: MembershipRole }, db: DbClient = prisma,
+  input: { user_id: string; business_id: string; role: MembershipRole; /** The session that ACCEPTED the invitation: only its sign-out of this business is lifted. */ session_id?: string | null }, db: DbClient = prisma,
 ): Promise<{ membership: Membership; created: boolean }> {
   if (!ROLES.includes(input.role)) throw new MembershipError('invalid role', 'invalid_role');
   const user = await db.user.findUnique({ where: { id: input.user_id }, select: { role: true } });
@@ -73,6 +73,13 @@ export async function addMembership(
       update: { role: input.role, disabledAt: null },
       create: { userId: input.user_id, businessId: input.business_id, role: input.role },
     });
+    // A fresh grant lifts an earlier sign-out of this business ONLY for the session that accepted it (it proved the mailbox and is signed in as the
+    // invited account right now). The person's other sessions (a stolen laptop that was signed out of this business) stay revoked until a NEW login.
+    if (input.session_id) {
+      await db.$executeRaw`
+        UPDATE "user_sessions" SET "revoked_business_ids" = array_remove("revoked_business_ids", ${input.business_id})
+         WHERE "id" = ${input.session_id} AND "user_id" = ${input.user_id} AND ${input.business_id} = ANY("revoked_business_ids")`;
+    }
     return { membership: toMembership(row), created: !exists };
   } catch (err) {
     if ((err as { code?: string })?.code === 'P2003') throw new MembershipError('business not found', 'business_not_found');
@@ -129,7 +136,10 @@ export async function disableMembership(userId: string, businessId: string, disa
     if (disabled === (m.disabledAt !== null)) return { ok: true, membership: toMembership(m), changed: false };
     if (disabled && (await wouldLeaveNoOwner(tx, m))) return { ok: false, reason: 'last_owner' };
     const row = await tx.membership.update({ where: { id: m.id }, data: { disabledAt: disabled ? now : null } });
-    if (disabled) await tx.userSession.updateMany({ where: { userId, activeBusinessId: businessId }, data: { activeBusinessId: null } });
+    if (disabled) {
+      await tx.userSession.updateMany({ where: { userId, activeBusinessId: businessId }, data: { activeBusinessId: null } });
+      await revokeBusinessForSessions(tx, { userId }, businessId); // re-enabling later must not revive a session that already lost this business
+    }
     return { ok: true, membership: toMembership(row), changed: true };
   });
 }
@@ -158,6 +168,7 @@ export async function removeMembership(
     }
     await tx.membership.delete({ where: { id: m.id } });
     await tx.userSession.updateMany({ where: { userId, activeBusinessId: businessId }, data: { activeBusinessId: null } });
+    await revokeBusinessForSessions(tx, { userId }, businessId);
     const u = await tx.user.findUnique({ where: { id: userId }, select: { businessId: true } });
     if (u?.businessId === businessId) {
       const next = others.find((o) => o.disabledAt === null) ?? others[0];
@@ -165,6 +176,18 @@ export async function removeMembership(
     }
     return { ok: true as const, account_deleted: false };
   });
+}
+
+/**
+ * Add `businessId` to the per-session revoked list of the user's sessions (idempotent; one UPDATE). A session on that list cannot resolve to
+ * that business or switch to it, even if the membership is enabled again later: only a NEW login (a new session) clears it. `except` keeps one
+ * session (the caller's own) out of it. Returns how many sessions were changed.
+ */
+export async function revokeBusinessForSessions(db: DbClient, who: { userId: string; exceptSessionId?: string }, businessId: string): Promise<number> {
+  return db.$executeRaw`
+    UPDATE "user_sessions" SET "revoked_business_ids" = array_append(COALESCE("revoked_business_ids", ARRAY[]::text[]), ${businessId})
+     WHERE "user_id" = ${who.userId} AND "kind" = 'user' AND NOT (${businessId} = ANY(COALESCE("revoked_business_ids", ARRAY[]::text[])))
+       AND (${who.exceptSessionId ?? null}::text IS NULL OR "id" <> ${who.exceptSessionId ?? null}::text)`;
 }
 
 export const enableMembership = (userId: string, businessId: string): Promise<MembershipChange> => disableMembership(userId, businessId, false);
@@ -197,6 +220,7 @@ export async function setSessionActiveBusiness(sessionId: string, businessId: st
   const n = await db.$executeRaw`
     UPDATE "user_sessions" s SET "active_business_id" = ${businessId}
      WHERE s."id" = ${sessionId} AND s."kind" = 'user'
+       AND NOT (${businessId} = ANY(COALESCE(s."revoked_business_ids", ARRAY[]::text[])))
        AND EXISTS (SELECT 1 FROM "memberships" m JOIN "users" u ON u."id" = m."user_id"
                     WHERE m."user_id" = s."user_id" AND m."business_id" = ${businessId}
                       AND m."disabled_at" IS NULL AND u."disabled_at" IS NULL)`;
@@ -224,7 +248,7 @@ export async function resolveActiveMembership(
  * Nothing is consumed on a mismatch (the whole thing is one transaction).
  */
 export async function acceptInviteForExistingUser(
-  token: string, userId: string, now: Date = new Date(),
+  token: string, userId: string, now: Date = new Date(), sessionId: string | null = null,
 ): Promise<{ membership: Membership; created: boolean; invite: EmailToken } | null> {
   try {
     return await prisma.$transaction(async (tx) => {
@@ -233,7 +257,7 @@ export async function acceptInviteForExistingUser(
       const invite = await consumeEmailToken('invite', token, now, tx);
       if (!invite || !invite.business_id || (invite.role !== 'owner' && invite.role !== 'staff')) throw new Rollback();
       if (normalizeEmail(user.email) !== normalizeEmail(invite.email)) throw new Rollback();
-      const r = await addMembership({ user_id: userId, business_id: invite.business_id, role: invite.role }, tx);
+      const r = await addMembership({ user_id: userId, business_id: invite.business_id, role: invite.role, session_id: sessionId }, tx);
       return { ...r, invite };
     });
   } catch (err) {

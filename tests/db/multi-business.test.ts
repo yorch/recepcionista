@@ -185,7 +185,10 @@ suite('multi-business accounts (postgres)', () => {
     expect(list.find((u: any) => u.id === ids.multi).disabled_at).not.toBeNull();
     const on = await m.userRoute.PATCH(req(`/api/team/users/${ids.multi}`, { method: 'PATCH', json: { disabled: false }, headers: { cookie: ownerB } }), ctx(ids.multi));
     expect(on.status).toBe(200);
-    expect((await switchTo(cookie, B)).status).toBe(200);
+    // residual L5: re-enabling the membership does NOT revive a session that already lost B; a new sign-in does
+    expect((await switchTo(cookie, B)).status).toBe(404);
+    const fresh = await signIn('multi');
+    expect((await switchTo(fresh, B)).status).toBe(200);
     // an account disabled in its ONLY business cannot sign in at all (and says nothing about why)
     await db.disableMembership(ids.solo, C);
     await clearLimiter(db, ['auth/login']);
@@ -449,5 +452,71 @@ suite('multi-business accounts (postgres)', () => {
     expect(adm.status).toBe(200);
     expect(await activeOf(inB)).toBeNull();
     expect(await activeOf(again)).toBeNull();
+  });
+  test('residual L5: "sign out of this business" is real: the person\'s other sessions can no longer act in or switch back to it until they sign in again', async () => {
+    const inA = await signIn('multi');
+    const inB = await signIn('multi');
+    expect((await switchTo(inB, B)).status).toBe(200);
+    const ownerA = await signIn('ownerA');
+    expect((await m.revoke.POST(req(`/api/team/users/${ids.multi}/revoke-sessions`, { method: 'POST', headers: { cookie: ownerA } }), ctx(ids.multi))).status).toBe(200);
+    expect(await activeOf(inA)).toBeNull(); // the session working in A is gone
+    const row = await activeOf(inB);
+    expect(row.revokedBusinessIds).toEqual([A]); // the one in B survives, marked
+    expect((await switchTo(inB, A)).status).toBe(404);
+    expect(await meOf(inB)).toMatchObject({ business_id: B });
+    expect((await matrix[4][1](inB, A)).status).toBe(404);
+    // falling back to "the primary" must not land in A either
+    await db.setSessionActiveBusiness(row.id, null);
+    expect(await meOf(inB)).toMatchObject({ business_id: B });
+    // the marker is idempotent (a second sign-out does not duplicate it) ...
+    expect((await switchTo(inB, B)).status).toBe(200);
+    await m.revoke.POST(req(`/api/team/users/${ids.multi}/revoke-sessions`, { method: 'POST', headers: { cookie: ownerA } }), ctx(ids.multi));
+    expect((await activeOf(inB)).revokedBusinessIds).toEqual([A]);
+    // ... and signing in again is the way back
+    const again = await signIn('multi');
+    expect((await switchTo(again, A)).status).toBe(200);
+    expect((await activeOf(again)).revokedBusinessIds ?? []).toEqual([]);
+    // an owner of ANOTHER business has no say over A: B's owner cannot sign the person out of A
+    const ownerB = await signIn('ownerB');
+    const foreign = await m.revoke.POST(req(`/api/team/users/${ids.multi}/revoke-sessions?business_id=${A}`, { method: 'POST', headers: { cookie: ownerB } }), ctx(ids.multi));
+    expect([403, 404]).toContain(foreign.status);
+    expect((await activeOf(again)).revokedBusinessIds ?? []).toEqual([]);
+  });
+
+  test('residual L5: a disabled or removed membership revokes the business for the account\'s other sessions; a fresh invitation lifts it only for the accepting session', async () => {
+    const extra = `biz_mx_${run}`;
+    extraBiz.push(extra);
+    await db.prisma.business.create({ data: { id: extra, name: 'Extra', status: 'live' } });
+    ids.visitor = (await db.createUser({ email: email('visitor'), password_hash: await pw.hashPassword(PASSWORD), role: 'staff', business_id: A, email_verified: true })).id;
+    await db.addMembership({ user_id: ids.visitor, business_id: extra, role: 'staff' });
+    const s1 = await signIn('visitor');
+    expect((await switchTo(s1, extra)).status).toBe(200);
+    expect((await switchTo(s1, A)).status).toBe(200);
+    const s2 = await signIn('visitor'); // a second session, still on its primary (A)
+    // the membership in `extra` is disabled and re-enabled: BOTH sessions lost it for good
+    await db.disableMembership(ids.visitor, extra);
+    await db.enableMembership(ids.visitor, extra);
+    expect((await switchTo(s1, extra)).status).toBe(404);
+    expect((await switchTo(s2, extra)).status).toBe(404);
+    expect((await activeOf(s2)).revokedBusinessIds).toEqual([extra]);
+    // a new sign-in works
+    expect((await switchTo(await signIn('visitor'), extra)).status).toBe(200);
+    // removal (the person keeps the account: they belong to A as well)
+    expect((await db.removeMembership(ids.visitor, extra)).ok).toBe(true);
+    // report 17 M3: invited again and accepted. Only the session that ACCEPTED lifts its own sign-out; the person's other sessions (a stolen
+    // laptop that was signed out of this business) stay revoked until a new login.
+    const accepting = await db.prisma.userSession.findFirst({ where: { userId: ids.visitor }, orderBy: { createdAt: 'desc' } }); // the sign-in made just above
+    await db.prisma.userSession.update({ where: { id: accepting!.id }, data: { revokedBusinessIds: [extra] } });
+    await db.addMembership({ user_id: ids.visitor, business_id: extra, role: 'staff', session_id: accepting!.id });
+    expect((await db.prisma.userSession.findUnique({ where: { id: accepting!.id } }))!.revokedBusinessIds).toEqual([]); // the accepting session
+    expect((await switchTo(s1, extra)).status).toBe(404); // the old sessions stay revoked: a fresh grant is not their consent
+    expect((await switchTo(s2, extra)).status).toBe(404);
+    expect((await activeOf(s1)).revokedBusinessIds).toContain(extra);
+    // without a session (an admin-side grant) nothing is lifted anywhere
+    await db.removeMembership(ids.visitor, extra);
+    await db.addMembership({ user_id: ids.visitor, business_id: extra, role: 'staff' });
+    expect((await activeOf(s1)).revokedBusinessIds).toContain(extra);
+    await db.removeMembership(ids.visitor, extra);
+    expect((await activeOf(s1)).revokedBusinessIds).toContain(extra);
   });
 });

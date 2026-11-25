@@ -342,7 +342,7 @@ Integration gaps found and fixed in the integration pass (each with a test):
 ## Review 14 (`docs/review/11-adv-calendar-owner.md`, `12-adv-voice-platform.md`, `13-adv-identity-money.md`, `14-adv-verticals-i18n-data.md`)
 
 Every finding was either fixed with a regression test or recorded as a residual (see the "Resolution" section at the end of each report; the
-residuals are collected under "Review 14 residuals" in `docs/known-limitations.md`). One hand-written migration,
+residuals are collected in `docs/known-limitations.md`, "Residuals of reviews 11-15"). One hand-written migration,
 `20261203120000_review14_provider_deletions_consent_lock_metering` (re-runnable, row locks only, zero drift proven with
 `prisma migrate diff --from-migrations ... --shadow-database-url ... --exit-code`, and exercised on a populated old-schema database in
 `tests/db/migration.test.ts`): `pending_recording_deletions.provider` (+ provider-aware shape CHECK), the transcript consent guard taking
@@ -370,4 +370,40 @@ One hand-written migration, `20261204120000_review15_metered_at_backfill_repair`
 | Payments L2 | a new Payment Link deactivates the previous one; no link for a cancelled booking; a link that raced a cancel is deactivated | `tests/integration/phase2.test.ts` |
 | Voice L4, L6 | an automatically recreated agent gets the phone binding and post-call webhook; shorter Spanish owner confirmation | `tests/integration/review14-data.test.ts`, `tests/review14-pure.test.ts` |
 | Identity L5 | documented: the button is "Sign out of this business"; disable the membership to block access | `docs/auth.md`, `docs/known-limitations.md` |
+| Owner voice reply | new: list recent leads, draft a reply with enforced read-back, YES / NO code by SMS from the verified owner phone (per-reply HMAC code, atomic single use, 30 minute expiry, no undo), recipient re-derived server-side from this business's call / booking, full outbound policy (opt-out, quiet hours refuse, plan cap, STOP footer), message scanner (no links / numbers / codes / payment / injection), daily, per-call, per-customer limits, retention + erasure of `owner_replies`, dashboard list | `tests/owner-reply-pure.test.ts`, `tests/integration/owner-reply.test.ts` |
 
+
+## Residual gaps of reviews 11-15 (`docs/known-limitations.md`, "Residuals of reviews 11-15")
+
+One hand-written migration, `20261206120000_residual_gaps` (additive, re-runnable `IF NOT EXISTS` / guarded, zero drift proven with `prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url <own shadow db> --exit-code`, and exercised on a populated old-schema database in `tests/db/migration.test.ts`): table `calendar_orphaned_events`, columns `calls.dial_seconds`, `calls.forward_pending_secs`, `bookings.refund_requested_at`, `user_sessions.revoked_business_ids`. New env var: `REFUND_RECONCILE_AFTER_HOURS` (default 6). Items that cannot be fixed on our side (ElevenLabs backups / logs, how the live Google, Stripe and Twilio behave) stay documented as UNVERIFIED / provider limits.
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| Owner call-in spoofed caller id (11 L4, 12 L6) | sessions (10 a day), confirmation texts (6 an hour) and the attack lockout are kept per identity class (`verified` = STIR attestation A, `unverified` = everything else) via `ownerTrustOf` / `ownerBudgetId` (`owner/config.ts`, `owner/session.ts`, 5 call sites in `owner/tools.ts`); the verdict is stored on the call row before the first budget check; no owner PIN (documented why) | `tests/integration/owner-callin.test.ts` "residual L4", `tests/residual-pure.test.ts` |
+| Different Google account with dead tokens (11 M1) | events that could not be deleted are recorded in `calendar_orphaned_events` (service + start time, account, calendar; no customer data, no tokens), listed on the Google card with a dismiss button (`DELETE /api/integrations/google/orphans`, owner, audited), also for "disconnect + remove events"; customer erasure blanks the row's booking id and service | `tests/integration/google-calendar.test.ts` "residual M1" |
+| Pre-upgrade owner proposals (11 M2) | `applyKbChange` refuses (and rejects) a proposal whose `base` lacks any field its patch touches; new proposals always carry one | `tests/integration/owner-callin.test.ts` "residual M2" |
+| Transferred call metering (12 L2, 15 L3) | `splitTransferSeconds`: transfer turn time, else `DialCallDuration` / `CallDuration` from a dial-status or voicemail callback (`calls.dial_seconds`), else the last timed turn before the transfer, else whole call forward; AI + forward always equal the duration. The forward part is marked (`forward_pending_secs`) before anything is written and finished by the `reconcile` job (`settlePendingForwards`), deduplicated per call sid | `tests/integration/telephony-phase2.test.ts` "residual L2 / L3", `tests/residual-pure.test.ts` |
+| Usage-warning job scale (14 L6) | visits only businesses whose usage counter changed since the previous pass (2 min overlap) plus a durable retry list (deferred / failed), full sweep on the first pass and daily; warnings still exactly-once | `tests/integration/residual-gaps.test.ts` |
+| Vertical change call script (14 M2) | the `agent-dirty` retry rebuilds the generated call script (`rebuildGeneratedCallScript`); an edited script is never touched | `tests/integration/residual-gaps.test.ts` |
+| Refund pending forever (13 H2) | `POST /api/bookings/:id/refund/check` ("Check with Stripe", owner, step-up) and the `reconcile` job after `REFUND_RECONCILE_AFTER_HOURS`: lists the payment's refunds in Stripe and adopts the refund found or marks the attempt failed (only when none exists and it is 30 minutes old), never creates one; audited (`booking.refund_checked`, `booking.refund_failed`) | `tests/integration/phase2.test.ts` "residual H2", `tests/residual-pure.test.ts` |
+| Old payment links (13 L1) | on cancel with no stored link id the booking's links are found in Stripe by `booking_id` metadata (paged, bounded) and deactivated, audited with `via: stripe_lookup` | `tests/integration/phase2.test.ts` "residual L1" |
+| Revoked sessions (15 L5) | `user_sessions.revoked_business_ids`: "Sign out of this business", disabling and removing a membership mark the person's other sessions; those cannot resolve to or switch to the business until a new login (or an accepted invitation) | `tests/db/multi-business.test.ts` "residual L5" |
+
+
+## Reviews 16 and 17 (`docs/review/16-adv-voice-reply.md`, `docs/review/17-adv-residual-fixes.md`)
+
+One hand-written migration, `20261207120000_review16_fixes` (additive, re-runnable guarded blocks: the `owner_replies` status CHECKs gain `uncertain`, `calls.forward_pending_key`). Zero drift proven with `prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url <own shadow> --exit-code`, and a populated old-schema upgrade test.
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| 16 H1 lead enumeration | per identity class: distinct leads disclosed per day capped (10 unverified / 30 verified, atomic under an advisory lock), `mark_lead_handled` needs a read-back, 3 per call and 5 / 30 per day, and an unverified mark hides only from unverified listings | `tests/integration/review16-owner-reply.test.ts` |
+| 16 M1 post-send errors | `SentNotLoggedError`: a failure after the provider accepted the text keeps the reply `sent` (sms_log re-tried best effort); a provider timeout and a stalled claim end `uncertain`; the duplicate guard and the daily cap count sent / sending / uncertain | same + `tests/db/review16-migration.test.ts` |
+| 16 M2 daily cap | cap, duplicate guard and the `proposed -> sending` claim are one transaction under `pg_advisory_xact_lock` | same ("eight racing YES texts") |
+| 16 L1 scanner | NFKC + Unicode digit folding, spelled digits, `/ . ( )` separators, vanity numbers, links in words, spaced / leetspeak brands, credential and wallet asks, non-Latin letters refused | `tests/owner-reply-pure.test.ts` |
+| 16 L2 spoof warning | `Not you? Reply NO <code>.`; a bare NO cancels all waiting drafts, a bare YES asks for the code | `tests/owner-reply-pure.test.ts`, `review16-owner-reply.test.ts` |
+| 16 L3 stuck rows / erasure | stale `sending` swept to `uncertain` by the reconcile job and shown as unknown on the dashboard; the lead-handled marker is a keyed HMAC and erasure deletes it | `review16-owner-reply.test.ts` |
+| 17 H1, M2 refund recovery | the booking's stored Stripe refund id is matched first (dashboard refunds), a live foreign refund blocks "never reached Stripe" (409 `foreign_refund`), an older failed attempt does not count as the current one, clicking Refund on a pending refund this app did not make is refused | `tests/integration/phase2.test.ts` |
+| 17 M3 sessions | accepting an invitation lifts the sign-out only for the accepting session | `tests/db/multi-business.test.ts` |
+| 17 M4 payment links on cancel | no Stripe call unless a link was attempted; queued, background, short timeouts, tenant scoped, retried by the reconcile job | `tests/integration/phase2.test.ts` |
+| 17 M5 reconcile metering | a transferred call is split with `splitTransferSeconds`; the forwarded leg goes through the per-sid forward metering | `tests/integration/telephony-phase2.test.ts` |
+| 17 L6-L8 | stuck-refund pass ordered by last check; a usage-warning check error keeps the retry marker; changed-since list ordered with a cursor; orphan sweep with a cursor and retention coverage; call-script rebuild is a compare-and-swap and recognises older generated scripts; pending-forward key stored | `phase2.test.ts`, `residual-gaps.test.ts`, `telephony-phase2.test.ts` |

@@ -152,7 +152,11 @@ export async function applyKbChange(businessId: string, id: string, now: Date = 
     const biz = hasBusinessFields(patch) ? await lockBusiness(tx, businessId) : {};
     const base = (change.base ?? null) as PatchValues | null;
     const current: PatchValues = { ...kb, ...biz };
-    if (base && Object.keys(base).some((k) => !kbValuesEqual(current[k], base[k]))) {
+    // A proposal stored before the base was recorded for every touched field (pre-upgrade rows: `base` null or only hours / closures /
+    // area) cannot be verified, so it is refused like a stale one instead of overwriting whole lists blind. New proposals always carry
+    // a base entry for each field they touch (proposeKbChange), so this never refuses them.
+    const unverifiable = baseKeysOf(patch).some((k) => !base || !Object.prototype.hasOwnProperty.call(base, k));
+    if (unverifiable || (base && Object.keys(base).some((k) => !kbValuesEqual(current[k], base[k])))) {
       // A field this change touches (services / faqs / notes / hours / closures / area) was edited after it was proposed: applying a
       // whole-list patch would silently undo that edit.
       await tx.ownerKbChange.update({ where: { id }, data: { status: 'rejected', appliedAt: null } });

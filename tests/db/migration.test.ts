@@ -520,6 +520,63 @@ suite('migrations (postgres)', () => {
     }
   }, 300_000);
 
+  test('residual-gaps migration on a populated old-schema database: existing rows survive with NULL defaults, the orphan table works and is constrained, re-runnable, zero drift', async () => {
+    const RES = '20261206120000_residual_gaps';
+    const name = await newDb('residual');
+    const before = historyUpTo('before-residual', dirs().filter((d) => d < RES).at(-1)!);
+    expect(prisma(['migrate', 'deploy'], dbUrl(name), before).code).toBe(0);
+    const c = client(name);
+    try {
+      const one = async (sql: string) => (await c.$queryRawUnsafe(sql)) as any[];
+      // Old-schema data: a business with a call in flight, a pending refund, a user with a session and a Google connection with a pushed event.
+      for (const q of [
+        `INSERT INTO businesses(id,name,status) VALUES ('rb1','Old A','live'), ('rb2','Old B','live')`,
+        `INSERT INTO calls(id,business_id,status,started_at,call_sid,conversation_id,transfer_status) VALUES ('rc1','rb1','completed', now() - interval '1 day', 'CAold1', 'convold1', 'connected')`,
+        `INSERT INTO bookings(id,business_id,customer_name,customer_phone,service,scheduled_at,status,deposit_paid,deposit_amount,refund_status,refund_amount_cents,stripe_payment_intent_id)
+           VALUES ('rk1','rb1','Ana','+13055550100','AC repair', now() + interval '2 days','cancelled', true, 5000, 'pending', 5000, 'pi_old1')`,
+        `INSERT INTO users(id,email,password_hash,role,business_id) VALUES ('ru1','old@example.test','x','owner','rb1')`,
+        `INSERT INTO user_sessions(id,user_id,kind,token_hash,expires_at,active_business_id) VALUES ('rs1','ru1','user','hash-old-1', now() + interval '1 day','rb1')`,
+        `INSERT INTO calendar_connections(id,business_id,account_email,status,access_token_enc,refresh_token_enc) VALUES ('rcc1','rb1','old@example.test','active','x','y')`,
+        `INSERT INTO calendar_event_links(id,booking_id,connection_id,google_event_id) VALUES ('rl1','rk1','rcc1','gev1')`,
+      ]) await c.$executeRawUnsafe(q);
+      const r = prisma(['migrate', 'deploy'], dbUrl(name));
+      expect(r.out).toContain(RES);
+      expect(r.code).toBe(0);
+      // everything that existed is untouched, the new columns are NULL (= "nothing recorded"), the session keeps working
+      expect(await one(`SELECT dial_seconds, forward_pending_secs, transfer_status FROM calls WHERE id = 'rc1'`)).toEqual([{ dial_seconds: null, forward_pending_secs: null, transfer_status: 'connected' }]);
+      expect(await one(`SELECT refund_status, refund_amount_cents, refund_requested_at FROM bookings WHERE id = 'rk1'`)).toEqual([{ refund_status: 'pending', refund_amount_cents: 5000, refund_requested_at: null }]);
+      expect(await one(`SELECT revoked_business_ids, active_business_id FROM user_sessions WHERE id = 'rs1'`)).toEqual([{ revoked_business_ids: [], active_business_id: 'rb1' }]);
+      expect(await one(`SELECT count(*)::int AS n FROM calendar_event_links`)).toEqual([{ n: 1 }]);
+      // an empty revoked list can be appended to (what revokeBusinessForSessions does) and the guard against duplicates holds
+      const mark = `UPDATE user_sessions SET revoked_business_ids = array_append(COALESCE(revoked_business_ids, ARRAY[]::text[]), 'rb2') WHERE user_id = 'ru1' AND NOT ('rb2' = ANY(COALESCE(revoked_business_ids, ARRAY[]::text[])))`;
+      expect(await c.$executeRawUnsafe(mark)).toBe(1);
+      expect(await c.$executeRawUnsafe(mark)).toBe(0);
+      expect(await one(`SELECT revoked_business_ids FROM user_sessions WHERE id = 'rs1'`)).toEqual([{ revoked_business_ids: ['rb2'] }]);
+      // the orphan table: unique per event, reason constrained, cascades with the business, no FK to bookings (an erased booking leaves the row)
+      await c.$executeRawUnsafe(`INSERT INTO calendar_orphaned_events(id,business_id,booking_id,google_event_id,calendar_id,account_email,service,starts_at) VALUES ('ro1','rb1','rk1','gev1','primary','old@example.test','AC repair', now())`);
+      let msg = '';
+      try { await c.$executeRawUnsafe(`INSERT INTO calendar_orphaned_events(id,business_id,google_event_id,calendar_id,account_email) VALUES ('ro2','rb1','gev1','primary','old@example.test')`); } catch (e) { msg = String((e as Error).message); }
+      expect(msg).toContain('already exists');
+      msg = '';
+      try { await c.$executeRawUnsafe(`INSERT INTO calendar_orphaned_events(id,business_id,google_event_id,calendar_id,account_email,reason) VALUES ('ro3','rb1','gev9','primary','a@b.c','bogus')`); } catch (e) { msg = String((e as Error).message); }
+      expect(msg).toContain('calendar_orphaned_events_reason_check');
+      await c.$executeRawUnsafe(`DELETE FROM bookings WHERE id = 'rk1'`);
+      expect(await one(`SELECT count(*)::int AS n FROM calendar_orphaned_events WHERE business_id = 'rb1'`)).toEqual([{ n: 1 }]);
+      await c.$executeRawUnsafe(`DELETE FROM businesses WHERE id = 'rb1'`);
+      expect(await one(`SELECT count(*)::int AS n FROM calendar_orphaned_events`)).toEqual([{ n: 0 }]);
+      // re-runnable: applying the file again changes nothing and fails nowhere
+      const rerun = rawPrisma(['db', 'execute', '--file', path.join(MIGRATIONS, RES, 'migration.sql'), '--schema', path.join(ROOT, 'prisma/schema.prisma')], dbUrl(name));
+      expect(rerun.out).toContain('Script executed successfully');
+      expect(await one(`SELECT count(*)::int AS n FROM calendar_orphaned_events`)).toEqual([{ n: 0 }]);
+      // zero drift: this database against schema.prisma, and the whole history against a shadow database
+      expect(rawPrisma(['migrate', 'diff', '--from-url', dbUrl(name), '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--exit-code'], dbUrl(name)).code).toBe(0);
+      const shadow = await newDb('residual_shadow');
+      expect(rawPrisma(['migrate', 'diff', '--from-migrations', MIGRATIONS, '--to-schema-datamodel', path.join(ROOT, 'prisma/schema.prisma'), '--shadow-database-url', dbUrl(shadow), '--exit-code'], dbUrl(shadow)).code).toBe(0);
+    } finally {
+      await c.$disconnect();
+    }
+  }, 300_000);
+
   test('phase 1 validation step names the violating constraint', async () => {
     const PHASE1 = '20261201120000_phase1_calendar_kb_transcript_passkeys_memberships';
     const name = await newDb('phase1val');

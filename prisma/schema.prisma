@@ -98,7 +98,9 @@ model Business {
   activeSessions      UserSession[]
   calendarConnections CalendarConnection[]
   calendarBusyBlocks  CalendarBusyBlock[]
+  calendarOrphans     CalendarOrphanedEvent[]
   ownerKbChanges      OwnerKbChange[]
+  ownerReplies        OwnerReply[]
 
   @@index([phoneKey])
   @@index([phoneE164])
@@ -162,11 +164,21 @@ model Call {
   meteredAt          DateTime? @map("metered_at") @db.Timestamptz(6)
   /// How many times the reconcile job tried to fetch this call's final data from the provider.
   reconcileAttempts  Int       @default(0) @map("reconcile_attempts")
+  /// Bridged seconds of the call's forwarded / transferred leg as REPORTED by a Twilio dial-status callback (DialCallDuration). Used to split a
+  /// transferred call into AI and forward seconds when the transcript has no timing; never billed from here.
+  dialSeconds        Int?      @map("dial_seconds")
+  /// Forward seconds of a transferred call that are still to be written to the usage counters (set before the AI part is recorded, cleared
+  /// once the forward part is recorded): the reconcile job finishes a forward write that failed, so those seconds are never lost.
+  forwardPendingSecs Int?      @map("forward_pending_secs")
+  /// The dedupe key (call sid, else conversation id) the forward seconds were / will be metered under: stored with forward_pending_secs so a later-filled call_sid cannot make the settle job meter them again under a new key.
+  forwardPendingKey  String?   @map("forward_pending_key")
 
   business         Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
   bookings         Booking[]
   transcriptEvents CallTranscriptEvent[]
   ownerKbChanges   OwnerKbChange[]
+  ownerReplies     OwnerReply[]          @relation("OwnerReplyOwnerCall")
+  leadReplies      OwnerReply[]          @relation("OwnerReplyLeadCall")
 
   @@index([businessId, startedAt])
   @@index([businessId, callerE164])
@@ -219,6 +231,9 @@ model Booking {
   refundAmountCents       Int?      @map("refund_amount_cents")
   stripeRefundId          String?   @map("stripe_refund_id")
   refundedAt              DateTime? @map("refunded_at") @db.Timestamptz(6)
+  /// When the CURRENT refund attempt was recorded as pending (NULL = never or before the column existed). The "check with Stripe" recovery
+  /// only treats a pending refund as never-sent once it is old enough.
+  refundRequestedAt       DateTime? @map("refund_requested_at") @db.Timestamptz(6)
   /// 'none' | 'open' | 'won' | 'lost' (CHECK in the migration); set from charge.dispute.* events.
   disputeStatus           String    @default("none") @map("dispute_status")
 
@@ -228,6 +243,7 @@ model Booking {
   rescheduledTo   Booking[]          @relation("BookingReschedule")
   smsLog          SmsLog[]
   calendarLink    CalendarEventLink?
+  leadReplies     OwnerReply[]       @relation("OwnerReplyLeadBooking")
 
   @@index([businessId, scheduledAt])
   @@index([businessId, phoneE164])
@@ -373,26 +389,29 @@ model User {
 }
 
 model UserSession {
-  id               String    @id @default(uuid())
+  id                 String    @id @default(uuid())
   /// NULL only for kind 'admin_token' (break-glass ADMIN_TOKEN login); CHECK constraint.
-  userId           String?   @map("user_id")
+  userId             String?   @map("user_id")
   /// 'user' | 'admin_token'
-  kind             String    @default("user")
+  kind               String    @default("user")
   /// sha256 hex of the raw token; the raw token is never stored.
-  tokenHash        String    @unique @map("token_hash")
-  expiresAt        DateTime  @map("expires_at")
-  createdAt        DateTime  @default(now()) @map("created_at")
-  lastUsedAt       DateTime  @default(now()) @map("last_used_at")
+  tokenHash          String    @unique @map("token_hash")
+  expiresAt          DateTime  @map("expires_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  lastUsedAt         DateTime  @default(now()) @map("last_used_at")
   /// Set when the second factor was satisfied for this session (NULL = password only / no MFA).
-  mfaVerifiedAt    DateTime? @map("mfa_verified_at") @db.Timestamptz(6)
+  mfaVerifiedAt      DateTime? @map("mfa_verified_at") @db.Timestamptz(6)
   /// Last time the holder proved who they are (set at login, and by POST /api/auth/reauth). Sensitive changes (call forwarding)
   /// need it within the last 5 minutes. NULL on rows from before the column existed = not recent.
-  sudoAt           DateTime? @map("sudo_at") @db.Timestamptz(6)
-  ip               String?
-  userAgent        String?   @map("user_agent")
+  sudoAt             DateTime? @map("sudo_at") @db.Timestamptz(6)
+  ip                 String?
+  userAgent          String?   @map("user_agent")
   /// The business this session is currently working in (multi-business accounts). NULL = the primary / only one.
   /// Set only through setSessionActiveBusiness, which verifies an active membership in the same statement.
-  activeBusinessId String?   @map("active_business_id")
+  activeBusinessId   String?   @map("active_business_id")
+  /// Businesses this session may no longer act in or switch to: the owner signed the person out of them, or the membership was disabled /
+  /// removed. Survives re-enabling the membership; only a NEW login (a new session) clears it.
+  revokedBusinessIds String[]  @default([]) @map("revoked_business_ids")
 
   user           User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
   activeBusiness Business? @relation(fields: [activeBusinessId], references: [id], onDelete: SetNull)
@@ -605,6 +624,32 @@ model CalendarEventLink {
   @@map("calendar_event_links")
 }
 
+/// A pushed booking event that could NOT be removed from a previous Google account / calendar (the old tokens were dead when the owner switched
+/// accounts or disconnected with "also remove events"). Tokens are never kept. Business-side facts only: the service and the start time of the
+/// booking, never the customer's name, phone or address. Customer erasure blanks `service` and `booking_id` (the row stays as the reminder to
+/// remove the event by hand). Shown on the Google card until the owner dismisses it.
+model CalendarOrphanedEvent {
+  id            String    @id @default(uuid())
+  businessId    String    @map("business_id")
+  /// The booking the event was pushed for (no FK: the booking may be erased).
+  bookingId     String?   @map("booking_id")
+  googleEventId String    @map("google_event_id")
+  calendarId    String    @map("calendar_id")
+  accountEmail  String    @map("account_email")
+  service       String    @default("")
+  startsAt      DateTime? @map("starts_at") @db.Timestamptz(6)
+  /// 'account_changed' | 'calendar_changed' | 'disconnected' (CHECK in the migration)
+  reason        String    @default("account_changed")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, accountEmail, calendarId, googleEventId])
+  @@index([businessId, createdAt])
+  @@index([bookingId])
+  @@map("calendar_orphaned_events")
+}
+
 /// Busy time mirrored from the business's Google Calendar. Times ONLY: titles, descriptions and attendees are never stored.
 model CalendarBusyBlock {
   id              String   @id @default(uuid())
@@ -654,6 +699,50 @@ model OwnerKbChange {
   @@index([businessId, createdAt])
   @@index([callId])
   @@map("owner_kb_changes")
+}
+
+/// A text to a CUSTOMER that the owner asked for on the private owner line ("owner voice reply"). Recorded when the owner confirms the read-back; sent
+/// only when the owner replies YES <code> by SMS from the verified phone. The recipient is derived server-side from the lead (a call or booking of
+/// THIS business), never from the model. Status 'sending' is the atomic claim that makes a code single-use. See docs/owner-call-in.md "Voice reply".
+model OwnerReply {
+  id            String    @id @default(uuid())
+  businessId    String    @map("business_id")
+  /// The OWNER call the reply was asked for on (SET NULL when the call row is purged).
+  callId        String?   @map("call_id")
+  /// 'call' | 'booking' (CHECK): which row the recipient was derived from.
+  leadKind      String    @map("lead_kind")
+  leadCallId    String?   @map("lead_call_id")
+  leadBookingId String?   @map("lead_booking_id")
+  /// Recipient, E.164, derived from the lead row. Erased with the customer (retention / erasure).
+  toE164        String    @map("to_e164")
+  /// First name only (letters), as read aloud; NULL when unknown.
+  toName        String?   @map("to_name")
+  /// What the owner approved, as typed by the assistant after the read-back (<= 160 chars, no links / numbers).
+  body          String
+  segments      Int       @default(1)
+  /// 'proposed' | 'sending' | 'sent' | 'uncertain' | 'cancelled' | 'expired' | 'refused' | 'failed' (CHECK). 'uncertain' = a send that may or may not have gone out (stalled claim, provider timeout): never retried.
+  status        String    @default("proposed")
+  /// Why a reply was 'refused' / 'failed' (opted_out, quiet_hours, no_consent, cap, daily_limit, customer_limit, lead_gone, ...).
+  refuseReason  String?   @map("refuse_reason")
+  /// 'verified' (STIR attestation A) | 'unverified': the budget class of the call that asked (see owner/config.ts ownerTrustOf).
+  ownerTrust    String    @default("unverified") @map("owner_trust")
+  smsLogId      String?   @map("sms_log_id")
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  decidedAt     DateTime? @map("decided_at") @db.Timestamptz(6)
+  sentAt        DateTime? @map("sent_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  business    Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  call        Call?    @relation("OwnerReplyOwnerCall", fields: [callId], references: [id], onDelete: SetNull)
+  leadCall    Call?    @relation("OwnerReplyLeadCall", fields: [leadCallId], references: [id], onDelete: SetNull)
+  leadBooking Booking? @relation("OwnerReplyLeadBooking", fields: [leadBookingId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+  @@index([businessId, toE164, createdAt])
+  @@index([callId])
+  @@index([leadCallId])
+  @@index([leadBookingId])
+  @@map("owner_replies")
 }
 
 /// Live transcript of a call, one row per utterance. Deleted with the call (cascade); never stored for calls whose consent is 'declined'.

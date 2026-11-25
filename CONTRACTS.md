@@ -136,6 +136,7 @@ owner Jorge `+13055550199`.
 | `POST /api/bookings/[id]/reschedule` | owner+, same-origin; `{scheduled_at (instant or local wall clock), duration_minutes?, notify?}` -> `{booking,changed,previous,notice}`; 409 `slot_taken`/not movable, 422 hours/past/invalid; audited `booking.rescheduled` |
 | `POST /api/bookings/[id]/notify` | owner+; text the customer about the latest cancel/move (when the automatic text was held back); 409 when already told |
 | `POST /api/bookings/[id]/refund` | owner+, step-up (403 `reauth_required`); `{amount_cents?, override?}` -> `{booking,amount_cents,status,replayed,override,partial,policy,notice}`; 422 `policy_ineligible` (needs `override:true`), 409 `already_refunded`/`no_payment_reference`/`in_progress`, 502 `provider_refused`/`outcome_unknown`; Stripe Idempotency-Key per booking+amount; audited |
+| `POST /api/bookings/[id]/refund/check` | owner+, step-up (403 `reauth_required`); "Check with Stripe" for a refund stuck `pending`: lists Stripe's refunds for the payment and -> `{result:'adopted_refunded'|'adopted_pending'|'marked_failed'|'unchanged', booking, refund_id}`; 409 `not_pending`/`too_early`(attempt under 30 min old)/`in_progress`/`no_payment_reference`, 502 `unavailable`; read only towards Stripe (never creates a refund); audited |
 | `GET/PUT /api/businesses/[id]/refund-policy` | GET staff+, PUT owner+; `{refund_policy:'none'|'full_24h'|'full_48h'|'full_always', refund_policy_text<=2000}`; audited |
 | `GET/PUT /api/businesses/[id]/voice`, `GET .../voice/preview?voice_id=` | owner+; GET `{available,voice_id,voice_name,voices[]}` (the allowlist); PUT `{voice_id|null}` (422 outside the allowlist, 503 without ElevenLabs) saves, audits and re-syncs the agent -> `{voice_id,voice_name,synced}`; preview streams the provider sample of an allowed voice |
 | `GET /api/calls/[id]/audio` | staff+, tenant scoped, rate limited; streams the call recording (Range, `no-store`) only when `consent_status='disclosed'`; 404 otherwise; 503 + `Retry-After` when the process already runs 4 provider downloads; audit `call.recording_played` once per person, call and 10 minutes for ANY successful range; never exposes the provider URL or key |
@@ -163,6 +164,20 @@ owner Jorge `+13055550199`.
 | `GET /api/billing/status` (field naming) | the 80% / 100% cap warnings are `usage_warnings: [{kind, level, percent, ...}]` (never `warnings`); also `billing_interval`, `annual_available` |
 | `POST /api/billing/checkout` (mock mode) | with `STRIPE_PRICE_ID_ANNUAL` set, `interval:'year'` is accepted in the non-production mock checkout too; the mock activation records `billing_interval` |
 | `POST /api/payments/webhook` (extended) | also `charge.dispute.updated / closed / funds_withdrawn / funds_reinstated`; sets `bookings.dispute_status` (`none\|open\|won\|lost`, monotonic) |
-| `GET /api/integrations/google/status` | `block_on_busy` now comes from `calendar_connections.block_on_busy` |
+| `GET /api/integrations/google/status` | `block_on_busy` now comes from `calendar_connections.block_on_busy`; `orphaned_events: {total, items[{id,service,starts_at,account_email,reason,created_at}]}` = pushed events that could not be removed from a previous account / calendar (no customer data) |
+| `DELETE /api/integrations/google/orphans` | owner; `{ids?: string[]}` (omitted = all) -> `{dismissed}`; deletes only this business's reminder rows, sends nothing to Google; audited `calendar.orphans_dismissed` |
 | `POST /api/voice/tools/propose_kb_change` (extended) | `change_type` adds `set_hours` (`days`, `open_time`, `close_time` or `closed`), `add_closed_dates` / `remove_closed_dates` (`dates` YYYY-MM-DD), `set_service_area` (`areas`); they change the REAL fields (`businesses.hours / closed_dates / service_area`) |
+
+## Owner voice reply (owner-line tools, SMS commands)
+
+No new HTTP route. Four more owner-line voice tools on `POST /api/voice/tools/[tool]` (all refused unless the call row is `kind = 'owner'`, see docs/owner-call-in.md; registered only while `OWNER_REPLY_ENABLED` is not `false`):
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_recent_leads` | none | `{ok, message, data:{stage:'leads', count}}`; `message` is up to five numbered structured lines (kind, first name, last 4 digits, time) and snapshots the numbers for this owner call; the distinct leads a caller-identity class may hear per day are capped (10 unverified / 30 verified), a spent budget answers `ok:false` |
+| `draft_reply` | `lead_ref` (the number from the list, "1".."5"), `message` (<= 120 chars, plain words), `confirmed` | `confirmed=false`: read-back (`data.stage = 'read_back'`); `confirmed=true` after the identical read-back: `data.stage = 'proposed'` and a code is texted to the owner; the customer is texted only by `YES <code>` |
+| `mark_lead_handled` | `lead_ref`, `confirmed` | `confirmed=false`: read-back (`data.stage = 'read_back'`); `confirmed=true` after it: hides that customer from later lists of the same identity class (3 per call, 5 / 30 per day unverified / verified) |
+| `get_callback_number` | `lead_ref` | texts the owner (only) the customer's number |
+
+There is no recipient argument: the recipient comes from the call / booking row of the business. SMS commands at `POST /api/sms/inbound` (verified owner phone only, after STOP/START/HELP): `YES <code>` sends, `NO <code>` cancels, `UNDO <code>` answers that a sent text cannot be undone. A bare `NO` from the verified owner phone cancels every waiting draft; a bare `YES` asks for the code. Table `owner_replies` (`status`: proposed, sending, sent, uncertain, cancelled, expired, refused, failed; `uncertain` = may or may not have been delivered, never retried). Audit actions `owner_reply.*`. Customer text: `<Business>: <words>. Reply STOP to opt out` (sms_log kind `manual`, consent basis `owner_voice_reply`).
 

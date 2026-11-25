@@ -698,4 +698,82 @@ integration('google calendar (postgres, fake google)', () => {
     expect((await cal.getCalendarConnection(biz.id))!.status).toBe('needs_reauth');
     http.setGoogleFetch(fake.fetch);
   });
+  test('residual M1: events that cannot be removed from the previous account are remembered (business-side facts only), shown on the status, dismissable, erasable; no tokens kept', async () => {
+    const { biz, conn } = await setup();
+    const b = await book(biz.id, '09:00');
+    const b2 = await book(biz.id, '12:00', { service: 'Duct cleaning' });
+    await push.pushBooking(b.id);
+    await push.pushBooking(b2.id);
+    expect(fake.events.size).toBe(2);
+    // The old account's tokens are dead: Google refuses every delete.
+    fake.failStatus = 401;
+    const { resetForNewAccount } = await import('@/lib/integrations/google/oauth');
+    expect(await resetForNewAccount(biz.id, 'someone-else@example.test')).toBe(2);
+    fake.failStatus = null;
+    const rows = await prisma.calendarOrphanedEvent.findMany({ where: { businessId: biz.id }, orderBy: { service: 'asc' } });
+    expect(rows.map((r) => [r.service, r.accountEmail, r.reason])).toEqual([['AC repair', 'owner@example.test', 'account_changed'], ['Duct cleaning', 'owner@example.test', 'account_changed']]);
+    expect(rows[0].startsAt?.toISOString()).toBe(at('09:00').toISOString());
+    // privacy: nothing about the customer, no token, ever
+    const dump = JSON.stringify(rows);
+    expect(dump).not.toContain('Maria');
+    expect(dump).not.toContain('12 Palm St');
+    expect(dump).not.toMatch(/rt-initial|at-initial|token/i);
+    expect(await cal.getEventLinkByBooking(b.id)).toBeNull(); // the links went either way
+    // idempotent: the same event is never listed twice
+    expect(await cal.recordOrphanedEvents(biz.id, [{ booking_id: b.id, google_event_id: rows[0].googleEventId, calendar_id: 'primary', account_email: 'owner@example.test', service: 'AC repair', starts_at: null, reason: 'account_changed' }])).toBe(0);
+
+    // the Google card status lists them (owner of THIS business only)
+    const owner = await login(biz.id);
+    const status = await import('@/app/api/integrations/google/status/route');
+    const st = (await (await status.GET(req('/api/integrations/google/status', owner))).json()).data;
+    expect(st.orphaned_events.total).toBe(2);
+    expect(JSON.stringify(st.orphaned_events)).not.toContain('Maria');
+    // customer erasure: the row stays as the reminder but no longer names what the booking was
+    await prisma.booking.update({ where: { id: b.id }, data: { anonymizedAt: new Date(), customerName: 'Erased' } });
+    expect(await cal.anonymizeOrphanedEvents(null)).toBe(1);
+    expect((await prisma.calendarOrphanedEvent.findMany({ where: { businessId: biz.id, bookingId: null } })).map((r) => r.service)).toEqual(['']);
+
+    // dismissing: staff cannot, another business's owner cannot, the owner can (audited)
+    const orphansRoute = await import('@/app/api/integrations/google/orphans/route');
+    const staff = await login(biz.id, 'staff');
+    expect((await orphansRoute.DELETE(req('/api/integrations/google/orphans', staff, {}, 'DELETE'))).status).toBe(403);
+    const other = await newBusiness({ timezone: TZ });
+    const otherOwner = await login(other.id);
+    expect((await (await orphansRoute.DELETE(req('/api/integrations/google/orphans', otherOwner, {}, 'DELETE'))).json()).data.dismissed).toBe(0);
+    expect(await prisma.calendarOrphanedEvent.count({ where: { businessId: biz.id } })).toBe(2);
+    expect((await orphansRoute.DELETE(req('/api/integrations/google/orphans', owner, { ids: 'nope' }, 'DELETE'))).status).toBe(422);
+    const one = (await prisma.calendarOrphanedEvent.findFirst({ where: { businessId: biz.id } }))!;
+    expect((await (await orphansRoute.DELETE(req('/api/integrations/google/orphans', owner, { ids: [one.id] }, 'DELETE'))).json()).data.dismissed).toBe(1);
+    expect((await (await orphansRoute.DELETE(req('/api/integrations/google/orphans', owner, {}, 'DELETE'))).json()).data.dismissed).toBe(1);
+    expect(await prisma.calendarOrphanedEvent.count({ where: { businessId: biz.id } })).toBe(0);
+    expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'calendar.orphans_dismissed' } })).toBe(2);
+    expect(conn.id).toBeTruthy();
+  }, 30_000);
+
+  test('residual M1: events that WERE deleted leave nothing behind; "disconnect + remove events" with a dead token is remembered; a disconnected connection owes no cleanup', async () => {
+    const { biz } = await setup();
+    const b = await book(biz.id, '09:00');
+    await push.pushBooking(b.id);
+    const { resetForNewAccount, disconnectGoogle } = await import('@/lib/integrations/google/oauth');
+    expect(await resetForNewAccount(biz.id, 'someone-else@example.test')).toBe(0);
+    expect(await prisma.calendarOrphanedEvent.count({ where: { businessId: biz.id } })).toBe(0);
+
+    const second = await setup();
+    const b2 = await book(second.biz.id, '10:00');
+    await push.pushBooking(b2.id);
+    fake.failStatus = 403;
+    await disconnectGoogle(second.biz.id, { user_id: null, kind: 'admin_token' }, true);
+    fake.failStatus = null;
+    expect((await prisma.calendarOrphanedEvent.findMany({ where: { businessId: second.biz.id } })).map((r) => [r.service, r.reason])).toEqual([['AC repair', 'disconnected']]);
+
+    // disconnected WITHOUT removing events (they stay on purpose): a later account switch is not an "undeleted" case
+    const third = await setup();
+    const b3 = await book(third.biz.id, '11:00');
+    await push.pushBooking(b3.id);
+    await disconnectGoogle(third.biz.id, { user_id: null, kind: 'admin_token' }, false);
+    fake.failStatus = 401;
+    await resetForNewAccount(third.biz.id, 'someone-else@example.test');
+    fake.failStatus = null;
+    expect(await prisma.calendarOrphanedEvent.count({ where: { businessId: third.biz.id } })).toBe(0);
+  }, 30_000);
 });

@@ -15,7 +15,8 @@ import { logger } from '@/lib/log';
 import { describeNow, nowVariables } from '@/lib/time';
 import { initiationAgentOverrides, initiationAutoConfig } from '@/lib/voice/initiation-config';
 import { BOOKING_TOOL_SPECS } from '@/lib/voice/tools-bookings';
-import { OWNER_TOOL_NAMES, OWNER_TOOL_SPECS, type OwnerToolName } from '@/lib/voice/owner/specs';
+import { OWNER_KB_TOOL_NAMES, OWNER_REPLY_TOOL_NAMES, OWNER_TOOL_SPECS, type OwnerToolName } from '@/lib/voice/owner/specs';
+import { ownerReplyEnabled } from '@/lib/voice/owner/reply-config';
 import { ownerCallinEnabled } from '@/lib/voice/owner/config';
 
 const log = logger('elevenlabs');
@@ -350,7 +351,7 @@ const cachedToolIds = (): boolean => [...toolIdCache.values()].some((e) => Date.
  * enabled, the owner-line tools (tools are per AGENT, not per call; the tool route refuses the owner ones on every call that is not kind 'owner').
  */
 export function expectedToolNames(): (ToolName | OwnerToolName)[] {
-  return [...TOOL_NAMES.filter((n) => n !== 'transfer_to_human' || nativeTransferEnabled()), ...(ownerCallinEnabled() ? OWNER_TOOL_NAMES : [])];
+  return [...TOOL_NAMES.filter((n) => n !== 'transfer_to_human' || nativeTransferEnabled()), ...(ownerCallinEnabled() ? OWNER_KB_TOOL_NAMES : []), ...(ownerReplyEnabled() ? OWNER_REPLY_TOOL_NAMES : [])];
 }
 
 /** Concurrent syncs in one process share one registration per tool (two agents syncing at once must not create duplicate workspace tools). */

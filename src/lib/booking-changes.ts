@@ -10,11 +10,11 @@
  * reported honestly to the caller, who can retry with `notifyBookingChange` later.
  */
 import {
-  claimEvent, completeEvent, getBooking, getBookingPaymentLinkId, getBusiness, getCall, logSms, markCustomerNotified, markRefundNotApplicable, recordAudit,
+  claimEvent, completeEvent, getBooking, getBusiness, getCall, logSms, markCustomerNotified, markRefundNotApplicable, recordAudit,
   releaseEvent, rescheduleBooking, transitionBooking, type RescheduleResult, countryForBusiness,
 } from '@/lib/db';
 import { emitBookingChanged } from '@/lib/booking-hooks';
-import { deactivatePaymentLink } from '@/lib/providers/stripe';
+import { scheduleLinkDeactivation } from '@/lib/payments/link-store';
 import { sendAndLog } from '@/lib/messaging';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { cancelSms, refundSms, rescheduleSms, type Lang } from '@/lib/messaging/templates';
@@ -130,10 +130,7 @@ export async function cancelBooking(input: {
     if (!refund.eligible && (booking.refund_status ?? 'none') === 'none') await markRefundNotApplicable(booking.id);
     // A cancelled booking's deposit link must stop taking money (best effort: the webhook also alerts the owner if it is paid anyway).
     if (!booking.deposit_paid) {
-      try {
-        const linkId = await getBookingPaymentLinkId(booking.id);
-        if (linkId && (await deactivatePaymentLink(linkId))) await recordAudit({ actor_kind: 'system', business_id: booking.business_id, action: 'booking.payment_link_deactivated', target: `booking:${booking.id}`, meta: { link: linkId } });
-      } catch (err) { log.warn('payment_link.deactivate_failed', { booking: booking.id, err }); }
+      await scheduleLinkDeactivation(booking); // queued + background (never waits for Stripe, never pages the account's link list inline); never throws
     }
     await recordAudit({
       actor_kind: input.actor.kind, actor_user_id: input.actor.user_id ?? null, business_id: booking.business_id, action: 'booking.cancelled',
