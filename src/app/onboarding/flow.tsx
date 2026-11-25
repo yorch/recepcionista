@@ -24,6 +24,8 @@ import { TestStep } from './step-test';
 export interface FlowProps {
   businessId: string | null;
   isAdmin: boolean;
+  /** demoModeEnabled() on the server: the demo console link is offered only then. */
+  demoEnabled?: boolean;
   priceDisplay: string;
   /** The annual plan can be chosen (STRIPE_PRICE_ID_ANNUAL is configured). */
   annualAvailable?: boolean;
@@ -38,6 +40,7 @@ export interface StepProps {
   businessId: string;
   status: OnboardingStatus;
   isAdmin: boolean;
+  demoEnabled?: boolean;
   go: (s: StepId) => void;
   refresh: () => Promise<OnboardingStatus | null>;
 }
@@ -135,7 +138,7 @@ export function OnboardingFlow(props: FlowProps) {
   }, [draft, businessId, t]);
 
   const idx = STEP_IDS.indexOf(step);
-  const stepProps: StepProps | null = businessId && status ? { businessId, status, isAdmin, go, refresh } : null;
+  const stepProps: StepProps | null = businessId && status ? { businessId, status, isAdmin, demoEnabled: props.demoEnabled, go, refresh } : null;
 
   return (
     <div className="min-h-screen">

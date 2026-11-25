@@ -2,6 +2,7 @@ import { fail, ok, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { sendAndLog } from '@/lib/messaging';
 import { getBusiness, isKnownContact } from '@/lib/db';
+import { SMS_PROVIDER_NOT_CONFIGURED } from '@/lib/messaging/delivery';
 import { limitRequest } from '@/lib/ratelimit';
 import { validateRecipient } from '@/lib/messaging/recipient';
 
@@ -44,7 +45,8 @@ export async function POST(req: Request) {
     // Only known contacts: the owner, a booking customer, or a past caller (indexed E.164 lookups, not a scan of the history).
     if (!(await isKnownContact(business.id, to))) return fail('recipient is not a known contact of this business', 403);
 
-    const { sms } = await sendAndLog({ business_id: business.id, to, body: body.body, kind: 'manual' });
+    const { sms, result } = await sendAndLog({ business_id: business.id, to, body: body.body, kind: 'manual' });
+    if (result.error === SMS_PROVIDER_NOT_CONFIGURED) return fail(SMS_PROVIDER_NOT_CONFIGURED, 503);
     return ok(sms);
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 500);

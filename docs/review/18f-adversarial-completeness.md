@@ -143,3 +143,35 @@ Class: **PF** = prod-reachable fake or false success, **DM** = dev-only mock (ha
 **Counts:** 37 backlog rows. PF 16 (incl. 3 cosmetic), UF 16, DM 4, DC 4 (some rows carry two classes). Owner decisions needed: 22 rows. No-decision quick wins (all S): #1, #2, #4, #5 (SMS), #7, #10, #15, #19, #20, #33, #34, plus #14 after a one-line decision.
 
 **Suggested order:** #1+#2 (one change), #4, #5, #3, #7, #10, #19, #15, #14, #20. Then the decision items, asked one at a time: #6 (architecture) first, because it gates whether production AI calls work at all; then #8, #13, #9, #12, #16, #17, #11.
+
+---
+
+## 5. Resolution (mock cleanup, branch `claude/serene-clarke-fowr2c`)
+
+Status per backlog row of section 4. **done** = implemented with regression tests; **skipped (decision pending)** = owner decision outstanding, another pass will do it; **documented** = copy/docs corrected to match the code. Tests: `tests/mock-cleanup-pure.test.ts`, `tests/integration/mock-cleanup.test.ts` (plus `billing-routes` updates).
+
+| # | Status | What changed |
+| --- | --- | --- |
+| 1 | **done** | One policy, `smsDelivered(status)` (`src/lib/messaging/delivery.ts`): `sent` is delivered; `mock` only outside production. In production `sendSms` itself returns `failed` / `sms_provider_not_configured` instead of a mock. Used by every customer path of N6 (voice `send_sms`, booking confirmation and payment-link tools, `sendConfirmation` consent, change notices, owner reply, gratitude sweep, inbound rating lookup, booking panel, `/api/sms/send` -> 503). `sendAndLog` refunds the plan reservation and does not meter an undelivered text; follow-up consent is recorded only for a delivered text; the console echo of bodies is non-production only. |
+| 2 | **done** | `owner-phone` and `forward-number` verify/start answer an honest `503 sms_provider_not_configured` (no code "sent"); the UI maps it to a localized message (EN/ES `err.smsNotConfigured`). |
+| 3 | skipped (decision pending) | - |
+| 4 | **done** | `PUT /knowledge`, `PUT /onboarding-status/knowledge` and `PATCH /businesses/:id` (name, owner name, website, area, hours) call `syncPromptAfterEdit` (`resyncAfterKbChange` + `markAgentDirty` on failure) and return `agent_sync`. The editor toast is honest (`kb.ed.saved` / `savedPending` / `savedNoAgent`, EN+ES). Owner-call-in apply/revert also queue a retry on failure. |
+| 5 | **done** (SMS) | Purchase sets `SmsUrl`/`SmsMethod` (and `VoiceUrl` only when `lineKind()==='webhook'`). New admin route `POST /api/admin/repair-numbers` (dry run by default, batched, idempotent, audited; never touches the platform sender, mock-pool numbers or a native line's Voice URL). Documented in runbook, env-vars, auth.md. Voice import of the native line stays with #6. |
+| 6 | skipped (decision pending) | - |
+| 7 | **done** | `consent_status='disclosed'` on the incoming route needs a real agent refresh, or the scripted demo outside production; production without `ELEVENLABS_API_KEY` stays `unknown`. |
+| 8, 9 | skipped (decision pending) | - |
+| 10 | **done** | `syncAgent` loads the stored KB when `kb` is null (a load error fails the sync and leaves the old prompt). |
+| 11-14 | skipped (decision pending) | #14: README and `CONTRACTS.md` now state the `/pay/<bookingId>` limitation honestly (documented). |
+| 15 | **done** | The demo console page is `notFound()` unless `demoModeEnabled()`; the nav item and the onboarding link are hidden; integration badges use the real readiness checks (`hasTwilio`, `hasElevenLabs`, `hasLlm`). HVAC-only scripts left (page is not reachable in production). |
+| 16-18 | skipped (decision pending) | - |
+| 19 | **done** | `demoModeEnabled()` is false when `NODE_ENV==='production'` (mock-complete, reset, simulate-call, mock-activate, demo console, Stripe-error fallback, SMS echo). Tests that rely on `DEMO_MODE` keep working in the test environment. |
+| 20 | **done** | The gratitude sweep texts in the booking's call language, falling back to the business `locale_default`. |
+| 21-31 | skipped (decision pending) | - |
+| 32 | untouched (live test needed) | - |
+| 33 | **done** | A Stripe error with a real key throws unless `DEMO_MODE=true` (never in production); mock billing checkout answers 503 instead of a link that 404s unless `DEMO_MODE=true`. |
+| 34 | **done / corrected** | The skips already required `ALLOW_INSECURE_DEV` (`isProd = () => !insecureDevAllowed()`): the 18f/18a E4 claim was wrong. The misleading `isProd` name and log lines were fixed (`authStrict`) and a test pins the behaviour; docs corrected. |
+| 35 | **done** | The four webhook GET probes report real readiness (200/503 by secret configured, `readiness()`); the unknown-language badge shows an em dash instead of "EN"; the waveform is documented in code as decoration (progress is the only real signal). Default vertical, `agent-prompt` language constants and the hours prefill are unchanged (cosmetic). |
+| 36 | **done** | A failed deferred verification email (signup and public resend) is logged at error level and audited (`auth.verification_email_failed`, class only); the "check your email" hint says the page cannot know whether it went out and points to resend/support. The response stays identical for every address (anti-enumeration). |
+| 37 | **documented** | README, PRD (reschedule, owner reply, transfer, language detection, calendar sync, test counts, tool count, demo console, audio, LLM fallback), `env-vars.md`, `.env.example`, `CONTRACTS.md` `/pay/[id]`, `scheduler.ts` header, extraction docstring, runbook step 5, `known-limitations.md`, `auth.md`. Not decided here: which PRD section is the product source of truth for D9/D10 (the text now follows the code). |
+
+Also fixed in passing: the N6 `owner-alert` check now uses `demoModeEnabled()`.

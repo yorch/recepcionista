@@ -57,6 +57,8 @@ export function VoicePlayer({
               {!src ? t('audio.pending') : missing ? t('audio.unavailable') : playing ? t('audio.playing') : (idleLabel ?? t('audio.voiceNote'))}
             </span>
           </div>
+          {/* DECORATION, not the audio's waveform: the bar heights are a fixed pseudo-random pattern (no audio analysis). The only real
+              information is the filled portion, which is the playback progress (role=progressbar). */}
           <div
             role="progressbar"
             aria-label={`${t('audio.progress')}, ${label}`}

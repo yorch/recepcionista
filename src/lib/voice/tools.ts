@@ -21,6 +21,7 @@ import { logger } from '@/lib/log';
 import { normalizePhone } from '@/lib/providers/twilio';
 import { E164 } from '@/lib/messaging/recipient';
 import { sendAndLog } from '@/lib/messaging';
+import { smsDelivered as smsWasDelivered } from '@/lib/messaging/delivery';
 import { SERVICE_ALIASES } from '@/lib/verticals/aliases';
 import { CALL_911_EN, CALL_911_ES, call911For, call911Hazards } from '@/lib/voice/emergency';
 import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
@@ -475,7 +476,7 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
       try {
         const confirmation = await sendConfirmation(booking.id, lang, { to: textTo });
         sms = confirmation;
-        smsDelivered = confirmation.sms.status === 'sent' || confirmation.sms.status === 'mock';
+        smsDelivered = smsWasDelivered(confirmation.sms.status);
       } catch (err) {
         log.warn('confirmation.failed', { booking: booking.id, err });
       }
@@ -595,7 +596,7 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
       };
     }
 
-    if (sent.status === 'failed') {
+    if (sent.status === 'failed' || !smsWasDelivered(log.status)) {
       return {
         ok: false,
         message: say(lang,
@@ -688,7 +689,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     }
 
     const spoken = formatCents(amountCents);
-    if (sms && sms.status !== 'sent' && sms.status !== 'mock') {
+    if (sms && !smsWasDelivered(sms.status)) {
       // The link exists but the text was blocked (opt-out, plan cap, ...): never claim it is on its way.
       return {
         ok: false,

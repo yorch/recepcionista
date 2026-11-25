@@ -15,6 +15,8 @@ interface NavItem {
   icon: string;
   /** Minimum role to see the link (server pages still enforce it). */
   gate?: 'owner' | 'admin';
+  /** Shown only when the server says demo mode is on (never in production). */
+  demoOnly?: boolean;
 }
 
 const NAV: NavItem[] = [
@@ -27,7 +29,7 @@ const NAV: NavItem[] = [
   { href: '/dashboard/billing', label: 'nav.billing', icon: 'M3 7h18v12H3zM3 11h18M7 16h3', gate: 'owner' },
   { href: '/dashboard/security', label: 'nav.security', icon: 'M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6l-7-3Zm-2.5 9 2 2 3.5-4', },
   { href: '/dashboard/settings', label: 'nav.settings', icon: 'M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6m-4 4v6', gate: 'owner' },
-  { href: '/dashboard/demo', label: 'nav.demo', icon: 'M9 3h6l1 4h3v14H5V7h3l1-4Zm0 10h6m-3-3v6', gate: 'admin' },
+  { href: '/dashboard/demo', label: 'nav.demo', icon: 'M9 3h6l1 4h3v14H5V7h3l1-4Zm0 10h6m-3-3v6', gate: 'admin', demoOnly: true },
 ];
 
 const BUSINESS_COOKIE = 'rc_business';
@@ -51,6 +53,8 @@ export interface SidebarProps {
   /** Accounts in several businesses (not admins): where they can switch to, and whether they may add another location. */
   memberships?: SwitcherMembership[];
   canAddBusiness?: boolean;
+  /** demoModeEnabled() on the server: the demo console exists only then (never in production). */
+  demoEnabled?: boolean;
 }
 
 const FOCUSABLE = 'a[href], button:not([disabled]), select, input, textarea, [tabindex]:not([tabindex="-1"])';
@@ -182,7 +186,7 @@ export function Sidebar(props: SidebarProps) {
 }
 
 function SidebarBody({
-  businessName, phone, live, status = 'ai', who, role, isAdmin, isOwner, currentBusinessId, businesses, memberships = [], canAddBusiness = false, path,
+  businessName, phone, live, status = 'ai', who, role, isAdmin, isOwner, currentBusinessId, businesses, memberships = [], canAddBusiness = false, demoEnabled = false, path,
 }: SidebarProps & { path: string }) {
   const t = useT();
   const statusText = t(STATUS_KEY[status]);
@@ -247,7 +251,7 @@ function SidebarBody({
       </div>
 
       <nav aria-label={t('shell.dashboardNav')} className="mt-5 flex flex-col gap-0.5">
-        {NAV.filter((item) => !item.gate || gates[item.gate]).map((item) => {
+        {NAV.filter((item) => (!item.gate || gates[item.gate]) && (!item.demoOnly || demoEnabled)).map((item) => {
           const active = path === item.href || (item.href !== '/dashboard' && path.startsWith(item.href));
           return (
             <Link

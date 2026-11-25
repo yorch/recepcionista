@@ -1,4 +1,5 @@
-import { ok, fail } from '@/lib/http';
+import { ok, fail, readiness } from '@/lib/http';
+import { insecureDevAllowed } from '@/lib/auth';
 import { getBusinessByPhone, listBusinesses, createCall, getCallBySid, updateCall } from '@/lib/db';
 import { syncAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
@@ -114,7 +115,7 @@ export async function POST(req: Request) {
         let agentMock = true;
         let wsUrl: string | null = null;
         try {
-          const agent = await syncAgent({ business, kb: null });
+          const agent = await syncAgent({ business, kb: null }) // syncAgent loads the stored KB itself;
           agentId = agent.agent_id;
           agentMock = agent.mock;
           if (agentId) wsUrl = (await getSignedUrl(agentId)).signed_url ?? null;
@@ -230,7 +231,7 @@ export async function POST(req: Request) {
     let agentId = '';
     let agentMock = true;
     try {
-      const agent = await syncAgent({ business, kb: null });
+      const agent = await syncAgent({ business, kb: null }) // syncAgent loads the stored KB itself;
       agentId = agent.agent_id;
       agentMock = agent.mock;
       if (agentId && !agentMock) {
@@ -241,9 +242,10 @@ export async function POST(req: Request) {
     }
 
     // Server-side evidence that the agent opens with the disclosure: its first message (firstMessageFor, which
-    // always contains the notice) was just pushed to a real agent, or this is the scripted demo that speaks the
-    // same text. If the agent refresh failed the old first message stands, so the state stays 'unknown'.
-    if ((!hasElevenLabs() || !agentMock) && call.consent_status !== 'declined') {
+    // always contains the notice) was just pushed to a real agent, or this is the scripted demo (outside production) that
+    // speaks the same text. If the agent refresh failed, or production has no ElevenLabs key (nothing speaks any notice),
+    // the state stays 'unknown'.
+    if ((!agentMock || (!hasElevenLabs() && process.env.NODE_ENV !== 'production')) && call.consent_status !== 'declined') {
       await updateCall(call.id, { recording_disclosed: true, consent_status: 'disclosed' });
     }
 
@@ -275,7 +277,7 @@ export async function POST(req: Request) {
   }
 }
 
-/** Twilio health-check / browser probe. Reveals nothing about tenants. */
+/** Readiness probe (reveals nothing about tenants): 200 only when Twilio signatures can be verified (TWILIO_AUTH_TOKEN set, or the local-dev opt-in is on). */
 export async function GET() {
-  return ok({ ready: true });
+  return readiness(Boolean(process.env.TWILIO_AUTH_TOKEN) || insecureDevAllowed());
 }

@@ -18,6 +18,7 @@ function friendly(t: TFunction, err: ApiError, what: 'send' | 'confirm'): string
   if (err.status === 403 && /email_not_verified/i.test(err.message)) return t('vf.emailFirst');
   if (err.status === 429) return t('vf.tooMany');
   if (err.status === 404 || err.status === 501) return t('vf.unavailable');
+  if (err.status === 503 && /sms_provider_not_configured/.test(err.message)) return errorText(t, err);
   if (err.status === 503) return t('vf.cantSend');
   if (what === 'confirm' && (err.status === 400 || err.status === 401 || err.status === 422)) return err.message ? errorText(t, err) : t('vf.badCode');
   return errorText(t, err);

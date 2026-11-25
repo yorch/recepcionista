@@ -6,7 +6,7 @@ import { appUrl } from '@/lib/providers/stripe';
 import { insecureDevAllowed } from '@/lib/auth';
 import { buildSystemPrompt, complianceRules, COMPLIANCE_MARKER } from '@/lib/kb';
 import { disclosureFor } from '@/lib/kb/disclosure';
-import { listBusinesses, listBusinessesByAgentId, updateBusiness } from '@/lib/db';
+import { getKnowledgeBase, listBusinesses, listBusinessesByAgentId, updateBusiness } from '@/lib/db';
 import type { Business, KnowledgeBase } from '@/lib/types';
 import { TOOL_NAMES, type ToolName } from '@/lib/voice/tools';
 import { nativeTransferEnabled } from '@/lib/voice/transfer';
@@ -28,7 +28,8 @@ export const hasElevenLabs = () => Boolean(process.env.ELEVENLABS_API_KEY);
 
 // ------------------------------------------------------------ webhook auth
 
-const isProd = () => !insecureDevAllowed();
+/** Webhook / tool auth may be skipped ONLY with the explicit ALLOW_INSECURE_DEV=true opt-in outside production (same rule as Twilio's check). */
+const authStrict = () => !insecureDevAllowed();
 const SIGNATURE_TOLERANCE_SECS = 30 * 60;
 
 function safeEq(a: string, b: string): boolean {
@@ -43,13 +44,13 @@ export type AuthVerdict = { ok: true; skipped?: boolean } | { ok: false; error: 
  * Verify the `ElevenLabs-Signature` header (`t=<unix>,v0=<hex>`), an
  * HMAC-SHA256 of `${t}.${rawBody}` keyed with ELEVENLABS_WEBHOOK_SECRET (the
  * secret ElevenLabs returns once, when the webhook is created). Fails closed
- * in production; in development with no secret it is skipped with a warning.
+ * whenever the secret is unset, unless ALLOW_INSECURE_DEV=true outside production (then skipped with a warning).
  */
 export function verifyElevenLabsSignature(rawBody: string, header: string | null): AuthVerdict {
   const secret = process.env.ELEVENLABS_WEBHOOK_SECRET;
   if (!secret) {
-    if (isProd()) {
-      log.error('signature.no_secret', { reason: 'ELEVENLABS_WEBHOOK_SECRET unset in production' });
+    if (authStrict()) {
+      log.error('signature.no_secret', { reason: 'ELEVENLABS_WEBHOOK_SECRET unset (set it, or ALLOW_INSECURE_DEV=true for local dev)' });
       return { ok: false, error: 'webhook verification not configured' };
     }
     log.warn('signature.skipped', { reason: 'ELEVENLABS_WEBHOOK_SECRET unset (ALLOW_INSECURE_DEV)' });
@@ -76,12 +77,12 @@ export function verifyElevenLabsSignature(rawBody: string, header: string | null
 /** Header the tool webhooks carry; the value is ELEVENLABS_TOOL_SECRET. */
 export const TOOL_SECRET_HEADER = 'x-recepcionista-tool-secret';
 
-/** Check the shared secret that provisioning puts on every tool. Fails closed in production. */
+/** Check the shared secret that provisioning puts on every tool. Fails closed when unset, unless ALLOW_INSECURE_DEV=true outside production. */
 export function verifyToolSecret(req: Request): AuthVerdict {
   const secret = process.env.ELEVENLABS_TOOL_SECRET;
   if (!secret) {
-    if (isProd()) {
-      log.error('tool_secret.missing', { reason: 'ELEVENLABS_TOOL_SECRET unset in production' });
+    if (authStrict()) {
+      log.error('tool_secret.missing', { reason: 'ELEVENLABS_TOOL_SECRET unset (set it, or ALLOW_INSECURE_DEV=true for local dev)' });
       return { ok: false, error: 'tool authentication not configured' };
     }
     log.warn('tool_secret.skipped', { reason: 'ELEVENLABS_TOOL_SECRET unset (ALLOW_INSECURE_DEV)' });
@@ -570,7 +571,7 @@ export interface AgentResult {
 /**
  * THE one way an agent is created or brought up to date (provision, voice change, settings, owner KB change, incoming-call repair, the seed
  * script and POST /api/admin/resync-agents all call it). Everything the agent needs is part of one config body, rebuilt from the database on
- * every call: the prompt (KB, hours, compliance, transfer rules), ALL workspace tools (customer + owner line; created once by name+URL, refreshed
+ * every call (a null `kb` is loaded from the database here): the prompt (KB, hours, compliance, transfer rules), ALL workspace tools (customer + owner line; created once by name+URL, refreshed
  * in place, never duplicated) as `tool_ids`, system tools (language detection, transfer_to_number), the language preset, the voice id, the dynamic
  * variable placeholders (business_id, call_sid, caller_phone, transfer_mode, transfer_destination, owner_mode, ...), and then the initiation-webhook
  * + per-call override flags. Idempotent: running it again changes nothing that is already right (PATCH of the same body, tools matched by name).
@@ -579,7 +580,7 @@ export interface AgentResult {
 export async function syncAgent(
   input: { business: Business; kb: KnowledgeBase | null; agent_id?: string },
 ): Promise<AgentResult> {
-  const { business, kb } = input;
+  const { business } = input;
   let existing = (input.agent_id || (await resolveAgentIdFor(business))).trim();
   if (existing) {
     // Never PATCH an agent that another business owns (it would rewrite their live prompt).
@@ -592,6 +593,14 @@ export async function syncAgent(
   if (!hasElevenLabs()) {
     log.warn('agent.mock', { business: business.id, name: business.name, reason: 'no API key' });
     return { agent_id: existing || `mock_agent_${business.id}`, mock: true };
+  }
+
+  // The prompt carries the services, prices and FAQs: a caller that has no KB in hand (the incoming-call repair, scripts) gets the
+  // stored one, never a KB-less prompt pushed over the live agent. An error loading it fails the sync (the old prompt stands).
+  let kb: KnowledgeBase | null;
+  try { kb = input.kb ?? (await getKnowledgeBase(business.id)); } catch (err) {
+    log.error('agent.kb_load_failed', { business: business.id, err });
+    return { agent_id: existing || `mock_agent_${business.id}`, mock: true, error: `kb load: ${(err as Error).message}` };
   }
 
   const started = Date.now();

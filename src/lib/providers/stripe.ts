@@ -3,6 +3,7 @@
  * convincing test checkout, so the demo works before keys are wired.
  */
 import type { PaymentLink } from '@/lib/types';
+import { demoModeEnabled } from '@/lib/auth';
 import { logger } from '@/lib/log';
 
 const log = logger('stripe');
@@ -31,8 +32,8 @@ function mockLink(amountCents: number, reason: string, bookingId?: string | null
 /**
  * Create a single-use Stripe Payment Link. Metadata carries booking_id and
  * business_id (on the link, the checkout session and the PaymentIntent).
- * In production a Stripe failure throws; the mock checkout exists only
- * outside production.
+ * A Stripe failure throws (in production always; elsewhere unless DEMO_MODE=true, which swaps in the mock
+ * checkout). With no STRIPE_SECRET_KEY at all the mock checkout exists only outside production.
  */
 export async function createPaymentLink(
   amountCents: number,
@@ -85,7 +86,8 @@ export async function createPaymentLink(
     });
     return { id: json.id, url: json.url, amount_cents: cents, mock: false };
   } catch (err) {
-    if (isProd()) {
+    // A real Stripe key that FAILS is an error everywhere. Only explicit demo mode (never production) may swap in the mock checkout.
+    if (isProd() || !demoModeEnabled()) {
       log.error('link.failed', { amount_cents: cents, err });
       throw err instanceof Error ? err : new Error('Stripe payment link failed');
     }

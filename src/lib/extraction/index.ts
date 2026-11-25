@@ -2,8 +2,9 @@
  * WS1 — URL scraping + LLM extraction.
  *
  * Throws ExtractionError when the URL cannot be scraped or the LLM cannot
- * extract usable data. Callers must handle this and show the user a clear
- * message — we never silently fall back to hardcoded template data.
+ * extract usable data (including: no LLM key configured). Callers must handle this and show
+ * the user a clear message — a website is never answered with invented data. (A business with
+ * NO website gets the vertical pack's labelled starting template instead; see `templateResult`.)
  */
 // SERVER ONLY: pulls in node:* modules via safe-fetch. Client components must import './url' instead.
 // (The `server-only` package is not installed; do not import this module from a 'use client' file.)

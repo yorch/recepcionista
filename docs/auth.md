@@ -81,6 +81,7 @@ Public (no session; each verifies its own secret/signature or is rate limited an
 | `GET/POST /api/privacy/export`, `/erase` | owner | `business_id` forced to own |
 | `POST /api/demo/reset`, `/api/demo/simulate-call`, `GET simulate-call` | admin | n/a |
 | `POST /api/admin/users` | admin | n/a |
+| `POST /api/admin/repair-numbers` | admin (Bearer or admin session); rate limited 6/min | idempotent repair of the Twilio SMS/Voice webhooks of tenant numbers; `dry_run` defaults to true; audited `admin.repair_numbers` (docs/runbook.md section 1 step 5) |
 | `POST /api/admin/resync-agents` | admin (Bearer or admin session); rate limited 6/min | all businesses that have an agent; `dry_run` defaults to true; audited `admin.resync_agents` (docs/runbook.md section 11) |
 | `POST /api/integrations/google/mock-event` | owner; 404 unless `GOOGLE_OAUTH_MOCK=true` outside production | the caller's own business only (admins pass `?business_id=`); local / e2e only |
 | `POST /api/sms/inbound` (bare `C` reply) | Twilio signature (no session) | the business that OWNS the number texted; only the sender's own bookings (E.164 match); STOP-class keywords first |

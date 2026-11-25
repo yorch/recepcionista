@@ -5,6 +5,7 @@
 import crypto from 'node:crypto';
 import { claimEvent, completeEvent, prisma, releaseEvent } from '@/lib/db';
 import { sendAndLog } from '@/lib/messaging';
+import { demoModeEnabled } from '@/lib/auth';
 import { ownerAlertStatus } from '@/lib/messaging/owner';
 import { isGsm7 } from '@/lib/messaging/policy';
 import { rateLimit } from '@/lib/ratelimit';
@@ -149,7 +150,7 @@ export async function alertOwner(business: Business, body: string, opts: AlertOp
       return { notified: false, reason: blocked === 'blocked_owner_unverified' ? 'owner_unverified' : 'sms_failed', sms };
     }
     // 'mock' means no Twilio configured: only counts as delivered in explicit demo mode.
-    const delivered = sent.status === 'sent' || (sent.status === 'mock' && process.env.DEMO_MODE === 'true');
+    const delivered = sent.status === 'sent' || (sent.status === 'mock' && demoModeEnabled());
     if (!delivered) {
       log.error('owner_alert.not_delivered', { business: business.id, status: sent.status, error: sent.error ?? null });
       await giveBack();

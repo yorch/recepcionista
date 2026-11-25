@@ -3,6 +3,7 @@ import { sameNumber, toE164 } from '@/lib/phone';
 import { routeGratitudeReply } from '@/lib/gratitude/reply';
 import { applyInboundKeyword } from '@/lib/messaging/inbound';
 import { normalizeInbound, twiml } from '@/lib/messaging/keywords';
+import { mockSmsAllowed } from '@/lib/messaging/delivery';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { handleOwnerSms } from '@/lib/voice/owner/sms';
 import { handleCancelReply } from '@/lib/messaging/sms-cancel';
@@ -64,7 +65,7 @@ export async function POST(req: Request) {
     if (rating) {
       const country = countryForBusiness(business);
       const recent = await prisma.smsLog.findMany({
-        where: { businessId: business.id, kind: 'gratitude', bookingId: { not: null }, status: { in: ['sent', 'mock'] } },
+        where: { businessId: business.id, kind: 'gratitude', bookingId: { not: null }, status: { in: mockSmsAllowed() ? ['sent', 'mock'] : ['sent'] } },
         orderBy: { createdAt: 'desc' },
         take: 20,
       });

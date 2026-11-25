@@ -1,3 +1,4 @@
+import { demoModeEnabled } from '@/lib/auth';
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { getBusiness, listBusinesses } from '@/lib/db';
@@ -45,6 +46,7 @@ export default async function OnboardingPage({
     <OnboardingFlow
       businessId={businessId}
       isAdmin={isAdmin}
+      demoEnabled={demoModeEnabled()}
       priceDisplay={planPriceDisplay(locale)}
       annualAvailable={annualAvailable()}
       annualDisplay={planPriceDisplayAnnual(locale)}

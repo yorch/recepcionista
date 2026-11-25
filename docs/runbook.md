@@ -24,9 +24,13 @@ Not legal advice.
    the current first message (disclosure), prompt and tool definitions (the tool secret header is refreshed on
    existing tools). The first provision of a workspace returns the post-call webhook signing secret ONCE: store it
    as `ELEVENLABS_WEBHOOK_SECRET`, redeploy, re-run `verify:deploy`. Then do section 6 (initiation webhook, owner phones).
-5. **Twilio inbound SMS URL.** Point the number's "A message comes in" webhook (HTTP POST) at
-   `https://<APP_URL>/api/sms/inbound`. A number has one inbound URL; STOP/START/HELP and gratitude replies all go
-   through it. The voice side is the ElevenLabs native Twilio integration (the number is imported into
+5. **Twilio inbound SMS URL.** Numbers bought by the app are created with `SmsUrl=https://<APP_URL>/api/sms/inbound`
+   (POST) already set (and, on a `webhook` line, `VoiceUrl=.../api/voice/incoming`). For numbers bought BEFORE that (or by hand), run
+   the idempotent repair: `curl -sX POST $APP_URL/api/admin/repair-numbers -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' -d '{}'`
+   is a DRY RUN (default) that reads each tenant number from Twilio and lists the fields that would change; send `{"dry_run": false}`
+   to apply (batches of 10, `next_cursor`; the platform sender and mock-pool numbers are never touched; it never changes the Voice
+   URL on a native ElevenLabs line). Doing it by hand in the console is equivalent: a number has one inbound URL; STOP/START/HELP, "Reply C",
+   1-5 ratings, owner YES codes and gratitude replies all go through it. The voice side is the ElevenLabs native Twilio integration (the number is imported into
    ElevenLabs, which owns the Voice URL), not `/api/voice/incoming`.
 6. **Retention.** `POST /api/admin/retention {"dry_run": true}` and review what would be purged per business
    (default window is 365 days). Adjust each business's `retention_days` in Dashboard > Settings, then set

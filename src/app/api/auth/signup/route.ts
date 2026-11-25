@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { checkSameOrigin, clientKey } from '@/lib/auth';
 import {
-  afterResponse, allowPerEmail, auditIp, limitIp, sendSignupExistsNotice, sendVerificationEmail,
+  afterResponse, allowPerEmail, auditIp, limitIp, sendSignupExistsNotice, sendVerificationEmailReported,
 } from '@/lib/account-flows';
 import { getUserByEmail, recordAudit } from '@/lib/db';
 import { emailConfigured } from '@/lib/email';
@@ -91,7 +91,7 @@ export async function POST(req: Request) {
       actor_kind: 'user', actor_user_id: created.user.id, business_id: created.businessId, action: 'auth.signup',
       target: `user:${created.user.id}`, ip: auditIp(req), ...(created.replacedStale ? { meta: { replaced_stale_unverified: true } } : {}),
     });
-    await afterResponse('signup.verification', () => sendVerificationEmail(created.user));
+    await afterResponse('signup.verification', () => sendVerificationEmailReported(created.user, 'signup'));
     return accepted();
   } catch (err) {
     log.error('error', { err });

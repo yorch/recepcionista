@@ -4,8 +4,10 @@
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { insecureDevAllowed } from '@/lib/auth';
+import { mockSmsAllowed, SMS_PROVIDER_NOT_CONFIGURED } from '@/lib/messaging/delivery';
 import { validateRecipient } from '@/lib/messaging/recipient';
 import { toE164 } from '@/lib/phone';
+import { lineKind } from '@/lib/voice/line';
 import { logger } from '@/lib/log';
 
 export interface SendSmsResult { id: string; status: 'sent' | 'mock' | 'failed'; error?: string }
@@ -75,11 +77,15 @@ export async function sendSms(to: string, body: string, opts: { anyCountry?: boo
   }
   const e164 = check.to;
   if (!hasTwilio()) {
+    if (!mockSmsAllowed()) {
+      // Production without a complete Twilio config: nothing is sent, so this is a FAILURE, never a mock "success".
+      log.error('sms.not_configured', { to: e164, reason: 'TWILIO_* incomplete in production' });
+      return { id: '', status: 'failed', error: SMS_PROVIDER_NOT_CONFIGURED };
+    }
     await new Promise((r) => setTimeout(r, MOCK_DELAY_MS));
     log.warn('sms.mock', { to: e164, reason: 'TWILIO_* incomplete', chars: body.length });
-    // The body (it can hold a verification code or a payment link) is only echoed to the console outside production or in
-    // explicit demo mode; a production box without Twilio logs the length only.
-    if (process.env.NODE_ENV !== 'production' || process.env.DEMO_MODE === 'true') console.log(`[sms:mock] -> ${e164}\n${body}\n`);
+    // The body (it can hold a verification code or a payment link) is only echoed to the console outside production.
+    console.log(`[sms:mock] -> ${e164}\n${body}\n`);
     return { id: `mock_${Date.now()}`, status: 'mock' };
   }
   try {
@@ -112,6 +118,66 @@ export async function sendSms(to: string, body: string, opts: { anyCountry?: boo
   } catch (err) {
     log.error('sms.error', { to: e164, err });
     return { id: '', status: 'failed', error: (err as Error).message };
+  }
+}
+
+/**
+ * The webhooks a tenant's Twilio number must carry. SMS is always ours (/api/sms/inbound: STOP/START/HELP, "Reply C", 1-5 ratings,
+ * owner YES codes). The Voice URL is ours ONLY on the 'webhook' line (forward / voicemail); on the native ElevenLabs line the number is
+ * imported into ElevenLabs, which owns the Voice URL, so it is never touched. `null` when no public base URL is configured.
+ */
+export function numberWebhooks(env: NodeJS.ProcessEnv = process.env): { SmsUrl: string; SmsMethod: 'POST'; VoiceUrl?: string; VoiceMethod?: 'POST' } | null {
+  const base = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(base)) return null;
+  const hooks: { SmsUrl: string; SmsMethod: 'POST'; VoiceUrl?: string; VoiceMethod?: 'POST' } = { SmsUrl: `${base}/api/sms/inbound`, SmsMethod: 'POST' };
+  if (lineKind(env) === 'webhook') { hooks.VoiceUrl = `${base}/api/voice/incoming`; hooks.VoiceMethod = 'POST'; }
+  return hooks;
+}
+
+export type NumberWebhookOutcome = 'ok' | 'would_update' | 'updated' | 'not_found' | 'skipped' | 'failed';
+export interface NumberWebhookResult { outcome: NumberWebhookOutcome; detail?: string; changed?: string[] }
+
+/**
+ * IDEMPOTENT repair of an existing number's webhooks: looks the number up on the account, and updates only the fields that differ
+ * (`dryRun` reports `would_update` and changes nothing). Never touches the platform SMS sender, never throws, never logs credentials.
+ */
+export async function configureNumberWebhooks(
+  e164: string,
+  opts: { dryRun?: boolean; fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+): Promise<NumberWebhookResult> {
+  const env = opts.env ?? process.env;
+  const doFetch = opts.fetchImpl ?? fetch;
+  const sid = env.TWILIO_ACCOUNT_SID;
+  const token = env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token || !env.TWILIO_PHONE_NUMBER) return { outcome: 'skipped', detail: 'Twilio is not configured' };
+  if (isMockPoolNumber(e164)) return { outcome: 'skipped', detail: 'mock-pool number: nothing exists at Twilio' };
+  if (isPlatformNumber(e164, env)) return { outcome: 'skipped', detail: 'platform SMS sender number: not touched' };
+  const want = numberWebhooks(env);
+  if (!want) return { outcome: 'skipped', detail: 'no public base URL (PUBLIC_BASE_URL / APP_URL): the webhook addresses are unknown' };
+  const auth = { authorization: `Basic ${btoa(`${sid}:${token}`)}` };
+  const base = `https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers`;
+  try {
+    const found = await doFetch(`${base}.json?PhoneNumber=${encodeURIComponent(e164)}`, { headers: auth, signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS) });
+    if (!found.ok) return { outcome: 'failed', detail: `lookup ${found.status}` };
+    const list = (await found.json().catch(() => null)) as { incoming_phone_numbers?: Array<Record<string, unknown>> } | null;
+    const hit = (list?.incoming_phone_numbers ?? []).find((n) => n.phone_number === e164 && typeof n.sid === 'string');
+    if (!hit) return { outcome: 'not_found', detail: 'the number is not on this Twilio account' };
+    const have: Record<string, unknown> = { SmsUrl: hit.sms_url, SmsMethod: hit.sms_method, VoiceUrl: hit.voice_url, VoiceMethod: hit.voice_method };
+    const patch: Record<string, string> = {};
+    for (const [k, v] of Object.entries(want)) if (typeof v === 'string' && (have[k] ?? '') !== v) patch[k] = v;
+    const changed = Object.keys(patch);
+    if (changed.length === 0) return { outcome: 'ok' };
+    if (opts.dryRun) return { outcome: 'would_update', changed };
+    const res = await doFetch(`${base}/${encodeURIComponent(hit.sid as string)}.json`, {
+      method: 'POST', headers: { ...auth, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(patch),
+      signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
+    });
+    if (!res.ok) { log.warn('number.webhooks_failed', { phone: e164, status: res.status }); return { outcome: 'failed', detail: `update ${res.status}`, changed }; }
+    log.info('number.webhooks_set', { phone: e164, fields: changed });
+    return { outcome: 'updated', changed };
+  } catch (err) {
+    log.error('number.webhooks_error', { phone: e164, err });
+    return { outcome: 'failed', detail: (err as Error).message.slice(0, 120) };
   }
 }
 
@@ -261,12 +327,16 @@ export async function provisionNumber(
     }
   }
   const friendlyName = attempts ? attemptFriendlyName(attempts.id) : undefined;
+  const hooks = numberWebhooks(env);
+  if (!hooks) log.error('number.webhooks_unset', { reason: 'no public base URL (PUBLIC_BASE_URL / APP_URL): the number is bought without SMS/Voice URLs; run POST /api/admin/repair-numbers' });
   let failure = 'number purchase failed';
   try {
     const buy = await doFetch(`${base}/IncomingPhoneNumbers.json`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ PhoneNumber: candidate, ...(friendlyName ? { FriendlyName: friendlyName } : {}) }),
+      // The webhooks are set AT purchase: a number without them cannot take STOP / "Reply C" / ratings / owner YES replies (and, on the
+      // webhook line, calls). With no public base URL they are skipped (loudly) and `POST /api/admin/repair-numbers` fixes them later.
+      body: new URLSearchParams({ PhoneNumber: candidate, ...(friendlyName ? { FriendlyName: friendlyName } : {}), ...(hooks ?? {}) }),
       signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
     });
     const bought = (await buy.json().catch(() => ({}))) as { phone_number?: string; message?: string };

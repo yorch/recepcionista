@@ -99,7 +99,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Team invites, role change, disable, remove, audit trail | Shipped | `src/app/api/team/*`, `src/app/dashboard/team/`, `src/app/dashboard/team/audit/` |
 | Break-glass `ADMIN_TOKEN` (revocable 12 h sessions) | Shipped | `docs/auth.md` |
 | Cookie CSRF same-origin checks | Shipped | `src/proxy.ts`, `src/lib/session.ts` |
-| Admin can create users; demo console (admin only, `DEMO_MODE`) | Shipped | `src/app/api/admin/users/route.ts`, `src/app/dashboard/demo/page.tsx` |
+| Admin can create users; demo console (admin only; the page and nav exist only with `DEMO_MODE=true`, never in production) | Shipped | `src/app/api/admin/users/route.ts`, `src/app/dashboard/demo/page.tsx` |
 
 ### 5.2 Billing and usage limits
 
@@ -127,7 +127,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Feature | Status | Evidence |
 | --- | --- | --- |
 | Website to knowledge base (SSRF-guarded fetch, redirect re-validation) | Shipped | `src/app/api/extract/route.ts`, `src/lib/extraction/index.ts`, `src/lib/net/safe-fetch.ts` |
-| Template fallback when no LLM key is set | Shipped | `src/lib/extraction/index.ts`, `src/lib/providers/llm.ts` |
+| Template fallback when no LLM key is set | Partial. Call summaries and briefings fall back to templates. Website extraction REFUSES without a key (422); a business with no website gets the vertical's template knowledge base (starting prices to be reviewed). | `src/lib/extraction/index.ts`, `src/lib/providers/llm.ts` |
 | Knowledge base and prompt editor (includes business hours) | Shipped | `src/components/dashboard/knowledge-editor.tsx`, `src/app/dashboard/knowledge/page.tsx` |
 | Owner alert phone verification (SMS code, rate limited) | Shipped | `src/lib/messaging/owner-verify.ts`, `src/app/api/businesses/[id]/owner-phone/verify/*` |
 | Carrier call-forwarding instructions (AT&T, T-Mobile, Verizon, GSM, landline, VoIP) | Shipped | `src/app/onboarding/forwarding.ts` |
@@ -145,7 +145,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Disclosure at call start, English and Spanish (owner text can extend, not replace) | Shipped | `src/lib/voice/elevenlabs.ts` (`firstMessageFor`), `src/lib/kb/disclosure.ts` |
 | Declined recording: sticky `declined`, transcript withheld, provider conversation deleted (best effort) | Shipped | `src/lib/voice/postcall.ts`, `docs/compliance.md` |
 | Post-call webhook with HMAC check; one row per call | Shipped | `src/app/api/voice/post-call/route.ts`, `src/app/api/voice/webhook/route.ts`, `src/lib/voice/postcall.ts` |
-| Seven voice tools: `check_availability`, `create_booking`, `send_sms`, `create_payment_link`, `flag_emergency`, `get_pricing`, `handoff_to_human` | Shipped | `src/lib/voice/tools.ts`, `src/app/api/voice/tools/[tool]/route.ts` |
+| Core voice tools: `check_availability`, `create_booking`, `send_sms`, `create_payment_link`, `flag_emergency`, `get_pricing`, `handoff_to_human`; plus `reschedule_booking`, `cancel_booking`, `transfer_to_human` (`NATIVE_TRANSFER=on`) and the owner call-in tools | Shipped | `src/lib/voice/tools.ts`, `src/app/api/voice/tools/[tool]/route.ts` |
 | Tool calls authenticated by a shared secret header | Shipped | `src/lib/voice/elevenlabs.ts` (`verifyToolSecret`) |
 | Pause mode: the assistant takes no bookings, texts or payments; callers are told so and can leave a message (name and number on the AI line; a recorded voicemail on a webhook line) | Shipped | `src/lib/voice/call-mode.ts`, `src/lib/voice/non-ai.ts`, `src/app/api/businesses/[id]/call-mode/route.ts`, `src/components/dashboard/call-mode.tsx` |
 | Forward mode: calls are bridged to the owner's verified number | Partial. Works only on a webhook line (`VOICE_LINE_KIND=webhook`, Twilio Voice URL `/api/voice/incoming`) or through the owner's own carrier forwarding. On the native ElevenLabs line (the production setup) it is disabled: the dashboard says so, `PATCH call-mode {mode:'forward'}` returns 422, and callers hear the paused message. | `src/lib/voice/line.ts` (`FORWARD_UNAVAILABLE`), `src/lib/voice/call-mode.ts`, `src/app/api/voice/incoming/route.ts`, `docs/known-limitations.md` |
@@ -157,7 +157,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Owner correction of the knowledge base by voice | Shipped as owner call-in (SMS-confirmed, undoable; hours, closed dates, service area, services, FAQs). Owner voice REPLY shipped too: the owner hears recent leads and has one customer texted back, only after an SMS YES code, no undo (`OWNER_REPLY_ENABLED`). | `docs/owner-call-in.md`, `src/lib/voice/owner/`, `src/lib/messaging/owner-reply.ts` |
 | Live transcript during a call | Shipped (SSE + polling fallback, consent-gated; provider field UNVERIFIED) | `src/lib/voice/live-transcript.ts`, `src/app/api/calls/[id]/live/route.ts` |
 | Dashboard, onboarding, auth, public pages, emails and owner texts in English and Spanish; per-user language, business default | Shipped (Spanish copy not natively reviewed; model/caller-written content stays as written) | `docs/i18n.md`, `src/lib/i18n/` |
-| Bilingual conversation (English and Spanish) | Partial. Driven by the prompt and the model. No language detection in code, and quality is not measured. | `src/lib/voice/elevenlabs.ts`, `src/lib/kb/index.ts` |
+| Bilingual conversation (English and Spanish) | Partial. Driven by the prompt and the model, plus ElevenLabs language detection (`LANGUAGE_DETECTION`, on by default). Quality is not measured. | `src/lib/voice/elevenlabs.ts`, `src/lib/kb/index.ts` |
 
 ### 5.5 Messaging and consent
 
@@ -190,10 +190,10 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Today, Calls, Calendar, Brain, Briefings, Team, Billing, Security, Settings | Shipped | `src/components/dashboard/shell.tsx`, `src/app/dashboard/*` |
 | Calls page: transcript, summary, status, and a Voicemails tab | Shipped | `src/app/dashboard/calls/page.tsx`, `src/components/dashboard/calls-list.tsx` |
 | Call recording player | Shipped: consent-gated proxy with Range | `src/app/api/calls/[id]/audio/route.ts`, `src/components/dashboard/recording-player.tsx` |
-| Calendar grid: week, day and month views; owner can cancel, mark completed and resend the confirmation. No reschedule (cancel and rebook). | Shipped | `src/app/dashboard/bookings/page.tsx`, `src/components/calendar/calendar.tsx`, `src/components/calendar/time-grid.tsx`, `src/components/calendar/month-grid.tsx`, `src/components/calendar/booking-panel.tsx` |
+| Calendar grid: week, day and month views; owner can cancel, mark completed and resend the confirmation. Reschedule is built (dashboard dialog and the voice `reschedule_booking` tool). | Shipped | `src/app/dashboard/bookings/page.tsx`, `src/components/calendar/calendar.tsx`, `src/components/calendar/time-grid.tsx`, `src/components/calendar/month-grid.tsx`, `src/components/calendar/booking-panel.tsx` |
 | Daily briefing: content (calls, bookings, revenue, flags) | Shipped | `src/lib/briefing/index.ts`, `src/app/api/briefings/generate/route.ts` |
 | 6 PM automatic briefing, per business time zone (catch-up until local midnight); owner texted a link when verified, outside quiet hours and within the SMS cap | Shipped. Runs in the job runner (`JOBS`, on by default in production). | `src/lib/jobs/index.ts` (`runDailyBriefings`), `src/lib/jobs/schedule.ts` (`briefingSlot`), `src/instrumentation.ts` |
-| Briefing audio (ElevenLabs TTS; text only without a TTS key) | Partial. Audio only with `ELEVENLABS_API_KEY`. Served by an authenticated route. | `src/lib/briefing/tts.ts`, `src/app/api/briefings/audio/[name]/route.ts` |
+| Briefing audio (ElevenLabs TTS; text only without a TTS key) | Partial. Audio with `ELEVENLABS_API_KEY`; without it only a development Mac (`say`) can produce audio. Served by an authenticated route. | `src/lib/briefing/tts.ts`, `src/app/api/briefings/audio/[name]/route.ts` |
 | Settings: alert phone, call disclosure text, retention window, call mode and forwarding number | Shipped. Hours are edited in Brain, not Settings. | `src/components/dashboard/settings-form.tsx`, `src/app/api/businesses/[id]/settings/route.ts`, `src/components/dashboard/call-mode.tsx` |
 | Settings: voice selection | Shipped (allowlist / premade voices, re-sync) | `src/components/dashboard/voice-settings.tsx`, `src/app/api/businesses/[id]/voice/route.ts` |
 
@@ -219,7 +219,7 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 | Audit log of security, billing, provisioning and job events | Shipped | `src/lib/db/audit.ts`, `docs/auth.md`, `docs/billing.md` |
 | Typed, paginated database layer (Prisma; list queries return a `Page`) | Shipped | `src/lib/db/paging.ts`, `src/lib/db/index.ts` (`listCallsPage`) |
 | CI: install, Prisma generate, typecheck, lint, build, migrate, `bun test` against Postgres 17 (same major as production) with `TEST_DATABASE_URL` set | Shipped | `.github/workflows/ci.yml` |
-| Test suite: about 730 `test()`/`it()` cases in about 59 files under `tests/`, including `tests/db` and `tests/integration` (DB-backed suites need `TEST_DATABASE_URL`) | Shipped. Not re-run for this document. | `tests/`, `docs/testing.md` |
+| Test suite: about 1,500 `test()`/`it()` cases in about 95 files (`bun test` reports the exact count) under `tests/`, including `tests/db` and `tests/integration` (DB-backed suites need `TEST_DATABASE_URL`) | Shipped. Not re-run for this document. | `tests/`, `docs/testing.md` |
 | Hardening changelog (every review finding mapped to its current state) and point-in-time reviews | Shipped | `docs/changelog-hardening.md`, `docs/review/` |
 
 ## 6. Non-goals
@@ -227,8 +227,8 @@ Status: **Shipped** = built and in the code path; **Partial** = built with a sta
 - Multi-location or franchise accounts. One business per owner account.
 - Outbound marketing or outbound calls.
 - Dispatching subcontractors or sending technicians.
-- Live human transfer or a staffed answering service.
-- Google Calendar or other external calendar sync. The internal calendar is the source of truth.
+- A staffed answering service. (Live human transfer exists behind `NATIVE_TRANSFER`, off by default.)
+- Replacing the internal calendar: it stays the source of truth; Google Calendar sync is an optional two-way mirror.
 - Card data over the phone or inside the app. Deposits use Stripe-hosted payment links.
 - Legal advice, HIPAA (the dental template is not a HIPAA-compliant product), PCI scope, data residency.
 - Native mobile app. The dashboard is responsive web.
@@ -313,7 +313,7 @@ These are targets to set after the first paying cohort. None is measured today.
 
 Ordered by what most blocks a paying launch:
 
-1. **Live human transfer** for emergencies and requested humans, instead of a callback flag.
+1. **Live human transfer** on by default: built behind `NATIVE_TRANSFER` (off) pending a live test, instead of a callback flag.
 2. **Forwarding on the production AI line.** No supported API exists for a per-call transfer override on the native ElevenLabs path (see `docs/known-limitations.md`). Forwarding works today only on a webhook line or through carrier forwarding.
 3. ~~Minimum content checks~~ Done: provisioning is gated on 3 priced services, opening hours and 1 FAQ (5 and 3 recommended).
 4. ~~Refund and dispute policy~~ Done (`docs/refunds.md`): policy, `/refunds`, customer text on cancel, owner-initiated refunds. Still manual by design: the app never refunds without an owner action.
@@ -323,7 +323,7 @@ Ordered by what most blocks a paying launch:
 8. ~~Voice selection~~ Done (allowlist).
 9. ~~Calendar reschedule~~ Done (dashboard and voice).
 
-Deferred by owner decision (not built, not scheduled): owner voice REPLY. (Voice correction of the knowledge base, the live transcript and Google Calendar sync are built: docs/changelog-hardening.md "Phase: features".)
+Built (not roadmap): voice correction of the knowledge base, owner voice REPLY (`OWNER_REPLY_ENABLED`, follows `OWNER_CALLIN_ENABLED`), the live transcript and Google Calendar sync (docs/changelog-hardening.md "Phase: features").
 
 Not planned: multi-location, outbound calls.
 

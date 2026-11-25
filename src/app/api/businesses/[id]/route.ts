@@ -3,6 +3,7 @@ import { auditActorOf, authenticate, authErrorResponse, hasRole, requireBusiness
 import { clientKey } from '@/lib/auth';
 import { getBusiness, updateBusiness, getKnowledgeBase, getDashboardStats, isOptedOut, recordAudit } from '@/lib/db';
 import { isVertical } from '@/lib/verticals';
+import { syncPromptAfterEdit, type PromptSyncOutcome } from '@/lib/voice/agent-resync';
 import { applyVerticalChange, type VerticalChangeOutcome } from '@/lib/verticals/change';
 import { VERTICALS } from '@/lib/types';
 import { tzOf } from '@/lib/time';
@@ -38,6 +39,9 @@ const PATCHABLE: Record<string, (v: unknown) => unknown> = {
     return v as Hours;
   },
 };
+
+/** PATCH fields that appear in the agent's prompt. */
+const PROMPT_FIELDS: ReadonlySet<string> = new Set(['name', 'owner_name', 'url', 'service_area', 'hours']);
 
 export interface BusinessDetail {
   business: Business;
@@ -121,8 +125,14 @@ export async function PATCH(
         meta: { ...actor.meta, from: before.vertical ?? 'hvac', to: updated.vertical ?? 'hvac', ...outcome, kb_content_kept: true },
       });
     }
+    // Name, owner name, website, service area and hours are all spoken in the agent's prompt: push them to the live agent now (a trade change
+    // already did, above). A failure is queued for retry and reported as `agent_sync`.
+    let agentSync: PromptSyncOutcome | null = null;
+    if (!(before && verticalChanges) && Object.keys(patch).some((k) => PROMPT_FIELDS.has(k))) agentSync = await syncPromptAfterEdit(id);
     // `vertical_sync` (only after a trade change): the dashboard warns when the live agent could not be updated yet (a retry is queued).
-    return ok<Business & { vertical_sync?: VerticalChangeOutcome }>({ ...publicBusiness(updated), ...(verticalSync ? { vertical_sync: verticalSync } : {}) });
+    return ok<Business & { vertical_sync?: VerticalChangeOutcome; agent_sync?: PromptSyncOutcome }>({
+      ...publicBusiness(updated), ...(verticalSync ? { vertical_sync: verticalSync } : {}), ...(agentSync ? { agent_sync: agentSync } : {}),
+    });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 400);
   }

@@ -1,6 +1,7 @@
 /**
- * Availability over the business's own hours + existing bookings. Internal
- * calendar by design — no external calendar API in the MVP. All maths happens in
+ * Availability over the business's own hours + existing bookings. The internal
+ * calendar is the source of truth; an optional Google Calendar mirror contributes busy
+ * intervals (lib/integrations/google/busy). All maths happens in
  * the business's time zone (see lib/time.ts), whatever the process TZ is.
  */
 import { listBlockingIntervals } from '@/lib/db';

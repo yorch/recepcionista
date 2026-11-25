@@ -23,7 +23,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `PUBLIC_BASE_URL` | no | `APP_URL` | overrides the origin used for links and Twilio signature URLs | no |
 | `NEXT_PUBLIC_APP_URL` | no | none | last-resort origin fallback (Stripe deposit links, Twilio) | no |
 | `ADMIN_TOKEN` | prod | none | break-glass admin: Bearer token and `/login` admin sign-in. Unset = the app fails closed (503) | yes |
-| `ALLOW_INSECURE_DEV` | never in prod | unset | local dev: skip admin auth and webhook checks (ignored in production; deploy.sh refuses `true`) | no |
+| `ALLOW_INSECURE_DEV` | never in prod | unset | local dev: skip admin auth and webhook / tool-secret checks (Twilio signature, ElevenLabs signature, ElevenLabs tool secret) when the matching secret is unset; the ONLY way to skip them (`NODE_ENV` alone never does). Ignored in production; deploy.sh refuses `true` | no |
 | `TRUSTED_PROXY` | prod (compose sets `true`) | unset (compose: `true`) | trust `X-Forwarded-For` for per-client rate limits and the same-origin check | no |
 | `TRUSTED_PROXY_HOPS` | no | `1` | proxies appending to `X-Forwarded-For` (2 behind a CDN plus Traefik) | no |
 | `APP_SECRET_KEY` | prod | insecure fixed key outside production | AES-256-GCM key for TOTP secrets: 32 random bytes, base64 (`openssl rand -base64 32`). deploy.sh validates the length | yes |
@@ -32,7 +32,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `WEBAUTHN_ORIGINS` | no | `PUBLIC_BASE_URL`/`APP_URL` origin | extra exact origins allowed to use passkeys, comma separated (staging); `https` only (`http` for localhost), each host must be the rpID or a subdomain. Production without any configured origin answers `503 passkeys_not_configured` | no |
 | `MAX_BUSINESSES_PER_USER` | no | `10` | most businesses one account may own (owner memberships; "Add another location", `POST /api/businesses/mine`), 1-100 | no |
 | `ALLOWED_DEV_ORIGINS` | no | none | `next dev` behind a tunnel (dev only) | no |
-| `DEMO_MODE` | never in prod | unset | `/api/demo/*`, `/api/pay/mock-complete`, mock Stripe checkout (`/api/billing/mock-activate`). compose forces `false`; deploy.sh refuses `true` | no |
+| `DEMO_MODE` | never in prod | unset | `/api/demo/*`, `/api/pay/mock-complete`, mock Stripe checkout (`/api/billing/mock-activate` and the mock checkout link), the demo console page and nav, and the Stripe-error fallback to a mock deposit link. **Ignored when `NODE_ENV=production`** (`demoModeEnabled()`): a leaked flag is inert. compose forces `false`; deploy.sh refuses `true` | no |
 | `CSP_REPORT_ONLY` | no | unset | `true`: enforce the moderate CSP and only report violations of the strict nonce policy (docs/security-headers.md) | no |
 | `CSP_UPGRADE_INSECURE` | no | unset = automatic: on only in production with an `https://` `APP_URL`/`PUBLIC_BASE_URL` | `true`/`false` forces `upgrade-insecure-requests` (turn it off for a plain-HTTP staging deployment; docs/security-headers.md) | no |
 | `CSP_REPORT_URI` | no | none | adds `report-uri` to the CSP (a collector URL you operate) | no |
@@ -92,7 +92,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 
 | Name | Required | Default | Feature | Secret |
 | --- | --- | --- | --- | --- |
-| `TWILIO_ACCOUNT_SID` | prod (real SMS and numbers) | unset: SMS is logged and numbers are mock-pool numbers, outside production only | Twilio. In production, or whenever Twilio is configured, a failed number purchase FAILS provisioning (502, or 503 `phone_provider_not_configured` without credentials): a fake number is never issued | no |
+| `TWILIO_ACCOUNT_SID` | prod (real SMS and numbers) | unset: outside production SMS is only logged (a `mock`, treated as delivered in dev/tests) and numbers are mock-pool numbers. **In production an incomplete Twilio config makes every text FAIL** (`sms_provider_not_configured`: verification routes answer 503, nothing is metered, no follow-up consent is recorded, the voice agent never says "I texted you"). A purchased number is configured with `SmsUrl=${APP_URL}/api/sms/inbound` (and `VoiceUrl=${APP_URL}/api/voice/incoming` on the `webhook` line); existing numbers are fixed with `POST /api/admin/repair-numbers` (dry run by default) | Twilio. In production, or whenever Twilio is configured, a failed number purchase FAILS provisioning (502, or 503 `phone_provider_not_configured` without credentials): a fake number is never issued | no |
 | `TWILIO_AUTH_TOKEN` | cond (with the SID; also verifies Twilio webhooks) | none | Twilio | yes |
 | `TWILIO_PHONE_NUMBER` | cond | none | SMS sender number. The platform's own line: never bought for, adopted by or released from a tenant (compared as E.164, so `+1 305 ...` and `1305...` match; an unparseable value makes releases refuse). Releases also refuse when it is set but SID/token are missing | no |
 | `TWILIO_AREA_CODE` | no | `305` | default US/Canada area code for newly bought tenant numbers (3 digits, first 2-9; an invalid value falls back to 305; deploy.sh rejects it). A business is bought a number in the area code of ITS OWN owner phone when that is a valid US/Canada code, so this only applies to tenants without one | no |
@@ -103,7 +103,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `OWNER_PHONE_GRANDFATHER_BEFORE`, `OWNER_PHONE_GRANDFATHER_UNTIL` | no | none | ISO instants: only businesses created before `_BEFORE` benefit; the switch expires at `_UNTIL` (unparseable = off) | no |
 | `OWNER_VERIFY_GLOBAL_PER_HOUR`, `OWNER_VERIFY_GLOBAL_PER_DAY` | no | `300`, `2000` | platform-wide caps on owner-phone verification texts (on top of per-user, per-IP, per-number and per-business limits) | no |
 | `ALLOW_UNVERIFIED_BOOKING_SMS` | no | off | text a model-relayed booking phone when the call has no verified caller id | no |
-| `ELEVENLABS_API_KEY` | cond (live voice agent) | unset: scripted calls | ElevenLabs agent and briefing TTS | yes |
+| `ELEVENLABS_API_KEY` | cond (live voice agent) | unset: no voice agent. Outside production a mock agent id and the `DEMO_MODE` scripted replay; in production nothing speaks a disclosure, so a call is NOT marked `consent_status='disclosed'` and provisioning does not create a real agent | ElevenLabs agent and briefing TTS | yes |
 | `ELEVENLABS_TOOL_SECRET` | prod when `ELEVENLABS_API_KEY` is set | none | shared secret on the agent tools and `/api/voice/initiation` (`x-recepcionista-tool-secret`) | yes |
 | `ELEVENLABS_TOOL_SECRET_ID` | no | none | id of an ElevenLabs workspace secret holding the same value (tool header by reference) | no |
 | `ELEVENLABS_WEBHOOK_SECRET` | prod when `ELEVENLABS_API_KEY` is set | none | HMAC for the post-call webhook; shown once by provisioning | yes |
@@ -112,11 +112,11 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `ELEVENLABS_VOICE_ID` | no | `PStJ2DzQnh8zxG5PDf1s` | voice for briefings and the agent default (a business's own pick, `voice_id`, wins for its agent) | no |
 | `ELEVENLABS_VOICE_ALLOWLIST` | no | provider premade voices | voices an owner may choose in Settings: comma separated ids, each optionally `id:Display Name`; ids outside it are refused (422) | no |
 | `ELEVENLABS_INITIATION_WEBHOOK` | no | `auto` | `off` stops provisioning from configuring the initiation webhook by API | no |
-| `OPENAI_API_KEY` | no | unset: templates | extraction and briefings | yes |
+| `OPENAI_API_KEY` | no (but without any LLM key website extraction is refused) | unset (and no `ANTHROPIC_API_KEY`): call summaries and briefing narration use templates; website-to-knowledge-base extraction answers 422 | extraction, summaries and briefings | yes |
 | `LLM_MODEL` | no | `gpt-4o-mini` | OpenAI model | no |
 | `ANTHROPIC_API_KEY` | no | unset | extraction and briefings (used when OpenAI is unset) | yes |
 | `ANTHROPIC_MODEL` | no | `claude-sonnet-4-5` | Anthropic model | no |
-| `REVIEW_URL` | no | demo link | review link in gratitude texts | no |
+| `REVIEW_URL` | no (set it in production) | `https://g.page/r/demo/review` placeholder: a production default that real customers would receive (owner decision pending, docs/review/18f #8) | review link in gratitude texts | no |
 
 ## Scripts only
 

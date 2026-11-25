@@ -19,6 +19,7 @@
 import { countryForBusiness, isOptedOut, prisma, recordAudit } from '@/lib/db';
 import { logSms } from '@/lib/db';
 import { SentNotLoggedError, sendAndLog } from '@/lib/messaging';
+import { smsDelivered } from '@/lib/messaging/delivery';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { rateLimit } from '@/lib/ratelimit';
 import { tzOf } from '@/lib/time';
@@ -172,7 +173,7 @@ export async function confirmOwnerReply(business: Business, replyId: string, now
       await auditReply('refused', business.id, reply, { reason, sms: sms.id });
       return { kind: 'refused', reason, name };
     }
-    if (result.status === 'failed') {
+    if (!smsDelivered(result.status)) {
       if (AMBIGUOUS_PROVIDER_ERROR.test(result.error ?? '')) { // a timeout: the carrier may still have taken it. Never retried, never called "not sent".
         accepted = true;
         await finish(reply.id, { status: 'uncertain', refuseReason: 'provider_unknown', smsLogId: sms.id });

@@ -12,6 +12,14 @@ export function fail(error: unknown, status = 400) {
   return NextResponse.json({ ok: false, error: message } satisfies ApiResult<never>, { status });
 }
 
+/**
+ * Answer of a webhook route's GET probe: `ready` says whether the route can actually authenticate its caller right now (its secret is
+ * configured, or the explicit local-dev opt-in is on), 200 when ready and 503 when not. It never reveals a secret or anything about tenants.
+ */
+export function readiness(ready: boolean, extra: Record<string, unknown> = {}) {
+  return NextResponse.json({ ok: ready, data: { ready, ...extra } }, { status: ready ? 200 : 503 });
+}
+
 export async function readJson<T>(req: Request): Promise<T> {
   try {
     return (await req.json()) as T;

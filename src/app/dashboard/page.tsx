@@ -198,7 +198,7 @@ export default async function TodayPage() {
                   </div>
                   <div className="mt-1 flex items-center gap-2">
                     <Badge tone={c.language === 'es' ? 'brand' : c.language === 'mixed' ? 'sky' : 'neutral'}>
-                      {c.language === 'mixed' ? 'EN/ES' : c.language?.toUpperCase() ?? 'EN'}
+                      {c.language === 'mixed' ? 'EN/ES' : c.language?.toUpperCase() ?? '—'}
                     </Badge>
                     <span className="text-xs text-dim">{seconds(c.duration_sec)}</span>
                     <span className="truncate text-xs text-body">{c.summary}</span>

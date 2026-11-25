@@ -9,6 +9,7 @@ import { tzOf } from '@/lib/time';
 import { decide, smsSegments, withStopFooter } from '@/lib/messaging/policy';
 import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
 import { forwardVerificationText, ownerVerificationText, type VerifyPurpose } from '@/lib/messaging/owner-verify';
+import { smsDelivered } from '@/lib/messaging/delivery';
 import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
@@ -131,7 +132,8 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     throw err;
   }
 
-  if (result.status === 'failed') {
+  // An undelivered text (provider failure, or a mock in production) burns no plan quota: the reservation is refunded.
+  if (!smsDelivered(result.status)) {
     await refund();
     log.warn('send.failed', {
       business: input.business_id,
@@ -165,7 +167,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
       consent_basis: decision.consent_basis,
     }, { country });
   } catch (err) {
-    if (result.status === 'failed') throw err; // nothing went out: an ordinary failure
+    if (!smsDelivered(result.status)) throw err; // nothing went out: an ordinary failure
     log.error('send.log_failed_after_send', { business: input.business_id, kind: input.kind, err });
     throw new SentNotLoggedError(result, err);
   }
@@ -193,7 +195,7 @@ export async function sendOwnerVerificationCode(
   }
   const verificationText = purpose === 'forward-number' ? forwardVerificationText(code) : ownerVerificationText(code); // fixed template: nothing tenant-controlled
   const result = await sendSms(phoneE164, verificationText);
-  if (result.status !== 'failed') await meterSms(businessId, smsSegments(verificationText));
+  if (smsDelivered(result.status)) await meterSms(businessId, smsSegments(verificationText));
   const sms = await logSms({
     business_id: businessId, to_phone: phoneE164,
     // The code itself is not retained in the log.

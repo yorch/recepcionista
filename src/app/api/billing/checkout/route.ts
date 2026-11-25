@@ -3,7 +3,8 @@ import { authenticate, requireVerifiedEmail, scopeBusinessId } from '@/lib/sessi
 import { getBusiness, listBusinessUsers, recordAudit } from '@/lib/db';
 import { claimTrial, emailFingerprint, trialUsedElsewhere } from '@/lib/billing/trial';
 import { limitRequest } from '@/lib/ratelimit';
-import { annualAvailable, billingMode, checkoutReturnPath, createCheckoutSession, parseInterval, returnBaseUrl } from '@/lib/providers/stripe-billing';
+import { annualAvailable, BillingConfigError, billingMode, checkoutReturnPath, createCheckoutSession, parseInterval, returnBaseUrl } from '@/lib/providers/stripe-billing';
+import { demoModeEnabled } from '@/lib/auth';
 import { ensureCustomer } from '@/lib/billing/customer';
 import { billingErrorResponse } from '@/lib/billing/http';
 
@@ -41,6 +42,8 @@ export async function POST(req: Request) {
     const mode = billingMode(); // throws BillingConfigError -> 503 (always in production without Stripe)
 
     if (mode === 'mock') {
+      // The mock checkout is /api/billing/mock-activate, which answers 404 without DEMO_MODE: do not hand out a dead link.
+      if (!demoModeEnabled()) throw new BillingConfigError('Stripe billing is not configured (STRIPE_SECRET_KEY unset; set DEMO_MODE=true for the local mock checkout)');
       const url = `${returnBaseUrl()}/api/billing/mock-activate?business_id=${encodeURIComponent(business.id)}`
         + (returnPath === '/dashboard/billing' ? '' : `&return_path=${encodeURIComponent(returnPath)}`)
         + (interval === 'year' ? '&interval=year' : '');

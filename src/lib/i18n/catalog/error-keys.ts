@@ -14,6 +14,8 @@ export const API_ERROR_SLUGS: Record<string, string> = {
   'internal error': 'internal',
   'email_not_configured': 'emailNotConfigured',
   'email_send_failed': 'emailSendFailed',
+  'sms_provider_not_configured': 'smsNotConfigured',
+  'signup_verification_email_failed': 'signupEmailFailed',
   'email_not_verified': 'emailNotVerified',
   'captcha_failed': 'captchaFailed',
   'signup_disabled': 'signupDisabled',

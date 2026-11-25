@@ -71,7 +71,7 @@ is what the voice agent should say.
 | `POST /api/sms/gratitude` | `{booking_id}` → `{sms, body}` |
 | `POST /api/sms/gratitude-reply` | `{booking_id, rating}` → `{routed: 'review' \| 'owner'}` |
 | `POST /api/payments/create-link` | `{business_id, amount_cents, description, booking_id?}` → `PaymentLink` |
-| `GET /pay/[id]` | mock checkout page (only reached in mock Stripe mode) |
+| `GET /pay/[id]` | local mock checkout page (mock Stripe mode). Not protected in production: a booking with a deposit still renders it (known limitation, docs/review/18f #14); real deposit links are Stripe's |
 
 ### WS5 owns
 

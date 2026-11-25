@@ -2,6 +2,7 @@ import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { getBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
 import { buildSystemPrompt } from '@/lib/kb';
+import { syncPromptAfterEdit, type PromptSyncOutcome } from '@/lib/voice/agent-resync';
 import type { FAQ, KnowledgeBase, Service } from '@/lib/types';
 
 interface KnowledgePatch {
@@ -14,7 +15,7 @@ interface KnowledgePatch {
 export async function PUT(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
-): Promise<ReturnType<typeof ok<KnowledgeBase>> | ReturnType<typeof fail>> {
+): Promise<ReturnType<typeof ok<KnowledgeBase & { agent_sync: PromptSyncOutcome }>> | ReturnType<typeof fail>> {
   const auth = await authenticate(req, { role: 'owner' }); // the knowledge base is the agent's prompt: owner-only
   if (!auth.ok) return auth.response;
   try {
@@ -36,7 +37,9 @@ export async function PUT(
     const system_prompt = buildSystemPrompt(business, { services, faqs, pricing_notes });
 
     const saved = await upsertKnowledgeBase(id, { services, faqs, pricing_notes, call_script, system_prompt });
-    return ok<KnowledgeBase>(saved);
+    // The live agent's prompt is whatever the last sync pushed: push this edit now (a failure is queued for retry and reported).
+    const agent_sync = await syncPromptAfterEdit(id);
+    return ok<KnowledgeBase & { agent_sync: PromptSyncOutcome }>({ ...saved, agent_sync });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 400);
   }

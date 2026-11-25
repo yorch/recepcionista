@@ -229,9 +229,9 @@ export function internalAuthHeaders(): Record<string, string> {
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
-/** Demo-only routes (reset/simulate) are 404 unless DEMO_MODE=true. */
+/** Demo-only routes (reset/simulate/mock-complete) are 404 unless DEMO_MODE=true, and NEVER in production (a leaked flag is inert). */
 export function demoModeEnabled(): boolean {
-  return process.env.DEMO_MODE === 'true';
+  return process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 }
 
 /**

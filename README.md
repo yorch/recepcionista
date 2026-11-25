@@ -45,12 +45,12 @@ phone number:
 ![Onboarding: paste a URL, review the extracted knowledge
 base](docs/screenshots/onboarding.png)
 
-Dashboard — calls, bookings and today's revenue at a glance:
+Dashboard — today's calls, upcoming bookings and this month's deposits at a glance:
 
 ![Dashboard with today's calls and bookings](docs/screenshots/dashboard.png)
 
-The demo console — drives the same seven HTTP tools the voice agent calls on a
-real call:
+The demo console (local `DEMO_MODE=true` only; it does not exist in production) —
+runs the same tool code the voice agent calls on a real call, in-process:
 
 ![Demo console simulating an inbound call](docs/screenshots/demo.png)
 
@@ -149,10 +149,15 @@ and, when `ELEVENLABS_API_KEY` is set, without `ELEVENLABS_TOOL_SECRET` and
 `ELEVENLABS_WEBHOOK_SECRET` (or `TWILIO_AUTH_TOKEN` when `TWILIO_ACCOUNT_SID` is set).
 Set `ADMIN_TOKEN` locally too, so you test the same sign-in path you deploy.
 
-**Nothing fails open because of `NODE_ENV`.** If a secret is unset the app
-rejects the request. To run locally without secrets, opt in explicitly with
-`ALLOW_INSECURE_DEV=true` (ignored in production builds). Never combine it
-with a tunnel or any publicly reachable host.
+**Nothing fails open because of `NODE_ENV`.** If a webhook or tool secret is unset the app
+rejects the request (Twilio signature, ElevenLabs webhook signature, tool secret). To run
+locally without secrets, opt in explicitly with `ALLOW_INSECURE_DEV=true` (ignored in
+production builds). Never combine it with a tunnel or any publicly reachable host.
+**Missing provider keys also fail honestly in production**: without a complete Twilio
+configuration a text is a failure (`sms_provider_not_configured`: the verification routes answer
+503, nothing is counted against the plan, no follow-up consent is recorded), never a "mock"
+success; `DEMO_MODE` is ignored in production (reset, simulated calls and the mock checkout are
+404). Without `ELEVENLABS_API_KEY` there is no voice agent (see the table below).
 
 **ElevenLabs webhook secret.** The first provision creates the post-call
 webhook and returns its signing secret once, in the admin-only provision
@@ -224,20 +229,21 @@ Verify it:
 ```sh
 bun scripts/smoke.ts     # 39 assertions, drives the whole product over HTTP
 bun scripts/ws1-test.ts  # 14 — extraction, KB, provisioning
-bun scripts/ws3-test.ts  # 40 — the seven voice tools
+bun scripts/ws3-test.ts  # 40 — the core voice tools
 bun scripts/ws4-test.ts  # 71 — bilingual SMS, payments, webhooks
 bun scripts/ws5-test.ts  # 17 — briefings, TTS, gratitude
 ```
 
-No keys are required to demo. Every external service runs through an adapter
-with a local fallback:
+No keys are required to try it locally (development, or `DEMO_MODE=true`). Every
+external service runs through an adapter with a local fallback, **and every fallback is
+refused in production**:
 
-| Service | With a key | Without a key |
+| Service | With a key | Without a key (development / demo only) |
 | --- | --- | --- |
-| LLM (OpenAI / Anthropic) | real extraction + summaries | deterministic templates, still coherent |
-| ElevenLabs | real voice agent + TTS briefings | macOS `say` + `afconvert` for briefings; scripted call replay |
-| Twilio | real SMS + number provisioning | SMS logged and shown in the dashboard |
-| Stripe | real test-mode payment links | `/pay/[id]` mock checkout page |
+| LLM (OpenAI / Anthropic) | real extraction + summaries | call summaries and briefings use deterministic templates; website-to-knowledge-base extraction **refuses** (422), it never invents a knowledge base |
+| ElevenLabs | real voice agent + TTS briefings | macOS `say` + `afconvert` for briefings (a development host only); a mock agent id and scripted call replay (`DEMO_MODE`) |
+| Twilio | real SMS + number provisioning | SMS logged (a mock) and shown in the dashboard; fake `+1<area>555xxxx` numbers. In production: texts fail with `sms_provider_not_configured`, number purchase is refused |
+| Stripe | real test-mode payment links | `/pay/[id]` mock checkout page. A Stripe error with a real key is an error (the mock only with `DEMO_MODE=true`) |
 
 ---
 
@@ -265,15 +271,12 @@ Next.js 16 (App Router) ── Postgres 17 (Docker) via Prisma
 ```
 
 **Key design choice:** the voice agent never touches the database. It calls
-seven HTTP tools
-(`check_availability`, `create_booking`, `send_sms`, `create_payment_link`,
-`flag_emergency`,
-`get_pricing`, `handoff_to_human`), each returning a `message` the agent speaks
-aloud. The demo
-console drives those exact same endpoints, so what judges see is the real
-pipeline.
+HTTP tools (the seven below, plus `reschedule_booking`, `cancel_booking`,
+`transfer_to_human` when `NATIVE_TRANSFER=on`, and the owner call-in tools),
+each returning a `message` the agent speaks aloud. The demo console (local only)
+runs the same tool code in-process.
 
-## The seven tools
+## The core tools
 
 | Tool | Does | Guardrail |
 | --- | --- | --- |
@@ -291,7 +294,7 @@ pipeline.
 src/lib/types.ts          every domain type (frozen contract)
 src/lib/db/               Prisma client + async data layer (single import point)
 src/lib/providers/        llm · twilio · stripe — real-or-mock adapters
-src/lib/voice/            the seven tools + ElevenLabs agent client
+src/lib/voice/            the voice tools + ElevenLabs agent client
 src/lib/briefing/         Spanglish script generation + TTS
 src/lib/jobs/             background job runner: 6 PM briefing per time zone, gratitude sweep, cleanup, retention
 src/lib/messaging/        bilingual SMS templates
@@ -352,16 +355,16 @@ See `MEL_USAGE.md`.
 | Piece | Status |
 | --- | --- |
 | Booking, call records, knowledge base, briefing scripts | **Real** — written to the store, read by every page |
-| Briefing audio | **Real audio** — ElevenLabs with a key, macOS `say` (Paulina, es_MX) without one |
-| SMS copy and delivery | Real bilingual copy; delivered through Twilio with a key, logged to the dashboard without one |
+| Briefing audio | **Real audio** — ElevenLabs with a key. Without one only a development Mac can produce audio (`say`, es_MX); elsewhere there is no audio (text only) |
+| SMS copy and delivery | Real bilingual copy; delivered through Twilio with a key. Without one: logged only outside production; in production a text FAILS (`sms_provider_not_configured`) |
 | Deposit links | Real Stripe test-mode links with a key; local `/pay/[id]` checkout without one |
-| Voice agent | Real ElevenLabs Conversational AI agent with a key; scripted replay without one |
-| Calendar | Intentionally internal — no OAuth, no external sync |
+| Voice agent | Real ElevenLabs Conversational AI agent with a key; scripted replay (`DEMO_MODE`) without one. No agent speaks (and no recording consent is claimed) in production without the key |
+| Calendar | Internal calendar, with an optional two-way Google Calendar sync (OAuth; `docs/integrations/google-calendar.md`) |
 
 ## Notes
 
-- Calendar is internal by design — no OAuth, no external sync.
-- Stripe stays in test mode. No card data touches this app.
+- The calendar is internal; Google Calendar sync is optional (`docs/integrations/google-calendar.md`).
+- Stripe stays in test mode here. Real card entry happens on Stripe's pages (production deposit links are `buy.stripe.com`); the app's own `/pay/[id]` page is the local mock checkout (nothing is posted anywhere). Known limitation: the booking-level `/pay/<bookingId>` page still renders in production for a booking with a deposit (decision pending, `docs/review/18f`).
 - **Postgres is the source of truth.** It runs in Docker
   (`docker compose up -d`), reachable at
   `localhost:5433`. `POST /api/demo/reset` reseeds it in-process without leaving

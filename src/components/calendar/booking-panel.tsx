@@ -1,4 +1,5 @@
 'use client';
+import { smsDelivered } from '@/lib/messaging/delivery';
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { StatusBadge } from './status';
@@ -131,7 +132,7 @@ export function BookingPanel({ booking, tz, canManage, onClose, onChanged }: Boo
     try {
       const r = await apiRequest<ResendResult>(`/api/bookings/${booking.id}/resend-confirmation`, { method: 'POST', body: {} });
       const text = r.deduped ? t('bp.resendDeduped') : ((RESEND_KEYS as readonly string[]).includes(r.status) ? t(`resend.${r.status}` as 'resend.sent') : t('bp.textStatus', { status: r.status }));
-      setMessage({ tone: r.deduped || r.status === 'sent' || r.status === 'mock' ? 'ok' : 'error', text });
+      setMessage({ tone: r.deduped || smsDelivered(r.status) ? 'ok' : 'error', text });
     } catch (err) {
       setMessage({ tone: 'error', text: errorText(t, err) });
     } finally {

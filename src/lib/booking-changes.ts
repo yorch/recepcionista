@@ -16,6 +16,7 @@ import {
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import { scheduleLinkDeactivation } from '@/lib/payments/link-store';
 import { sendAndLog } from '@/lib/messaging';
+import { smsDelivered } from '@/lib/messaging/delivery';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { cancelSms, refundSms, rescheduleSms, type Lang } from '@/lib/messaging/templates';
 import { bookingRefundEligibility, type Eligibility } from '@/lib/refunds';
@@ -43,7 +44,6 @@ export interface NoticeResult {
   delivered: boolean;
 }
 
-const DELIVERED: ReadonlySet<string> = new Set(['sent', 'mock']);
 
 /** The language to text a customer in: the language of the call that made the booking, else the business default. */
 export async function customerLanguage(booking: Booking, business: Business): Promise<Lang> {
@@ -72,7 +72,7 @@ async function sendChangeText(
       business_id: business.id, to: booking.customer_phone, body, kind: 'other', booking_id: booking.id,
       consent_basis: initiator === 'customer' ? 'caller_initiated' : 'transactional_booking', now,
     });
-    delivered = DELIVERED.has(sms.status);
+    delivered = smsDelivered(sms.status);
     if (delivered) await markCustomerNotified(booking.id, now);
     return { status: sms.status, delivered };
   } catch (err) {
@@ -191,7 +191,7 @@ export async function notifyRefund(bookingId: string, amountCents: number, now: 
         return { status: 'blocked_quiet_hours', delivered: false };
       }
       const { sms } = await sendAndLog({ business_id: business.id, to: booking.customer_phone, body, kind: 'other', booking_id: booking.id, consent_basis: 'transactional_booking', now });
-      delivered = DELIVERED.has(sms.status);
+      delivered = smsDelivered(sms.status);
       return { status: sms.status, delivered };
     } finally {
       if (delivered) await completeEvent('booking_change_sms', claim); else await releaseEvent('booking_change_sms', claim);
