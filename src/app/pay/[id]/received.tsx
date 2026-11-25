@@ -10,8 +10,6 @@ export interface PaymentReceivedProps {
   amountCents: number;
   label: string;
   businessName: string;
-  /** Last 4 digits of the card; "----" (or empty) when unknown, e.g. the link was already paid. */
-  last4: string;
   /** Display string for when it was paid (formatted by the caller, in the customer's zone). */
   paidAt?: string;
   t: TFunction;
@@ -19,9 +17,8 @@ export interface PaymentReceivedProps {
 }
 
 export function PaymentReceived({
-  reference, amountCents, label, businessName, last4, paidAt, t, locale,
+  reference, amountCents, label, businessName, paidAt, t, locale,
 }: PaymentReceivedProps) {
-  const knownCard = /^\d{4}$/.test(last4);
   return (
     <main id="main-content" className="mx-auto flex min-h-dvh w-full max-w-md flex-col items-center justify-center px-5 py-10 text-center">
       <div aria-hidden="true" className="live-dot grid h-16 w-16 place-items-center rounded-full bg-mint/15 text-3xl text-mint">
@@ -36,7 +33,6 @@ export function PaymentReceived({
         <Row label={t('pay.row.paidTo')} value={businessName} />
         <Row label={t('pay.row.amount')} value={formatMoney(amountCents, locale)} strong />
         <Row label={t('pay.row.for')} value={label} />
-        {knownCard ? <Row label={t('pay.row.card')} value={`•••• ${last4}`} /> : null}
         {paidAt ? <Row label={t('pay.row.date')} value={paidAt} /> : null}
         <Row label={t('pay.row.reference')} value={reference} mono />
       </dl>

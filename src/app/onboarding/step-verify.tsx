@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -11,6 +11,7 @@ import type { TFunction } from '@/lib/i18n/core';
 import { toE164 } from '@/lib/phone';
 import { prettyPhone } from './forwarding';
 import type { StepProps } from './flow';
+import { OnboardingTimeZone, type TimeZoneFieldHandle } from './step-timezone';
 
 const RESEND_SECONDS = 30;
 
@@ -38,6 +39,8 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const [codeError, setCodeError] = useState<string | null>(null);
   const [changing, setChanging] = useState(false);
+  const tzRef = useRef<TimeZoneFieldHandle>(null);
+  const [continuing, setContinuing] = useState(false);
 
   const e164 = toE164(phone);
   const verifiedSame = status.owner_phone_verified && e164 !== null && e164 === toE164(status.owner_phone) && !changing;
@@ -136,8 +139,17 @@ export function VerifyStep({ businessId, status, go, refresh }: StepProps) {
         )}
       </Card>
 
+      {verifiedSame ? (
+        <Card className="mt-4 p-5">
+          <OnboardingTimeZone ref={tzRef} businessId={businessId} phone={status.owner_phone} />
+        </Card>
+      ) : null}
+
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button onClick={() => go('plan')} disabled={!status.owner_phone_verified || !verifiedSame} className="flex-1 sm:flex-none sm:px-8">{t('plan.continue')}</Button>
+        <Button
+          onClick={async () => { setContinuing(true); const saved = (await tzRef.current?.flush()) ?? true; setContinuing(false); if (saved) go('plan'); }}
+          disabled={!status.owner_phone_verified || !verifiedSame || continuing} className="flex-1 sm:flex-none sm:px-8"
+        >{t('plan.continue')}</Button>
         <Button variant="ghost" onClick={() => go('review')}>{t('common.back')}</Button>
       </div>
     </section>

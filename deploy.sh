@@ -3,28 +3,24 @@
 # Deploy recepcionista to a host running Traefik.
 #
 #   ./deploy.sh                                   build, back up the DB, migrate, (re)start
-#   ./deploy.sh --seed --i-know-this-wipes-data   …and then load the demo dataset
 #   ./deploy.sh --logs                            follow the app logs after starting
 #
 # Safe to re-run: migrations are idempotent and `up -d` recreates only what
 # changed. Before `up -d`, if the database container is running, a gzipped
-# pg_dump is written to $BACKUP_DIR (default ./backups). --seed is never implied:
-# scripts/seed.ts truncates every table, so it also needs the explicit
-# --i-know-this-wipes-data flag.
+# pg_dump is written to $BACKUP_DIR (default ./backups). There is no --seed:
+# the demo dataset truncates every table and creates a fake live tenant, so
+# it is refused here (use the development compose file for demo data).
 set -Eeuo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 COMPOSE=(docker compose -f compose.production.yaml)
-SEED=0
-CONFIRM_WIPE=0
 FOLLOW_LOGS=0
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 
 for arg in "$@"; do
   case "$arg" in
-    --seed) SEED=1 ;;
-    --i-know-this-wipes-data) CONFIRM_WIPE=1 ;;
+    --seed|--i-know-this-wipes-data) echo "ERROR: $arg is refused: this script only deploys production, and the demo dataset wipes every table and creates a fake live tenant. Use compose.dev.yaml for demo data." >&2; exit 2 ;;
     --logs) FOLLOW_LOGS=1 ;;
     -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg (try --help)" >&2; exit 2 ;;
@@ -32,10 +28,6 @@ for arg in "$@"; do
 done
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-
-if [[ "$SEED" == "1" && "$CONFIRM_WIPE" != "1" ]]; then
-  die "--seed truncates every table. Re-run with --seed --i-know-this-wipes-data to confirm."
-fi
 
 # ---- preconditions -------------------------------------------------------
 [[ -f .env ]] || die ".env is missing. Copy .env.example to .env and fill it in."
@@ -60,6 +52,10 @@ set -a; . ./.env; set +a
 [[ -n "${ADMIN_TOKEN:-}" ]] \
   || die "ADMIN_TOKEN is unset in .env. Required in production: openssl rand -hex 32"
 
+# LLM: REQUIRED in production (owner decision). Website import fails without it, and call summaries / briefing narration would silently fall back to
+# templates. The app health check also reports 503 `llm_not_configured`, so a deploy without a key would never become healthy.
+[[ -n "${OPENAI_API_KEY:-}" || -n "${ANTHROPIC_API_KEY:-}" ]] \
+  || die "No LLM key: set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env. An LLM is required in production (website import, call summaries and briefings)."
 # Voice/SMS providers: in production the app fails closed without these, so a
 # missing secret would deploy "successfully" and then reject every live call.
 if [[ -n "${ELEVENLABS_API_KEY:-}" ]]; then
@@ -67,6 +63,9 @@ if [[ -n "${ELEVENLABS_API_KEY:-}" ]]; then
     || die "ELEVENLABS_TOOL_SECRET is unset in .env but ELEVENLABS_API_KEY is set. Every voice tool call would 401. openssl rand -hex 32"
   [[ -n "${ELEVENLABS_WEBHOOK_SECRET:-}" ]] \
     || die "ELEVENLABS_WEBHOOK_SECRET is unset in .env but ELEVENLABS_API_KEY is set. Post-call webhooks would 401. See README (ElevenLabs webhook secret)."
+fi
+if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -n "${TWILIO_AUTH_TOKEN:-}" && -n "${TWILIO_PHONE_NUMBER:-}" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
+  die "Twilio is configured but ELEVENLABS_API_KEY is unset in .env: provisioning refuses (503 voice_provider_not_configured) because a purchased number would have no voice agent. Set ELEVENLABS_API_KEY (each purchased number is imported into ElevenLabs and bound to its tenant's agent)."
 fi
 if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -z "${TWILIO_AUTH_TOKEN:-}" ]]; then
   die "TWILIO_AUTH_TOKEN is unset in .env but TWILIO_ACCOUNT_SID is set."
@@ -185,8 +184,8 @@ fi
 for v in NATIVE_TRANSFER STIR_TRUST LANGUAGE_DETECTION; do
   case "${!v:-}" in "" | on | off) ;; *) die "$v is '${!v}' in .env: use on or off, or leave it empty (docs/env-vars.md)." ;; esac
 done
-if [[ "${NATIVE_TRANSFER:-}" == "on" && "${VOICE_LINE_KIND:-}" != "native" && ( -z "${ELEVENLABS_API_KEY:-}" || -z "${ELEVENLABS_PHONE_NUMBER_ID:-}" ) ]]; then
-  echo "WARNING: NATIVE_TRANSFER=on only matters on a native ElevenLabs line (ELEVENLABS_API_KEY + ELEVENLABS_PHONE_NUMBER_ID); here it has no effect. Run the live transfer test first (docs/runbook.md section 8)." >&2
+if [[ "${NATIVE_TRANSFER:-}" == "on" && "${VOICE_LINE_KIND:-}" != "native" && ( -z "${ELEVENLABS_API_KEY:-}" || "${ELEVENLABS_TENANT_LINES:-}" == "off" && -z "${ELEVENLABS_PHONE_NUMBER_ID:-}" ) ]]; then
+  echo "WARNING: NATIVE_TRANSFER=on only matters on a native ElevenLabs line (ELEVENLABS_API_KEY; each tenant's number is imported, or ELEVENLABS_PHONE_NUMBER_ID with ELEVENLABS_TENANT_LINES=off); here it has no effect. Each business also has to opt in under Settings. Run the live transfer test first (docs/runbook.md section 8)." >&2
 fi
 if [[ "${NATIVE_TRANSFER:-}" == "on" && -z "${ELEVENLABS_TOOL_SECRET:-}" ]]; then
   die "NATIVE_TRANSFER=on needs ELEVENLABS_TOOL_SECRET (the per-call transfer destination travels through the authenticated initiation webhook)."
@@ -250,14 +249,6 @@ fi
 # `up -d` waits for db (healthy) and migrate (completed) before starting app,
 # because of the depends_on conditions in the compose file.
 "${COMPOSE[@]}" up -d --remove-orphans
-
-if [[ "$SEED" == "1" ]]; then
-  echo "Seeding the demo dataset (this truncates every table)…"
-  # --rm so the one-shot container does not linger in `compose ps`.
-  # deploy.sh already required --i-know-this-wipes-data, so pass the seed script's own override: the production
-  # database name ("recepcionista") does not look disposable to its guard.
-  "${COMPOSE[@]}" --profile seed run --rm seed bun scripts/seed.ts --force-i-know
-fi
 
 # ---- report --------------------------------------------------------------
 APP_ID="$("${COMPOSE[@]}" ps -q app)"

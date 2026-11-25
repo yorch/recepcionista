@@ -30,7 +30,7 @@ export default async function BriefingsPage() {
         right={isOwner ? <BriefingActions businessId={biz.id} /> : null}
       />
 
-      <BriefingsList businessId={biz.id} initial={page} />
+      <BriefingsList businessId={biz.id} initial={page} isOwner={isOwner} />
       {briefings.length === 0 ? (
         <div className="mt-6">
           <EmptyState

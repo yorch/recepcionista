@@ -127,7 +127,6 @@ cp .env.example .env    # set DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN, A
                         # EMAIL_PROVIDER + EMAIL_FROM + its key, STRIPE_WEBHOOK_SECRET, provider keys
                         # (every variable: docs/env-vars.md; deploy.sh refuses to run without the required ones)
 ./deploy.sh             # build, back up the DB, migrate, start
-./deploy.sh --seed --i-know-this-wipes-data   # …plus the demo dataset (wipes data)
 ```
 
 ## Authentication
@@ -208,8 +207,8 @@ at a public host. Each item is a check, not a promise that the code does it.
 - [ ] Without a token, `/dashboard`, `/api/businesses` and `/api/sms/send` return
       401. Check this with `curl` against the public URL.
 - [ ] `STRIPE_SECRET_KEY` is a test key (`sk_test_…`) until the payment flow has
-      been reviewed, and the mock checkout at `/pay/[id]` is not the path used for
-      live deposits.
+      been reviewed, and the demo checkout at `/pay/[id]` (DEMO_MODE only, never rendered in
+      production) is not the path used for live deposits.
 - [ ] Postgres has no published port. `docker compose -f compose.production.yaml ps`
       shows no host mapping for `db`.
 - [ ] Traefik has a rate limit, and `/api/demo` and `/api/voice/tools` are
@@ -241,7 +240,7 @@ refused in production**:
 | Service | With a key | Without a key (development / demo only) |
 | --- | --- | --- |
 | LLM (OpenAI / Anthropic) | real extraction + summaries | call summaries and briefings use deterministic templates; website-to-knowledge-base extraction **refuses** (422), it never invents a knowledge base |
-| ElevenLabs | real voice agent + TTS briefings | macOS `say` + `afconvert` for briefings (a development host only); a mock agent id and scripted call replay (`DEMO_MODE`) |
+| ElevenLabs | real voice agent + TTS briefings | no local voice: briefings simply have no audio without an ElevenLabs key (the dashboard says "audio unavailable"); a mock agent id and scripted call replay (`DEMO_MODE`) |
 | Twilio | real SMS + number provisioning | SMS logged (a mock) and shown in the dashboard; fake `+1<area>555xxxx` numbers. In production: texts fail with `sms_provider_not_configured`, number purchase is refused |
 | Stripe | real test-mode payment links | `/pay/[id]` mock checkout page. A Stripe error with a real key is an error (the mock only with `DEMO_MODE=true`) |
 
@@ -357,14 +356,14 @@ See `MEL_USAGE.md`.
 | Booking, call records, knowledge base, briefing scripts | **Real** — written to the store, read by every page |
 | Briefing audio | **Real audio** — ElevenLabs with a key. Without one only a development Mac can produce audio (`say`, es_MX); elsewhere there is no audio (text only) |
 | SMS copy and delivery | Real bilingual copy; delivered through Twilio with a key. Without one: logged only outside production; in production a text FAILS (`sms_provider_not_configured`) |
-| Deposit links | Real Stripe test-mode links with a key; local `/pay/[id]` checkout without one |
+| Deposit links | Real Stripe test-mode links with a key; local `/pay/[id]` demo checkout without one (non-production only; production refuses to create a link without a key) |
 | Voice agent | Real ElevenLabs Conversational AI agent with a key; scripted replay (`DEMO_MODE`) without one. No agent speaks (and no recording consent is claimed) in production without the key |
 | Calendar | Internal calendar, with an optional two-way Google Calendar sync (OAuth; `docs/integrations/google-calendar.md`) |
 
 ## Notes
 
 - The calendar is internal; Google Calendar sync is optional (`docs/integrations/google-calendar.md`).
-- Stripe stays in test mode here. Real card entry happens on Stripe's pages (production deposit links are `buy.stripe.com`); the app's own `/pay/[id]` page is the local mock checkout (nothing is posted anywhere). Known limitation: the booking-level `/pay/<bookingId>` page still renders in production for a booking with a deposit (decision pending, `docs/review/18f`).
+- Stripe stays in test mode here. Real card entry happens on Stripe's pages (production deposit links are `buy.stripe.com`); the app's own `/pay/[id]` page forwards a booking with a live link to Stripe, shows a receipt once paid, and otherwise says the link is not available; the demo card form (nothing is posted anywhere) renders only with `DEMO_MODE=true` outside production.
 - **Postgres is the source of truth.** It runs in Docker
   (`docker compose up -d`), reachable at
   `localhost:5433`. `POST /api/demo/reset` reseeds it in-process without leaving

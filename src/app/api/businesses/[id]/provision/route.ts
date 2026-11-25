@@ -6,9 +6,11 @@ import { areaCodeForBusiness } from '@/lib/phone';
 import crypto from 'node:crypto';
 import { extractFromUrl, templateResult, ExtractionError } from '@/lib/extraction';
 import { generateKnowledgeBase, promptIsDeficient } from '@/lib/kb';
-import { readinessOf } from '@/lib/kb/readiness';
-import { isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
-import { syncAgent, bindPhoneNumber } from '@/lib/voice/elevenlabs';
+import { readinessForGoLive } from '@/lib/kb/readiness-server';
+import { hasTwilio, isMockPoolNumber, provisionNumber, releaseNumber } from '@/lib/providers/twilio';
+import { syncAgent, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { ensureTenantLine, lineApplicable } from '@/lib/voice/tenant-line';
+import { lineKindFor } from '@/lib/voice/line';
 import { ensurePostCallWebhook, registerPostCallWebhookOnAgent } from '@/lib/voice/postcall';
 import { logger } from '@/lib/log';
 import { limitRequest } from '@/lib/ratelimit';
@@ -31,6 +33,8 @@ export interface ProvisionResult {
   regenerated?: boolean;
   /** True when the agent exists but the post-call webhook could not be attached (operator action needed: docs/runbook.md). Never carries a secret. */
   post_call_webhook_pending?: boolean;
+  /** The tenant's own AI line: its number is imported into the voice provider and bound to its agent. */
+  line?: { phone_number_id: string; adopted: boolean };
   /** Shown ONCE, ONLY to an admin principal, when this call created the ElevenLabs post-call webhook. Store as ELEVENLABS_WEBHOOK_SECRET; it is not persisted or logged. */
   webhook_secret?: string;
   webhook_secret_notice?: string;
@@ -61,6 +65,13 @@ function kbNeedsRegen(kb: KnowledgeBase, business: Business): boolean {
  * lease expires after PROVISION_LEASE_MS.
  */
 const PROVISION_LEASE_MS = 90_000;
+
+/**
+ * A business may only go live with a REAL voice agent where the platform is real: in production, or as soon as a real phone provider
+ * (Twilio) is configured. Outside both (local demo, tests) the mock agent is allowed so the demo keeps working. Checked BEFORE the number is
+ * bought, so a misconfigured deployment never pays for a number that cannot be answered, and again after the agent step.
+ */
+export const realVoiceRequired = (env: NodeJS.ProcessEnv = process.env): boolean => env.NODE_ENV === 'production' || hasTwilio();
 
 export async function POST(
   req: Request,
@@ -204,7 +215,7 @@ async function provision(
           const extraction = await extractFromUrl(business.url, business.vertical);
           generated = generateKnowledgeBase(extraction, business);
         } else {
-          generated = generateKnowledgeBase(templateResult(business.name, business.vertical, business.locale_default === 'es' ? 'es' : 'en'), business);
+          generated = generateKnowledgeBase(templateResult(business.name, business.vertical, business.locale_default === 'es' ? 'es' : 'en', business.service_area ?? []), business);
         }
       }
       kb = await upsertKnowledgeBase(id, generated);
@@ -215,7 +226,7 @@ async function provision(
     // Minimum content checks (docs: kb readiness): a business whose KB is too thin to answer calls does not get a paid number or agent.
     // Admins may override (they can see the same list in the response). Checked before ANY paid step.
     if (principal.kind !== 'admin') {
-      const readiness = readinessOf(kb, (await getBusiness(id)) ?? business);
+      const readiness = readinessForGoLive(kb, (await getBusiness(id)) ?? business);
       if (!readiness.ready) {
         log.info('kb_incomplete', { business: id, blockers: readiness.blockers.map((b) => b.key) });
         return NextResponse.json({
@@ -223,6 +234,16 @@ async function provision(
           blockers: readiness.blockers, warnings: readiness.warnings, score: readiness.score,
         }, { status: 422 }) as unknown as ReturnType<typeof fail>;
       }
+    }
+
+    // The voice provider must be real before ANY paid step (#3): no key means no agent, and a number nobody answers is worse than no number.
+    if (realVoiceRequired() && !hasElevenLabs()) {
+      await auditProvision(principal, id, 'provision.voice_not_configured', { has_number: Boolean(business.phone) });
+      log.error('voice.not_configured', { business: id, action: 'refusing to provision: ELEVENLABS_API_KEY is not set' });
+      return provisionFailure(503, 'The voice provider is not configured on this server, so your receptionist cannot be turned on yet. Contact support.', {
+        code: 'voice_provider_not_configured', stage: 'voice', phone: business.phone,
+        retry: business.phone ? 'Your phone number is reserved for this business. Once support has fixed the voice setup, try again: the retry reuses it.' : 'Nothing was purchased or charged. Try again once support has fixed the voice setup.',
+      });
     }
 
     // Preserve the business's existing line: CONTRACTS.md documents the demo
@@ -314,18 +335,35 @@ async function provision(
     let webhookSecret: string | undefined;
     let postCallPending = false;
     let agentFailure: string | null = null;
+    let lineFailure: { code: string; error: string; retryable: boolean } | null = null;
+    let line: { phone_number_id: string; adopted: boolean } | undefined;
     lostLeaseCheck(signal);
     try {
       const agent = await syncAgent({ business: updated, kb });
       agentId = agent.agent_id;
       agentMock = agent.mock;
       if (agent.error) agentFailure = `agent registration failed (${agent.error})`;
+      else if (agent.mock && realVoiceRequired()) agentFailure = 'the voice provider returned no real agent';
       if (!agent.mock && agent.agent_id && agent.agent_id !== updated.agent_id) {
         const withAgent = await updateBusiness(id, { agent_id: agent.agent_id });
         if (withAgent) updated = withAgent;
       }
       if (!agent.mock && agentId) {
-        try { await bindPhoneNumber(agentId); } catch { /* best-effort */ }
+        // The tenant's OWN line: import the purchased number into the voice provider and bind it to THIS agent (never a shared number).
+        // Skipped for a mock-pool number (demo), without Twilio credentials (nothing to import from: the number was not bought by this platform) and
+        // on a forced 'webhook' deployment (the Voice URL stays ours, voice/incoming).
+        if (lineKindFor(updated) === 'native' && lineApplicable(updated).ok && hasTwilio()) {
+          const lineRes = await ensureTenantLine(updated);
+          if (!lineRes.ok) {
+            lineFailure = lineRes;
+          } else {
+            line = { phone_number_id: lineRes.phone_number_id, adopted: lineRes.adopted };
+            const withLine = await getBusiness(id);
+            if (withLine) updated = withLine;
+          }
+        } else {
+          await bindPhoneNumber(agentId, updated).catch(() => undefined); // single-line installs (documented env fallback); never throws
+        }
         // Only an ADMIN call may create the platform-wide webhook (and so see its one-time signing secret).
         // A tenant call just attaches the existing one; if it is missing or cannot be looked up the step fails safely.
         const hook = await ensurePostCallWebhook({ allowCreate: principal.kind === 'admin' });
@@ -348,6 +386,15 @@ async function provision(
         502,
         `Your phone number is ready but the voice agent could not be set up (${agentFailure}).`,
         { code: 'agent_registration_failed', stage: 'agent', phone },
+      );
+    }
+
+    if (lineFailure) {
+      await auditProvision(principal, id, 'provision.partial', { phone, stage: 'line', code: lineFailure.code, error: lineFailure.error });
+      return provisionFailure(
+        502,
+        `Your phone number is ready but it could not be connected to your voice agent (${lineFailure.error}).`,
+        { code: 'voice_line_failed', stage: 'line', phone },
       );
     }
 
@@ -376,6 +423,7 @@ async function provision(
       agent_mock: agentMock,
       regenerated,
       ...(postCallPending ? { post_call_webhook_pending: true } : {}),
+      ...(line ? { line } : {}),
       ...(webhookSecret && principal.kind === 'admin' ? {
         webhook_secret: webhookSecret,
         webhook_secret_notice: 'Store this as ELEVENLABS_WEBHOOK_SECRET in .env and redeploy. It is shown only once and is not saved by the app.',

@@ -7,6 +7,10 @@
  * page in the dashboard reads through Prisma, so a 200 without a reachable
  * Postgres would be a lie the proxy happily routes traffic to.
  *
+ * In production an LLM key is REQUIRED (owner decision): without OPENAI_API_KEY or ANTHROPIC_API_KEY this answers 503 `llm_not_configured`, so the
+ * container never becomes healthy and a deploy without the key fails loudly instead of silently degrading to templates (website import, call
+ * summaries, briefings).
+ *
  * Deliberately unauthenticated and cheap: one `SELECT 1`, no counts, no joins.
  * Kept out of the `(dashboard)` auth surface on purpose — a probe that needs
  * credentials cannot be called by a probe.
@@ -14,6 +18,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db/client';
 import { logger } from '@/lib/log';
+import { llmRequiredProblem } from '@/lib/providers/llm-required';
 
 const log = logger('health');
 
@@ -36,6 +41,11 @@ export async function GET() {
   const startedAt = Date.now();
   try {
     await ping();
+    const llm = llmRequiredProblem();
+    if (llm) {
+      log.error('llm_not_configured', { note: llm });
+      return NextResponse.json({ ok: false, db: 'up', error: 'llm_not_configured', detail: llm }, { status: 503, headers: { 'cache-control': 'no-store' } });
+    }
     return NextResponse.json(
       { ok: true, db: 'up', latency_ms: Date.now() - startedAt },
       { status: 200, headers: { 'cache-control': 'no-store' } },

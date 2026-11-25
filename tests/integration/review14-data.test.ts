@@ -202,9 +202,12 @@ integration('review 14: verticals, consent race, agent sync, jobs (postgres)', (
     const fake = fakeElevenLabs();
     fake.install();
     try {
-      await withEnv({ ...ENV, ELEVENLABS_PHONE_NUMBER_ID: 'phnum_test_1' }, async () => {
+      await withEnv({ ...ENV, ELEVENLABS_PHONE_NUMBER_ID: undefined }, async () => {
         el.clearToolIdCache(); el.resetInitiationCache();
         const biz = await newBusiness({ agent_id: null });
+        // the tenant's OWN imported number (the shared env number is never rebound across tenants)
+        const ownLine = `phnum_own_${uniq('l')}`;
+        await prisma.business.update({ where: { id: biz.id }, data: { elevenlabsPhoneNumberId: ownLine } });
         await withKb(biz.id);
         const first = await el.syncAgent({ business: (await db.getBusiness(biz.id))!, kb: null });
         const state = flakyAgents(fake);
@@ -222,7 +225,7 @@ integration('review 14: verticals, consent race, agent sync, jobs (postgres)', (
         expect(state.creates).toBe(1);
         const created = (await db.getBusiness(biz.id))!.agent_id!;
         expect(created).not.toBe(first.agent_id);
-        expect(seen).toEqual(['/convai/phone-numbers/phnum_test_1']); // bound to the NEW agent, like provisioning does
+        expect(seen).toContain(`/convai/phone-numbers/${ownLine}`); // the tenant's own number follows the NEW agent, like provisioning does
       });
     } finally { fake.restore(); }
   }, 30_000);

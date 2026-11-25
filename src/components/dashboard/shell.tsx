@@ -22,6 +22,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: '/dashboard', label: 'nav.today', icon: 'M3 10.5 12 3l9 7.5M5 9.5V21h5v-6h4v6h5V9.5' },
   { href: '/dashboard/calls', label: 'nav.calls', icon: 'M4 5c0 8 6 14 14 14l1.5-3.2-3.5-1.8-2 2C11 15 9 13 8 10l2-2-1.8-3.5L5 4' },
+  { href: '/dashboard/messages', label: 'nav.messages', icon: 'M4 5h16v11H9l-5 4V5Z' },
   { href: '/dashboard/bookings', label: 'nav.calendar', icon: 'M4 6h16v14H4zM4 10h16M9 3v4M15 3v4' },
   { href: '/dashboard/knowledge', label: 'nav.brain', icon: 'M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8A3 3 0 0 0 8 18a3 3 0 0 0 4 2m0-16a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8A3 3 0 0 1 16 18a3 3 0 0 1-4 2m0-16v16' },
   { href: '/dashboard/briefings', label: 'nav.briefings', icon: 'M4 13a8 8 0 1 0 16 0 8 8 0 0 0-16 0Zm4-2v4m4-7v10m4-7v4' },
@@ -55,6 +56,8 @@ export interface SidebarProps {
   canAddBusiness?: boolean;
   /** demoModeEnabled() on the server: the demo console exists only then (never in production). */
   demoEnabled?: boolean;
+  /** New (untriaged) customer messages: the badge on the Messages link. */
+  inboxNew?: number;
 }
 
 const FOCUSABLE = 'a[href], button:not([disabled]), select, input, textarea, [tabindex]:not([tabindex="-1"])';
@@ -186,7 +189,7 @@ export function Sidebar(props: SidebarProps) {
 }
 
 function SidebarBody({
-  businessName, phone, live, status = 'ai', who, role, isAdmin, isOwner, currentBusinessId, businesses, memberships = [], canAddBusiness = false, demoEnabled = false, path,
+  businessName, phone, live, status = 'ai', who, role, isAdmin, isOwner, currentBusinessId, businesses, memberships = [], canAddBusiness = false, demoEnabled = false, inboxNew = 0, path,
 }: SidebarProps & { path: string }) {
   const t = useT();
   const statusText = t(STATUS_KEY[status]);
@@ -265,6 +268,12 @@ function SidebarBody({
             >
               <Icon d={item.icon} />
               {t(item.label)}
+              {item.href === '/dashboard/messages' && inboxNew > 0 ? (
+                <span className="ml-auto rounded-full bg-brand px-1.5 py-0.5 text-[11px] font-semibold leading-none text-on-brand">
+                  <span aria-hidden="true">{inboxNew > 99 ? '99+' : inboxNew}</span>
+                  <span className="sr-only">{t('msg.filter.new', { count: inboxNew })}</span>
+                </span>
+              ) : null}
             </Link>
           );
         })}

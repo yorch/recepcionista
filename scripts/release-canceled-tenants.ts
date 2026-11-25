@@ -58,6 +58,11 @@ async function main() {
   const bi = args.indexOf('--business');
   const only = bi >= 0 ? args[bi + 1] : undefined;
   if (bi >= 0 && !only) usageExit('--business needs an id');
+  // The same switch as the admin jobs (src/lib/jobs/tenants.ts): a real run needs TENANT_RELEASE_JOB=on. Without --apply this is a dry run.
+  if (flag('--apply') && (process.env.TENANT_RELEASE_JOB ?? '').trim().toLowerCase() !== 'on') {
+    console.error('[release-canceled-tenants] --apply is refused: set TENANT_RELEASE_JOB=on to allow real releases / comps (the dry run needs nothing).');
+    process.exit(2);
+  }
   console.log(`grace ${graceDays} days, notify ${notifyDays} days, include recent: ${includeRecent}; mode: ${apply ? 'APPLY' : 'DRY RUN'}\n`);
   const ids = only ? [only] : await listReleaseCandidates();
   let acted = 0;

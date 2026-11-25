@@ -201,21 +201,24 @@ integration('voice tools route (postgres)', () => {
     expect(rows.every((s) => s.status === 'failed')).toBe(true);
   });
 
-  test('create_payment_link texts the booking/caller number only and answers without leaking the link', async () => {
+  test('create_payment_link: the amount comes from the deposit policy, never from the model; the link texts the caller number only', async () => {
     const biz = await newBusiness();
     const caller = '+13055550606';
     const live = await db.createCall({ business_id: biz.id, caller_phone: caller });
+    // No policy: the AI cannot ask for a deposit at all, whatever amount it sends.
+    const off = await call('create_payment_link', { agent_id: biz.agent_id, call_id: live.id, amount_cents: 5000 });
+    expect(off.body.ok).toBe(false);
+    expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'payment_link' } })).toBe(0);
+
+    expect((await db.setDepositPolicy(biz.id, { enabled: true, mode: 'fixed', fixed_cents: 5000 })).ok).toBe(true);
     const r = await call('create_payment_link', {
-      agent_id: biz.agent_id, call_id: live.id, amount_cents: 5000, to: '+19995550123', caller_phone: '+19995550124',
+      agent_id: biz.agent_id, call_id: live.id, amount_cents: 99_999, to: '+19995550123', caller_phone: '+19995550124',
     });
     expect(r.body.ok).toBe(true);
     expect(r.body.data).toBeNull();
     const sms = await prisma.smsLog.findMany({ where: { businessId: biz.id, kind: 'payment_link' } });
     expect(sms.map((s) => s.toPhone)).toEqual([caller]);
-    // dollars-not-cents mistakes are re-asked, not charged
-    const small = await call('create_payment_link', { agent_id: biz.agent_id, call_id: live.id, amount_cents: 50 });
-    expect(small.body.ok).toBe(false);
-    expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'payment_link' } })).toBe(1);
+    expect(sms[0].body).toContain('$50'); // the policy's amount, not the model's 99,999
   });
 
   test('unknown tools and tool-name variants', async () => {

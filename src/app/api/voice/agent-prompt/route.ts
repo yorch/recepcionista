@@ -11,7 +11,7 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   check_availability: 'Look up open appointment slots before offering a time.',
   create_booking: 'Book the appointment once the caller agrees to a time.',
   send_sms: 'Text the caller or the owner.',
-  create_payment_link: 'Create and text a secure deposit link (max $500).',
+  create_payment_link: 'Create and text a secure deposit link (the amount is set by the business\'s deposit policy, not by you).',
   flag_emergency: 'Mark the call as an emergency and alert the owner now.',
   get_pricing: 'Look up a starting price — never quote from memory.',
   handoff_to_human: 'Transfer the caller to the owner.',

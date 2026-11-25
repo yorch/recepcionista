@@ -6,6 +6,7 @@
 import { integration, outboundCalls, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, beforeEach, expect, setSystemTime, test } from 'bun:test';
 import { cleanup, eventId, futureDateKey, loadDb, loadPrisma, newBusiness, nextUsDstDay, phone, stripeSignature, uniq } from '../helpers/fixtures';
+import { confirmGoLive } from '../helpers/golive';
 import { zonedTimeToUtc } from '../../src/lib/time';
 
 integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, readiness (postgres)', () => {
@@ -789,7 +790,7 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
     expect(r.status).toBe(422);
     const j = await json(r) as { code?: string; blockers?: { key: string }[] };
     expect(j.code).toBe('kb_incomplete');
-    expect(j.blockers!.map((b) => b.key).sort()).toEqual(['faqs', 'services']);
+    expect(j.blockers!.map((b) => b.key).sort()).toEqual(['content', 'faqs', 'service_area', 'services']); // + the service area the owner must give and the go-live confirmation
     expect((await db.getBusiness(biz.id))!.phone ?? null).toBeNull(); // nothing was bought
     expect(outboundCalls.length).toBe(before);
     // complete the KB: the gate opens (the rest of provisioning is exercised in provision-numbers.test.ts)
@@ -797,6 +798,7 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
       services: [{ name: 'A', base_price: 90 }, { name: 'B', base_price: 120 }, { name: 'C', base_price: 200 }], faqs: [{ question: 'Hours?', answer: 'Daily 8-6.' }], pricing_notes: '',
       system_prompt: `You are the receptionist for ${biz.name}.`, call_script: '',
     } as never);
+    await confirmGoLive(biz.id);
     const open = await provisionRoute(req(`/api/businesses/${biz.id}/provision`, owner, {}), ctx(biz.id));
     expect(open.status).not.toBe(422);
   });

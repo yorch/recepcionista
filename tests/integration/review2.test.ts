@@ -217,7 +217,8 @@ integration('review round 2 regressions (postgres)', () => {
 
     const s = await tool('send_sms', { agent_id: biz.agent_id, conversation_id: conv, caller_phone: caller, to: '+19995550123', body: 'Our address is 1 Main St' });
     expect(s.ok).toBe(true);
-    const pay = await tool('create_payment_link', { agent_id: biz.agent_id, conversation_id: conv, caller_phone: caller, amount_cents: 5000, booking_id: booking.id });
+    await db.setDepositPolicy(biz.id, { enabled: true, mode: 'fixed', fixed_cents: 5000 }); // the amount is the business policy's, never the model's
+    const pay = await tool('create_payment_link', { agent_id: biz.agent_id, conversation_id: conv, caller_phone: caller, booking_id: booking.id });
     expect(pay.ok).toBe(true);
     const tos = (await prisma.smsLog.findMany({ where: { businessId: biz.id } })).map((x) => x.toPhone);
     expect(new Set(tos)).toEqual(new Set([caller]));
@@ -530,7 +531,9 @@ integration('review round 2 regressions (postgres)', () => {
     expect(outboundCalls.length).toBeGreaterThan(0); // the (blocked) provider calls this test provoked on purpose
     outboundCalls.length = 0; // outboundCalls is shared by every integration test: leave it clean
     const failed = (await callsOf(biz.id)).find((c) => c.callSid === params2.CallSid)!;
-    expect(failed.consentStatus).toBe('unknown');
+    // the AI could not be connected, so the caller heard the voicemail line instead, which states the recording notice itself
+    expect(failed).toMatchObject({ status: 'handed_off', consentStatus: 'disclosed' });
+    expect(failed.flaggedReason ?? '').toContain('AI could not be connected');
   });
 
   test('M6: an unknown To number only routes to a single-tenant install, and GET /incoming reveals no tenant count', async () => {
@@ -538,8 +541,10 @@ integration('review round 2 regressions (postgres)', () => {
     const params = { CallSid: uniq('CA'), From: phone(), To: '+19995550001' };
     const url = `${SECRETS.publicBase}/api/voice/incoming`;
     const res = await incomingRoute(twilioForm(url, params));
-    // other businesses exist in this database, so there is no "first business" fallback
-    expect(res.status).toBe(404);
+    // other businesses exist in this database, so there is no "first business" fallback; the signed caller hears TwiML, not a JSON 404
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('xml');
+    expect(await res.text()).toContain('<Hangup/>');
     expect(await prisma.call.count({ where: { businessId: biz.id } })).toBe(0);
     const get = (await import('@/app/api/voice/incoming/route')).GET;
     expect(await (await get()).json()).toEqual({ ok: true, data: { ready: true } });

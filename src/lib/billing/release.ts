@@ -17,6 +17,7 @@ import { prisma } from '@/lib/db/client';
 import { clearBusinessProviderResources, recordAudit, withLease } from '@/lib/db';
 import { notifyOwners } from '@/lib/billing/emails';
 import { releaseNumber, type ReleaseNumberResult } from '@/lib/providers/twilio';
+import { releaseTenantLine } from '@/lib/voice/tenant-line';
 import { deleteAgent, deleteAgentTools, type ReleaseAgentResult, type ReleaseToolsResult } from '@/lib/voice/elevenlabs';
 import { logger } from '@/lib/log';
 
@@ -62,6 +63,8 @@ export interface ReleaseFacts {
   has_owner_email: boolean;
   phone_shared: boolean;
   agent_shared: boolean;
+  /** The tenant's own imported ElevenLabs number (phnum_...), when it has one: deleted before the agent and the Twilio number. */
+  line_id?: string | null;
   /** Another business still has an agent (the workspace tools are shared and must stay). */
   other_agents_exist: boolean;
 }
@@ -128,7 +131,7 @@ export async function loadReleaseFacts(businessId: string, now: Date = new Date(
   const b = await prisma.business.findUnique({
     where: { id: businessId },
     select: {
-      id: true, name: true, billingStatus: true, plan: true, currentPeriodEnd: true, trialEndsAt: true, phone: true, phoneE164: true, agentId: true,
+      id: true, name: true, billingStatus: true, plan: true, currentPeriodEnd: true, trialEndsAt: true, phone: true, phoneE164: true, agentId: true, elevenlabsPhoneNumberId: true,
       users: { where: { role: 'owner', disabledAt: null }, select: { email: true } },
     },
   });
@@ -154,7 +157,7 @@ export async function loadReleaseFacts(businessId: string, now: Date = new Date(
     phone: b.phone, phone_e164: b.phoneE164, agent_id: b.agentId, recent_calls: recent,
     notified_at: noticeAt && (!since || noticeAt >= since) ? noticeAt : null,
     has_owner_email: b.users.length > 0,
-    phone_shared: phoneShared > 0, agent_shared: agentShared > 0, other_agents_exist: otherAgents > 0,
+    line_id: b.elevenlabsPhoneNumberId ?? null, phone_shared: phoneShared > 0, agent_shared: agentShared > 0, other_agents_exist: otherAgents > 0,
   };
 }
 
@@ -162,6 +165,7 @@ export interface ReleaseOutcome {
   number: { phone_last4: string | null; result: ReleaseNumberResult | { skipped: string } | null };
   agent: { agent_id: string | null; result: ReleaseAgentResult | { skipped: string } | null };
   tools: ReleaseToolsResult | { skipped: string } | null;
+  line?: { result: Awaited<ReturnType<typeof releaseTenantLine>> | null };
   cleared: { phone: boolean; agent: boolean };
   errors: string[];
 }
@@ -170,6 +174,7 @@ export interface ReleaseDeps {
   releaseNumber?: (e164: string, deps?: { callerBusinessId?: string | null }) => Promise<ReleaseNumberResult>;
   deleteAgent?: typeof deleteAgent;
   deleteAgentTools?: typeof deleteAgentTools;
+  releaseLine?: typeof releaseTenantLine;
 }
 
 const last4 = (p: string | null) => (p ? p.slice(-4) : null);
@@ -182,12 +187,21 @@ export async function executeRelease(
   const doNumber = deps.releaseNumber ?? releaseNumber;
   const doAgent = deps.deleteAgent ?? deleteAgent;
   const doTools = deps.deleteAgentTools ?? deleteAgentTools;
+  const doLine = deps.releaseLine ?? releaseTenantLine;
 
   const lostLease = (step: string): boolean => {
     if (!ctx.signal?.aborted) return false;
     out.errors.push(`${step}: lease lost, stopped before the provider call (retry later)`);
     return true;
   };
+  // 0) the tenant's own imported ElevenLabs number (detached from the agent, then deleted). If it cannot be removed the Twilio number is kept
+  //    this round (a retry finishes both), so no imported number ever points at a number that no longer exists.
+  let lineGone = true;
+  if (f.line_id && !lostLease('line')) {
+    const r = await doLine(f.id);
+    out.line = { result: r };
+    if (!r.ok) { lineGone = false; out.errors.push(`line: ${r.error}`); }
+  }
   // 1) the agent first: it stops answering before the line disappears.
   let agentGone = false;
   if (f.agent_id && !lostLease('agent')) {
@@ -195,7 +209,7 @@ export async function executeRelease(
       out.agent.result = { skipped: 'another business uses this agent; kept at the provider' };
       agentGone = true; // only this business's reference is dropped
     } else {
-      const r = await doAgent(f.agent_id);
+      const r = await doAgent(f.agent_id, f.line_id ? { phoneNumberIds: [f.line_id] } : {});
       out.agent.result = r;
       agentGone = r.ok;
       if (!r.ok) out.errors.push(`agent: ${r.error ?? 'failed'}`);
@@ -204,7 +218,8 @@ export async function executeRelease(
   }
   // 2) the number.
   const number = f.phone_e164 ?? f.phone;
-  if (number && !lostLease('number')) {
+  if (number && !lineGone) out.number.result = { skipped: 'the imported voice line could not be removed yet; the number is kept until it is' };
+  else if (number && !lostLease('number')) {
     if (f.phone_shared) {
       out.number.result = { skipped: 'another business uses this number; kept at the provider' };
       out.cleared.phone = Boolean(await clearBusinessProviderResources(f.id, { phone: true }));

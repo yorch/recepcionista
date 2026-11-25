@@ -879,7 +879,7 @@ export async function createBooking(
     business_id: ID; customer_name: string; customer_phone: string;
     service: string; scheduled_at: string;
   },
-  opts: { enforce?: boolean; max_per_call?: number } = {},
+  opts: { enforce?: boolean; max_per_call?: number; ownerInitiated?: boolean } = {},
 ): Promise<Booking> {
   const enforce = opts.enforce ?? true;
   const start = new Date(input.scheduled_at);
@@ -905,28 +905,33 @@ export async function createBooking(
       }
 
       if (enforce) {
-        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(), 0, closedDatesOf(biz.closedDates));
+        // Scheduling config: minimum lead + horizon apply to AI / public bookings; the owner's own dashboard booking skips both.
+        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(),
+          opts.ownerInitiated ? 0 : biz.minLeadMinutes, closedDatesOf(biz.closedDates), { horizonDays: opts.ownerInitiated ? null : biz.horizonDays });
         if (!v.ok) throw new BookingRejectedError(v.reason);
       }
 
       if (status !== 'cancelled') {
+        // The buffer is kept clear on both sides in code (the DB constraint guarantees only raw non-overlap per crew); `enforce:false` skips it.
+        const padMs = enforce ? biz.bufferMinutes * 60_000 : 0;
+        const padded: Interval = { start: candidate.start - padMs, end: candidate.end + padMs };
         const near = await tx.booking.findMany({
           where: {
             businessId: input.business_id,
             status: { not: 'cancelled' },
             scheduledAt: {
-              gte: new Date(candidate.start - MAX_DURATION_MIN * 60_000),
-              lt: new Date(candidate.end),
+              gte: new Date(padded.start - MAX_DURATION_MIN * 60_000),
+              lt: new Date(padded.end),
             },
           },
           select: { scheduledAt: true, durationMinutes: true, crew: true },
         });
         // Per crew: the overlap rule (and the database exclusion constraint) is per (business, crew). With one crew this is the old rule.
         if (input.crew != null && (!Number.isInteger(input.crew) || input.crew < 1 || input.crew > biz.crews)) throw new BookingRejectedError('invalid_crew');
-        crew = firstFreeCrew(biz.crews, candidate, crewBusy(near), input.crew ?? null);
+        crew = firstFreeCrew(biz.crews, padded, crewBusy(near), input.crew ?? null);
         if (crew === null || (input.crew != null && crew !== input.crew)) throw new BookingRejectedError('slot_taken');
-        // Owner's Google Calendar busy time (healthy connection + "block on busy" on); same transaction, same advisory lock.
-        if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
+        // Owner's Google Calendar busy time (healthy connection + "block on busy" on); same transaction, same advisory lock. The buffer applies here too.
+        if (enforce && (await calendarBusyConflict(tx, input.business_id, padded.start, padded.end))) throw new BookingRejectedError('calendar_busy');
       }
 
       return tx.booking.create({
@@ -1230,7 +1235,7 @@ export interface RescheduleResult {
  * Throws BookingRejectedError: 'booking_not_found' (also another business's booking), 'not_reschedulable' (only pending/confirmed move),
  * 'invalid_time', a SlotRejection (past / outside hours), or 'slot_taken'.
  */
-export async function rescheduleBooking(input: RescheduleInput, opts: { enforce?: boolean } = {}): Promise<RescheduleResult> {
+export async function rescheduleBooking(input: RescheduleInput, opts: { enforce?: boolean; ownerInitiated?: boolean } = {}): Promise<RescheduleResult> {
   const enforce = opts.enforce ?? true;
   const start = new Date(input.scheduled_at);
   if (Number.isNaN(start.getTime())) throw new BookingRejectedError('invalid_time');
@@ -1248,20 +1253,23 @@ export async function rescheduleBooking(input: RescheduleInput, opts: { enforce?
       if (cur.scheduledAt.getTime() === start.getTime() && cur.durationMinutes === duration) return { booking: toBooking(cur), previous, changed: false };
       const candidate: Interval = { start: start.getTime(), end: start.getTime() + duration * 60_000 };
       if (enforce) {
-        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(), 0, closedDatesOf(biz.closedDates));
+        const v = validateSlot(toBusiness(biz).hours, candidate.start, duration, tzOf(biz.timezone), Date.now(),
+          opts.ownerInitiated ? 0 : biz.minLeadMinutes, closedDatesOf(biz.closedDates), { horizonDays: opts.ownerInitiated ? null : biz.horizonDays });
         if (!v.ok) throw new BookingRejectedError(v.reason);
       }
+      const padMs = enforce ? biz.bufferMinutes * 60_000 : 0; // buffer kept clear in code, like createBooking
+      const padded: Interval = { start: candidate.start - padMs, end: candidate.end + padMs };
       const near = await tx.booking.findMany({
         where: {
           businessId: input.business_id, status: { not: 'cancelled' }, id: { not: cur.id },
-          scheduledAt: { gte: new Date(candidate.start - MAX_DURATION_MIN * 60_000), lt: new Date(candidate.end) },
+          scheduledAt: { gte: new Date(padded.start - MAX_DURATION_MIN * 60_000), lt: new Date(padded.end) },
         },
         select: { scheduledAt: true, durationMinutes: true, crew: true },
       });
       // Keep the booking on its crew when that crew is free at the new time, else move it to the first free crew; none free = slot_taken.
-      const crew = firstFreeCrew(biz.crews, candidate, crewBusy(near), cur.crew);
+      const crew = firstFreeCrew(biz.crews, padded, crewBusy(near), cur.crew);
       if (crew === null) throw new BookingRejectedError('slot_taken');
-      if (enforce && (await calendarBusyConflict(tx, input.business_id, candidate.start, candidate.end))) throw new BookingRejectedError('calendar_busy');
+      if (enforce && (await calendarBusyConflict(tx, input.business_id, padded.start, padded.end))) throw new BookingRejectedError('calendar_busy');
       const row = await tx.booking.update({
         where: { id: cur.id },
         data: { scheduledAt: start, durationMinutes: duration, crew, rescheduleCount: { increment: 1 }, customerNotifiedAt: null },

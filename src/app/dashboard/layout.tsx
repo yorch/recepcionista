@@ -9,6 +9,7 @@ import { getDashboardContext } from '@/lib/dashboard-context';
 import { demoModeEnabled } from '@/lib/auth';
 import { hasRole } from '@/lib/session';
 import { resolveCallRoute } from '@/lib/voice/call-mode';
+import { countInboundByStatus } from '@/lib/db';
 
 /** Signed-in pages are never indexed. */
 export const metadata: Metadata = { robots: { index: false, follow: false } };
@@ -23,6 +24,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const isOwner = hasRole(ctx.principal, 'owner');
   const live = biz.status === 'live' && Boolean(biz.phone);
   const route = resolveCallRoute(biz).action;
+  // The badge on the Messages link: a failure to count never breaks the dashboard.
+  const inboxNew = await countInboundByStatus(biz.id).then((c) => c.new).catch(() => 0);
 
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">
@@ -40,6 +43,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         memberships={ctx.memberships.map((m) => ({ business_id: m.business_id, business_name: m.business_name, role: m.role }))}
         canAddBusiness={ctx.canAddBusiness && ctx.principal.email_verified}
         demoEnabled={demoModeEnabled()}
+        inboxNew={inboxNew}
       />
       <div className="min-w-0 flex-1">
         <Suspense fallback={null}><OnboardingReturn unprovisioned={!live && isOwner} /></Suspense>

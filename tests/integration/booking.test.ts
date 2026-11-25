@@ -106,7 +106,7 @@ integration('booking (postgres)', () => {
   test('DST spring-forward: the missing hour is skipped in the grid and wall times use the right offset', async () => {
     const day = nextUsDstDay('spring'); // a Sunday, 02:00 EST -> 03:00 EDT
     const b = await newBusiness({ hours: { ...ALL_WEEK, sunday: { open: '01:00', close: '04:00' } } as unknown as typeof ALL_WEEK });
-    const slots = await sched.slotsForDate(b, day, 60);
+    const slots = await sched.slotsForDate(b, day, 60, new Date(`${day}T00:00:00Z`).getTime() - 3 * 86_400_000); // clock injected: the DST day is months away, past the booking window
     // 01:00 EST = 06:00Z, 03:00 EDT = 07:00Z, closes 04:00 EDT = 08:00Z -> two real hours.
     expect(slots.map((s) => s.start)).toEqual([
       `${day}T06:00:00.000Z`, `${day}T07:00:00.000Z`,
@@ -117,25 +117,27 @@ integration('booking (postgres)', () => {
     expect(parsed.ok && parsed.date.toISOString()).toBe(`${day}T13:00:00.000Z`);
     const before = (await import('@/lib/time')).parseScheduledAt(wall(addDaysToDateKey(day, -1), '09:00'), 'America/New_York');
     expect(before.ok && before.date.toISOString()).toBe(`${addDaysToDateKey(day, -1)}T14:00:00.000Z`);
-    const bk = await db.createBooking(input(full.id, `${day}T13:00:00.000Z`));
+    const FAR = { ownerInitiated: true }; // the DST day is months away: past the booking window an AI booking obeys
+    const bk = await db.createBooking(input(full.id, `${day}T13:00:00.000Z`), FAR);
     expect(bk.scheduled_at).toBe(`${day}T13:00:00.000Z`);
-    expect(await reject(db.createBooking(input(full.id, `${day}T12:30:00.000Z`)))).toBe('slot_taken');
+    expect(await reject(db.createBooking(input(full.id, `${day}T12:30:00.000Z`), FAR))).toBe('slot_taken');
   });
 
   test('DST fall-back: the repeated hour yields five real hours and both 01:30s are bookable', async () => {
     const day = nextUsDstDay('fall'); // a Sunday, 02:00 EDT -> 01:00 EST
     const b = await newBusiness({ hours: { ...ALL_WEEK, sunday: { open: '00:00', close: '04:00' } } as unknown as typeof ALL_WEEK });
-    const slots = await sched.slotsForDate(b, day, 60);
+    const slots = await sched.slotsForDate(b, day, 60, new Date(`${day}T00:00:00Z`).getTime() - 3 * 86_400_000); // clock injected: the DST day is months away, past the booking window
     // 00:00 EDT = 04:00Z ... 04:00 EST = 09:00Z -> 5 hourly slots.
     expect(slots.map((s) => s.start)).toEqual(
       [4, 5, 6, 7, 8].map((h) => `${day}T0${h}:00:00.000Z`),
     );
-    const eDT = await db.createBooking(input(b.id, `${day}T01:30:00-04:00`));
-    const eST = await db.createBooking(input(b.id, `${day}T01:30:00-05:00`));
+    const FAR = { ownerInitiated: true }; // months ahead: past the booking window an AI booking obeys
+    const eDT = await db.createBooking(input(b.id, `${day}T01:30:00-04:00`), FAR);
+    const eST = await db.createBooking(input(b.id, `${day}T01:30:00-05:00`), FAR);
     expect(eDT.scheduled_at).toBe(`${day}T05:30:00.000Z`);
     expect(eST.scheduled_at).toBe(`${day}T06:30:00.000Z`);
     // an hour-long job at 01:30 EDT overlaps neither neighbour exactly but blocks 02:00 EDT-equivalent 05:45Z
-    expect(await reject(db.createBooking(input(b.id, `${day}T05:45:00.000Z`)))).toBe('slot_taken');
+    expect(await reject(db.createBooking(input(b.id, `${day}T05:45:00.000Z`), FAR))).toBe('slot_taken');
     // the offset-less 09:00 on the DST day is EST (UTC-5)
     const parsed = (await import('@/lib/time')).parseScheduledAt(wall(day, '09:00'), 'America/New_York');
     expect(parsed.ok && parsed.date.toISOString()).toBe(`${day}T14:00:00.000Z`);

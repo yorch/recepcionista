@@ -12,8 +12,21 @@ import { CallHandlingSettings } from '@/components/dashboard/call-mode';
 import { callModeView } from '@/lib/voice/call-mode';
 import { VoiceSettingsCard } from '@/components/dashboard/voice-settings';
 import { RefundPolicySettings } from '@/components/dashboard/refund-policy-settings';
+import { DepositPolicySettings } from '@/components/dashboard/deposit-policy-settings';
+import { DEPOSIT_MAX_CENTS, DEPOSIT_MIN_CENTS, depositPolicyOf } from '@/lib/business-config';
+import { AI_DEPOSIT_CAP_CENTS } from '@/lib/payments/deposit';
 import { GoogleCalendarCard } from '@/components/dashboard/google-calendar-card';
 import { VerticalSettings } from '@/components/dashboard/vertical-settings';
+import { ReviewUrlSettings } from '@/components/dashboard/review-url-settings';
+import { PrivacyTools } from '@/components/dashboard/privacy-tools';
+import { LineSettingsCard } from '@/components/dashboard/line-settings';
+import { assistantNameOf, DEFAULT_ASSISTANT_NAME } from '@/lib/voice/assistant-name';
+import { lineKindFor } from '@/lib/voice/line';
+import { nativeTransferEnabled } from '@/lib/voice/transfer';
+import { TimezoneSettings } from '@/components/dashboard/timezone-settings';
+import { SchedulingSettings } from '@/components/dashboard/scheduling-settings';
+import { schedulingOf } from '@/lib/business-config';
+import { inferTimeZoneFromPhone } from '@/lib/tz-infer';
 
 export async function generateMetadata(): Promise<Metadata> {
   return { title: (await getT())('set.metaTitle') };
@@ -73,6 +86,41 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         </div>
       </Card>
 
+      <Card className="mt-6" id="ai-line">
+        <CardHead title={t('line.card.title')} subtitle={t('line.card.sub')} />
+        <div className="p-4">
+          <LineSettingsCard
+            businessId={biz.id}
+            initial={{
+              assistant_name: biz.assistant_name ?? null, assistant_name_effective: assistantNameOf(biz), default_assistant_name: DEFAULT_ASSISTANT_NAME,
+              native_transfer_enabled: biz.native_transfer_enabled === true, transfer_capability: nativeTransferEnabled(), line_kind: lineKindFor(biz),
+              own_line: Boolean(biz.elevenlabs_phone_number_id), has_number: Boolean(biz.phone),
+              forward_number_verified: Boolean(biz.forward_number_e164 && (biz.forward_number_verified_at || (biz.owner_phone_verified_at && biz.owner_phone_e164 === biz.forward_number_e164))),
+            }}
+          />
+        </div>
+      </Card>
+
+      <Card className="mt-6" id="review-link">
+        <CardHead title={t('rv.title')} subtitle={t('rv.sub')} />
+        <div className="p-4"><ReviewUrlSettings businessId={biz.id} initial={biz.review_url ?? ''} /></div>
+      </Card>
+
+      <Card className="mt-6" id="privacy">
+        <CardHead title={t('pv.title')} subtitle={t('pv.sub')} />
+        <div className="p-4"><PrivacyTools businessId={biz.id} /></div>
+      </Card>
+
+      <Card className="mt-6" id="time-zone">
+        <CardHead title={t('pd.tz.title')} subtitle={t('pd.tz.sub')} />
+        <div className="p-4"><TimezoneSettings businessId={biz.id} initial={{ timezone: tzOf(biz), suggested: inferTimeZoneFromPhone(biz.owner_phone_e164 ?? biz.owner_phone ?? null) }} /></div>
+      </Card>
+
+      <Card className="mt-6" id="scheduling">
+        <CardHead title={t('pd.sc.title')} subtitle={t('pd.sc.sub')} />
+        <div className="p-4"><SchedulingSettings businessId={biz.id} initial={schedulingOf(biz)} /></div>
+      </Card>
+
       <Card className="mt-6" id="google-calendar">
         <CardHead title={t('set.gcal.title')} subtitle={t('set.gcal.sub')} />
         <div className="p-4"><GoogleCalendarCard initialResult={gcal ?? null} /></div>
@@ -87,6 +135,16 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         <CardHead title={t('set.refund.title')} subtitle={t('set.refund.sub')} />
         <div className="p-4">
           <RefundPolicySettings businessId={biz.id} initialPolicy={biz.refund_policy ?? 'full_24h'} initialText={biz.refund_policy_text ?? ''} />
+        </div>
+      </Card>
+
+      <Card className="mt-6" id="deposit-policy">
+        <CardHead title={t('dp.title')} subtitle={t('dp.sub')} />
+        <div className="p-4">
+          <DepositPolicySettings
+            businessId={biz.id} canEdit initial={depositPolicyOf(biz)}
+            limits={{ min_cents: DEPOSIT_MIN_CENTS, max_cents: DEPOSIT_MAX_CENTS, ai_cap_cents: AI_DEPOSIT_CAP_CENTS }}
+          />
         </div>
       </Card>
 

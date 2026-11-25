@@ -364,7 +364,7 @@ integration('job runner (postgres)', () => {
       expect(res.status).toBe(200);
       const data = ((await res.json()) as any).data;
       expect(data.runner).toMatchObject({ tick_seconds: 60, jobs_setting: 'off' }); // test env: JOBS unset => off outside production
-      expect(data.jobs.map((j: any) => j.name)).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions', 'reconcile', 'usage_warnings', 'google_calendar']);
+      expect(data.jobs.map((j: any) => j.name)).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions', 'reconcile', 'usage_warnings', 'google_calendar', 'tenant_release', 'grandfather']);
       const cleanupJob = data.jobs.find((j: any) => j.name === 'cleanup');
       expect(cleanupJob.last_run_at).toBeTruthy();
       expect(new Date(cleanupJob.next_due_at).getTime()).toBeGreaterThan(Date.now());

@@ -230,9 +230,12 @@ integration('mock cleanup (postgres)', () => {
       expect(res.status).toBe(200);
       return prisma.call.findFirstOrThrow({ where: { businessId: biz.id } });
     };
-    expect(await call()).toMatchObject({ consentStatus: 'disclosed', recordingDisclosed: true });
+    // outside production the webhook line has no AI without an agent: the caller is offered the voicemail, whose line states the recording notice itself
+    expect(await call()).toMatchObject({ consentStatus: 'disclosed', recordingDisclosed: true, status: 'handed_off' });
+    // production, no key: the same honest voicemail (never a silent call and never JSON); the notice IS spoken, so the evidence is real
     const prod = await withEnv({ ...PROD, ALLOW_INSECURE_DEV: undefined }, call);
-    expect(prod).toMatchObject({ consentStatus: 'unknown', recordingDisclosed: false });
+    expect(prod).toMatchObject({ consentStatus: 'disclosed', recordingDisclosed: true, status: 'handed_off' });
+    expect(prod.flaggedReason ?? '').toContain('AI could not be connected');
   });
 
   // ------------------------------------------------------------------ #19: DEMO_MODE is inert in production
@@ -270,7 +273,7 @@ integration('mock cleanup (postgres)', () => {
         expect(dry.status).toBe(200);
         const body = ((await dry.json()) as any).data;
         expect(body.dry_run).toBe(true);
-        expect(body.items).toEqual([{ business_id: biz.id, phone: biz.phone, outcome: 'would_update', changed: ['SmsUrl'] }]);
+        expect(body.items).toEqual([{ business_id: biz.id, phone: biz.phone, outcome: 'would_update', changed: ['SmsUrl'], line: { outcome: 'skipped', detail: 'ELEVENLABS_API_KEY is not set' } }]);
         expect(calls.every((c) => c.method === 'GET')).toBe(true);
         expect((await repair(req('/api/admin/repair-numbers', { business_ids: [biz.id], dry_run: false }))).status).toBe(200);
         expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/IncomingPhoneNumbers/PN1.json'))).toBe(true);

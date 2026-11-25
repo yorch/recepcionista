@@ -1,4 +1,5 @@
 'use client';
+import { splitAuto } from '@/lib/auto-label';
 import Link from 'next/link';
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
@@ -53,7 +54,12 @@ function CallCard({ c, nowMs, highlight }: { c: PublicCall; nowMs: number; highl
         )}
       </div>
 
-      {c.summary ? <p className="mt-3 text-[13px] leading-relaxed text-body">{c.summary}</p> : null}
+      {c.summary ? (
+        <p className="mt-3 text-[13px] leading-relaxed text-body">
+          {splitAuto(c.summary).auto ? <Badge tone="neutral" className="mr-2 align-middle">{t('pd.auto.excerpt')}</Badge> : null}
+          {splitAuto(c.summary).text}
+        </p>
+      ) : null}
 
       {c.flagged_reason ? <p className="mt-2 rounded-lg bg-[#1a1208] px-3 py-2 text-xs text-warn">{c.flagged_reason}</p> : null}
 

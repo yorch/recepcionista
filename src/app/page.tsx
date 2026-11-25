@@ -4,6 +4,7 @@ import { Logo } from '@/components/ui/logo';
 import { buttonClass } from '@/components/ui/button';
 import { LocaleSwitcher } from '@/components/ui/locale-switcher';
 import { planPriceDisplay } from '@/app/site-config';
+import { planPriceTexts } from '@/lib/billing/price';
 import { getLocale, getT } from '@/lib/i18n/server';
 
 /** Public marketing page: static copy only. It never reads or renders any tenant's data. */
@@ -32,7 +33,7 @@ const FEATURES = [
 export default async function Home() {
   const t = await getT();
   const locale = await getLocale();
-  const price = planPriceDisplay(locale);
+  const price = (await planPriceTexts(locale, { monthly: planPriceDisplay(locale), annual: null })).monthly; // Stripe's real price when readable, else the display text
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-6 sm:px-6 sm:py-8">
       <header className="flex items-center justify-between gap-3">

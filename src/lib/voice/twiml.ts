@@ -94,3 +94,13 @@ export const unavailableTwiml = (): string => wrap(
 
 export const thanksTwiml = (): string => wrap('<Say language="en-US">Thank you. Goodbye.</Say><Hangup/>');
 export const emptyHangupTwiml = (): string => wrap('<Hangup/>');
+
+/**
+ * A signed Twilio call must NEVER be answered with JSON (the caller would hear "an application error"). When a branch has no AI to connect
+ * on a webhook line, it says so plainly and hangs up: `owner` for the owner line, `ai` when the AI cannot be reached right now.
+ */
+export const lineNoticeTwiml = (kind: 'owner' | 'ai'): string => wrap(kind === 'owner'
+  ? '<Say language="en-US">The owner line is not available on this phone line. Please use your dashboard to update your assistant. Goodbye.</Say>'
+    + '<Say language="es-MX">La l\u00ednea del due\u00f1o no est\u00e1 disponible en este n\u00famero. Use su panel para actualizar a su asistente. Adi\u00f3s.</Say><Hangup/>'
+  : '<Say language="en-US">Our assistant cannot take your call right now. Please try again later. Goodbye.</Say>'
+    + '<Say language="es-MX">Nuestra asistente no puede atender su llamada en este momento. Intente de nuevo m\u00e1s tarde. Adi\u00f3s.</Say><Hangup/>');

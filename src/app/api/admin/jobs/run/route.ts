@@ -17,17 +17,19 @@ export async function POST(req: Request) {
   const auth = await authenticate(req, { role: 'admin' });
   if (!auth.ok) return auth.response;
   try {
-    const body = await readJson<{ job?: unknown; business_id?: unknown; dry_run?: unknown }>(req).catch(() => ({} as { job?: unknown; business_id?: unknown; dry_run?: unknown }));
+    const body = await readJson<{ job?: unknown; business_id?: unknown; dry_run?: unknown; before?: unknown }>(req).catch(() => ({} as { job?: unknown; business_id?: unknown; dry_run?: unknown; before?: unknown }));
     if (!isJobName(body.job)) return fail(`job must be one of: ${JOB_NAMES.join(', ')}`, 422);
     if (body.dry_run !== undefined && typeof body.dry_run !== 'boolean') return fail('dry_run must be true or false', 422);
     if (body.business_id !== undefined && (typeof body.business_id !== 'string' || !body.business_id)) return fail('business_id must be a non-empty string', 422);
-    if (body.business_id !== undefined && body.job !== 'daily_briefing' && body.job !== 'gratitude_sweep') return fail('business_id only applies to daily_briefing and gratitude_sweep', 422);
+    if (body.business_id !== undefined && body.job !== 'daily_briefing' && body.job !== 'gratitude_sweep' && body.job !== 'tenant_release') return fail('business_id only applies to daily_briefing, gratitude_sweep and tenant_release', 422);
+    if (body.before !== undefined && (body.job !== 'grandfather' || typeof body.before !== 'string' || Number.isNaN(new Date(body.before).getTime()))) return fail('before (an ISO date-time) only applies to grandfather', 422);
     const dryRun = body.dry_run !== false;
     const businessId = body.business_id as string | undefined;
     if (businessId && !(await getBusiness(businessId))) return fail('business not found', 404);
 
-    const report = await runJob(body.job, { dryRun, businessId, force: true });
-    if (!dryRun) {
+    // tenant_release / grandfather: a real run (`dry_run:false`) also needs TENANT_RELEASE_JOB=on; otherwise the report says `refused_not_enabled` and nothing changes.
+    const report = await runJob(body.job, { dryRun, businessId, force: true, before: typeof body.before === 'string' ? body.before : undefined });
+    if (!report.dry_run) {
       await recordAudit({
         actor_kind: auth.principal.kind === 'admin' && auth.principal.user ? 'user' : 'admin_token',
         actor_user_id: auth.principal.kind === 'admin' ? auth.principal.user?.id ?? null : null,

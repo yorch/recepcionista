@@ -7,6 +7,7 @@ import { mockSmsAllowed } from '@/lib/messaging/delivery';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { handleOwnerSms } from '@/lib/voice/owner/sms';
 import { handleCancelReply } from '@/lib/messaging/sms-cancel';
+import { handleInboundText } from '@/lib/messaging/inbox';
 import { meterSms } from '@/lib/messaging';
 import { smsSegments } from '@/lib/messaging/policy';
 import { logger } from '@/lib/log';
@@ -23,6 +24,7 @@ const xml = (body: string, status = 200) =>
  * THE inbound-SMS webhook: point the Twilio number's "A message comes in" URL here (and only here; a number has
  * one inbound URL). STOP-class keywords opt the sender out of this business's texts, START-class keywords opt
  * back in, HELP returns contact info, a bare C cancels the sender's single upcoming booking, and a 1-5 reply to a gratitude text is routed to the review/owner logic.
+ * Any other text is stored in the owner's inbox, forwarded to the verified owner phone and acknowledged once (messaging/inbox).
  * Signature verified, fails closed. The business is resolved from the Twilio number the text was sent TO.
  */
 export async function POST(req: Request) {
@@ -76,7 +78,11 @@ export async function POST(req: Request) {
       }
     }
 
-    return xml(twiml()); // not a keyword: no auto-reply
+    // Everything else is a customer writing to the business: store it in the owner's inbox, forward it to the verified owner phone and
+    // acknowledge it once (see messaging/inbox). The reply is sent through the normal send path (logged, opt-out and cap aware), not as TwiML.
+    const outcome = await handleInboundText(business, { From: from, Body: fields.Body, MessageSid: fields.MessageSid, SmsMessageSid: fields.SmsMessageSid });
+    log.info('inbox', { business: business.id, stored: outcome.stored, dropped: outcome.dropped ?? null, forward: outcome.forward ?? null, auto_reply: outcome.autoReply ?? null });
+    return xml(twiml());
   } catch (err) {
     log.error('failed', { err });
     return xml(twiml(), 500);

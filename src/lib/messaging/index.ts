@@ -26,6 +26,8 @@ export interface SendAndLogInput {
   booking_id?: string | null;
   /** Why this text is allowed (see messaging/policy). Required for gratitude / review_request. */
   consent_basis?: string | null;
+  /** Longest text INCLUDING the STOP footer (default 300). Owner-typed texts raise it so their words are never cut. */
+  max_chars?: number;
   /** Test seam. */
   now?: Date;
 }
@@ -105,7 +107,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
   if (!decision.allow) return blockedResult(decision.reason, input.consent_basis ?? null);
 
   // The exact text that goes out (with the STOP footer): its segment count is what is metered and what the cap is checked against.
-  const text = decision.footer ? withStopFooter(input.body) : input.body;
+  const text = decision.footer ? withStopFooter(input.body, input.max_chars ?? 300) : input.body;
   const segments = Math.max(1, smsSegments(text));
 
   // Plan cap: customer-facing texts stop at the cap (a text that would not fit in what is left is blocked). The segments are

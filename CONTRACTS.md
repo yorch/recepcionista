@@ -44,14 +44,15 @@ All routes return `ApiResult<T>` = `{ok:true, data}` or `{ok:false, error}`.
 | `GET /api/businesses/[id]` | → `{business, knowledge_base, stats}` |
 | `PATCH /api/businesses/[id]` | partial `Business` → `Business`; after a trade (`vertical`) change the response also carries `vertical_sync: {prompt_rebuilt, call_script_rebuilt, agent: 'synced'\|'skipped'\|'failed', retry_queued}` (`retry_queued`: the live agent could not be updated yet, the `reconcile` job retries with backoff) |
 | `POST /api/extract` | `{url}` → `ExtractionResult` |
-| `POST /api/businesses/[id]/provision` | `{}` → `{business, knowledge_base, phone, mock}` — runs extraction if no KB, builds KB + system prompt, provisions number, sets status `live` |
+| `POST /api/businesses/[id]/provision` | `{}` → `{business, knowledge_base, phone, mock, agent_id?, line?: {phone_number_id, adopted}}` — runs extraction if no KB, builds KB + system prompt, provisions number, creates the agent, imports the number into ElevenLabs and binds it to the tenant's agent, sets status `live`. Refusals (business stays `onboarding`): 503 `voice_provider_not_configured` BEFORE any purchase (no `ELEVENLABS_API_KEY` in production / with real Twilio), 502 `agent_registration_failed` (incl. a mock agent), 502 `voice_line_failed` (import/bind), each with `partial.phone` when a number is kept |
 | `PUT /api/businesses/[id]/knowledge` | `{services?, faqs?, pricing_notes?, call_script?}` → `KnowledgeBase` (regenerates system_prompt) |
 
 ### WS3 owns
 
 | Method + path | Body → Response |
 | --- | --- |
-| `POST /api/voice/incoming` | Twilio-style form or JSON `{To, From, CallSid}` → `{agent_id, business_id, call_id, ws_url?}` |
+| `POST /api/voice/incoming` | signed Twilio form → ALWAYS TwiML (register-call connect, voicemail, forward, or a `<Say>` + hangup for out-of-service / owner line / unknown number); unsigned JSON `{To, From, CallSid}` (demo, `ALLOW_INSECURE_DEV` only) → `{agent_id, business_id, call_id, ws_url?}` |
+| `GET/PATCH /api/businesses/[id]/line` | GET (staff+): `{assistant_name, assistant_name_effective, default_assistant_name, native_transfer_enabled, transfer_capability, line_kind, own_line, has_number, forward_number_verified}`. PATCH (owner only, same-origin, 20/min): `{assistant_name?: string\|null (1-40 chars), native_transfer_enabled?: boolean}` → the same view + `agent_sync`; turning transfer ON: 409 while `NATIVE_TRANSFER` is off, 403 `reauth_required` without a recent login proof; audited `business.assistant_name_changed` / `business.native_transfer_changed` (the name is not copied) |
 | `POST /api/voice/webhook` | ElevenLabs post-call `{business_id?, call_id?, transcript, duration_sec, language, ...}` → `{call}` |
 | `POST /api/voice/tools/[tool]` | ElevenLabs tool call payload → tool result |
 | `GET /api/voice/agent-prompt?business_id=` | → `{system_prompt, first_message, tools[]}` |
@@ -67,22 +68,26 @@ is what the voice agent should say.
 | --- | --- |
 | `POST /api/sms/send` | `{business_id, to, body, kind}` → `SmsLog` |
 | `POST /api/sms/confirmation` | `{booking_id}` → `{sms, body}` |
-| `POST /api/sms/payment-link` | `{business_id, booking_id?, to, amount_cents, description}` → `{sms, link}` |
+| `POST /api/sms/payment-link` | owner+; `{business_id, booking_id, amount_cents?}` → `{sms, link, body}`; recipient is the booking's own number; the amount is policy-bound (below) |
 | `POST /api/sms/gratitude` | `{booking_id}` → `{sms, body}` |
 | `POST /api/sms/gratitude-reply` | `{booking_id, rating}` → `{routed: 'review' \| 'owner'}` |
-| `POST /api/payments/create-link` | `{business_id, amount_cents, description, booking_id?}` → `PaymentLink` |
-| `GET /pay/[id]` | local mock checkout page (mock Stripe mode). Not protected in production: a booking with a deposit still renders it (known limitation, docs/review/18f #14); real deposit links are Stripe's |
+| `POST /api/payments/create-link` | owner+; `{business_id, amount_cents?, description?, booking_id?}` → `PaymentLink`; without `amount_cents` the booking's stored / the policy's computed amount; an explicit amount must lie inside the deposit policy's min/max (platform limits 100..100000 cents without a policy); 409 for a cancelled booking or a paid deposit |
+| `GET /pay/[id]` | public. PRODUCTION never renders a card form: a booking with a live Payment Link redirects to Stripe (`buy.stripe.com`, looked up on Stripe, cached 60 s, per-process budget), a paid booking shows the receipt (no card digits, no claim of a text), anything else (cancelled, replaced / used link, no link, Stripe unreachable) shows "this link is not available, contact the business"; an unknown id is a 404. The demo card form exists only with `DEMO_MODE=true` outside production |
 
 ### WS5 owns
 
 | Method + path | Body → Response |
 | --- | --- |
-| `POST /api/briefings/generate` | `{business_id, date?}` → `Briefing` (text + audio_url) |
+| `POST /api/briefings/generate` | `{business_id, date?}` → `Briefing & { audio: {status:'ready',bytes} \| {status:'unavailable',reason} }` (owner; text + stored audio when the voice provider is configured; `stats.narration` is `ai` or `automatic`) |
 | `GET /api/briefings?business_id=` | → `Briefing[]` |
+| `GET /api/briefings/[id]/audio` | staff+, tenant scoped (another business or no clip = 404); streams the stored clip from `briefing_audio` with its content type, Range (206/416), `ETag` (304), `private` cache |
+| `POST /api/briefings/[id]/audio` | OWNER, rate limited, audited; regenerates the audio from the stored text with the business voice → `{briefing_id, audio_url, audio}` (`unavailable` + `reason` `not_configured`/`provider_failed`/`bad_audio`/`store_failed`: never stale audio) |
 | `POST /api/gratitude/run` | `{}` → `{sent: number}` — sweep bookings completed 24h+ ago, send gratitude SMS |
 
-Audio files must be written to `public/audio/` and referenced as
-`/audio/<file>.mp3|.wav|.m4a`.
+Briefing audio is stored in the database (`briefing_audio`, ElevenLabs TTS with the business `voice_id`, else `ELEVENLABS_VOICE_ID`, else the
+default voice id) and `briefings.audio_url` is `/api/briefings/<id>/audio`. Nothing is written to `public/audio/` any more and there is no local
+voice fallback; a legacy `/audio/<file>` URL is only read by the old authenticated route and deleted on erasure. Without `ELEVENLABS_API_KEY`
+the briefing simply has no audio (the dashboard shows "audio unavailable"). `BRIEFING_AUDIO_KEEP_DAYS` (default 30) prunes old clips in the hourly cleanup.
 
 ### WS6 owns
 
@@ -131,6 +136,15 @@ owner Jorge `+13055550199`.
 | `GET /api/bookings?view=week|day|month&date=YYYY-MM-DD[&ws=0|1]` | staff+; `{view,date,days,from,to,timezone,week_start,items,truncated}` for the visible range in the business zone |
 | `GET /api/bookings?agenda=upcoming|past&cursor&limit` | staff+; `{items,next_cursor}` |
 | `GET /api/bookings/[id]` | staff+; `{booking, call}` (call summary = notes) |
+| `POST /api/bookings` | owner+, same-origin, 30/min; `{business_id?, customer_name, customer_phone? (blank = walk-in), service, scheduled_at (instant or local wall clock), duration_minutes?, address?, price_estimate? (cents), crew?, notify?}` -> 201 `{booking, notice}`; the SAME engine as the AI (hours, closed dates, lead / horizon, per-crew overlap under the advisory lock, Google busy); `created_via='dashboard'`, audit `booking.created_dashboard`, Google push hook; the customer is texted only with `notify:true` (quiet hours defer it); 409 `slot_taken` / `calendar_busy`, 422 for hours / closed / past |
+| `GET /api/bookings/slots?date=YYYY-MM-DD[&duration=60][&business_id]` | owner+; `{date,timezone,duration_minutes,slots}` the times a NEW booking can take (same availability as the AI) |
+| `PATCH /api/bookings/[id]` (edit) | owner+; WITHOUT `status`: `{customer_name?, customer_phone?, service?, address?, price_estimate? (cents), scheduled_at?, duration_minutes?, notify?}` -> `{booking,changed,moved,notice}`; a new time / length runs the reschedule engine; a new number clears the follow-up consent; closed bookings are 409; audit `booking.edited` |
+| `PATCH /api/bookings/[id]` (no-show) | `{status:'cancelled', reason:'no_show', notify:false}`; 409 before the start time |
+| `POST /api/bookings/[id]/deposit` | owner+, 10/min; `{amount_cents?, send?}` -> `{booking,amount_cents,source:'policy'\|'stored'\|'owner',resent,link:{id,url,mock},sms}`; request or RESEND a deposit link (the old link is deactivated); `send:false` only returns the link; 409 cancelled / already paid, 422 no phone (send) or an amount outside the policy, 503 `payments_not_configured` in production without Stripe; audit `booking.deposit_requested` |
+| `POST /api/bookings/[id]/deposit/mark-paid` | owner+, STEP-UP; `{amount_cents?}` -> `{booking,changed,amount_cents}`; `deposit_source='manual'`, who and when stored, audit `booking.deposit_marked_manual`, the open Stripe link is deactivated; 409 over a Stripe payment |
+| `POST /api/bookings/[id]/deposit/unmark` | owner+, STEP-UP; undo a MANUAL mark that has no refund; audit `booking.deposit_unmarked_manual` |
+| `POST /api/bookings/[id]/refund/manual` | owner+, STEP-UP; `{amount_cents?}`; records a refund of a MANUAL deposit made off-platform (no provider call, no customer text); audit `booking.refund_recorded_manual`; the Stripe refund route answers 409 `manual_deposit` for such a booking |
+| `GET/PUT /api/businesses/[id]/deposit-policy` | GET staff+, PUT owner+; the whole policy `{enabled, mode:'fixed'\|'percent', fixed_cents, percent, min_cents, max_cents}` + `limits`; audit `business.deposit_policy_changed` |
 | `PATCH /api/bookings/[id]` | owner+; `{status:'cancelled'|'completed', notify?, reason?}` -> `{booking,changed,deposit_refund_needed,refund,notice}`; cancelling texts the customer (policy-aware) and returns the refund-policy verdict, never refunds; audited |
 | `GET /api/bookings/[id]/slots?date=YYYY-MM-DD` | owner+; `{date,timezone,duration_minutes,slots:[{start,end,available,current}]}` the times the booking can move to |
 | `POST /api/bookings/[id]/reschedule` | owner+, same-origin; `{scheduled_at (instant or local wall clock), duration_minutes?, notify?}` -> `{booking,changed,previous,notice}`; 409 `slot_taken`/not movable, 422 hours/past/invalid; audited `booking.rescheduled` |
@@ -156,10 +170,22 @@ owner Jorge `+13055550199`.
 | `GET /api/calls/[id]/transcript?after=<seq>` | staff+, tenant scoped; polling fallback `{events, next_after, live, consent, status}` (same shared upstream poll); rate limited to 40 requests a minute per person (429 + `Retry-After`) |
 | `POST /api/voice/transcript-event` | tool-secret header; `{call_id\|call_sid\|conversation_id, events:[{seq, role, text, at?, is_final?}]}` (1-200) -> `{stored, skipped}`; idempotent by seq; ignored unless the call is live and `disclosed`; an objecting caller line declines the call and purges |
 | `POST /api/voice/screen` | Twilio signature; call-screening whisper on the owner's forward leg (`<Number url>`): prompt (Gather), `Digits=1` bridges, else hang up that leg |
-| `POST /api/voice/tools/transfer_to_human` | tool-secret; (native line, `NATIVE_TRANSFER=on`) re-checks verified number / hours / caps and answers `approved` (call -> `transfer_status=attempted`) or takes a callback (handoff) |
+| `POST /api/voice/tools/transfer_to_human` | tool-secret; (native line, `NATIVE_TRANSFER=on` AND the business's `native_transfer_enabled`) re-checks verified number / hours / caps and answers `approved` (call -> `transfer_status=attempted`) or takes a callback (handoff) |
 | `POST /api/voice/initiation` (extended) | dynamic variables now include `transfer_mode` (`off\|available\|forward`) and `transfer_destination` (E.164 or ''), per call |
 | `POST /api/admin/resync-agents` | admin; `{dry_run?: true (default), business_ids?: string[<=25], limit?: 1..25 (10), cursor?}` -> `{dry_run, configured, tools[], items:[{business_id, agent_id, outcome: would_sync\|synced\|created\|mock\|failed\|skipped, detail?}], next_cursor}`; dry run makes no provider call; 6 req/min; audited `admin.resync_agents`; 503 for a real run without `ELEVENLABS_API_KEY` |
+| `POST /api/admin/repair-numbers` | admin; `{dry_run?: true (default), business_ids?: string[<=25], limit?: 1..25 (10), cursor?}` -> `{dry_run, webhooks, items:[{business_id, phone, outcome: ok\|would_update\|updated\|not_found\|skipped\|failed, changed?, detail?, line?: {outcome: ok\|would_import\|would_bind\|imported\|adopted\|bound\|skipped\|failed, detail?}}], next_cursor}`; repairs the Twilio SMS URL (Voice URL only on a webhook line) and imports/binds each business's own number into ElevenLabs (native line); 6 req/min; audited `admin.repair_numbers` |
 | `POST /api/integrations/google/mock-event` | owner; local/e2e only (404 unless `GOOGLE_OAUTH_MOCK=true` outside production); `{start, end, summary?, transparency?}` -> `{id, sync}` or `{delete_id}` -> `{deleted, sync}` |
+| `POST /api/sms/inbound` (extended, inbox) | any other text (not STOP/START/HELP/YES, an owner code, a bare C or a gratitude 1-5) is stored in `inbound_messages` (deduped on `MessageSid`; the owner's own number, the business line and unparseable senders are dropped), texted to the VERIFIED owner phone through `alertOwner` (not in quiet hours; `INBOX_FORWARD_HOURLY_LIMIT` per hour; once per message; links in the text are replaced by `[link]`), and acknowledged once per sender per 24 h (sms_log kind `inbox_autoreply`, through `sendAndLog`: opt-out list, plan cap and STOP footer apply; language from the text, assistant name from `businesses.assistant_name`, default Maria). Per-sender 10/h and per-business 300/h flood limits. Always answers empty TwiML |
+| `GET /api/businesses/:id/messages` | owner or staff of that business; `?status=new\|handled\|ignored\|all&cursor=&limit=` -> `{items:[{id, from_last4, body, received_at, status, handled_at, booking_id, forwarded, auto_replied}], next_cursor, counts:{new,handled,ignored}}` |
+| `GET /api/businesses/:id/messages/:messageId` | owner or staff; adds `from_e164`, `opted_out`, `booking`, `thread[]` (their texts and our auto-reply / manual / reply texts) |
+| `PATCH /api/businesses/:id/messages/:messageId` | owner or staff; `{status:'new'\|'handled'\|'ignored'}`; audited `inbox.status_changed` |
+| `POST /api/businesses/:id/messages/:messageId/reply` | owner or staff; `{body}` (<= 320 chars); the recipient is the stored sender, never a client number; `sendAndLog` kind `owner_inbox_reply` (opt-out, plan cap, quiet hours, STOP footer); a delivered reply marks the message handled; audited `inbox.reply_sent` (no body) |
+| `POST /api/businesses/:id/messages/send` | owner or staff; `{to, body}`; the number must already be a booking, call or inbox sender of the business; kind `manual`; 40/h per business and 6/h per recipient; audited `sms.manual_sent` (last 4 and length only). Refusals carry `code`: `empty, too_long, invalid_recipient, unknown_recipient, not_allowed, rate_limited (429), quiet_hours (409), opted_out (409), cap_reached (402), send_failed (502)` |
+| `GET /api/businesses/:id/messages/log` | owner or staff; `?direction=out\|in&cursor=` -> the text log with status (`sent, failed, mock, blocked_*`), numbers as last 4 |
+| `GET/PUT /api/businesses/:id/review-url` | GET owner or staff, PUT owner; `{review_url: https link <= 300 chars \| null}`; audited `business.review_url_changed`. Unset = review requests are a thank-you without a link; there is no platform default |
+| `POST /api/businesses/:id/privacy/lookup` | owner only; `{phone}` -> counts only (no content); 60/h |
+| `POST /api/businesses/:id/privacy/export` | owner only, step-up (`reauth_required` after 5 min); `{phone}` -> the same JSON as `GET /api/privacy/export`; 20/h; audited `privacy.export` (`customer:...last4` + counts) |
+| `POST /api/businesses/:id/privacy/erase` | owner only, step-up; `{phone, confirm:'ERASE'}`; 20/h; audited `privacy.erase` / `privacy.erase_failed` |
 | `POST /api/sms/inbound` (extended) | a bare `C` (case/punctuation folded) from the booking's own number cancels that sender's ONLY upcoming booking for the business that owns the texted number and answers TwiML with the refund-policy verdict (en/es); several upcoming -> asks them to call; none -> says so; `CANCEL/STOP/END/QUIT...` stay opt-outs; per-sender 5/10 min, per-business 120/h, MessageSid dedupe; an opted-out sender is cancelled silently (no reply) |
 | `GET /api/billing/status` (field naming) | the 80% / 100% cap warnings are `usage_warnings: [{kind, level, percent, ...}]` (never `warnings`); also `billing_interval`, `annual_available` |
 | `POST /api/billing/checkout` (mock mode) | with `STRIPE_PRICE_ID_ANNUAL` set, `interval:'year'` is accepted in the non-production mock checkout too; the mock activation records `billing_interval` |
@@ -181,3 +207,20 @@ No new HTTP route. Four more owner-line voice tools on `POST /api/voice/tools/[t
 
 There is no recipient argument: the recipient comes from the call / booking row of the business. SMS commands at `POST /api/sms/inbound` (verified owner phone only, after STOP/START/HELP): `YES <code>` sends, `NO <code>` cancels, `UNDO <code>` answers that a sent text cannot be undone. A bare `NO` from the verified owner phone cancels every waiting draft; a bare `YES` asks for the code. Table `owner_replies` (`status`: proposed, sending, sent, uncertain, cancelled, expired, refused, failed; `uncertain` = may or may not have been delivered, never retried). Audit actions `owner_reply.*`. Customer text: `<Business>: <words>. Reply STOP to opt out` (sms_log kind `manual`, consent basis `owner_voice_reply`).
 
+## Platform: scheduling, time zone, content confirmation, tenant jobs (agent D)
+
+| Method + path | Body → Response |
+| --- | --- |
+| `GET /api/businesses/[id]/scheduling` | staff+; `{slot_minutes, min_lead_minutes, horizon_days, buffer_minutes, crews}` |
+| `PUT /api/businesses/[id]/scheduling` | OWNER, same-origin, 30/min, audited `business.scheduling_changed`; any subset of the five fields; 422 invalid / unknown (nothing written); 409 `crew_in_use` when lowering `crews` below a crew with an upcoming booking |
+| `GET /api/businesses/[id]/timezone` | staff+; `{timezone, suggested, now}`; `suggested` comes from the owner phone area code and is NEVER applied by the server |
+| `PUT /api/businesses/[id]/timezone` | OWNER, same-origin, 20/min, audited `business.timezone_changed`; `{timezone}` IANA only (`EST`, `+01:00` are 422) → view + `changed`, `hours_recheck`, `agent_sync` |
+| `GET /api/businesses/[id]/content-confirmation` | staff+; `{state: unconfirmed\|confirmed\|stale, confirmed_at}` |
+| `POST /api/businesses/[id]/content-confirmation` | OWNER; confirms the services / prices / service area as they are now (fingerprint); 422 without services or without a service area; audited `business.content_confirmed` |
+| `POST /api/admin/jobs/run` | admin; adds `tenant_release` (optional `business_id`) and `grandfather` (`before` ISO cutoff); `dry_run` defaults to true; a real run needs `TENANT_RELEASE_JOB=on`, otherwise the report holds `refused_not_enabled` |
+
+Function contracts (signatures unchanged, options added): `slotsForDate(business, date, minutes, nowMs?)`, `nextAvailable(business, count, minutes, nowMs?)` read
+`schedulingOf(business)` (grid, notice, horizon, buffer, crews; Google blocks stop every crew); `validateSlot(..., closedDates, { horizonDays })` returns
+`too_soon` (inside the notice) and `too_far` (beyond the horizon) next to the old reasons; `createBooking(input, { enforce, max_per_call, ownerInitiated })` and
+`rescheduleBooking(input, { enforce, ownerInitiated })`: `ownerInitiated` skips the notice and the horizon only (dashboard bookings; customer moves by the voice agent do not), the
+buffer is kept clear in code (and around Google blocks), crews are assigned per `bookings_no_overlap (business, crew, range)`. `slotsForMove(..., nowMs, { customer })` applies notice + horizon to customer moves.

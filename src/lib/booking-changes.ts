@@ -159,7 +159,7 @@ export async function rescheduleAndNotify(input: {
   const result = await rescheduleBooking({
     business_id: input.businessId, booking_id: input.bookingId, scheduled_at: input.scheduled_at, duration_minutes: input.duration_minutes,
     actor: { kind: input.actor.kind, user_id: input.actor.user_id ?? null, ip: input.actor.ip ?? null, reason: typeof input.actor.meta?.source === 'string' ? input.actor.meta.source : null },
-  });
+  }, { ownerInitiated: (input.initiator ?? 'owner') === 'owner' }); // the owner's own move skips the minimum lead and the horizon; a customer's obeys them
   let notice: NoticeResult | null = null;
   if (result.changed) {
     notice = input.notify === false

@@ -7,7 +7,10 @@
  *                    hours, within the SMS cap). Only live businesses whose billing allows service (isProvisioningAllowed).
  *  - gratitude_sweep hourly, per live business: the existing runGratitudeSweep (consent, opt-out, quiet-hours and cap rules
  *                    are enforced inside it, unchanged). A business in quiet hours is skipped, not swept.
- *  - cleanup         hourly: expired sessions, expired email tokens, old processed_events claims, stale rate-limit buckets.
+ *  - cleanup         hourly: expired sessions, expired email tokens, old processed_events claims, stale rate-limit buckets, briefing audio older than
+ *                    BRIEFING_AUDIO_KEEP_DAYS (default 30; the briefing text stays).
+ *  - tenant_release  daily when TENANT_RELEASE_JOB=report|on: canceled/unpaid tenants' heads-up mail + release (jobs/tenants.ts). DRY RUN unless =on.
+ *  - grandfather     manual only (admin): comp existing vetted tenants (jobs/tenants.ts). DRY RUN unless TENANT_RELEASE_JOB=on.
  *  - retention       daily PII purge. OFF unless RETENTION_JOB=on (unchanged semantics; see retention-job.ts).
  *  - recording_deletions  every tick: delete the provider-side voicemail recordings queued by a purge / erasure (retries with backoff,
  *                    a 404 counts as deleted, an alert fires when one keeps failing). Runs even while RETENTION_JOB is off (erasure
@@ -24,7 +27,7 @@
  */
 import {
   claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, deleteExpiredWebauthnChallenges, WEBAUTHN_CHALLENGE_GRACE_MS, EMAIL_TOKEN_GRACE_MS,
-  getBusiness, isProvisioningAllowed, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
+  briefingAudioKeepDays, getBusiness, isProvisioningAllowed, pruneBriefingAudio, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
   checkSmsAllowed, recordingDeletionStatus, withLease,
 } from '@/lib/db';
 import { appBaseUrl } from '@/lib/email/templates';
@@ -41,6 +44,7 @@ import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { runReconcileJob, runUsageWarningsJob } from './reconcile';
 import { POLL_EVERY_MS as GOOGLE_POLL_EVERY_MS, runGoogleCalendarWork } from './calendar';
 import { drainRecordingDeletions } from '@/lib/voice/recording-deletion';
+import { runGrandfatherJob, runTenantReleaseJob, tenantReleaseSetting } from './tenants';
 import type { Briefing, Business } from '@/lib/types';
 import type { JobBusiness } from '@/lib/db';
 import {
@@ -62,6 +66,7 @@ const CLEANUP_LEASE_MS = 2 * 60_000;
 export const CLEANUP_EVERY_MS = 60 * 60_000;
 export const RETENTION_EVERY_MS = 24 * 60 * 60_000;
 export const USAGE_WARNINGS_EVERY_MS = 10 * 60_000;
+export const TENANT_RELEASE_EVERY_MS = 24 * 60 * 60_000;
 const FIRST_TICK_DELAY_MS = 20_000;
 
 const STATE_SOURCE = 'job-state';
@@ -77,6 +82,8 @@ export const JOB_INFO: Record<JobName, { description: string; schedule: string }
   reconcile: { description: 'Add the AI minutes of calls whose post-call webhook never arrived (fetched from ElevenLabs; once, shared with the webhook; backs off, gives up with an audit row). Also re-syncs voice agents whose last sync failed (e.g. after a business-type change).', schedule: 'every tick' },
   usage_warnings: { description: 'Safety net for the 80% / 100% cap warnings (email + text, once per kind per period). One instance at a time (lease).', schedule: 'every 10 minutes' },
   google_calendar: { description: 'Google Calendar: fallback poll (15 min), push-channel renewal, retry/backoff, push reconcile, privacy sweep.', schedule: 'every tick (per connection every 15 min)' },
+  tenant_release: { description: 'Canceled / unpaid tenants: heads-up e-mail, then release of the Twilio number, ElevenLabs agent and line after the grace period. DRY RUN unless TENANT_RELEASE_JOB=on; every run stores a report (audit jobs.tenant_release_report).', schedule: 'daily when TENANT_RELEASE_JOB is report or on; otherwise manual' },
+  grandfather: { description: 'Comp existing vetted tenants created before a cutoff when plans start being enforced. Manual only; dry run unless TENANT_RELEASE_JOB=on.', schedule: 'manual only' },
 };
 
 // ---- types ------------------------------------------------------------------------------------
@@ -115,7 +122,9 @@ export const defaultDeps: JobDeps = {
 
 export interface RunOptions {
   now?: Date;
-  /** Restrict to one business (briefing / gratitude). */
+  /** Admin jobs only (`grandfather`): ISO cutoff instant, the businesses created before it are considered. */
+  before?: string;
+  /** Restrict to one business (briefing / gratitude / tenant_release). */
   businessId?: string;
   dryRun?: boolean;
   /** Manual runs only: ignore the schedule gate (18:00 / hour-due) but keep every safety gate (billing, idempotency). */
@@ -331,14 +340,15 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
 
 /** What the cleanup job would delete right now (read-only counts). */
 export async function previewCleanup(now: Date = new Date()): Promise<Record<string, number>> {
-  const [sessions, tokens, events, buckets, challenges] = await Promise.all([
+  const [sessions, tokens, events, buckets, challenges, audio] = await Promise.all([
     prisma.userSession.count({ where: { expiresAt: { lt: now } } }),
     prisma.emailToken.count({ where: { expiresAt: { lt: new Date(now.getTime() - EMAIL_TOKEN_GRACE_MS) } } }),
     prisma.processedEvent.count({ where: { createdAt: { lt: new Date(now.getTime() - PROCESSED_EVENTS_RETENTION_MS) } } }),
     prisma.rateLimitBucket.count({ where: { windowStart: { lt: new Date(now.getTime() - CLEANUP_HORIZON_MS) } } }),
     prisma.webauthnChallenge.count({ where: { expiresAt: { lt: new Date(now.getTime() - WEBAUTHN_CHALLENGE_GRACE_MS) } } }),
+    prisma.briefingAudio.count({ where: { createdAt: { lt: new Date(now.getTime() - briefingAudioKeepDays() * 86_400_000) } } }),
   ]);
-  return { sessions, email_tokens: tokens, processed_events: events, rate_limit_buckets: buckets, webauthn_challenges: challenges };
+  return { sessions, email_tokens: tokens, processed_events: events, rate_limit_buckets: buckets, webauthn_challenges: challenges, briefing_audio: audio };
 }
 
 export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
@@ -357,6 +367,7 @@ export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
       processed_events: await cleanupProcessedEvents(now, true),
       rate_limit_buckets: await cleanupRateLimitBuckets(now),
       webauthn_challenges: await deleteExpiredWebauthnChallenges(now), // expired passkey challenges (kept a day for forensics); no longer a random 2% side effect of issuing one
+      briefing_audio: (await pruneBriefingAudio({ now })).removed, // stored briefing clips older than BRIEFING_AUDIO_KEEP_DAYS (default 30); the briefing text stays
     }));
     if (!run.acquired) { report.items.push({ outcome: 'busy' }); return report; }
     report.counts = run.value;
@@ -450,6 +461,8 @@ export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> 
     case 'reconcile': return runReconcileJob({ now: opts.now, dryRun: opts.dryRun, env: opts.env }) as Promise<JobReport>;
     case 'usage_warnings': return runUsageWarningsJob({ now: opts.now, dryRun: opts.dryRun, businessId: opts.businessId }) as Promise<JobReport>;
     case 'google_calendar': return runGoogleCalendarJob(opts);
+    case 'tenant_release': return runTenantReleaseJob(opts);
+    case 'grandfather': return runGrandfatherJob(opts);
   }
 }
 
@@ -457,7 +470,8 @@ export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> 
 export function enabledJobs(env: NodeJS.ProcessEnv = process.env): JobName[] {
   const s = jobsSetting(env);
   const retention = retentionJobEnabled(env.RETENTION_JOB);
-  if (s.enabled) return JOB_NAMES.filter((j) => j !== 'retention' || retention);
+  const release = tenantReleaseSetting(env) !== 'off'; // `report` (dry-run report) or `on` (acts): see jobs/tenants.ts
+  if (s.enabled) return JOB_NAMES.filter((j) => (j !== 'retention' || retention) && (j !== 'tenant_release' || release) && j !== 'grandfather');
   // JOBS unset outside production: the retention job keeps working on its own, as it always did. JOBS=off turns everything off.
   return !s.explicit && retention ? ['retention', 'recording_deletions'] : [];
 }
@@ -476,13 +490,18 @@ export async function runJobTick(opts: { now?: Date; env?: NodeJS.ProcessEnv; jo
       } else if (job === 'retention') {
         const last = await lastRunAt('retention');
         if (last && now.getTime() - last.getTime() < RETENTION_EVERY_MS) continue;
+      } else if (job === 'tenant_release') {
+        const last = await lastRunAt('tenant_release');
+        if (last && now.getTime() - last.getTime() < TENANT_RELEASE_EVERY_MS) continue;
       } else if (job === 'usage_warnings') {
         // A safety net (the inline trigger sends the warnings): 3 queries per live business, so not every 60 s tick.
         const last = await lastRunAt('usage_warnings');
         if (last && now.getTime() - last.getTime() < USAGE_WARNINGS_EVERY_MS) continue;
       }
-      reports.push(await runJob(job, { now, deps: opts.deps, env }));
+      // tenant_release on the schedule: a REAL run only with TENANT_RELEASE_JOB=on, otherwise the dry-run report (runTenantReleaseJob enforces it).
+      reports.push(await runJob(job, { now, deps: opts.deps, env, ...(job === 'tenant_release' ? { dryRun: tenantReleaseSetting(env) !== 'on' } : {}) }));
       if (job === 'usage_warnings') await markRun('usage_warnings', now);
+      if (job === 'tenant_release') await markRun('tenant_release', now);
     } catch (err) {
       log.error('tick.job_failed', { job, err });
     }
@@ -547,6 +566,13 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
       next = last ? new Date(Math.max(now.getTime(), last.getTime() + USAGE_WARNINGS_EVERY_MS)) : now;
     } else if (name === 'reconcile') {
       next = now;
+    } else if (name === 'tenant_release') {
+      const mode = tenantReleaseSetting(env);
+      next = mode === 'off' ? null : last ? new Date(Math.max(now.getTime(), last.getTime() + TENANT_RELEASE_EVERY_MS)) : now;
+      note = mode === 'on' ? 'ACTING: sends heads-up mails and releases tenants whose grace period is over' : mode === 'report' ? 'dry-run report only (TENANT_RELEASE_JOB=report)' : 'off: manual dry runs only; set TENANT_RELEASE_JOB=report or on';
+    } else if (name === 'grandfather') {
+      next = null;
+      note = 'manual only (needs a cutoff); a real run also needs TENANT_RELEASE_JOB=on';
     } else {
       next = retentionJobEnabled(env.RETENTION_JOB)
         ? (last ? new Date(Math.max(now.getTime(), last.getTime() + RETENTION_EVERY_MS)) : now)

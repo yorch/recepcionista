@@ -59,6 +59,19 @@ export async function markPaused(
   log.info('paused_call', { business: business.id, call: call.id, owner_notified: notified });
 }
 
+/**
+ * A call on a WEBHOOK line that could not be connected to the AI (no real agent, the provider refused, an outage): the caller heard the honest
+ * voicemail notice (which says the message is recorded), so the call is disclosed; the owner is told the AI could not answer.
+ */
+export async function markAiUnavailable(
+  business: Business, call: Call, from: string | null | undefined, opts: { known?: boolean } = {},
+): Promise<void> {
+  if (call.status === 'handed_off') return;
+  await updateCall(call.id, { status: 'handed_off', flagged_reason: 'The AI could not be connected on this line; the caller was offered a voicemail', recording_disclosed: true, consent_status: 'disclosed' });
+  const notified = await notifyMissedCall(business, from, 'the assistant could not answer', { known: opts.known });
+  log.warn('ai_unavailable', { business: business.id, call: call.id, owner_notified: notified });
+}
+
 /** A paused / forwarded call on the NATIVE ElevenLabs path: the agent says the paused message and takes a callback message. */
 export async function markPausedNative(business: Business, call: Call, from: string | null | undefined, mode: 'paused' | 'forward', refusedWhy: string | null = null): Promise<void> {
   if (call.status === 'handed_off') return;

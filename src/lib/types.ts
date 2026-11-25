@@ -242,6 +242,8 @@ export interface BriefingStats {
   /** INTEGER CENTS */
   revenue: number;
   flags: number;
+  /** How the transcript was written: by the AI writer, or by the automatic template (no key / provider failure). Absent on older briefings. */
+  narration?: 'ai' | 'automatic';
 }
 
 export interface Briefing {

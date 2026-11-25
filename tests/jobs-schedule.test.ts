@@ -102,7 +102,7 @@ describe('switches', () => {
   });
 
   test('job names', () => {
-    expect([...JOB_NAMES]).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions', 'reconcile', 'usage_warnings', 'google_calendar']);
+    expect([...JOB_NAMES]).toEqual(['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions', 'reconcile', 'usage_warnings', 'google_calendar', 'tenant_release', 'grandfather']);
     expect(isJobName('cleanup')).toBe(true);
     expect(isJobName('rm -rf')).toBe(false);
     expect(isJobName(undefined)).toBe(false);

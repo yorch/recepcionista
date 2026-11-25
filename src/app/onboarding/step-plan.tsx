@@ -14,8 +14,8 @@ const POLL_MS = 2500;
 const POLL_MAX_MS = 90_000;
 
 export function PlanStep({
-  businessId, status, isAdmin, go, refresh, priceDisplay, annualAvailable = false, annualDisplay = null, checkout, clearCheckout,
-}: StepProps & { priceDisplay: string; annualAvailable?: boolean; annualDisplay?: string | null; checkout: 'success' | 'cancel' | null; clearCheckout: () => void }) {
+  businessId, status, isAdmin, go, refresh, priceDisplay, annualAvailable = false, annualDisplay = null, capLines = [], checkout, clearCheckout,
+}: StepProps & { priceDisplay: string; annualAvailable?: boolean; annualDisplay?: string | null; capLines?: string[]; checkout: 'success' | 'cancel' | null; clearCheckout: () => void }) {
   const t = useT();
   const locale = useLocale();
   const [interval, setInterval] = useState<'month' | 'year'>('month');
@@ -95,6 +95,11 @@ export function PlanStep({
           {INCLUDED.map((x) => (
             <li key={x} className="flex gap-2.5 text-[13px] leading-relaxed text-soft">
               <span aria-hidden="true" className="mt-0.5 text-mint">✓</span>{t(x)}
+            </li>
+          ))}
+          {capLines.map((line) => (
+            <li key={line} className="flex gap-2.5 text-[13px] leading-relaxed text-soft">
+              <span aria-hidden="true" className="mt-0.5 text-mint">✓</span>{line}
             </li>
           ))}
         </ul>

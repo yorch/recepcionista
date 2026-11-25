@@ -32,10 +32,12 @@ export interface TimeGridProps {
   selectedId: string | null;
   onOpen: (b: Booking, el: HTMLElement) => void;
   onOpenDay: (day: string) => void;
+  /** Owner only: a click on an empty part of a day column (day key, wall-clock minutes from midnight, rounded down to the half hour). Keyboard users use the "New booking" button. */
+  onEmptySlot?: (day: string, minutes: number) => void;
 }
 
 /** Week / day time grid (md and up): hour rows on the business's open hours, blocks sized by duration. */
-export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, selectedId, onOpen, onOpenDay }: TimeGridProps) {
+export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, selectedId, onOpen, onOpenDay, onEmptySlot }: TimeGridProps) {
   const t = useT();
   const locale = useLocale();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -125,7 +127,18 @@ export function TimeGrid({ days, bookings, hours, tz, todayKey, now, loading, se
             const lanes = new Map(layoutLanes(items.map((i) => ({ bookingId: i.booking.id, startMin: i.segment.startMin, endMin: i.segment.endMin }))).map((l) => [l.bookingId, l]));
             const line = d === todayKey && now !== null ? nowLine(new Date(now), tz, axis) : null;
             return (
-              <div key={d} className={cn('relative border-l border-line', d === todayKey && 'bg-brand/[0.03]')}>
+              <div
+                key={d}
+                className={cn('relative border-l border-line', d === todayKey && 'bg-brand/[0.03]', onEmptySlot && 'cursor-cell')}
+                onClick={onEmptySlot ? (e) => {
+                  if ((e.target as HTMLElement).closest('button')) return; // a booking block opens its own panel
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  if (rect.height <= 0) return;
+                  const span = axis.endMin - axis.startMin;
+                  const minutes = axis.startMin + Math.min(span - 30, Math.max(0, Math.floor(((e.clientY - rect.top) / rect.height) * span / 30) * 30));
+                  onEmptySlot(d, minutes);
+                } : undefined}
+              >
                 {hourMarks.map((m) => (
                   <div key={m} aria-hidden="true" className="absolute inset-x-0 border-t border-line/70" style={{ top: `${((m - axis.startMin) / (axis.endMin - axis.startMin)) * 100}%` }} />
                 ))}

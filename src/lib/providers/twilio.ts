@@ -135,7 +135,7 @@ export function numberWebhooks(env: NodeJS.ProcessEnv = process.env): { SmsUrl: 
 }
 
 export type NumberWebhookOutcome = 'ok' | 'would_update' | 'updated' | 'not_found' | 'skipped' | 'failed';
-export interface NumberWebhookResult { outcome: NumberWebhookOutcome; detail?: string; changed?: string[] }
+export interface NumberWebhookResult { outcome: NumberWebhookOutcome; detail?: string; changed?: string[]; /** The Twilio IncomingPhoneNumber sid (PN...), when the number was found. */ sid?: string }
 
 /**
  * IDEMPOTENT repair of an existing number's webhooks: looks the number up on the account, and updates only the fields that differ
@@ -143,7 +143,7 @@ export interface NumberWebhookResult { outcome: NumberWebhookOutcome; detail?: s
  */
 export async function configureNumberWebhooks(
   e164: string,
-  opts: { dryRun?: boolean; fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
+  opts: { dryRun?: boolean; fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv; /** The number is an imported ElevenLabs line: ElevenLabs owns its Voice URL, never write it. */ skipVoiceUrl?: boolean } = {},
 ): Promise<NumberWebhookResult> {
   const env = opts.env ?? process.env;
   const doFetch = opts.fetchImpl ?? fetch;
@@ -153,6 +153,7 @@ export async function configureNumberWebhooks(
   if (isMockPoolNumber(e164)) return { outcome: 'skipped', detail: 'mock-pool number: nothing exists at Twilio' };
   if (isPlatformNumber(e164, env)) return { outcome: 'skipped', detail: 'platform SMS sender number: not touched' };
   const want = numberWebhooks(env);
+  if (want && opts.skipVoiceUrl) { delete want.VoiceUrl; delete want.VoiceMethod; }
   if (!want) return { outcome: 'skipped', detail: 'no public base URL (PUBLIC_BASE_URL / APP_URL): the webhook addresses are unknown' };
   const auth = { authorization: `Basic ${btoa(`${sid}:${token}`)}` };
   const base = `https://api.twilio.com/2010-04-01/Accounts/${sid}/IncomingPhoneNumbers`;
@@ -166,15 +167,16 @@ export async function configureNumberWebhooks(
     const patch: Record<string, string> = {};
     for (const [k, v] of Object.entries(want)) if (typeof v === 'string' && (have[k] ?? '') !== v) patch[k] = v;
     const changed = Object.keys(patch);
-    if (changed.length === 0) return { outcome: 'ok' };
-    if (opts.dryRun) return { outcome: 'would_update', changed };
+    const pnSid = hit.sid as string;
+    if (changed.length === 0) return { outcome: 'ok', sid: pnSid };
+    if (opts.dryRun) return { outcome: 'would_update', changed, sid: pnSid };
     const res = await doFetch(`${base}/${encodeURIComponent(hit.sid as string)}.json`, {
       method: 'POST', headers: { ...auth, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(patch),
       signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
     });
-    if (!res.ok) { log.warn('number.webhooks_failed', { phone: e164, status: res.status }); return { outcome: 'failed', detail: `update ${res.status}`, changed }; }
+    if (!res.ok) { log.warn('number.webhooks_failed', { phone: e164, status: res.status }); return { outcome: 'failed', detail: `update ${res.status}`, changed, sid: pnSid }; }
     log.info('number.webhooks_set', { phone: e164, fields: changed });
-    return { outcome: 'updated', changed };
+    return { outcome: 'updated', changed, sid: pnSid };
   } catch (err) {
     log.error('number.webhooks_error', { phone: e164, err });
     return { outcome: 'failed', detail: (err as Error).message.slice(0, 120) };

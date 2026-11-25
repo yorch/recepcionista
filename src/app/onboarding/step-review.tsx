@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { ContentCheck, type ContentState } from '@/components/knowledge/content-confirm';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { KnowledgeForm } from '@/components/knowledge/knowledge-form';
@@ -8,7 +9,7 @@ import { readinessOfDraft } from '@/lib/kb/readiness';
 import {
   hasErrors, snapshot, toBusinessPatch, toKnowledgePayload, validateDraft, type DraftErrors, type KnowledgeDraft,
 } from '@/components/knowledge/model';
-import { useApi } from '@/hooks/use-api';
+import { apiRequest, useApi } from '@/hooks/use-api';
 import { errorText } from '@/lib/i18n/api-errors';
 import { useLocale, useT } from '@/lib/i18n/client';
 import { useUnsavedGuard } from '@/hooks/use-unsaved-guard';
@@ -30,8 +31,13 @@ export function ReviewStep({
   const { busy, request } = useApi();
   const [errors, setErrors] = useState<DraftErrors>(NONE);
   const [base, setBase] = useState<string | null>(null);
+  const [contentState, setContentState] = useState<ContentState>('unconfirmed');
+  const [contentChecked, setContentChecked] = useState(false);
 
   useEffect(() => { if (!draft) void ensureDraft(); }, [draft, ensureDraft]);
+  useEffect(() => {
+    apiRequest<{ state: ContentState }>(`/api/businesses/${businessId}/content-confirmation`).then((r) => { setContentState(r.state); if (r.state === 'confirmed') setContentChecked(true); }).catch(() => { /* the check below still gates continuing */ });
+  }, [businessId]);
   if (draft && base === null) setBase(snapshot(draft));
 
   const dirty = Boolean(draft && base !== null && snapshot(draft) !== base);
@@ -45,6 +51,15 @@ export function ReviewStep({
     if (!draft) return;
     const found = validateDraft(draft, { lang: locale });
     setErrors(found);
+    const areaBlocker = readinessOfDraft(draft, status.vertical, locale).blockers.find((b) => b.key === 'service_area');
+    if (areaBlocker) {
+      setErrors({ ...found, serviceArea: areaBlocker.message });
+      return;
+    }
+    if (!contentChecked) {
+      setErrors({ ...found, general: t('pd.cc.required') });
+      return;
+    }
     if (draft.services.length === 0) {
       setErrors({ ...found, general: t('rv.addService') });
       return;
@@ -56,6 +71,9 @@ export function ReviewStep({
     try {
       await request(`/api/businesses/${businessId}`, { method: 'PATCH', body: toBusinessPatch(draft) });
       await request(`/api/businesses/${businessId}/onboarding-status/knowledge`, { method: 'PUT', body: toKnowledgePayload(draft) });
+      // The owner confirmed what they saw: the fingerprint is taken from what was just saved, so a later edit makes it stale.
+      await request(`/api/businesses/${businessId}/content-confirmation`, { method: 'POST', body: {} });
+      setContentState('confirmed');
     } catch (err) {
       toast.error(errorText(t, err));
       return;
@@ -84,6 +102,10 @@ export function ReviewStep({
 
       <div className="mt-5">
         <KnowledgeForm draft={draft} vertical={status.vertical} errors={errors} onChange={(d) => { setDraft(d); if (hasErrors(errors)) setErrors(validateDraft(d, { lang: locale })); }} />
+      </div>
+
+      <div className="mt-6">
+        <ContentCheck checked={contentChecked} onChange={setContentChecked} state={contentState} disabled={busy} />
       </div>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">

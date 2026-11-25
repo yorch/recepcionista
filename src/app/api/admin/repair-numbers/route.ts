@@ -1,7 +1,10 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
-import { prisma, recordAudit } from '@/lib/db';
+import { prisma, recordAudit, getBusiness } from '@/lib/db';
+import { ensureTenantLine, lineApplicable } from '@/lib/voice/tenant-line';
+import { lineKindFor } from '@/lib/voice/line';
+import { hasElevenLabs } from '@/lib/voice/elevenlabs';
 import { configureNumberWebhooks, numberWebhooks, type NumberWebhookOutcome } from '@/lib/providers/twilio';
 import { toE164 } from '@/lib/phone';
 import { logger } from '@/lib/log';
@@ -13,7 +16,12 @@ const log = logger('admin/repair-numbers');
 export const REPAIR_MAX_BATCH = 25;
 export const REPAIR_DEFAULT_BATCH = 10;
 
-export interface RepairItem { business_id: string; phone: string; outcome: NumberWebhookOutcome; changed?: string[]; detail?: string }
+export interface RepairLine {
+  /** ok: imported and bound; would_import / would_bind: dry run; imported / adopted / bound: done; skipped: not applicable (reason in detail); failed. */
+  outcome: 'ok' | 'would_import' | 'would_bind' | 'imported' | 'adopted' | 'bound' | 'skipped' | 'failed';
+  detail?: string;
+}
+export interface RepairItem { business_id: string; phone: string; outcome: NumberWebhookOutcome; changed?: string[]; detail?: string; line?: RepairLine }
 export interface RepairResult {
   dry_run: boolean;
   /** The webhook addresses the numbers must carry (null: no public base URL is configured, nothing can be repaired). */
@@ -28,6 +36,9 @@ export interface RepairResult {
  * Voice URL and is never touched). `{ dry_run?: true (default), business_ids?: string[], limit?: 1..25 (default 10), cursor?: string }`.
  *  - DRY RUN (the default) reads each number from Twilio and reports `would_update` + the fields that differ; it changes nothing.
  *  - `"dry_run": false` updates only the differing fields (a number that is already right is `ok`); loop on `next_cursor` until null.
+ *  - It also repairs each business's OWN AI line (native line only): the purchased number is imported into ElevenLabs and bound to ITS agent
+ *    (`line` on each item; shapes UNVERIFIED, isolated in voice/elevenlabs-phone.ts). A number already imported at the provider is ADOPTED, never
+ *    imported twice; one that another business owns is never touched. The dry run reports `would_import` / `would_bind`.
  *  - Never touches TWILIO_PHONE_NUMBER (the platform sender) or mock-pool numbers. Audited as `admin.repair_numbers` (counts + business ids).
  */
 export async function POST(req: Request) {
@@ -71,6 +82,7 @@ export async function POST(req: Request) {
       const res = await configureNumberWebhooks(phone, { dryRun });
       items.push({ business_id: r.id, phone, outcome: res.outcome, ...(res.changed ? { changed: res.changed } : {}), ...(res.detail ? { detail: res.detail } : {}) });
       if (res.outcome === 'failed') log.warn('repair.failed', { business: r.id, detail: res.detail });
+      items[items.length - 1].line = await repairLine(r.id, dryRun);
     }
     const user = auth.principal.kind === 'admin' ? auth.principal.user : null;
     await recordAudit({
@@ -78,11 +90,29 @@ export async function POST(req: Request) {
       meta: {
         dry_run: dryRun, batch: batch.length, updated: items.filter((i) => i.outcome === 'updated').length,
         would_update: items.filter((i) => i.outcome === 'would_update').length, failed: items.filter((i) => i.outcome === 'failed').length,
+        line_would_import: items.filter((i) => i.line?.outcome === 'would_import').length, line_imported: items.filter((i) => i.line?.outcome === 'imported' || i.line?.outcome === 'adopted').length, line_failed: items.filter((i) => i.line?.outcome === 'failed').length,
         business_ids: batch.map((b) => b.id), has_more: nextCursor !== null,
       },
     });
     return ok<RepairResult>({ dry_run: dryRun, webhooks: hooks, items, next_cursor: nextCursor });
   } catch (err) {
     return fail(err, 500);
+  }
+}
+
+async function repairLine(businessId: string, dryRun: boolean): Promise<RepairLine> {
+  try {
+    const business = await getBusiness(businessId);
+    if (!business) return { outcome: 'skipped', detail: 'business disappeared' };
+    if (lineKindFor(business) !== 'native') return { outcome: 'skipped', detail: 'this deployment answers on a webhook line (VOICE_LINE_KIND=webhook): numbers are not imported' };
+    if (!hasElevenLabs()) return { outcome: 'skipped', detail: 'ELEVENLABS_API_KEY is not set' };
+    const app = lineApplicable(business);
+    if (!app.ok) return { outcome: 'skipped', detail: app.why };
+    const r = await ensureTenantLine(business, { dryRun });
+    if (!r.ok) return { outcome: 'failed', detail: `${r.code}: ${r.error}` };
+    if (dryRun) return { outcome: r.action === 'import' ? 'would_import' : r.action === 'bind' ? 'would_bind' : 'ok' };
+    return { outcome: r.adopted ? 'adopted' : r.imported ? 'imported' : r.action === 'bind' ? 'bound' : 'ok' };
+  } catch (err) {
+    return { outcome: 'failed', detail: (err as Error).message.slice(0, 120) };
   }
 }

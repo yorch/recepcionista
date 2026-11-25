@@ -121,14 +121,14 @@ describe('number webhooks', () => {
 
   test('repair: dry run reports what would change and writes nothing; a real run updates only differing fields; running again is a no-op', async () => {
     const f = twilio({ sms_url: '', sms_method: 'POST' });
-    expect(await configureNumberWebhooks('+17864129234', { dryRun: true, fetchImpl: f.fetchImpl, env: NATIVE })).toEqual({ outcome: 'would_update', changed: ['SmsUrl'] });
+    expect(await configureNumberWebhooks('+17864129234', { dryRun: true, fetchImpl: f.fetchImpl, env: NATIVE })).toEqual({ outcome: 'would_update', changed: ['SmsUrl'], sid: 'PN1' });
     expect(f.calls.every((c) => c.method === 'GET')).toBe(true);
-    expect(await configureNumberWebhooks('+17864129234', { fetchImpl: f.fetchImpl, env: NATIVE })).toEqual({ outcome: 'updated', changed: ['SmsUrl'] });
+    expect(await configureNumberWebhooks('+17864129234', { fetchImpl: f.fetchImpl, env: NATIVE })).toEqual({ outcome: 'updated', changed: ['SmsUrl'], sid: 'PN1' });
     const post = f.calls.find((c) => c.method === 'POST')!;
     expect(post.url).toContain('/IncomingPhoneNumbers/PN1.json');
     expect(Object.fromEntries(new URLSearchParams(post.body))).toEqual({ SmsUrl: 'https://app.example.test/api/sms/inbound' });
     const right = twilio({ sms_url: 'https://app.example.test/api/sms/inbound', sms_method: 'POST' });
-    expect(await configureNumberWebhooks('+17864129234', { fetchImpl: right.fetchImpl, env: NATIVE })).toEqual({ outcome: 'ok' });
+    expect(await configureNumberWebhooks('+17864129234', { fetchImpl: right.fetchImpl, env: NATIVE })).toEqual({ outcome: 'ok', sid: 'PN1' });
     expect(right.calls.some((c) => c.method === 'POST')).toBe(false);
   });
 

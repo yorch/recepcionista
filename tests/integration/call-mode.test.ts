@@ -67,16 +67,23 @@ integration('call handling mode (postgres)', () => {
   type InitBody = { conversation_config_override?: { agent?: { first_message?: string }; conversation?: { max_duration_seconds?: number } } };
 
   // ------------------------------------------------------------ /api/voice/incoming
-  test('ai mode (default): unchanged JSON answer, no TwiML', async () => {
+  test('ai mode (default) on the webhook line: a signed Twilio call is ALWAYS answered with TwiML (never JSON); with no AI to connect it is an honest voicemail', async () => {
     const biz = await newBusiness();
     const params = callParams(biz.phone!);
     const res = await signed(URL_IN, params);
     expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toContain('json');
-    const body = (await res.json()) as { data: { call_id: string; call_mode?: string } };
-    expect(body.data.call_mode).toBeUndefined();
-    expect((await db.getCall(body.data.call_id))?.status).toBe('in_progress');
+    expect(res.headers.get('content-type')).toContain('xml');
+    const xml = await res.text();
+    expect(xml).toStartWith('<?xml');
+    expect(xml).toContain('<Say');
+    expect(xml).toContain('will be recorded'); // the recording notice precedes the <Record>
+    expect(xml).toContain('<Record');
+    const row = await db.getCallBySid(params.CallSid);
+    expect(row?.business_id).toBe(biz.id);
     expect(outboundCalls).toEqual([]);
+    // the unsigned demo UI (JSON) still gets JSON
+    const demo = await incoming(new Request(URL_IN, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.1.1.1' }, body: JSON.stringify({ To: biz.phone, From: phone(), CallSid: uniq('CA') }) }));
+    if (demo.status === 200) expect(demo.headers.get('content-type')).toContain('json');
   });
 
   test('forward mode: TwiML <Dial> to the verified number, never recorded, the call row says so, no disclosure claimed', async () => {
@@ -106,7 +113,7 @@ integration('call handling mode (postgres)', () => {
     const biz = await newBusiness();
     await setMode(biz.id, { ...VERIFIED, forwardNumberVerifiedAt: null });
     const res = await signed(URL_IN, callParams(biz.phone!));
-    expect(res.headers.get('content-type')).toContain('json');
+    expect(res.headers.get('content-type')).toContain('xml');
     expect(await res.text()).not.toContain('<Dial');
   });
 
@@ -173,8 +180,12 @@ integration('call handling mode (postgres)', () => {
     await db.setBillingState(lapsed.id, { billing_status: 'canceled' });
     await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
       const res = await signed(URL_IN, callParams(lapsed.phone!));
-      const j = (await res.json()) as { data: { out_of_service?: boolean } };
-      expect(j.data.out_of_service).toBe(true);
+      // the honest out-of-service line, as TwiML (never JSON to a signed Twilio caller)
+      expect(res.headers.get('content-type')).toContain('xml');
+      const lapsedXml = await res.text();
+      expect(lapsedXml).toContain('<Say');
+      expect(lapsedXml).toContain('<Hangup/>');
+      expect(lapsedXml).not.toContain('<Record');
 
       const capped = await newBusiness();
       await setMode(capped.id, VERIFIED);
@@ -209,12 +220,16 @@ integration('call handling mode (postgres)', () => {
     const a = await newBusiness();
     const b = await newBusiness();
     await setMode(a.id, VERIFIED);
-    const res = await signed(URL_IN, callParams(b.phone!));
-    expect(res.headers.get('content-type')).toContain('json');
-    expect(((await res.json()) as { data: { business_id: string } }).data.business_id).toBe(b.id);
+    const bParams = callParams(b.phone!);
+    const res = await signed(URL_IN, bParams);
+    expect(res.headers.get('content-type')).toContain('xml');
+    expect(await res.text()).not.toContain('<Dial');
+    expect((await db.getCallBySid(bParams.CallSid))?.business_id).toBe(b.id);
     // and an unknown number with two businesses installed is never routed to "the first one"
     const unknown = await signed(URL_IN, callParams('+13055559999'));
-    expect(unknown.status).toBe(404);
+    // (a signed Twilio caller hears the honest unavailable line as TwiML, never a JSON 404)
+    expect(unknown.headers.get('content-type')).toContain('xml');
+    expect(await unknown.text()).toContain('<Hangup/>');
   });
 
   // ------------------------------------------------------------ /api/voice/voicemail

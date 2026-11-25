@@ -206,7 +206,9 @@ Local development without Stripe: leave `STRIPE_SECRET_KEY` unset and set `DEMO_
 ## Releasing canceled tenants (numbers, agents)
 
 A business whose subscription ended keeps its Twilio number (monthly rent) and its ElevenLabs agent until an operator releases them.
-`scripts/release-canceled-tenants.ts` does that safely; **dry run by default**:
+the `tenant_release` job (admin job runner, `POST /api/admin/jobs/run {"job":"tenant_release"}`; a dry run unless `dry_run:false` AND `TENANT_RELEASE_JOB=on`, see docs/env-vars.md) and
+`scripts/release-canceled-tenants.ts` (the same logic, `--apply` also needs `TENANT_RELEASE_JOB=on`) do that safely; **dry run by default**. With `TENANT_RELEASE_JOB=report` the daily
+job stores a dry-run report (`GET /api/admin/jobs` > `diagnostics.tenant_release`); with `on` it sends the heads-ups and releases what is due (max 10 tenants per run):
 
 ```sh
 # on the production host (tools container), after reading the output of the dry run add --apply; run it daily from cron

@@ -170,10 +170,32 @@ export const API_ERROR_SLUGS: Record<string, string> = {
   'role must be "owner" or "staff"': 'roleInvalid',
   'another purge is already running': 'purgeRunning',
   'webhook verification not configured': 'webhookNotConfigured',
+  // Dashboard bookings and deposits (bookingTools catalog).
+  'That is sooner than the minimum notice the business requires.': 'timeTooSoon',
+  'That is further ahead than the business takes bookings.': 'timeTooFar',
+  'That crew does not exist.': 'crewMissing',
+  'customer_phone is not a valid phone number': 'badCustomerPhone',
+  'customer_name is required': 'nameRequired',
+  'service is required': 'serviceRequired',
+  'the deposit of this booking is already paid': 'depositPaid',
+  'the booking is cancelled; a deposit link cannot be created for it': 'depositCancelled',
+  'the booking is cancelled; a deposit cannot be marked as paid': 'depositCancelled',
+  'payments_not_configured': 'paymentsNotConfigured',
+  'a booking can only be marked a no-show after it started': 'noShowEarly',
+  'enter an amount: the policy cannot compute one without a price estimate': 'depositNeedAmount',
+  'enter an amount (no deposit policy is set)': 'depositNeedAmount',
+  'enter the amount received (the booking has no deposit amount yet)': 'depositNeedAmount',
+  'this deposit was marked as paid manually: refund it the way you received it, then record the manual refund': 'manualDepositRefund',
+  'only a deposit marked as paid manually can be recorded as refunded manually; a card deposit is refunded through Stripe': 'notManualDeposit',
+  'only a deposit marked as paid manually can be unmarked': 'notManualDeposit',
+  'a manual refund was already recorded for this deposit': 'manualRefundDone',
+  'a refund is recorded for this deposit': 'refundRecorded',
 };
 
 /** Patterns for messages with a variable part. */
 export const API_ERROR_PATTERNS: { re: RegExp; slug: string }[] = [
   { re: /^business name must be at most \d+ characters$/, slug: 'businessNameLong' },
   { re: /^Request failed \(\d+\)$/, slug: 'requestFailed' },
+  { re: /^amount_cents must be between \d+ and \d+$/, slug: 'depositRange' },
+  { re: /^a (cancelled|completed) booking cannot be edited$/, slug: 'bookingClosedEdit' },
 ];

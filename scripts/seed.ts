@@ -16,6 +16,12 @@ import {
 } from '../src/lib/demo/seed-data';
 import { assertSafeDatabase } from './_safe-db';
 
+// The demo dataset truncates every table and creates a fake live tenant: never in production (the tools container runs with NODE_ENV=production).
+if (process.env.NODE_ENV === 'production') {
+  console.error('[seed] refused: scripts/seed.ts wipes the database and is for local development only (NODE_ENV=production).');
+  process.exit(2);
+}
+
 assertSafeDatabase('seed');
 
 async function main() {

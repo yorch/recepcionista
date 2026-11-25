@@ -21,6 +21,7 @@ import {
 import { initiationAgentOverrides } from '@/lib/voice/initiation-config';
 import { disclosureSpokenIn } from '@/lib/kb/disclosure';
 import { generateTextSafe } from '@/lib/providers/llm';
+import { markAuto } from '@/lib/auto-label';
 import type { Business, Call, Urgency } from '@/lib/types';
 import { LIFE_SAFETY_STRONG, packOf } from '@/lib/verticals';
 
@@ -592,8 +593,9 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
   const fallback = summaryFallback(transcript, urgency, language);
   const provided = body.analysis?.transcript_summary || body.analysis?.call_summary || '';
   let summary = provided.trim();
+  let autoSummary = false; // the text below is the template excerpt, not an AI-written summary: it is stored labelled
   if (!summary) {
-    summary = (await generateTextSafe(
+    const written = (await generateTextSafe(
       [
         {
           role: 'system',
@@ -611,7 +613,9 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
         },
       ],
       fallback,
-    )).value.trim();
+    ));
+    summary = written.value.trim();
+    autoSummary = written.mocked;
   }
 
   const updated = await updateCall(call.id, {
@@ -621,7 +625,7 @@ async function storePostCall(body: PostCallData, conversationId: string): Promis
         ? Math.round(Number(duration))
         : call.duration_sec,
     transcript: transcript || call.transcript,
-    summary: summary || fallback,
+    summary: summary && !autoSummary ? summary : markAuto(summary || fallback),
     language: language ?? call.language,
     recording_url: recordingUrl ?? call.recording_url,
     urgency: call.urgency === 'emergency' ? 'emergency' : urgency,

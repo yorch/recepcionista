@@ -95,7 +95,8 @@ describe('validateSlot', () => {
     expect(validateSlot(HOURS, Date.parse('2026-11-23T10:00:00Z'), 60, NY, Date.parse('2026-11-23T05:00:00Z'))).toEqual({ ok: false, reason: 'before_open' });
   });
   test('lead time', () => {
-    expect(validateSlot(HOURS, at('2026-11-23', '08:00'), 60, NY, NOW, 120)).toEqual({ ok: false, reason: 'past' });
+    expect(validateSlot(HOURS, at('2026-11-23', '08:00'), 60, NY, NOW, 120)).toEqual({ ok: false, reason: 'too_soon' }); // later than now, inside the notice
+    expect(validateSlot(HOURS, NOW - 1, 60, NY, NOW, 120)).toEqual({ ok: false, reason: 'past' });
   });
 });
 

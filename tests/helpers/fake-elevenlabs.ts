@@ -8,10 +8,14 @@
 const RUN = Math.random().toString(36).slice(2, 8);
 let GLOBAL_SEQ = 0;
 
-export function fakeElevenLabs(opts: { failToolsOnce?: boolean } = {}) {
+export function fakeElevenLabs(opts: { failToolsOnce?: boolean; failImport?: boolean; registerCall?: 'twiml' | 'fail' } = {}) {
   const tools = new Map<string, { id: string; config: any }>();
   const agents = new Map<string, { id: string; conversation_config: any; platform_settings: any; name: string; tags: string[] }>();
   const settings: { webhook?: any } = {};
+  /** Imported phone numbers (POST /convai/phone-numbers), by phone_number_id. `importBodies` keeps what was sent (the Twilio token is in it: tests assert it never leaks elsewhere). */
+  const phones = new Map<string, { phone_number_id: string; phone_number: string; label: string; agent_id: string | null }>();
+  const importBodies: any[] = [];
+  const registerCalls: any[] = [];
   const calls: string[] = [];
   let failTools = opts.failToolsOnce === true;
 
@@ -55,12 +59,35 @@ export function fakeElevenLabs(opts: { failToolsOnce?: boolean } = {}) {
       if (body.platform_settings) a.platform_settings = { ...a.platform_settings, ...body.platform_settings };
       return Response.json({ agent_id: a.id });
     }
+    if (path === '/convai/phone-numbers' && method === 'GET') {
+      return Response.json([...phones.values()].map((p) => ({ phone_number_id: p.phone_number_id, phone_number: p.phone_number, label: p.label, provider: 'twilio', assigned_agent: p.agent_id ? { agent_id: p.agent_id } : null })));
+    }
+    if (path === '/convai/phone-numbers' && method === 'POST') {
+      importBodies.push(body);
+      if (opts.failImport) return new Response(JSON.stringify({ detail: 'twilio credentials rejected' }), { status: 422 });
+      const id = `phnum_${RUN}_${++GLOBAL_SEQ}`;
+      phones.set(id, { phone_number_id: id, phone_number: body.phone_number, label: body.label, agent_id: null });
+      return Response.json({ phone_number_id: id });
+    }
+    const phoneOne = /^\/convai\/phone-numbers\/([^/]+)$/.exec(path);
+    if (phoneOne) {
+      const ph = phones.get(decodeURIComponent(phoneOne[1]));
+      if (!ph) return new Response('not found', { status: 404 });
+      if (method === 'GET') return Response.json({ phone_number_id: ph.phone_number_id, phone_number: ph.phone_number, assigned_agent: ph.agent_id ? { agent_id: ph.agent_id } : null });
+      if (method === 'PATCH') { ph.agent_id = body.agent_id ?? null; return Response.json({ phone_number_id: ph.phone_number_id }); }
+      if (method === 'DELETE') { phones.delete(ph.phone_number_id); return Response.json({}); }
+    }
+    if (path === '/convai/twilio/register-call' && method === 'POST') {
+      registerCalls.push(body);
+      if (opts.registerCall === 'fail') return new Response('nope', { status: 500 });
+      return new Response('<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://api.elevenlabs.io/x"/></Connect></Response>', { status: 200, headers: { 'content-type': 'application/xml' } });
+    }
     return Response.json({});
   }) as unknown as typeof fetch;
 
   let prev: typeof fetch | undefined;
   return {
-    tools, agents, settings, calls, fetchImpl,
+    tools, agents, settings, calls, fetchImpl, phones, importBodies, registerCalls,
     install() { prev = globalThis.fetch; globalThis.fetch = fetchImpl; },
     restore() { if (prev) globalThis.fetch = prev; },
     toolNames: () => [...tools.values()].map((t) => t.config.name as string).sort(),

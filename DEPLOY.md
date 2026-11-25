@@ -69,7 +69,6 @@ $EDITOR .env          # DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN,
                       # STRIPE_WEBHOOK_SECRET at minimum
 
 ./deploy.sh           # build → back up DB → migrate → start → wait for healthy
-./deploy.sh --seed --i-know-this-wipes-data   # optional: demo dataset (wipes data)
 ```
 
 `deploy.sh` refuses to start when any of these are blank:
@@ -91,9 +90,10 @@ writes a gzipped `pg_dump` to `./backups/` (override with `BACKUP_DIR`) when the
 database container is running. A first deploy has no database yet, so it has
 nothing to back up. Keep `backups/` out of git.
 
-`--seed` is not implied, and it needs `--i-know-this-wipes-data` as well.
-`scripts/seed.ts` truncates every table before inserting, so the flag makes the
-destructive step deliberate.
+There is NO `--seed`: `deploy.sh` refuses it (and `--i-know-this-wipes-data`) because the demo dataset
+truncates every table and creates a fake live tenant. `scripts/seed.ts` itself refuses `NODE_ENV=production`;
+use the development compose file for demo data. `deploy.sh` also refuses a `.env` without an LLM key
+(`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`): an LLM is required in production and `/api/health` reports 503 `llm_not_configured` without one.
 
 ## Pointing the providers at it
 

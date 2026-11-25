@@ -9,6 +9,7 @@ import { formatNumber, intlTag, type Locale } from '@/lib/i18n/core';
 import type { TFunction } from '@/lib/i18n/core';
 import { BillingActions } from './billing-actions';
 import { planPriceDisplay, planPriceDisplayAnnual } from '@/app/site-config';
+import { planCapLines, planPriceTexts } from '@/lib/billing/price';
 import type { BillingStatus } from '@/lib/types';
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -68,6 +69,9 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   const trialEnd = fmtDate(s.trial_ends_at, tz, locale);
   const periodEnd = fmtDate(s.current_period_end, tz, locale);
   const graceEnd = fmtDate(s.grace_ends_at, tz, locale);
+  // The price shown is Stripe's own (cached, fail-soft to the operator's display text); the caps are the ones the metering enforces.
+  const prices = await planPriceTexts(locale, { monthly: planPriceDisplay(locale), annual: planPriceDisplayAnnual(locale) });
+  const capLines = planCapLines(locale);
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
@@ -95,6 +99,13 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
         />
         <div className="space-y-3 p-5 text-[13px] leading-relaxed text-[#cbd7e6]">
           <p>{t(`bill.explain.${s.billing_status}` as const)}</p>
+          <div>
+            <p className="text-xs font-medium uppercase tracking-wider text-[#6b7b91]">{t('bill.includes')}</p>
+            {s.billing_status === 'none' || s.billing_status === 'canceled' ? <p className="mt-1 text-white">{prices.monthly}{prices.annual ? ` · ${prices.annual}` : ''}</p> : null}
+            <ul className="mt-1.5 space-y-1">
+              {capLines.map((l) => <li key={l} className="flex gap-2"><span aria-hidden="true" className="text-[#6ee7b0]">✓</span>{l}</li>)}
+            </ul>
+          </div>
           {trialDays !== null && trialEnd ? (
             <p>
               <strong className="text-white">{trialDays === 0 ? t('bill.endsToday') : t('bill.daysLeft', { count: trialDays })}</strong>
@@ -123,7 +134,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
             <p className="text-[#8b98ab]">{t('bill.notEnforced')}</p>
           ) : null}
           <div className="pt-1">
-            {canStart ? <BillingActions businessId={biz.id} mode="start" annualAvailable={s.annual_available} monthlyLabel={planPriceDisplay()} annualLabel={planPriceDisplayAnnual()} /> : null}
+            {canStart ? <BillingActions businessId={biz.id} mode="start" annualAvailable={s.annual_available} monthlyLabel={prices.monthly} annualLabel={prices.annual} /> : null}
             {canManage ? <BillingActions businessId={biz.id} mode="manage" /> : null}
           </div>
         </div>

@@ -407,3 +407,54 @@ One hand-written migration, `20261207120000_review16_fixes` (additive, re-runnab
 | 17 M4 payment links on cancel | no Stripe call unless a link was attempted; queued, background, short timeouts, tenant scoped, retried by the reconcile job | `tests/integration/phase2.test.ts` |
 | 17 M5 reconcile metering | a transferred call is split with `splitTransferSeconds`; the forwarded leg goes through the per-sid forward metering | `tests/integration/telephony-phase2.test.ts` |
 | 17 L6-L8 | stuck-refund pass ordered by last check; a usage-warning check error keeps the retry marker; changed-since list ordered with a cursor; orphan sweep with a cursor and retention coverage; call-script rebuild is a compare-and-swap and recognises older generated scripts; pending-forward key stored | `phase2.test.ts`, `residual-gaps.test.ts`, `telephony-phase2.test.ts` |
+
+
+## Mock replacement, agent B: customer messages, privacy tools, review link (docs/review/18f #8, #16/N3, #17 part)
+
+No migration (the Phase 1 tables `inbound_messages` and the `sms_log.kind` values `manual`, `owner_inbox_reply`, `inbox_autoreply` are used as built).
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| #16 / N3 customer texts dropped | stored in the inbox, forwarded to the verified owner phone (quiet hours and an hourly budget respected), acknowledged once per sender per 24 h, dashboard Messages page with triage, replies and a text log | `tests/integration/messages-inbox.test.ts`, `tests/messaging-inbox-pure.test.ts` |
+| #8 placeholder review link | per-business `review_url` (Settings); `REVIEW_URL` and the `g.page/r/demo/review` fallback removed; no link set = thank-you without a link; texts signed with `assistant_name` (default Maria) | same |
+| #17 privacy export / erase UI | owner-only Settings card; lookup, JSON download and erase with typed confirmation, step-up, rate limits, audit rows | same |
+| #17 manual text / SMS log | `POST .../messages/send` (known customers only, per-recipient limit) and the Text log tab | same |
+
+## Mock replacement, agent A: per-tenant AI line, honest provisioning, webhook TwiML, transfer opt-in, assistant name (docs/review/18f #3, #6, #21, #22, N2 voice side, N5, N8, part of #32)
+
+* **One module for the provider's phone shapes**: `src/lib/voice/elevenlabs-phone.ts` (import, list, get, bind/detach, delete, register-call; documented schemas, UNVERIFIED live; no throw, secret-free errors, the Twilio token only in the import body). `src/lib/voice/tenant-line.ts` orchestrates it with the database: `ensureTenantLine` (adopts an existing import of the same E.164, never takes an id another business owns, re-imports a deleted one, keeps the Twilio SMS URL, stores `elevenlabs_phone_number_id` and the Twilio `PN` sid), `releaseTenantLine`.
+* **Provisioning** refuses before any purchase when `ELEVENLABS_API_KEY` is missing in production or with real Twilio (503 `voice_provider_not_configured`), treats a mock agent as a failure there (502), imports the number and binds the tenant's own agent (502 `voice_line_failed`, number kept, retry resumes). `deploy.sh` now dies when Twilio is configured without the ElevenLabs key. `bindPhoneNumber(agentId, business)` binds the tenant's own number; the shared `ELEVENLABS_PHONE_NUMBER_ID` is a single-business fallback that is never rebound across tenants. The agent re-created by a resync re-binds the tenant's own number.
+* **Admin repair** (`POST /api/admin/repair-numbers`) also imports/binds existing numbers (`items[].line`), dry run by default. **Release** deletes the tenant's imported number before the agent and the Twilio number.
+* **`/api/voice/incoming`**: a signed Twilio call is always answered with TwiML (out-of-service, unknown number, owner line, AI via register-call or an honest voicemail); no more per-call `bindPhoneNumber` (it rebound the shared number on every call); the `kb: null` repair was already fixed (N5).
+* **Live transfer is per business** (`native_transfer_enabled`, with the global `NATIVE_TRANSFER` capability): the transfer tool, rule and system tool exist on an agent only for a business that opted in; call-mode forward on the native line, the initiation webhook and the `transfer_to_human` tool all use `transferEnabledFor(business)`. Tool/prompt wording: `handoff_to_human` texts the owner and offers a callback; `transfer_to_human` connects.
+* **Assistant name** (`businesses.assistant_name`, default "Maria") in the first message, the agent prompt (`# Your name`) and the owner prompt. Settings > Receptionist and phone line (`PATCH /api/businesses/:id/line`, owner only, audited, EN+ES).
+
+
+## Mock replacement, agent C: dashboard bookings, deposits, plan price, pay page (docs/review/18f #14, #17 part, #18, #23, #24, #25, 18b M3 / M4)
+
+No migration (the Phase 1 columns `deposit_*`, `created_via`, `crew` are used as built).
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| #18 / M4 no dashboard booking | `POST /api/bookings`, edit through `PATCH /api/bookings/:id`, no-show, "New booking" dialog (also from a clicked empty calendar slot), edit dialog, agenda rows open the booking panel; `src/lib/booking-manual.ts` calls the same `createBooking` / `rescheduleBooking` engine as the AI (hours, closed dates, per-crew overlap, Google busy, `created_via='dashboard'`, audit, Google push hook, optional text) | `tests/integration/booking-payments.test.ts`, `tests/booking-payments-pure.test.ts` |
+| #17 / M3 deposit tools | request / resend (`POST /api/bookings/:id/deposit`), copy the link, mark paid manually (owner, step-up, audited, `deposit_source='manual'`, open Stripe link deactivated), undo, manual refund record; a manual deposit never reaches Stripe (409 `manual_deposit`) | same |
+| #24 deposit model | `src/lib/payments/deposit.ts`: the AI amount is computed from the policy (the model's `amount_cents` is ignored; no policy = no AI deposit; booking must be from this call); owner amounts must fit the policy range; `GET/PUT /api/businesses/:id/deposit-policy` + Settings card; tool spec and prompt text updated | same, `tests/integration/voice-tools.test.ts` |
+| #14 / #23 `/pay` | no card form in production: redirect to the live Stripe link (host checked), receipt without card digits or a false "we texted you", honest "not available" page | same |
+| #25 plan price | `src/lib/billing/price.ts` reads the Stripe Price (cached, fail-soft to the display text); Billing, onboarding and landing show it with the caps the metering enforces | `tests/booking-payments-pure.test.ts` |
+
+
+## Mock replacement, agent D: scheduling, time zone, briefing audio, LLM honesty, template gate, tenant jobs (docs/review/18f #9, #11, #12, #13, #26, #27, #28, #29, #31)
+
+No migration (the Phase 1 columns are used as built).
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| #29 scheduling | slot grid / notice / horizon / buffer / crews read by availability, the voice tools, `createBooking`, `rescheduleBooking`, Google busy blocks; `too_soon` / `too_far` rejections; owner-initiated bookings and moves skip notice + horizon; Settings > Scheduling with crews help | `tests/platform-d-pure.test.ts`, `tests/integration/platform-d.test.ts` |
+| #11 time zone | `GET/PUT /api/businesses/:id/timezone`, area-code suggestion (never auto-applied), onboarding field + Settings card, DST-aware labels | same |
+| #12 briefing audio | ElevenLabs TTS with the business voice, `briefing_audio` storage, authenticated Range / ETag route, regenerate, prune, honest "unavailable" state; `say`/`afconvert` and disk writes removed | same |
+| #13 / #27 LLM | required in production (deploy.sh, boot banner, `/api/health` 503); `[auto]` call summaries and `automatic` briefings are labelled in data and UI and carry only data-derived facts; website import states it needs the LLM | same |
+| #9 template gate | no literal county, service area required, owner confirmation (fingerprint) required to go live, review-step checkbox + Knowledge card | same |
+| #26 seed | `deploy.sh --seed` refused, `seed.ts` refuses production, tools container no longer seeds | `tests/platform-d-pure.test.ts` |
+| #28 tenant jobs | `tenant_release` and `grandfather` admin jobs, dry run by default, `TENANT_RELEASE_JOB=on` to act, audit-only report | `tests/integration/platform-d.test.ts` |
+| #31 progress | real two-stage progress instead of timer labels | review |
+

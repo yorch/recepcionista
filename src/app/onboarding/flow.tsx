@@ -30,6 +30,8 @@ export interface FlowProps {
   /** The annual plan can be chosen (STRIPE_PRICE_ID_ANNUAL is configured). */
   annualAvailable?: boolean;
   annualDisplay?: string | null;
+  /** What the plan includes in volume (real caps, localized on the server). */
+  capLines?: string[];
   requestedStep: StepId | null;
   checkout: 'success' | 'cancel' | null;
   resumable: { id: string; name: string }[];
@@ -195,7 +197,7 @@ export function OnboardingFlow(props: FlowProps) {
               <ReviewStep {...stepProps} draft={draft} ensureDraft={ensureDraft} setDraft={setDraft} meta={meta} />
             ) : null}
             {step === 'verify' && stepProps ? <VerifyStep {...stepProps} /> : null}
-            {step === 'plan' && stepProps ? <PlanStep {...stepProps} priceDisplay={props.priceDisplay} annualAvailable={props.annualAvailable === true} annualDisplay={props.annualDisplay ?? null} checkout={checkout} clearCheckout={() => setCheckout(null)} /> : null}
+            {step === 'plan' && stepProps ? <PlanStep {...stepProps} priceDisplay={props.priceDisplay} annualAvailable={props.annualAvailable === true} annualDisplay={props.annualDisplay ?? null} capLines={props.capLines ?? []} checkout={checkout} clearCheckout={() => setCheckout(null)} /> : null}
             {step === 'provision' && stepProps ? <ProvisionStep {...stepProps} /> : null}
             {step === 'connect' && stepProps ? <ConnectStep {...stepProps} /> : null}
             {step === 'test' && stepProps ? <TestStep {...stepProps} /> : null}

@@ -88,7 +88,6 @@ export function Checkout({ reference, amountCents, label, businessName, bookingI
         amountCents={amountCents}
         label={label}
         businessName={businessName}
-        last4={card.replace(/\D/g, '').slice(-4)}
         paidAt={paidAt}
         t={t}
         locale={locale}

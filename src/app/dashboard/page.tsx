@@ -1,3 +1,4 @@
+import { splitAuto } from '@/lib/auto-label';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { getDashboardContext } from '@/lib/dashboard-context';
@@ -126,7 +127,8 @@ export default async function TodayPage() {
               right={<Link href="/dashboard/briefings" className="text-xs text-brand-soft hover:underline">{t('today.briefing.all')}</Link>}
             />
             <div className="p-4">
-              <VoicePlayer src={briefing?.audio_url} label={briefing ? t('today.briefing.eveningNote', { date: briefing.date }) : t('today.briefing.noneLabel')} />
+              <VoicePlayer src={briefing?.audio_url} emptyLabel={briefing ? t('audio.unavailable') : undefined} label={briefing ? t('today.briefing.eveningNote', { date: briefing.date }) : t('today.briefing.noneLabel')} />
+              {briefing?.stats.narration === 'automatic' ? <p role="note" className="mt-3 text-xs text-warn">{t('pd.br.automatic')}</p> : null}
               {briefing ? (
                 <p className="mt-4 max-h-40 overflow-y-auto rounded-xl bg-sunken p-3.5 text-[13px] leading-relaxed text-body">
                   {briefing.transcript}
@@ -201,7 +203,7 @@ export default async function TodayPage() {
                       {c.language === 'mixed' ? 'EN/ES' : c.language?.toUpperCase() ?? '—'}
                     </Badge>
                     <span className="text-xs text-dim">{seconds(c.duration_sec)}</span>
-                    <span className="truncate text-xs text-body">{c.summary}</span>
+                    <span className="truncate text-xs text-body">{splitAuto(c.summary).text}</span>
                   </div>
                 </li>
               ))}

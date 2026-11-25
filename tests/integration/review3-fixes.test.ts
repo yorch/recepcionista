@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { cleanup, loadDb, loadPrisma, newBusiness, phone, uniq } from '../helpers/fixtures';
+import { confirmGoLive } from '../helpers/golive';
 
 integration('round-3 fixes (postgres)', () => {
   /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -148,6 +149,11 @@ integration('round-3 fixes (postgres)', () => {
         const biz = await newBusiness({ agent_id: null });
         await prisma.business.update({ where: { id: biz.id }, data: { billingStatus: 'active' } });
         const owner = await login(biz.id, 'owner');
+
+        // the template KB is built by a first (refused) run; the owner confirms it and the service area, then provisions
+        expect((await provision(req(`/api/businesses/${biz.id}/provision`, owner, { force: false }), ctx(biz.id))).status).toBe(422);
+        await confirmGoLive(biz.id);
+        calls.length = 0;
 
         // owner, list OK but webhook missing: nothing created, no secret, flagged pending
         let res = await provision(req(`/api/businesses/${biz.id}/provision`, owner, { force: false }), ctx(biz.id));

@@ -12,6 +12,7 @@ import { logger, serializeError } from '@/lib/log';
 import { ownerPhoneGrandfatherProblem } from '@/lib/messaging/owner';
 import { signupAvailability, signupConfigWarning } from '@/lib/signup-config';
 import { lineKindMismatch } from '@/lib/voice/line';
+import { llmRequiredProblem } from '@/lib/providers/llm-required';
 
 const boot = logger('boot');
 let booted = false;
@@ -41,7 +42,7 @@ function providerSummary() {
       ? `openai:${process.env.LLM_MODEL || 'default'}`
       : has(process.env.ANTHROPIC_API_KEY)
         ? `anthropic:${process.env.ANTHROPIC_MODEL || 'default'}`
-        : 'none (templates)',
+        : 'none (templates; REQUIRED in production)',
     elevenlabs: has(process.env.ELEVENLABS_API_KEY) ? elevenLabsLine : 'off (scripted calls)',
     twilio: has(process.env.TWILIO_ACCOUNT_SID) &&
       has(process.env.TWILIO_AUTH_TOKEN) &&
@@ -65,6 +66,8 @@ function startupWarnings(): void {
   }
   const sw = signupConfigWarning();
   if (sw) boot.warn(signupAvailability().open ? 'signup.without_captcha' : 'signup.disabled', { banner: sw });
+  const lr = llmRequiredProblem();
+  if (lr) boot.error('llm_not_configured', { banner: `!!! ${lr}` });
   const lm = lineKindMismatch();
   if (lm) boot.error('voice_line_kind_mismatch', { banner: `!!! ${lm}` });
   const og = ownerPhoneGrandfatherProblem();

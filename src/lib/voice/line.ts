@@ -10,6 +10,7 @@
  *              voicemail and `forward` dials the verified number. There is no AI conversation on such a line (the route answers
  *              JSON only to the unsigned demo UI), so it is for forwarding / voicemail-only numbers and local demos.
  *
+ * A tenant that owns an imported number (businesses.elevenlabs_phone_number_id) is 'native' whatever else is set (lineKindFor).
  * VOICE_LINE_KIND=native|webhook forces the answer (except that `webhook` is IGNORED, loudly, when ELEVENLABS_PHONE_NUMBER_ID names a native
  * line: lineKindMismatch); unset, a deployment with ELEVENLABS_API_KEY and ELEVENLABS_PHONE_NUMBER_ID is
  * 'native' and everything else (development, tests, demo) is 'webhook'. Pure.
@@ -30,8 +31,19 @@ export function lineKind(env: Record<string, string | undefined> = process.env):
     return 'native';
   }
   if (forced === 'native' || forced === 'webhook') return forced;
-  return nativeLineConfigured(env) ? 'native' : 'webhook';
+  return nativeLineConfigured(env) || tenantLinesDefault(env) ? 'native' : 'webhook';
 }
+
+/**
+ * Per-tenant imported lines (voice/tenant-line.ts): with ELEVENLABS_API_KEY set and ELEVENLABS_TENANT_LINES not `off`, every purchased number is
+ * imported into ElevenLabs, so an unforced deployment is 'native' even without the shared ELEVENLABS_PHONE_NUMBER_ID.
+ */
+export const tenantLinesDefault = (env: Record<string, string | undefined> = process.env): boolean =>
+  Boolean((env.ELEVENLABS_API_KEY ?? '').trim()) && (env.ELEVENLABS_TENANT_LINES ?? '').trim().toLowerCase() !== 'off';
+
+/** The line kind for ONE business: a tenant that owns an imported ElevenLabs number is always native (ElevenLabs answers it). */
+export const lineKindFor = (business: { elevenlabs_phone_number_id?: string | null } | null | undefined, env: Record<string, string | undefined> = process.env): LineKind =>
+  business?.elevenlabs_phone_number_id ? 'native' : lineKind(env);
 
 /** Is a native ElevenLabs phone line configured (the API key AND the imported phone number id)? */
 export const nativeLineConfigured = (env: Record<string, string | undefined> = process.env): boolean =>
@@ -50,10 +62,18 @@ export function lineKindMismatch(env: Record<string, string | undefined> = proce
 
 /**
  * Can a call be forwarded to a human on this kind of line? Always on a 'webhook' line. On the 'native' ElevenLabs line only with
- * NATIVE_TRANSFER=on (the transfer-to-number system tool, voice/transfer.ts; default OFF until the live test in docs/runbook.md section 8).
+ * NATIVE_TRANSFER=on (the transfer-to-number system tool, voice/transfer.ts; default OFF until the live test in docs/runbook.md section 8)
+ * AND, when the business is given, its own `native_transfer_enabled` opt-in.
  */
-export const forwardingSupported = (line: LineKind = lineKind(), env: Record<string, string | undefined> = process.env): boolean =>
-  line === 'webhook' || (env.NATIVE_TRANSFER ?? '').trim().toLowerCase() === 'on';
+export const forwardingSupported = (
+  line: LineKind = lineKind(), env: Record<string, string | undefined> = process.env, business?: { native_transfer_enabled?: boolean | null } | null,
+): boolean => {
+  if (line === 'webhook') return true;
+  if ((env.NATIVE_TRANSFER ?? '').trim().toLowerCase() !== 'on') return false;
+  // Per-business opt-in (Settings > AI line): with the capability on, a business that has NOT enabled it still gets the paused script.
+  // `undefined` (a caller that does not know the business) keeps the global answer.
+  return business?.native_transfer_enabled === undefined || business?.native_transfer_enabled === null ? true : business.native_transfer_enabled === true;
+};
 
 /** The honest sentence shown wherever 'forward' would otherwise be offered or claimed on a line that cannot do it. */
 export const FORWARD_UNAVAILABLE = 'Forwarding is not available on the AI voice line — callers will hear the paused message';

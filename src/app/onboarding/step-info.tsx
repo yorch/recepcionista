@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { TextField } from '@/components/ui/field';
@@ -21,7 +21,8 @@ export interface ExtractionMeta {
   url: string | null;
 }
 
-const PHASES = ['info.phase.0', 'info.phase.1', 'info.phase.2', 'info.phase.3'] as const;
+/** Real stages only: the website is read and understood by ONE request (its duration is not broken down by the server), then the result is saved. */
+const PHASES = ['pd.info.stage.read', 'info.phase.3'] as const;
 
 function hostName(url: string, fallback: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return fallback; }
@@ -49,11 +50,8 @@ export function InfoStep({
   // New content (services, FAQs, the AI's language) follows the business's default language; the screen follows the viewer's own.
   const lang = status?.locale ?? uiLocale;
   const createdId = useRef<string | null>(businessId); // reuse on retry: never create a second business
-  const ticker = useRef<ReturnType<typeof setInterval> | null>(null);
   const [busyManual, setBusyManual] = useState(false);
   const reading = phase !== null;
-
-  useEffect(() => () => { if (ticker.current) clearInterval(ticker.current); }, []);
 
   async function ensureBusiness(label: string, siteUrl: string | null): Promise<string> {
     if (createdId.current) return createdId.current;
@@ -72,12 +70,11 @@ export function InfoStep({
     if (!normalized) { setUrlError(t('info.urlBad')); return; }
     setUrlError(null);
     setPhase(0);
-    ticker.current = setInterval(() => setPhase((p) => (p === null ? p : Math.min(p + 1, PHASES.length - 2))), 2500);
     try {
       const id = await ensureBusiness(name.trim() || hostName(normalized, t('info.newBusiness')), normalized);
       await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: { url: normalized, vertical } });
       const ex = await apiRequest<ExtractionResult>('/api/extract', { body: { url: normalized, business_id: id }, timeoutMs: 90_000 });
-      setPhase(PHASES.length - 1);
+      setPhase(1);
       const draft = withPackDefaults(draftFromExtraction(ex, status?.owner_name ?? ''), vertical, lang);
       // Save immediately so a refresh (or another device) resumes at review with these values.
       await apiRequest(`/api/businesses/${id}`, { method: 'PATCH', body: toBusinessPatch(draft) });
@@ -92,7 +89,6 @@ export function InfoStep({
       else if (e2.status === 429) setFormError(t('info.tooMany'));
       else setFormError(t('info.retryOrManual', { message: errorText(t, e2) }));
     } finally {
-      if (ticker.current) clearInterval(ticker.current);
       setPhase(null);
     }
   }
@@ -167,6 +163,7 @@ export function InfoStep({
             onChange={(e) => { setUrl(e.target.value); setUrlError(null); }} error={urlError}
             hint={t('info.websiteHint')}
           />
+          <p className="mt-2 text-xs text-dim">{t('pd.info.needsLlm')}</p>
           {formError ? <p role="alert" className="mt-3 rounded-xl border border-warn-line bg-warn-bg px-3.5 py-3 text-[13px] text-warn">{formError}</p> : null}
           <Button type="submit" className="mt-5 w-full" disabled={busyManual}>{t('info.read')}</Button>
         </form>

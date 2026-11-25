@@ -169,15 +169,17 @@ integration('caps, initiation webhook and follow-up consent (postgres)', () => {
     });
     await withEnv(ENFORCED, async () => {
       const res = await incoming(form());
-      const json = await res.json() as { data: { out_of_service?: boolean; agent_id: string } };
-      expect(json.data.out_of_service).toBe(true);
-      expect(json.data.agent_id).toBe('');
+      // a signed Twilio caller hears the honest out-of-service line as TwiML (never JSON)
+      expect(res.headers.get('content-type')).toContain('xml');
+      const xml = await res.text();
+      expect(xml).toContain('<Say');
+      expect(xml).toContain('<Hangup/>');
     });
     const calls = await prisma.call.findMany({ where: { businessId: biz.id } });
     expect(calls.length).toBe(1);
     expect(calls[0].status).toBe('handed_off');
     expect(calls[0].callerE164).toBe(params.From);
-    expect((await (await incoming(form())).json() as { data: { out_of_service?: boolean } }).data.out_of_service).toBeUndefined(); // billing not enforced
+    expect(await (await incoming(form())).text()).toContain('<Record'); // billing not enforced: the call is served (the webhook line has no AI without an agent: an honest voicemail)
     expect(await prisma.call.count({ where: { businessId: biz.id } })).toBe(1);
   });
 

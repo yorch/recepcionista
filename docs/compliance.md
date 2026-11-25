@@ -142,10 +142,13 @@ failure and exception results, and still reports honestly whether the owner was 
   counts; `{"dry_run": false}` purges. Works whether or not the job is on.
 - `purgeExpiredData` (when on, daily from `instrumentation.ts`, `src/lib/retention-job.ts`) runs under the DB lease
   `job:retention-purge`, so multiple instances are safe. Per business `retention_days` (1-3650, default 365):
-  calls/transcripts/SMS log/briefings deleted **together with the briefing audio files**, bookings anonymised
-  (financial fields kept). The audio files live under `public/audio/` (a Docker volume) and are served only through
-  the authenticated, tenant-scoped route `/api/briefings/audio/<file>` (`/audio/<file>` is rewritten to it; staff of
-  that business or an admin); retention and erasure delete the files.
+  calls/transcripts/SMS log/briefings deleted **together with the briefing audio** (bookings anonymised, financial fields kept).
+  Briefing audio is stored in the database (`briefing_audio`, one row per briefing, cascading with it) and served only through
+  the authenticated, tenant-scoped route `/api/briefings/<id>/audio` (staff of that business or an admin); retention and erasure delete the
+  rows, the hourly cleanup also prunes clips older than `BRIEFING_AUDIO_KEEP_DAYS` (default 30) while the briefing text stays. Legacy briefings
+  created before this change may still point at `/audio/<file>` (an old Docker volume): the legacy route serves them to the same people and
+  retention / erasure still delete those files.
+- The dashboard offers the same access / erasure to owners (Settings, "Customer privacy": `POST /api/businesses/:id/privacy/{lookup,export,erase}`, step-up, typed `ERASE` confirmation, audit rows with the last 4 digits only). Customer texts to the business number (`inbound_messages`) are part of both, follow `retention_days`, and are matched on the sender's E.164.
 - `POST /api/privacy/erase { business_id, phone }` erases one customer (owner of that business, or admin): their
   calls, every `sms_log` row about them (texts to them AND owner alerts quoting their number, name or booking), the
   briefings that summarise a day they appear in (narration, stats and audio file), and anonymises their bookings.

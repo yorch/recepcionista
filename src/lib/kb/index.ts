@@ -100,7 +100,7 @@ function fmtClosures(business: Business | null): string {
 }
 
 function fmtList(items: string[]): string {
-  return items.length > 0 ? items.map((s) => `- ${s}`).join('\n') : '- (not specified — serve the local metro area)';
+  return items.length > 0 ? items.map((s) => `- ${s}`).join('\n') : '- (not specified by the owner: never promise coverage; say the owner will confirm whether they serve the caller\'s address)';
 }
 
 /**
@@ -188,7 +188,7 @@ ${depositBlock}
 - NEVER ask for or accept a full card number over the phone. If the caller offers a card number, refuse politely and send the secure link instead.
 
 ## HUMAN HANDOFF
-If the caller insists on a human, the request is outside your knowledge, the caller is angry or confused, or anything feels sensitive: use handoff_to_human to transfer to ${owner}. Never pretend to be human when asked directly — say you're the virtual assistant for ${business.name} and connect them.
+If the caller insists on a human, the request is outside your knowledge, the caller is angry or confused, or anything feels sensitive: use handoff_to_human: it texts ${owner} right now so they can call the caller back, and the caller is offered that callback. It does NOT connect or transfer the call, so never say you are transferring them (if a transfer_to_human tool is available and the caller wants a person now, use that instead). Never pretend to be human when asked directly — say you're the virtual assistant for ${business.name} and offer the callback.
 
 ## CALL FLOW (5 steps)
 1. GREET: warm greeting, e.g. "${tx(pack.prompt.greeting).replace('{name}', business.name)}" / "${pack.prompt.greeting.es.replace('{name}', business.name)}"
@@ -205,7 +205,7 @@ You have exactly these tools:
 - create_payment_link — generate a secure deposit payment link (max $500)
 - flag_emergency — mark the call as an emergency so the owner is alerted
 - get_pricing — look up the starting price for a service
-- handoff_to_human — transfer the call to ${owner}
+- handoff_to_human — text ${owner} now and offer the caller a callback (it does not transfer the call)
 - reschedule_booking — move the CALLER'S OWN booking (works only for the number they are calling from; otherwise take a message with handoff_to_human)
 - cancel_booking — cancel the CALLER'S OWN booking after they confirm out loud (never promise a refund: repeat what the tool says about the deposit)
 Always use your tools rather than guessing answers. Prices come from get_pricing, never from memory of "typical" prices.
