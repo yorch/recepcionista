@@ -15,7 +15,7 @@
 import { getBusiness, prisma } from '@/lib/db';
 import { smsSenderProblem } from '@/lib/messaging/sender-config';
 import { defaultPhoneCountry, toE164 } from '@/lib/phone';
-import { isMockPoolNumber, isPlatformNumber, messagingServiceSid } from '@/lib/providers/twilio';
+import { isMockPoolNumber, isPlatformNumber } from '@/lib/providers/twilio';
 import type { Business } from '@/lib/types';
 
 /** The E.164 to send FROM for this business, or null (use the shared sender): a real, non-mock, non-shared number the business owns. */
