@@ -353,6 +353,10 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
     return { calls, restore: () => { globalThis.fetch = saved; } };
   }
   const withStripe = <T>(fn: () => Promise<T>) => withEnv({ STRIPE_SECRET_KEY: 'sk_test_x' }, fn);
+  /** The deposit-link deactivation after a cancel runs in the background (never awaited by the cancel): tests wait for it here. */
+  const flushLinks = async () => (await import('@/lib/payments/link-store')).flushLinkDeactivations();
+  /** The booking's deposit link was texted to the customer (the signal that a link may exist at all). */
+  const textedLink = (businessId: string, bookingId: string) => prisma.smsLog.create({ data: { businessId, toPhone: '+13055550100', body: 'Pay your deposit: https://buy.stripe.com/test', kind: 'payment_link', bookingId, status: 'sent' } });
   async function paidBooking(biz: { id: string }, o: { policy?: 'none' | 'full_24h' | 'full_48h' | 'full_always'; cancelAt?: 'far' | 'soon'; pi?: string | null; deposit?: number } = {}) {
     await db.updateBusiness(biz.id, { refund_policy: o.policy ?? 'full_24h' });
     const soon = o.cancelAt === 'soon';
@@ -939,6 +943,7 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
       await withStripe(async () => {
         const r = await oneRoute.PATCH(req(`/api/bookings/${b.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(b.id));
         expect(r.status).toBe(200);
+        await flushLinks(); // the deactivation runs in the background (report 17 M4): the cancel never waits for Stripe
         expect(calls).toEqual([{ url: 'https://api.stripe.com/v1/payment_links/plink_1AbCdEf123456', body: 'active=false', method: 'POST' }]);
         expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'booking.payment_link_deactivated', target: `booking:${b.id}` } })).toBe(1);
         expect((await db.getBooking(b.id))!.refund_status).toBe('not_applicable'); // no deposit at cancel time
@@ -955,7 +960,7 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
   // ---------------------------------------------------------------- residual gaps (reports 13 H2, 13 L1)
 
   /** A Stripe whose refund LIST and Payment-Link list answer from the given data; POST /refunds behaves like fakeStripe. */
-  function stripeWith(o: { refunds?: { id: string; status: string; amount: number; metadata?: Record<string, string> }[]; links?: { id: string; metadata?: Record<string, string> }[]; down?: boolean; post?: 'ok' | 'timeout' } = {}) {
+  function stripeWith(o: { refunds?: { id: string; status: string; amount: number; created?: number; metadata?: Record<string, string> }[]; links?: { id: string; metadata?: Record<string, string> }[]; down?: boolean; post?: 'ok' | 'timeout' } = {}) {
     const calls: { method: string; url: string; key: string | null; body: string }[] = [];
     const saved = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
@@ -1107,25 +1112,30 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
     } finally { st.restore(); }
   });
 
-  test('residual L1: cancelling a booking whose link id was never stored finds its payment link(s) in Stripe by metadata and deactivates them (paged, best effort, audited)', async () => {
+  test('residual L1 / 17 M4: cancelling a booking whose link was texted but whose id was never stored finds its payment link(s) in Stripe by metadata, in the BACKGROUND (bounded pages, tenant scoped, audited)', async () => {
     const biz = await newBusiness(); const owner = await login(biz.id);
-    const b = await booking(biz.id, { status: 'confirmed' });
     const other = await booking(biz.id, { status: 'confirmed' });
+    const b = await booking(biz.id, { status: 'confirmed' });
     expect(await prisma.booking.findUnique({ where: { id: b.id }, select: { stripePaymentLinkId: true } })).toMatchObject({ stripePaymentLinkId: null });
+    await textedLink(biz.id, b.id); // a legacy link: texted before the id was stored
+    const foreignBiz = await newBusiness();
     const st = stripeWith({ links: [
       { id: 'plink_1OtherBooking001', metadata: { booking_id: other.id } }, { id: 'plink_1NoMetadata00001' }, { id: 'plink_1MineFirst000001', metadata: { booking_id: b.id } },
-      { id: 'plink_1OtherBooking002', metadata: { booking_id: other.id } }, { id: 'plink_1MineSecond00002', metadata: { booking_id: b.id } },
+      { id: 'plink_1WrongTenant0001', metadata: { booking_id: b.id, business_id: foreignBiz.id } }, // same booking id but another tenant: never touched
+      { id: 'plink_1BeyondTheBound01', metadata: { booking_id: b.id } }, // page 3: beyond the 2-page background bound (documented)
     ] });
     try {
       await withStripe(async () => {
         const r = await oneRoute.PATCH(req(`/api/bookings/${b.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(b.id));
         expect(r.status).toBe(200);
+        await flushLinks();
         const deactivated = st.calls.filter((c) => c.method === 'POST' && c.url.includes('/payment_links/')).map((c) => c.url.split('/').pop());
-        expect(deactivated.sort()).toEqual(['plink_1MineFirst000001', 'plink_1MineSecond00002']); // both of this booking's, none of the other booking's
-        expect(st.calls.filter((c) => c.url.includes('/payment_links?')).length).toBe(3); // 5 links in pages of 2
+        expect(deactivated).toEqual(['plink_1MineFirst000001']);
+        expect(st.calls.filter((c) => c.url.includes('/payment_links?')).length).toBe(2); // 5 links in pages of 2, at most 2 pages
         const audits = await prisma.auditEvent.findMany({ where: { businessId: biz.id, action: 'booking.payment_link_deactivated', target: `booking:${b.id}` } });
-        expect(audits.length).toBe(2);
+        expect(audits.length).toBe(1);
         expect(audits.every((a) => (a.meta as { via?: string }).via === 'stripe_lookup')).toBe(true);
+        expect(await prisma.processedEvent.count({ where: { source: 'link-deactivate', id: b.id } })).toBe(0); // done: nothing left to retry
       });
     } finally { st.restore(); }
     // a STORED id is used as before, with no lookup at all
@@ -1135,17 +1145,174 @@ integration('phase 2: reschedule, cancel/refund, voice tools, recording, voice, 
     try {
       await withStripe(async () => {
         expect((await oneRoute.PATCH(req(`/api/bookings/${c.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(c.id))).status).toBe(200);
+        await flushLinks();
         expect(st2.calls.map((x) => `${x.method} ${x.url}`)).toEqual(['POST https://api.stripe.com/v1/payment_links/plink_1StoredLink00001']);
       });
     } finally { st2.restore(); }
-    // Stripe down: the cancel still succeeds
-    const d = await booking(biz.id, { status: 'confirmed' });
-    const st3 = stripeWith({ down: true });
-    try { await withStripe(async () => { expect((await oneRoute.PATCH(req(`/api/bookings/${d.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(d.id))).status).toBe(200); }); } finally { st3.restore(); }
-    expect((await db.getBooking(d.id))!.status).toBe('cancelled');
     // no Stripe key (dev / demo): nothing is looked up
     const e = await booking(biz.id, { status: 'confirmed' });
+    await textedLink(biz.id, e.id);
     const st4 = stripeWith({ links: [{ id: 'plink_1NeverCalled0001', metadata: { booking_id: e.id } }] });
-    try { expect((await oneRoute.PATCH(req(`/api/bookings/${e.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(e.id))).status).toBe(200); expect(st4.calls.length).toBe(0); } finally { st4.restore(); }
+    try { expect((await oneRoute.PATCH(req(`/api/bookings/${e.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(e.id))).status).toBe(200); await flushLinks(); expect(st4.calls.length).toBe(0); } finally { st4.restore(); }
   });
+
+  test('17 M4: a booking that never had a deposit link causes NO Stripe call at all on cancel (no account-wide payment-link paging)', async () => {
+    const biz = await newBusiness(); const owner = await login(biz.id);
+    const b = await booking(biz.id, { status: 'confirmed' });
+    const st = stripeWith({ links: [{ id: 'plink_1WouldMatch000001', metadata: { booking_id: b.id } }] });
+    try {
+      await withStripe(async () => {
+        expect((await oneRoute.PATCH(req(`/api/bookings/${b.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(b.id))).status).toBe(200);
+        await flushLinks();
+        expect(st.calls).toEqual([]);
+      });
+    } finally { st.restore(); }
+  });
+
+  test('17 M4: a slow Stripe never delays the cancel; a failed deactivation stays queued and the reconcile job finishes it', async () => {
+    const link = await import('@/lib/payments/link-store');
+    const biz = await newBusiness(); const owner = await login(biz.id);
+    const b = await booking(biz.id, { status: 'confirmed' });
+    expect(await db.setBookingPaymentLink(b.id, 'plink_1SlowStripe00001')).toBe(true);
+    const saved = globalThis.fetch;
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    globalThis.fetch = (async () => { await gate; return new Response('{}', { status: 200 }); }) as typeof fetch; // Stripe is slow until released
+    try {
+      await withStripe(async () => {
+        const t0 = Date.now();
+        const res = await oneRoute.PATCH(req(`/api/bookings/${b.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(b.id));
+        expect(res.status).toBe(200);
+        expect(Date.now() - t0).toBeLessThan(3000); // Stripe is still "thinking": the cancel did not wait for it
+        expect((await db.getBooking(b.id))!.status).toBe('cancelled');
+        expect(await prisma.processedEvent.count({ where: { source: 'link-deactivate', id: b.id } })).toBe(1); // durable
+        release(); await link.flushLinkDeactivations();
+        expect(await prisma.processedEvent.count({ where: { source: 'link-deactivate', id: b.id } })).toBe(0);
+      });
+    } finally { globalThis.fetch = saved; }
+    // Stripe down at cancel time: the marker stays, and the job retries it later (after the 2 minute spacing)
+    const c = await booking(biz.id, { status: 'confirmed' });
+    expect(await db.setBookingPaymentLink(c.id, 'plink_1StripeWasDown01')).toBe(true);
+    globalThis.fetch = (async () => { throw new DOMException('down', 'TimeoutError'); }) as typeof fetch;
+    try {
+      await withStripe(async () => {
+        expect((await oneRoute.PATCH(req(`/api/bookings/${c.id}`, owner, { status: 'cancelled', notify: false }, 'PATCH'), ctx(c.id))).status).toBe(200);
+        await link.flushLinkDeactivations();
+        expect(await prisma.processedEvent.count({ where: { source: 'link-deactivate', id: c.id } })).toBe(1);
+        const before = (await prisma.processedEvent.findUnique({ where: { source_id: { source: 'link-deactivate', id: c.id } } }))!.claimedAt.getTime();
+        await link.drainLinkDeactivations({ now: new Date(before + 1000) }); // too soon (2 minute spacing): the first attempt was just made, so this row is left alone
+        expect((await prisma.processedEvent.findUnique({ where: { source_id: { source: 'link-deactivate', id: c.id } } }))!.claimedAt.getTime()).toBe(before);
+      });
+    } finally { globalThis.fetch = saved; }
+    const st = stripeWith({});
+    try {
+      await withStripe(async () => {
+        const marker = (await prisma.processedEvent.findUnique({ where: { source_id: { source: 'link-deactivate', id: c.id } } }))!.claimedAt.getTime();
+        const rep = await link.drainLinkDeactivations({ now: new Date(marker + 5 * 60_000) });
+        expect(rep.done).toBeGreaterThanOrEqual(1);
+        expect(st.calls.map((x) => x.url)).toContain('https://api.stripe.com/v1/payment_links/plink_1StripeWasDown01');
+        expect(await prisma.processedEvent.count({ where: { source: 'link-deactivate', id: c.id } })).toBe(0);
+        expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'booking.payment_link_deactivated', target: `booking:${c.id}` } })).toBe(1);
+      });
+    } finally { st.restore(); }
+  });
+
+  // ---------------------------------------------------------------- report 17: refund recovery
+
+  const pendingRefund = async (biz: { id: string }, o: { ageMs?: number; refundId?: string | null; amount?: number } = {}) => {
+    const b = await paidBooking(biz);
+    await prisma.booking.update({ where: { id: b.id }, data: { refundStatus: 'pending', refundAmountCents: o.amount ?? 5000, refundRequestedAt: new Date(Date.now() - (o.ageMs ?? 7 * 3_600_000)), ...(o.refundId ? { stripeRefundId: o.refundId } : {}) } });
+    return b;
+  };
+
+  test('17 H1: a refund made in the Stripe dashboard and recorded as pending is matched by its stored id: still processing -> unchanged (never "never reached Stripe", no second refund); succeeded -> refunded; failed -> failed', async () => {
+    const { reconcileStuckRefunds } = await import('@/lib/refund-service');
+    const biz = await newBusiness(); const owner = await login(biz.id);
+    // processing, no metadata, a different amount than the booking's recorded one: found by id
+    const b = await pendingRefund(biz, { refundId: 're_dash1' });
+    let st = stripeWith({ refunds: [{ id: 're_dash1', status: 'pending', amount: 3000, metadata: {} }] });
+    try {
+      await withStripe(async () => {
+        const r = await reconcileStuckRefunds({ fetchImpl: globalThis.fetch, env: { REFUND_RECONCILE_AFTER_HOURS: '6' } });
+        expect(r.items.find((i) => i.booking_id === b.id)?.outcome).toBe('unchanged');
+        expect(await db.getBooking(b.id)).toMatchObject({ refund_status: 'pending', stripe_refund_id: 're_dash1' });
+        expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'booking.refund_failed', target: `booking:${b.id}` } })).toBe(0);
+        // the owner clicking Refund again while it processes must NOT create a second refund
+        const again = await refundReq(b.id, owner, {});
+        expect(again.status).toBe(409);
+        expect(st.calls.filter((c) => c.method === 'POST' && c.url.includes('/refunds'))).toEqual([]);
+      });
+    } finally { st.restore(); }
+    // now Stripe says it succeeded
+    st = stripeWith({ refunds: [{ id: 're_dash1', status: 'succeeded', amount: 3000, metadata: {} }] });
+    try { await withStripe(async () => { expect((await json<{ result: string }>(await checkReq(b.id, owner))).data!.result).toBe('adopted_refunded'); }); } finally { st.restore(); }
+    expect((await db.getBooking(b.id))!.refund_status).toBe('refunded');
+    // and a dashboard refund that failed
+    const f = await pendingRefund(biz, { refundId: 're_dash2' });
+    st = stripeWith({ refunds: [{ id: 're_dash2', status: 'failed', amount: 5000, metadata: {} }] });
+    try { await withStripe(async () => { expect((await json<{ result: string }>(await checkReq(f.id, owner))).data!.result).toBe('marked_failed'); }); } finally { st.restore(); }
+  });
+
+  test('17 H1: a LIVE refund on the payment that this app did not make for this attempt blocks "never reached Stripe" (409 foreign_refund, nothing changes)', async () => {
+    const { reconcileStuckRefunds } = await import('@/lib/refund-service');
+    const biz = await newBusiness(); const owner = await login(biz.id);
+    const b = await pendingRefund(biz); // no stored refund id: our own attempt never got an answer
+    const st = stripeWith({ refunds: [{ id: 're_unknown1', status: 'pending', amount: 2000, metadata: {} }, { id: 're_old_dead', status: 'failed', amount: 5000, metadata: {} }] });
+    try {
+      await withStripe(async () => {
+        const res = await checkReq(b.id, owner);
+        expect(res.status).toBe(409);
+        expect((await json(res)).code).toBe('foreign_refund');
+        const rec = await reconcileStuckRefunds({ fetchImpl: globalThis.fetch, env: { REFUND_RECONCILE_AFTER_HOURS: '6' } });
+        expect(rec.items.find((i) => i.booking_id === b.id)?.outcome).toBe('foreign_refund');
+        expect((await db.getBooking(b.id))!.refund_status).toBe('pending');
+        expect(await prisma.auditEvent.count({ where: { businessId: biz.id, action: 'booking.refund_failed', target: `booking:${b.id}` } })).toBe(0);
+      });
+    } finally { st.restore(); }
+  });
+
+  test('17 M2: an OLDER failed attempt of the same amount does not stand for the current attempt: the age gate still applies; a failure created after the attempt is definitive', async () => {
+    const biz = await newBusiness(); const owner = await login(biz.id);
+    const nowS = Math.floor(Date.now() / 1000);
+    // attempt 2 was recorded a minute ago; Stripe lists only attempt 1's failed refund (created an hour ago)
+    const young = await pendingRefund(biz, { ageMs: 60_000 });
+    let st = stripeWith({ refunds: [{ id: 're_attempt1', status: 'failed', amount: 5000, created: nowS - 3600, metadata: { booking_id: young.id } }] });
+    try {
+      await withStripe(async () => {
+        const res = await checkReq(young.id, owner);
+        expect(res.status).toBe(409);
+        expect((await json(res)).code).toBe('too_early');
+        expect((await db.getBooking(young.id))!.refund_status).toBe('pending');
+      });
+    } finally { st.restore(); }
+    // an hour later and still only the old failed refund: now it is "never reached Stripe"
+    const old = await pendingRefund(biz, { ageMs: 3_600_000 });
+    st = stripeWith({ refunds: [{ id: 're_attempt1b', status: 'failed', amount: 5000, created: nowS - 7200, metadata: { booking_id: old.id } }] });
+    try { await withStripe(async () => { expect((await json<{ result: string }>(await checkReq(old.id, owner))).data!.result).toBe('marked_failed'); }); } finally { st.restore(); }
+    // a failed refund created AFTER the attempt is this attempt's own failure: definitive at once
+    const mine = await pendingRefund(biz, { ageMs: 60_000 });
+    st = stripeWith({ refunds: [{ id: 're_attempt2', status: 'failed', amount: 5000, created: nowS, metadata: { booking_id: mine.id } }] });
+    try { await withStripe(async () => { expect((await json<{ result: string }>(await checkReq(mine.id, owner))).data!.result).toBe('marked_failed'); }); } finally { st.restore(); }
+  });
+
+  test('17 L6: the stuck-refund pass is fair: refunds Stripe keeps processing do not fill the window; each pass looks at the least recently checked', async () => {
+    const { reconcileStuckRefunds } = await import('@/lib/refund-service');
+    const biz = await newBusiness();
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) ids.push((await pendingRefund(biz, { refundId: `re_slow${i}_${uniq('r')}` })).id);
+    const rows = await prisma.booking.findMany({ where: { id: { in: ids } }, select: { id: true, stripeRefundId: true } });
+    const st = stripeWith({ refunds: rows.map((r) => ({ id: r.stripeRefundId!, status: 'pending', amount: 5000, metadata: {} })) });
+    try {
+      await withStripe(async () => {
+        // the production path (claims, no fetchImpl): two per pass, then the third, then nothing for an hour
+        const seen: string[] = [];
+        for (let pass = 0; pass < 3; pass++) {
+          const r = await reconcileStuckRefunds({ limit: 2, env: { REFUND_RECONCILE_AFTER_HOURS: '6' } });
+          for (const i of r.items) if (ids.includes(i.booking_id)) seen.push(i.booking_id);
+        }
+        expect(new Set(seen).size).toBe(3); // all three were looked at, none starved
+        expect(seen.length).toBe(3); // and none twice within the hour
+      });
+    } finally { st.restore(); }
+  });
+
 });

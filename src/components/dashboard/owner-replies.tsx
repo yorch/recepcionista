@@ -4,7 +4,7 @@ import { relative } from '@/lib/format';
 import type { Locale, MessageKey, TFunction } from '@/lib/i18n/core';
 import type { PublicOwnerReply, PublicReplyStatus } from '@/lib/voice/owner/reply-view';
 
-const TONE: Record<PublicReplyStatus, BadgeTone> = { waiting: 'unsure', sent: 'routine', cancelled: 'neutral', expired: 'neutral', refused: 'emergency', failed: 'emergency' };
+const TONE: Record<PublicReplyStatus, BadgeTone> = { waiting: 'unsure', sending: 'unsure', uncertain: 'emergency', sent: 'routine', cancelled: 'neutral', expired: 'neutral', refused: 'emergency', failed: 'emergency' };
 
 /**
  * "Owner voice replies": texts the owner asked the assistant to send to a customer from the private owner line, and what became of each

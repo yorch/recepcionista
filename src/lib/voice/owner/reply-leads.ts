@@ -4,15 +4,20 @@
  * (processed_events rows `owner-lead-ref` / `<owner call id>:<n>:<kind>:<row id>`), so the numbers cannot shift under the owner and the model
  * can never name a row id or a phone number: the recipient is always re-derived from the row, scoped to the business.
  */
+import crypto from 'node:crypto';
 import { countryForBusiness, isOptedOut, prisma } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
 import { PAUSED_FLAG, FORWARD_UNANSWERED_FLAG } from '@/lib/voice/non-ai';
 import type { Business, Call } from '@/lib/types';
-import { OWNER_REPLY_LEADS_SHOWN, OWNER_REPLY_LEAD_WINDOW_MS } from './reply-config';
-import { firstNameOf, last4Of, markerHash, type LeadKind } from './reply-text';
+import { OWNER_REPLY_DISCLOSED_PER_DAY, OWNER_REPLY_HANDLED_PER_DAY, OWNER_REPLY_LEADS_SHOWN, OWNER_REPLY_LEAD_WINDOW_MS } from './reply-config';
+import { ownerBudgetId, type OwnerTrust } from './config';
+import { handledMarkerId, HANDLED_SOURCE, type HandledClass } from './reply-marker';
+import { firstNameOf, last4Of, type LeadKind } from './reply-text';
 
 const REF_SOURCE = 'owner-lead-ref';
-const HANDLED_SOURCE = 'owner-lead-handled';
+const DISCLOSED_SOURCE = 'owner-lead-disc';
+const HANDLED_LOG_SOURCE = 'owner-lead-handled-log';
+const DAY_MS = 24 * 3600_000;
 
 export interface Lead {
   n: number;
@@ -35,18 +40,43 @@ function callKind(c: { urgency: string; status: string; flaggedReason: string | 
   return 'call';
 }
 
-export async function isHandled(businessId: string, e164: string, since: Date): Promise<boolean> {
-  const row = await prisma.processedEvent.findUnique({ where: { source_id: { source: HANDLED_SOURCE, id: markerHash(businessId, e164) } }, select: { claimedAt: true } });
-  return Boolean(row && row.claimedAt.getTime() >= since.getTime());
+const classOf = (trust: OwnerTrust): HandledClass => (trust === 'verified' ? 'v' : 'u');
+
+/**
+ * Was this number marked handled (after `since`)? A mark made on a verified call hides the lead from every listing; a mark made on an unverified
+ * call (possibly a spoofed caller id) hides it only from unverified listings, so a spoofer can never hide a lead from an attested owner call.
+ */
+export async function isHandled(businessId: string, e164: string, since: Date, trust: OwnerTrust = 'unverified'): Promise<boolean> {
+  const classes: HandledClass[] = trust === 'verified' ? ['v'] : ['v', 'u'];
+  const row = await prisma.processedEvent.findFirst({
+    where: { source: HANDLED_SOURCE, id: { in: classes.map((c) => handledMarkerId(businessId, e164, c)) }, claimedAt: { gte: since } }, select: { id: true },
+  });
+  return row !== null;
 }
 
-export async function markHandled(businessId: string, e164: string, now: Date = new Date()): Promise<void> {
-  const id = markerHash(businessId, e164);
+export async function markHandled(businessId: string, e164: string, trust: OwnerTrust = 'unverified', now: Date = new Date()): Promise<void> {
+  const id = handledMarkerId(businessId, e164, classOf(trust));
   await prisma.processedEvent.upsert({ where: { source_id: { source: HANDLED_SOURCE, id } }, create: { source: HANDLED_SOURCE, id, status: 'done', claimedAt: now }, update: { claimedAt: now } });
 }
 
+/**
+ * Reserve one "handled" mark against the per-class daily budget (atomic: advisory lock + count + insert of a log row that holds only the budget key
+ * and a random id, never a number). False = the budget is spent.
+ */
+export async function reserveHandled(businessId: string, trust: OwnerTrust, now: Date = new Date()): Promise<boolean> {
+  const budget = ownerBudgetId(businessId, trust);
+  const cap = OWNER_REPLY_HANDLED_PER_DAY[trust];
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owner-handled:${budget}`}))`;
+    const used = await tx.processedEvent.count({ where: { source: HANDLED_LOG_SOURCE, id: { startsWith: `${budget}:` }, claimedAt: { gte: new Date(now.getTime() - DAY_MS) } } });
+    if (used >= cap) return false;
+    await tx.processedEvent.create({ data: { source: HANDLED_LOG_SOURCE, id: `${budget}:${crypto.randomUUID()}`, status: 'done', claimedAt: now } });
+    return true;
+  });
+}
+
 /** The recent leads of this business (newest first, one per customer number, handled ones left out), numbered 1..N. Does not store anything. */
-export async function collectLeads(business: Business, now: Date = new Date()): Promise<Omit<Lead, 'n'>[]> {
+export async function collectLeads(business: Business, now: Date = new Date(), trust: OwnerTrust = 'unverified'): Promise<Omit<Lead, 'n'>[]> {
   const since = new Date(now.getTime() - OWNER_REPLY_LEAD_WINDOW_MS);
   const country = countryForBusiness(business);
   const [calls, bookings] = await Promise.all([
@@ -72,7 +102,7 @@ export async function collectLeads(business: Business, now: Date = new Date()): 
     if (seen.has(l.e164)) continue;
     seen.add(l.e164);
     if (l.e164 === owner || (business.phone_e164 && l.e164 === business.phone_e164)) continue; // never the owner or the business line itself
-    if (await isHandled(business.id, l.e164, l.at)) continue;
+    if (await isHandled(business.id, l.e164, l.at, trust)) continue;
     // A name seen on an earlier call of the same number is better than none, but only a plain one-word name is ever kept.
     out.push({ ...l, textable: !(await isOptedOut(business.id, l.e164, country)) });
     if (out.length >= OWNER_REPLY_LEADS_SHOWN) break;
@@ -80,9 +110,41 @@ export async function collectLeads(business: Business, now: Date = new Date()): 
   return out;
 }
 
+/**
+ * Apply the per-class daily DISCLOSURE budget to a candidate list (newest first). A lead already disclosed to this class in the last 24 h is free to
+ * list again; a new one needs budget, and when it is spent the older candidates are cut. Atomic (advisory lock), so concurrent lists cannot overshoot.
+ * The ledger rows hold only the budget key and the lead ROW id (no number, no name).
+ */
+async function discloseWithinBudget<T extends { rowKind: string; rowId: string }>(businessId: string, trust: OwnerTrust, leads: T[], now: Date): Promise<T[]> {
+  if (leads.length === 0) return leads;
+  const budget = ownerBudgetId(businessId, trust);
+  const cap = OWNER_REPLY_DISCLOSED_PER_DAY[trust];
+  const since = new Date(now.getTime() - DAY_MS);
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owner-disc:${budget}`}))`;
+    const rows = await tx.processedEvent.findMany({ where: { source: DISCLOSED_SOURCE, id: { startsWith: `${budget}:` }, claimedAt: { gte: since } }, select: { id: true } });
+    const known = new Set(rows.map((r) => r.id));
+    let room = cap - known.size;
+    const out: T[] = [];
+    const fresh: string[] = [];
+    for (const l of leads) {
+      const id = `${budget}:${l.rowKind}:${l.rowId}`;
+      if (known.has(id)) { out.push(l); continue; }
+      if (room <= 0) continue;
+      room--;
+      fresh.push(id);
+      out.push(l);
+    }
+    if (fresh.length) await tx.processedEvent.createMany({ data: fresh.map((id) => ({ source: DISCLOSED_SOURCE, id, status: 'done', claimedAt: now })), skipDuplicates: true });
+    return out;
+  });
+}
+
 /** List the leads and remember their numbers for this owner call (replacing any earlier list of the same call). */
-export async function snapshotLeads(business: Business, ownerCall: Call, now: Date = new Date()): Promise<Lead[]> {
-  const leads = (await collectLeads(business, now)).map((l, i) => ({ ...l, n: i + 1 }));
+export async function snapshotLeads(business: Business, ownerCall: Call, now: Date = new Date(), trust: OwnerTrust = 'unverified'): Promise<{ leads: Lead[]; capped: boolean }> {
+  const candidates = await collectLeads(business, now, trust);
+  const allowed = await discloseWithinBudget(business.id, trust, candidates, now);
+  const leads = allowed.map((l, i) => ({ ...l, n: i + 1 }));
   await prisma.processedEvent.deleteMany({ where: { source: REF_SOURCE, id: { startsWith: `${ownerCall.id}:` } } });
   if (leads.length) {
     await prisma.processedEvent.createMany({
@@ -90,7 +152,7 @@ export async function snapshotLeads(business: Business, ownerCall: Call, now: Da
       skipDuplicates: true,
     });
   }
-  return leads;
+  return { leads, capped: allowed.length < candidates.length };
 }
 
 export type ResolvedLead = Omit<Lead, 'n' | 'textable'> & { n: number };

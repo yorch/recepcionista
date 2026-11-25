@@ -92,17 +92,18 @@ export async function getCallDialSeconds(callId: string): Promise<number | null>
 }
 
 /** Mark (positive seconds) or clear (null) the forward seconds of a transferred call that still have to reach the usage counters. */
-export async function setForwardPending(callId: string, seconds: number | null): Promise<void> {
-  await prisma.call.updateMany({ where: { id: callId }, data: { forwardPendingSecs: seconds !== null && seconds > 0 ? Math.round(seconds) : null } });
+export async function setForwardPending(callId: string, seconds: number | null, key?: string | null): Promise<void> {
+  const on = seconds !== null && seconds > 0;
+  await prisma.call.updateMany({ where: { id: callId }, data: { forwardPendingSecs: on ? Math.round(seconds as number) : null, forwardPendingKey: on ? (key ?? null) : null } });
 }
 
-export interface PendingForward { id: string; business_id: string; call_sid: string | null; conversation_id: string | null; seconds: number }
+export interface PendingForward { id: string; business_id: string; call_sid: string | null; conversation_id: string | null; seconds: number; /** The metering key stored with the marker (null for a marker written before the column existed). */ key: string | null }
 
 /** Calls whose forward part was never confirmed written (oldest first): the reconcile job finishes them. Only settled calls (the claim was kept). */
 export async function listPendingForwards(opts: { olderThan: Date; limit?: number }): Promise<PendingForward[]> {
   const rows = await prisma.call.findMany({
     where: { forwardPendingSecs: { gt: 0 }, meteredAt: { not: null, lt: opts.olderThan } }, orderBy: { meteredAt: 'asc' }, take: Math.min(Math.max(opts.limit ?? 50, 1), 200),
-    select: { id: true, businessId: true, callSid: true, conversationId: true, forwardPendingSecs: true },
+    select: { id: true, businessId: true, callSid: true, conversationId: true, forwardPendingSecs: true, forwardPendingKey: true },
   });
-  return rows.map((r) => ({ id: r.id, business_id: r.businessId, call_sid: r.callSid, conversation_id: r.conversationId, seconds: r.forwardPendingSecs ?? 0 }));
+  return rows.map((r) => ({ id: r.id, business_id: r.businessId, call_sid: r.callSid, conversation_id: r.conversationId, seconds: r.forwardPendingSecs ?? 0, key: r.forwardPendingKey }));
 }

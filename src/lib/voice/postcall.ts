@@ -404,7 +404,7 @@ export async function processPostCall(envelope: PostCallEnvelope): Promise<PostC
             // recorded); the marker lets the reconcile job finish the forward write instead (never lost, never twice: per call sid).
             const split = splitTransferSeconds({ durationSec: c.duration_sec, transcript: body.transcript, dialSeconds: await getCallDialSeconds(c.id) });
             const sid = c.call_sid ?? conversationId;
-            if (split.forward > 0) await setForwardPending(c.id, split.forward);
+            if (split.forward > 0) await setForwardPending(c.id, split.forward, sid);
             if (split.ai > 0) { await recordCallSeconds(c.business_id, split.ai); aiWritten = true; }
             // meterForwardedCall never throws: a failed write comes back as 'failed' (and is deduplicated per call sid, so one retry is safe).
             let forward = await meterForwardedCall(sid, c.business_id, split.forward);

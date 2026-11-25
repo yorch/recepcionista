@@ -1,8 +1,10 @@
 /** Pure (database-free) tests for the owner voice reply channel: message validation, texts, lead lines, lead refs, settings, prompt, tool specs. */
+import { createHash } from 'node:crypto';
+import { handledMarkerId } from '@/lib/voice/owner/reply-marker';
 import { describe, expect, test } from 'bun:test';
 import { ownerReplyDailyLimit, ownerReplyEnabled, ownerReplyRequiresAttestation, OWNER_REPLY_MAX_CHARS } from '../src/lib/voice/owner/reply-config';
 import {
-  bodyProblemMessage, customerReplyText, firstNameOf, last4Of, leadLine, markerHash, normalizeReplyBody, ownerReplyConfirmSms, ownerTextFits, parseLeadRef, validateReplyBody, whenWords,
+  bodyProblemMessage, customerReplyText, firstNameOf, last4Of, leadLine, normalizeReplyBody, ownerReplyConfirmSms, ownerTextFits, parseLeadRef, validateReplyBody, whenWords,
 } from '../src/lib/voice/owner/reply-text';
 import { ownerPrompt } from '../src/lib/voice/owner/prompt';
 import { OWNER_KB_TOOL_NAMES, OWNER_REPLY_TOOL_NAMES, OWNER_TOOL_NAMES, OWNER_TOOL_SPECS } from '../src/lib/voice/owner/specs';
@@ -50,6 +52,31 @@ describe('validateReplyBody', () => {
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.flagged).toBe(false);
     }
+  });
+  test('report 16 L1: separators, Unicode digits, vanity numbers, spelled digits, link words, homoglyphs, spaced brands and credential asks are refused', () => {
+    const bad = [
+      'Call 555/123/4567 today', 'Call 555.123.4567', 'Call (555)123-4567', 'Code: \uFF11\uFF12\uFF13\uFF14\uFF15\uFF16', 'Your code is \u0664\u0665\u0666\u0667\u0668\u0669', 'Code \u0967\u0968\u0969\u096A\u096B\u096C',
+      'Call 1-800-FLOWERS', 'call 1800 FLOWERS', 'Call 800-FLOWERS', 'ring 555-CALL', 'Call 917 five five five 0199', 'llame al 917 cinco cinco cinco 0199',
+      'Pay your deposit at example dot com slash pay', 'visit bitly/abc12', 'go to tiny url now', 'h t t p : // x', 'mail me at gmail',
+      'Send a g\u0456ft card today', 'Pay the invoice by Zel le', 'Send 200 dollars by C a s h A p p', 'pay with Z.e.l.l.e', 'Send a g1ft c4rd', 'use C4sh App',
+      'Please send your SSN to confirm', 'Your account is locked, reply with your login', 'Your card was declined, text back your card details', 'Pay with Apple Pay or Google Pay now',
+      'send me the deposit link', 'confirm your PIN', 'su contrase\u00f1a por favor', 'env\u00ede su n\u00famero de tarjeta', 'Reply with your sign in',
+    ];
+    for (const b of bad) {
+      const r = validateReplyBody(b);
+      if (r.ok) throw new Error(`accepted: ${b}`);
+      expect(r.flagged === false || r.problem === 'injection').toBe(true);
+    }
+    // honest text still passes: dates, prices, times, small numbers, "one" in prose, words that merely contain a brand fragment
+    for (const ok of ['See you 12/25 at 3:30 PM', 'It will take one hour, maybe two.', 'Your total is $1,250.00 for 3 items', 'Appointment on 3/4/2027 at 9 AM', 'We close at five today.', 'Llegamos en dos horas.', 'Come in between 100 and 250 days']) {
+      expect(validateReplyBody(ok).ok).toBe(true);
+    }
+  });
+  test('report 16 L2: the spoof warning in the confirmation text carries the code', () => {
+    const t = ownerReplyConfirmSms('en', { name: 'Maria', last4: '4821', body: 'See you at 9', code: 'K7M2QX', callAt: '3:12 PM' });
+    expect(t).toContain('Not you? Reply NO K7M2QX.');
+    expect(ownerTextFits(t)).toBe(true);
+    expect(ownerReplyConfirmSms('es', { name: 'Maria', last4: '4821', body: 'Nos vemos a las 9', code: 'K7M2QX', callAt: '3:12 PM' })).toContain('Responda NO K7M2QX');
   });
   test('instruction-like text, role markers and tool names are refused AND flagged as an attack', () => {
     for (const bad of [
@@ -157,10 +184,15 @@ describe('leads', () => {
     for (const [raw, n] of [['1', 1], [' 3 ', 3], ['#2', 2], ['number 4', 4], ['No. 5', 5], [2, 2], ['lead 1', 1]] as const) expect(parseLeadRef(raw)).toBe(n);
     for (const bad of ['0', '6', '10', '-1', '1.5', 'one', '', null, undefined, {}, [], '+13055550142', '1; DROP', 'abc123', '11']) expect(parseLeadRef(bad as never)).toBeNull();
   });
-  test('last4 and the marker hash do not expose the number', () => {
+  test('last4 and the handled marker id do not expose the number (keyed HMAC, per business and trust class)', () => {
     expect(last4Of('+13055550142')).toBe('0142');
-    expect(markerHash('b1', '+13055550142')).toMatch(/^[0-9a-f]{24}$/);
-    expect(markerHash('b1', '+13055550142')).not.toBe(markerHash('b2', '+13055550142'));
+    const k1 = Buffer.alloc(32, 1), k2 = Buffer.alloc(32, 2);
+    const id = handledMarkerId('b1', '+13055550142', 'u', k1);
+    expect(id).toMatch(/^[0-9a-f]{32}$/);
+    expect(id).not.toBe(handledMarkerId('b2', '+13055550142', 'u', k1));
+    expect(id).not.toBe(handledMarkerId('b1', '+13055550142', 'v', k1));
+    expect(id).not.toBe(handledMarkerId('b1', '+13055550142', 'u', k2)); // keyed: a dump alone cannot be brute-forced
+    expect(id).not.toBe(createHash('sha256').update('owner-lead|b1|+13055550142').digest('hex').slice(0, 32)); // not the old unkeyed hash
   });
 });
 
@@ -201,7 +233,10 @@ describe('dashboard view', () => {
     expect(v).toMatchObject({ status: 'waiting', to_name: 'Maria', to_last4: '0142', body: 'Hello' });
     expect(JSON.stringify(v)).not.toContain('13055550142');
     expect(publicReplyStatus({ status: 'proposed', expiresAt: new Date(Date.now() - 1) })).toBe('expired');
-    expect(publicReplyStatus({ status: 'sending', expiresAt: new Date(Date.now() - 1) })).toBe('waiting');
+    expect(publicReplyStatus({ status: 'sending', expiresAt: new Date(Date.now() - 1), decidedAt: new Date() })).toBe('sending');
+    // report 16 L3: a row stuck in 'sending' is shown as unknown, not as "waiting for your YES"
+    expect(publicReplyStatus({ status: 'sending', expiresAt: new Date(Date.now() - 1), decidedAt: new Date(Date.now() - 6 * 60_000) })).toBe('uncertain');
+    expect(publicReplyStatus({ status: 'uncertain', expiresAt: new Date(Date.now() - 1) })).toBe('uncertain');
     for (const st of ['sent', 'cancelled', 'refused', 'failed', 'expired']) expect(publicReplyStatus({ status: st, expiresAt: new Date(0) })).toBe(st as never);
   });
 });

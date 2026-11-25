@@ -356,8 +356,20 @@ export const usagePercent = (used: number, cap: number): number => (cap > 0 ? Ma
  * uses the database clock (`updated_at = clock_timestamp()`), so callers pass a wall-clock time, never a test clock.
  */
 export async function listBusinessIdsWithUsageChangedSince(since: Date, limit = 5000): Promise<string[]> {
-  const rows = await prisma.$queryRaw<{ business_id: string }[]>`
-    SELECT DISTINCT uc."business_id" FROM "usage_counters" uc JOIN "businesses" b ON b."id" = uc."business_id"
-     WHERE b."status" = 'live' AND uc."updated_at" > ${since} LIMIT ${Math.max(1, Math.min(limit, 20000))}`;
-  return rows.map((r) => r.business_id);
+  return (await listBusinessesWithUsageChangedSince(since, limit)).ids;
+}
+
+/**
+ * The same list, OLDEST CHANGE FIRST, with a cursor: when there are more than `limit` changed businesses `truncated` is true and `last` is the
+ * change time of the last one returned, so the caller can continue from there on the next pass instead of silently skipping the rest.
+ */
+export async function listBusinessesWithUsageChangedSince(since: Date, limit = 5000): Promise<{ ids: string[]; truncated: boolean; /** Pass as the next `since` (already advanced past the last business returned). */ last: Date | null }> {
+  const n = Math.max(1, Math.min(limit, 20000));
+  const rows = await prisma.$queryRaw<{ business_id: string; at: Date }[]>`
+    SELECT uc."business_id", max(uc."updated_at") AS at FROM "usage_counters" uc JOIN "businesses" b ON b."id" = uc."business_id"
+     WHERE b."status" = 'live' AND uc."updated_at" > ${since}
+     GROUP BY uc."business_id" ORDER BY max(uc."updated_at") ASC, uc."business_id" ASC LIMIT ${n + 1}`;
+  const truncated = rows.length > n;
+  const kept = truncated ? rows.slice(0, n) : rows;
+  return { ids: kept.map((r) => r.business_id), truncated, last: kept.length ? new Date(kept[kept.length - 1].at.getTime() + 1) : null }; // +1 ms: a Date drops the microseconds, and `since` is an exclusive bound
 }

@@ -38,7 +38,7 @@ async function acceptForExistingAccount(
   const businessId = peek.business_id as string;
   const current = await getMembership(principal.user.id, businessId);
   if (current && !current.disabled_at) return fail(409, 'you are already a member of this business', 'already_member');
-  const accepted = await acceptInviteForExistingUser(token, principal.user.id);
+  const accepted = await acceptInviteForExistingUser(token, principal.user.id, new Date(), auth.sessionId ?? null);
   if (!accepted) return fail(400, BAD_LINK);
   await markEmailVerified(principal.user.id); // the link was mailed to this address
   if (auth.sessionId) await setSessionActiveBusiness(auth.sessionId, businessId);

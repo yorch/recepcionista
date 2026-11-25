@@ -35,3 +35,13 @@ export const OWNER_REPLY_DRAFTS_PER_CALL = 5;
 export const OWNER_REPLY_PER_CUSTOMER_HOUR = 2;
 /** Lead lists per owner call per hour (a caller cannot page through every customer). */
 export const OWNER_REPLY_LISTS_PER_HOUR = 6;
+/**
+ * Distinct leads the owner line may DISCLOSE per business per rolling 24 h, per trust class (verified = STIR A, unverified = anything else, including a
+ * spoofed caller id). A lead already disclosed in the window can be listed again for free; a new one counts. Marking a lead handled cannot widen this
+ * (only a listed lead can be marked), so a spoofed caller sees at most this many distinct leads a day, newest first.
+ */
+export const OWNER_REPLY_DISCLOSED_PER_DAY = { verified: 30, unverified: 10 } as const;
+/** Leads that may be marked handled per business per rolling 24 h, per trust class. */
+export const OWNER_REPLY_HANDLED_PER_DAY = { verified: 30, unverified: 5 } as const;
+/** Leads one owner call may mark handled. */
+export const OWNER_REPLY_HANDLED_PER_CALL = 3;

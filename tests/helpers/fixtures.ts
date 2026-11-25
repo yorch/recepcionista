@@ -144,3 +144,10 @@ export function quietTimezone(now: Date = new Date()): string {
   if (n > 12) n -= 24;
   return n === 0 ? 'Etc/GMT' : n > 0 ? `Etc/GMT+${n}` : `Etc/GMT-${-n}`;
 }
+
+/** The opposite of quietTimezone: an IANA zone in which it is ~noon right now (outside the 9pm-8am quiet window for hours around the run). */
+export function awakeTimezone(now: Date = new Date()): string {
+  let n = (now.getUTCHours() - 12 + 24) % 24;
+  if (n > 12) n -= 24;
+  return n === 0 ? 'Etc/GMT' : n > 0 ? `Etc/GMT+${n}` : `Etc/GMT-${-n}`;
+}

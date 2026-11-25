@@ -14,7 +14,7 @@ import {
   releaseEvent, rescheduleBooking, transitionBooking, type RescheduleResult, countryForBusiness,
 } from '@/lib/db';
 import { emitBookingChanged } from '@/lib/booking-hooks';
-import { deactivateLinksForCancelledBooking } from '@/lib/payments/link-store';
+import { scheduleLinkDeactivation } from '@/lib/payments/link-store';
 import { sendAndLog } from '@/lib/messaging';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { cancelSms, refundSms, rescheduleSms, type Lang } from '@/lib/messaging/templates';
@@ -130,7 +130,7 @@ export async function cancelBooking(input: {
     if (!refund.eligible && (booking.refund_status ?? 'none') === 'none') await markRefundNotApplicable(booking.id);
     // A cancelled booking's deposit link must stop taking money (best effort: the webhook also alerts the owner if it is paid anyway).
     if (!booking.deposit_paid) {
-      await deactivateLinksForCancelledBooking(booking); // the stored link, or (none stored) the ones Stripe has for this booking; never throws
+      await scheduleLinkDeactivation(booking); // queued + background (never waits for Stripe, never pages the account's link list inline); never throws
     }
     await recordAudit({
       actor_kind: input.actor.kind, actor_user_id: input.actor.user_id ?? null, business_id: booking.business_id, action: 'booking.cancelled',

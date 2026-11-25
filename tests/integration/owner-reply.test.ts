@@ -6,14 +6,7 @@
  */
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { cleanup, loadDb, loadPrisma, newBusiness, phone, quietTimezone, toolRequest, twilioSignature, uniq } from '../helpers/fixtures';
-
-/** A zone where it is ~noon right now (outside quiet hours for hours around the run). */
-function awakeTimezone(now: Date = new Date()): string {
-  let n = (now.getUTCHours() - 12 + 24) % 24;
-  if (n > 12) n -= 24;
-  return n === 0 ? 'Etc/GMT' : n > 0 ? `Etc/GMT+${n}` : `Etc/GMT-${-n}`;
-}
+import { awakeTimezone, cleanup, loadDb, loadPrisma, newBusiness, phone, quietTimezone, toolRequest, twilioSignature, uniq } from '../helpers/fixtures';
 
 integration('owner voice reply (postgres)', () => {
   let db: Awaited<ReturnType<typeof loadDb>>;
@@ -494,7 +487,11 @@ integration('owner voice reply (postgres)', () => {
       expect(cb.message).not.toContain(a.e164);
       expect(await lastOwnerText(biz)).toContain(a.e164);
       expect(await toCustomer(biz, a.e164)).toHaveLength(0);
-      expect((await tool(biz, s, 'mark_lead_handled', { lead_ref: '1' })).ok).toBe(true);
+      const readBack = await tool(biz, s, 'mark_lead_handled', { lead_ref: '1' }); // report 16 H1: a read-back first, nothing is hidden yet
+      expect(readBack.ok).toBe(true);
+      expect(readBack.message).toContain('Is that right?');
+      expect((await tool(biz, s, 'list_recent_leads')).message).toContain('Ana');
+      expect((await tool(biz, s, 'mark_lead_handled', { lead_ref: '1', confirmed: true })).ok).toBe(true);
       const list = await tool(biz, s, 'list_recent_leads');
       expect(list.message).not.toContain('Ana');
       expect(list.message).toContain('Ben');

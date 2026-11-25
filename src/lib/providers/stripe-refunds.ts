@@ -106,6 +106,8 @@ export interface ListedRefund {
   amount_cents: number;
   /** Our own `booking_id` metadata (set by createRefund); null for a refund made in the Stripe dashboard. */
   booking_id: string | null;
+  /** Stripe's `created` (unix seconds), or null when it was not returned. */
+  created?: number | null;
 }
 
 /**
@@ -115,8 +117,9 @@ export interface ListedRefund {
 export async function listRefundsForPaymentIntent(paymentIntentId: string, fetchImpl: typeof fetch = fetch): Promise<ListedRefund[] | null> {
   if (!/^pi_[A-Za-z0-9_]+$/.test(paymentIntentId)) throw new RefundProviderError('no Stripe payment is recorded for this deposit', true, undefined, 'no_payment_reference');
   if (!stripeConfigured()) return null;
-  const r = await call<{ data?: { id?: string; status?: string; amount?: number; metadata?: Record<string, string> | null }[] }>('GET', `/refunds?payment_intent=${encodeURIComponent(paymentIntentId)}&limit=100`, undefined, undefined, fetchImpl);
+  const r = await call<{ data?: { id?: string; status?: string; amount?: number; created?: number; metadata?: Record<string, string> | null }[] }>('GET', `/refunds?payment_intent=${encodeURIComponent(paymentIntentId)}&limit=100`, undefined, undefined, fetchImpl);
   return (r.data ?? []).filter((x) => typeof x.id === 'string').map((x) => ({
     id: x.id as string, status: String(x.status ?? 'pending'), amount_cents: Math.round(Number(x.amount ?? 0)), booking_id: x.metadata?.booking_id ? String(x.metadata.booking_id) : null,
+    created: typeof x.created === 'number' && Number.isFinite(x.created) ? x.created : null,
   }));
 }

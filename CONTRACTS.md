@@ -174,10 +174,10 @@ No new HTTP route. Four more owner-line voice tools on `POST /api/voice/tools/[t
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `list_recent_leads` | none | `{ok, message, data:{stage:'leads', count}}`; `message` is up to five numbered structured lines (kind, first name, last 4 digits, time) and snapshots the numbers for this owner call |
+| `list_recent_leads` | none | `{ok, message, data:{stage:'leads', count}}`; `message` is up to five numbered structured lines (kind, first name, last 4 digits, time) and snapshots the numbers for this owner call; the distinct leads a caller-identity class may hear per day are capped (10 unverified / 30 verified), a spent budget answers `ok:false` |
 | `draft_reply` | `lead_ref` (the number from the list, "1".."5"), `message` (<= 120 chars, plain words), `confirmed` | `confirmed=false`: read-back (`data.stage = 'read_back'`); `confirmed=true` after the identical read-back: `data.stage = 'proposed'` and a code is texted to the owner; the customer is texted only by `YES <code>` |
-| `mark_lead_handled` | `lead_ref` | hides that customer from later lists |
+| `mark_lead_handled` | `lead_ref`, `confirmed` | `confirmed=false`: read-back (`data.stage = 'read_back'`); `confirmed=true` after it: hides that customer from later lists of the same identity class (3 per call, 5 / 30 per day unverified / verified) |
 | `get_callback_number` | `lead_ref` | texts the owner (only) the customer's number |
 
-There is no recipient argument: the recipient comes from the call / booking row of the business. SMS commands at `POST /api/sms/inbound` (verified owner phone only, after STOP/START/HELP): `YES <code>` sends, `NO <code>` cancels, `UNDO <code>` answers that a sent text cannot be undone. Table `owner_replies` (`status`: proposed, sending, sent, cancelled, expired, refused, failed). Audit actions `owner_reply.*`. Customer text: `<Business>: <words>. Reply STOP to opt out` (sms_log kind `manual`, consent basis `owner_voice_reply`).
+There is no recipient argument: the recipient comes from the call / booking row of the business. SMS commands at `POST /api/sms/inbound` (verified owner phone only, after STOP/START/HELP): `YES <code>` sends, `NO <code>` cancels, `UNDO <code>` answers that a sent text cannot be undone. A bare `NO` from the verified owner phone cancels every waiting draft; a bare `YES` asks for the code. Table `owner_replies` (`status`: proposed, sending, sent, uncertain, cancelled, expired, refused, failed; `uncertain` = may or may not have been delivered, never retried). Audit actions `owner_reply.*`. Customer text: `<Business>: <words>. Reply STOP to opt out` (sms_log kind `manual`, consent basis `owner_voice_reply`).
 

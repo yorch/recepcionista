@@ -388,3 +388,22 @@ One hand-written migration, `20261206120000_residual_gaps` (additive, re-runnabl
 | Refund pending forever (13 H2) | `POST /api/bookings/:id/refund/check` ("Check with Stripe", owner, step-up) and the `reconcile` job after `REFUND_RECONCILE_AFTER_HOURS`: lists the payment's refunds in Stripe and adopts the refund found or marks the attempt failed (only when none exists and it is 30 minutes old), never creates one; audited (`booking.refund_checked`, `booking.refund_failed`) | `tests/integration/phase2.test.ts` "residual H2", `tests/residual-pure.test.ts` |
 | Old payment links (13 L1) | on cancel with no stored link id the booking's links are found in Stripe by `booking_id` metadata (paged, bounded) and deactivated, audited with `via: stripe_lookup` | `tests/integration/phase2.test.ts` "residual L1" |
 | Revoked sessions (15 L5) | `user_sessions.revoked_business_ids`: "Sign out of this business", disabling and removing a membership mark the person's other sessions; those cannot resolve to or switch to the business until a new login (or an accepted invitation) | `tests/db/multi-business.test.ts` "residual L5" |
+
+
+## Reviews 16 and 17 (`docs/review/16-adv-voice-reply.md`, `docs/review/17-adv-residual-fixes.md`)
+
+One hand-written migration, `20261207120000_review16_fixes` (additive, re-runnable guarded blocks: the `owner_replies` status CHECKs gain `uncertain`, `calls.forward_pending_key`). Zero drift proven with `prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url <own shadow> --exit-code`, and a populated old-schema upgrade test.
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| 16 H1 lead enumeration | per identity class: distinct leads disclosed per day capped (10 unverified / 30 verified, atomic under an advisory lock), `mark_lead_handled` needs a read-back, 3 per call and 5 / 30 per day, and an unverified mark hides only from unverified listings | `tests/integration/review16-owner-reply.test.ts` |
+| 16 M1 post-send errors | `SentNotLoggedError`: a failure after the provider accepted the text keeps the reply `sent` (sms_log re-tried best effort); a provider timeout and a stalled claim end `uncertain`; the duplicate guard and the daily cap count sent / sending / uncertain | same + `tests/db/review16-migration.test.ts` |
+| 16 M2 daily cap | cap, duplicate guard and the `proposed -> sending` claim are one transaction under `pg_advisory_xact_lock` | same ("eight racing YES texts") |
+| 16 L1 scanner | NFKC + Unicode digit folding, spelled digits, `/ . ( )` separators, vanity numbers, links in words, spaced / leetspeak brands, credential and wallet asks, non-Latin letters refused | `tests/owner-reply-pure.test.ts` |
+| 16 L2 spoof warning | `Not you? Reply NO <code>.`; a bare NO cancels all waiting drafts, a bare YES asks for the code | `tests/owner-reply-pure.test.ts`, `review16-owner-reply.test.ts` |
+| 16 L3 stuck rows / erasure | stale `sending` swept to `uncertain` by the reconcile job and shown as unknown on the dashboard; the lead-handled marker is a keyed HMAC and erasure deletes it | `review16-owner-reply.test.ts` |
+| 17 H1, M2 refund recovery | the booking's stored Stripe refund id is matched first (dashboard refunds), a live foreign refund blocks "never reached Stripe" (409 `foreign_refund`), an older failed attempt does not count as the current one, clicking Refund on a pending refund this app did not make is refused | `tests/integration/phase2.test.ts` |
+| 17 M3 sessions | accepting an invitation lifts the sign-out only for the accepting session | `tests/db/multi-business.test.ts` |
+| 17 M4 payment links on cancel | no Stripe call unless a link was attempted; queued, background, short timeouts, tenant scoped, retried by the reconcile job | `tests/integration/phase2.test.ts` |
+| 17 M5 reconcile metering | a transferred call is split with `splitTransferSeconds`; the forwarded leg goes through the per-sid forward metering | `tests/integration/telephony-phase2.test.ts` |
+| 17 L6-L8 | stuck-refund pass ordered by last check; a usage-warning check error keeps the retry marker; changed-since list ordered with a cursor; orphan sweep with a cursor and retention coverage; call-script rebuild is a compare-and-swap and recognises older generated scripts; pending-forward key stored | `phase2.test.ts`, `residual-gaps.test.ts`, `telephony-phase2.test.ts` |

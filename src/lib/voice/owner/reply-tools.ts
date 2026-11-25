@@ -19,9 +19,9 @@ import { attestationLevel } from '@/lib/stir';
 import { callClock } from './code';
 import { OWNER_CONFIRM_SMS_PER_HOUR, OWNER_LOCKOUT_MS, OWNER_BAD_PROPOSALS_LOCKOUT, OWNER_PREVIEW_TTL_MS, ownerBudgetId, ownerTrustOf } from './config';
 import {
-  OWNER_REPLY_DRAFTS_PER_CALL, OWNER_REPLY_LISTS_PER_HOUR, OWNER_REPLY_TTL_MS, ownerReplyDailyLimit, ownerReplyEnabled, ownerReplyRequiresAttestation,
+  OWNER_REPLY_DRAFTS_PER_CALL, OWNER_REPLY_HANDLED_PER_CALL, OWNER_REPLY_LISTS_PER_HOUR, OWNER_REPLY_TTL_MS, ownerReplyDailyLimit, ownerReplyEnabled, ownerReplyRequiresAttestation,
 } from './reply-config';
-import { markHandled, resolveLead, snapshotLeads } from './reply-leads';
+import { markHandled, reserveHandled, resolveLead, snapshotLeads } from './reply-leads';
 import { replyCode } from './reply-sms';
 import { bodyProblemMessage, customerReplyText, last4Of, leadLine, ownerReplyConfirmSms, ownerTextFits, parseLeadRef, validateReplyBody } from './reply-text';
 import { auditOwnerKb } from './apply';
@@ -79,16 +79,21 @@ async function listLeads(g: Gate): Promise<OwnerToolResult> {
   const rl = await rateLimit(`owner-reply:list:${call.id}`, OWNER_REPLY_LISTS_PER_HOUR, 3600_000, { failClosed: true });
   if (!rl.allowed) return fail(lang, 'That is enough lists for one call. Please call again later.', 'Ya hubo suficientes listas en esta llamada. Llame de nuevo más tarde.');
   const now = new Date();
-  const leads = await snapshotLeads(business, call, now);
+  const trust = ownerTrustOf(call);
+  const { leads, capped } = await snapshotLeads(business, call, now, trust);
+  if (leads.length === 0 && capped) {
+    // The daily disclosure budget of this identity class is spent: say so without revealing anything.
+    return fail(lang, 'I have already read out the most customers this line may hear about today. Please use the dashboard, or try again tomorrow.', 'Ya leí el máximo de clientes que esta línea puede escuchar hoy. Use el panel o intente mañana.');
+  }
   if (leads.length === 0) return { ok: true, message: say(lang, 'There are no recent customers waiting for a reply.', 'No hay clientes recientes esperando respuesta.'), data: { stage: 'leads', count: 0 } };
   const tz = tzOf(business);
   const lines = leads.map((l) => leadLine(lang, l, now, tz, callClock(l.at, tz) || ''));
-  await auditReply('leads_listed', business.id, null, { call: call.id, count: leads.length });
+  await auditReply('leads_listed', business.id, null, { call: call.id, count: leads.length, capped, trust });
   return {
     ok: true,
     message: say(lang,
-      `${lines.join(' ')} Say the number of the customer you want to reply to. Only these numbers work on this call.`,
-      `${lines.join(' ')} Diga el número del cliente al que quiere responder. Solo estos números sirven en esta llamada.`),
+      `${lines.join(' ')} ${capped ? 'That is all this line can read out today. ' : ''}Say the number of the customer you want to reply to. Only these numbers work on this call.`,
+      `${lines.join(' ')} ${capped ? 'Eso es todo lo que esta línea puede leer hoy. ' : ''}Diga el número del cliente al que quiere responder. Solo estos números sirven en esta llamada.`),
     data: { stage: 'leads', count: leads.length },
   };
 }
@@ -176,8 +181,27 @@ async function handled(g: Gate, args: Record<string, unknown>): Promise<OwnerToo
   const n = parseLeadRef(args.lead_ref);
   const lead = n ? await resolveLead(business, call, n) : null;
   if (!lead) return fail(lang, 'I do not have a customer with that number on this call. Let me list them first.', 'No tengo un cliente con ese número en esta llamada. Primero voy a leer la lista.');
-  await markHandled(business.id, lead.e164);
-  await auditReply('handled', business.id, null, { call: call.id });
+  const trust = ownerTrustOf(call);
+  const to = lead.name ?? say(lang, 'that customer', 'ese cliente');
+  const readback = say(lang,
+    `I will mark ${to} (number ending ${lead.last4}) as handled, so they are not listed again. Is that right?`,
+    `Marcaré a ${to} (número que termina en ${lead.last4}) como atendido, para que no vuelva a aparecer. ¿Es correcto?`);
+  const fingerprint = `handled:${lead.rowKind}:${lead.rowId}`;
+  if (args.confirmed !== true) {
+    await recordPreview(call.id, fingerprint);
+    return { ok: true, message: readback, data: { stage: 'read_back' } };
+  }
+  if (!(await consumePreview(call.id, fingerprint))) {
+    await recordPreview(call.id, fingerprint);
+    return { ok: false, message: say(lang, `Before I can do that, let me read it back. ${readback}`, `Antes de hacerlo, déjeme repetirlo. ${readback}`), data: { stage: 'read_back' } };
+  }
+  // Per call and per identity class per day: a caller cannot hide (or, by hiding, walk through) the whole lead list.
+  const rl = await rateLimit(`owner-reply:handled:${call.id}`, OWNER_REPLY_HANDLED_PER_CALL, 3600_000, { failClosed: true });
+  if (!rl.allowed || !(await reserveHandled(business.id, trust))) {
+    return fail(lang, 'That is the limit of customers I can mark as handled from this line. Please use the dashboard, or try again tomorrow.', 'Ese es el límite de clientes que puedo marcar como atendidos desde esta línea. Use el panel o intente mañana.');
+  }
+  await markHandled(business.id, lead.e164, trust);
+  await auditReply('handled', business.id, null, { call: call.id, trust });
   return { ok: true, message: say(lang, 'Marked as handled. It will not be listed again.', 'Marcado como atendido. No volverá a aparecer en la lista.'), data: { stage: 'handled' } };
 }
 

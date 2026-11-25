@@ -4,7 +4,12 @@
  * customer text is decided at this moment, from the database and the clock, never from what the model said earlier:
  *
  *  - single use: the 'proposed' -> 'sending' claim is one atomic UPDATE, so a replayed code, a Twilio retry or two racing YES texts send at most once
- *    (a crash after the claim leaves 'sending': the text is NEVER retried, the owner is not told it was sent);
+ *    (a crash after the claim leaves 'sending': the text is NEVER retried, the owner is not told it was sent; the reconcile job moves a stale
+ *    'sending' row to 'uncertain', and the dashboard shows it as such);
+ *  - the per-business daily cap and the identical-text guard are decided in the SAME transaction as the claim, under an advisory lock, and count
+ *    sent | sending | uncertain rows, so racing YES texts cannot overrun them;
+ *  - once the provider accepted the text it is SENT: a failure afterwards (the sms_log write, the status update) never turns it into "failed", and
+ *    an unknown provider outcome (timeout) is 'uncertain', which the duplicate guard also covers;
  *  - 30 minute expiry, recipient re-derived from the lead row of THIS business (erased / anonymised / foreign rows refuse), never the owner phone or
  *    the business line;
  *  - the usual outbound policy through sendAndLog (opt-out list, quiet hours 9 PM - 8 AM in the business zone, plan SMS cap, STOP footer), plus a
@@ -12,7 +17,8 @@
  * Quiet hours REFUSE (nothing is queued): a deferred text would outlive the confirmation the owner just gave.
  */
 import { countryForBusiness, isOptedOut, prisma, recordAudit } from '@/lib/db';
-import { sendAndLog } from '@/lib/messaging';
+import { logSms } from '@/lib/db';
+import { SentNotLoggedError, sendAndLog } from '@/lib/messaging';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { rateLimit } from '@/lib/ratelimit';
 import { tzOf } from '@/lib/time';
@@ -31,6 +37,7 @@ export type ReplyOutcome =
   | { kind: 'sent'; name: string | null; segments: number }
   | { kind: 'refused'; reason: ReplyRefusal; name: string | null }
   | { kind: 'failed'; name: string | null }
+  | { kind: 'uncertain'; name: string | null }
   | { kind: 'expired' }
   | { kind: 'already'; status: string };
 
@@ -43,7 +50,7 @@ export async function auditReply(action: string, businessId: string, reply: Pick
   }).catch(() => {});
 }
 
-const finish = async (id: string, data: { status: 'refused' | 'failed' | 'sent' | 'expired' | 'cancelled'; refuseReason?: string | null; smsLogId?: string | null; segments?: number; sentAt?: Date; decidedAt?: Date }) =>
+const finish = async (id: string, data: { status: 'refused' | 'failed' | 'sent' | 'expired' | 'cancelled' | 'uncertain'; refuseReason?: string | null; smsLogId?: string | null; segments?: number; sentAt?: Date; decidedAt?: Date }) =>
   prisma.ownerReply.update({ where: { id }, data: { ...data, decidedAt: data.decidedAt ?? new Date() } });
 
 /** The lead row the recipient came from must still exist, belong to this business and still carry the SAME number (erasure nulls / deletes it). */
@@ -60,13 +67,48 @@ async function leadStillValid(reply: OwnerReply, now: Date): Promise<boolean> {
   return false;
 }
 
+/** Rows that may have put (or are putting) a text in front of the customer: they count toward the daily cap and the duplicate guard. */
+const SENT_LIKE = ['sent', 'sending', 'uncertain'] as const;
+
+type ClaimResult = { kind: 'claimed' } | { kind: 'refused'; reason: ReplyRefusal } | { kind: 'not_claimed' };
+
+/**
+ * The claim, the daily cap and the duplicate guard in ONE transaction under a per-business advisory lock: two YES texts racing for different
+ * drafts see each other's 'sending' rows, so the cap cannot be overrun. A refusal is written in the same transaction.
+ */
+async function claimReply(business: Business, replyId: string, now: Date): Promise<ClaimResult> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owner-reply-send:${business.id}`}))`;
+    const row = await tx.ownerReply.findFirst({ where: { id: replyId, businessId: business.id, status: 'proposed', expiresAt: { gt: now } } });
+    if (!row) return { kind: 'not_claimed' } as const;
+    const day = new Date(now.getTime() - 24 * 3600_000);
+    const sentToday = await tx.ownerReply.count({ where: { businessId: business.id, status: { in: [...SENT_LIKE] }, decidedAt: { gte: day } } });
+    const hourAgo = new Date(now.getTime() - 3600_000);
+    const dup = sentToday >= ownerReplyDailyLimit() ? 0 : await tx.ownerReply.count({
+      where: { businessId: business.id, toE164: row.toE164, body: row.body, id: { not: row.id }, status: { in: [...SENT_LIKE] }, decidedAt: { gte: hourAgo } },
+    });
+    const refuse = sentToday >= ownerReplyDailyLimit() ? 'daily_limit' : dup > 0 ? 'duplicate' : null;
+    if (refuse) {
+      await tx.ownerReply.update({ where: { id: row.id }, data: { status: 'refused', refuseReason: refuse, decidedAt: now } });
+      return { kind: 'refused', reason: refuse } as const;
+    }
+    const claim = await tx.ownerReply.updateMany({ where: { id: row.id, status: 'proposed' }, data: { status: 'sending', decidedAt: now } });
+    return claim.count === 1 ? ({ kind: 'claimed' } as const) : ({ kind: 'not_claimed' } as const);
+  });
+}
+
+/** Provider errors that say nothing about whether the text went out (the request may have reached the carrier before the timeout). */
+const AMBIGUOUS_PROVIDER_ERROR = /timeout|timed out|abort|network|socket|reset|econn|fetch failed|terminated/i;
+
 /** Confirm (YES): send the text if, and only if, every check still passes. Idempotent: a second call reports what already happened. */
 export async function confirmOwnerReply(business: Business, replyId: string, now: Date = new Date()): Promise<ReplyOutcome> {
-  const claim = await prisma.ownerReply.updateMany({
-    where: { id: replyId, businessId: business.id, status: 'proposed', expiresAt: { gt: now } },
-    data: { status: 'sending', decidedAt: now },
-  });
-  if (claim.count !== 1) {
+  const claimed = await claimReply(business, replyId, now);
+  if (claimed.kind === 'refused') {
+    const row = await prisma.ownerReply.findFirst({ where: { id: replyId, businessId: business.id } });
+    await auditReply('refused', business.id, { id: replyId }, { reason: claimed.reason });
+    return { kind: 'refused', reason: claimed.reason, name: row?.toName ?? null };
+  }
+  if (claimed.kind === 'not_claimed') {
     const row = await prisma.ownerReply.findFirst({ where: { id: replyId, businessId: business.id } });
     if (row && row.status === 'proposed') { // past its 30 minutes
       const expired = await prisma.ownerReply.updateMany({ where: { id: row.id, status: 'proposed' }, data: { status: 'expired', decidedAt: now } });
@@ -83,6 +125,16 @@ export async function confirmOwnerReply(business: Business, replyId: string, now
     log.info('refused', { business: business.id, reason });
     return { kind: 'refused', reason, name };
   };
+  let accepted = false; // the provider took the text: from here on it is SENT, whatever else fails
+  let smsId: string | null = null;
+  let segments = reply.segments;
+  const markSent = async (): Promise<void> => {
+    // Best effort, a few tries: the text is out, so the row must say so even when the database is flaky.
+    for (let i = 0; i < 3; i++) {
+      try { await finish(reply.id, { status: 'sent', smsLogId: smsId, segments, sentAt: new Date() }); break; } catch (e) { log.error('mark_sent_failed', { reply: reply.id, try: i, err: e }); }
+    }
+    await auditReply('sent', business.id, reply, { sms: smsId, segments });
+  };
   try {
     if (!ownerReplyEnabled()) return await refuse('disabled');
     if (!(await leadStillValid(reply, now))) return await refuse('lead_gone');
@@ -91,19 +143,29 @@ export async function confirmOwnerReply(business: Business, replyId: string, now
     // The opt-out list always wins (sendAndLog checks it again; checked here to say so honestly and to burn no budget).
     if (await isOptedOut(business.id, reply.toE164, country)) return await refuse('opted_out');
     if (isQuietHour(now, tzOf(business))) return await refuse('quiet_hours');
-    const day = new Date(now.getTime() - 24 * 3600_000);
-    const sentToday = await prisma.ownerReply.count({ where: { businessId: business.id, status: 'sent', sentAt: { gte: day } } });
-    if (sentToday >= ownerReplyDailyLimit()) return await refuse('daily_limit');
-    const dup = await prisma.ownerReply.count({ where: { businessId: business.id, toE164: reply.toE164, body: reply.body, status: 'sent', sentAt: { gte: new Date(now.getTime() - 3600_000) } } });
-    if (dup > 0) return await refuse('duplicate');
     const text = customerReplyText(business.name, reply.body);
     if (!text.ok) return await refuse('too_long');
+    segments = text.segments;
     const hour = await rateLimit(`owner-reply:cust:${business.id}:${reply.toE164}`, OWNER_REPLY_PER_CUSTOMER_HOUR, 3600_000, { failClosed: true });
     if (!hour.allowed) return await refuse('customer_limit');
 
-    const { sms, result, blocked } = await sendAndLog({
-      business_id: business.id, to: reply.toE164, body: text.text, kind: 'manual', consent_basis: CONSENT_BASIS, now,
-    });
+    let sentOut: Awaited<ReturnType<typeof sendAndLog>>;
+    try {
+      sentOut = await sendAndLog({ business_id: business.id, to: reply.toE164, body: text.text, kind: 'manual', consent_basis: CONSENT_BASIS, now });
+    } catch (err) {
+      if (!(err instanceof SentNotLoggedError)) throw err;
+      // The provider accepted the text; only the sms_log row is missing. It is sent. Try once more to write the log row, then say so.
+      accepted = true;
+      log.error('sent_not_logged', { business: business.id, reply: reply.id, err });
+      try {
+        const sms = await logSms({ business_id: business.id, to_phone: reply.toE164, body: text.text, kind: 'manual', booking_id: null, provider_id: err.result.id || null, status: err.result.status === 'mock' ? 'mock' : 'sent', consent_basis: CONSENT_BASIS }, { country });
+        smsId = sms.id;
+      } catch { /* best effort */ }
+      await markSent();
+      return { kind: 'sent', name, segments };
+    }
+    const { sms, result, blocked } = sentOut;
+    smsId = sms.id;
     if (blocked) {
       const reason: ReplyRefusal = blocked === 'blocked_opt_out' ? 'opted_out' : blocked === 'blocked_quiet_hours' ? 'quiet_hours' : blocked === 'blocked_no_consent' ? 'no_consent' : blocked === 'blocked_cap' ? 'cap' : 'blocked';
       await finish(reply.id, { status: 'refused', refuseReason: reason, smsLogId: sms.id });
@@ -111,20 +173,43 @@ export async function confirmOwnerReply(business: Business, replyId: string, now
       return { kind: 'refused', reason, name };
     }
     if (result.status === 'failed') {
+      if (AMBIGUOUS_PROVIDER_ERROR.test(result.error ?? '')) { // a timeout: the carrier may still have taken it. Never retried, never called "not sent".
+        accepted = true;
+        await finish(reply.id, { status: 'uncertain', refuseReason: 'provider_unknown', smsLogId: sms.id });
+        await auditReply('uncertain', business.id, reply, { sms: sms.id });
+        return { kind: 'uncertain', name };
+      }
       await finish(reply.id, { status: 'failed', refuseReason: 'provider', smsLogId: sms.id });
       await auditReply('failed', business.id, reply, { sms: sms.id });
       return { kind: 'failed', name };
     }
-    await finish(reply.id, { status: 'sent', smsLogId: sms.id, segments: text.segments, sentAt: new Date() });
-    await auditReply('sent', business.id, reply, { sms: sms.id, segments: text.segments });
-    return { kind: 'sent', name, segments: text.segments };
+    accepted = true;
+    await markSent();
+    return { kind: 'sent', name, segments };
   } catch (err) {
-    // Unknown state after the claim: never retry (at most once). The row stays 'sending' unless the failure came before the provider call.
-    log.error('send_failed', { business: business.id, reply: reply.id, err });
+    log.error('send_failed', { business: business.id, reply: reply.id, accepted, err });
+    if (accepted) { // the text is out; only the bookkeeping failed. Never "failed": that would invite a second copy.
+      await markSent().catch(() => {});
+      return { kind: 'sent', name, segments };
+    }
+    // Failure before the provider was reached: nothing went out, nothing was charged to the customer.
     await prisma.ownerReply.updateMany({ where: { id: reply.id, status: 'sending' }, data: { status: 'failed', refuseReason: 'error' } }).catch(() => {});
     await auditReply('failed', business.id, reply, { error: true });
     return { kind: 'failed', name };
   }
+}
+
+/**
+ * Rows stuck in 'sending' (a crash between the claim and the outcome) become 'uncertain' after a grace period: the text may or may not have gone
+ * out, it is never retried, and the owner is told to check. Called by the reconcile job. Returns how many rows moved.
+ */
+export const STALE_SENDING_MS = 10 * 60_000;
+export async function sweepStaleOwnerReplies(now: Date = new Date()): Promise<number> {
+  const res = await prisma.ownerReply.updateMany({
+    where: { status: 'sending', decidedAt: { lt: new Date(now.getTime() - STALE_SENDING_MS) } },
+    data: { status: 'uncertain', refuseReason: 'stalled' },
+  });
+  return res.count;
 }
 
 /** Cancel (NO): only while the reply is still waiting. */

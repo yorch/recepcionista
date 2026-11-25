@@ -99,14 +99,14 @@ export async function createPaymentLink(
  * Stripe. Returns false (never throws) when Stripe is not configured, the id is not a real link, or the call failed (the webhook still
  * alerts the owner if the link is paid anyway).
  */
-export async function deactivatePaymentLink(linkId: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+export async function deactivatePaymentLink(linkId: string, fetchImpl: typeof fetch = fetch, timeoutMs: number = STRIPE_TIMEOUT_MS): Promise<boolean> {
   if (!hasStripe() || !/^plink_[A-Za-z0-9]{6,100}$/.test(linkId)) return false;
   try {
     const res = await fetchImpl(`https://api.stripe.com/v1/payment_links/${encodeURIComponent(linkId)}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ active: 'false' }),
-      signal: AbortSignal.timeout(STRIPE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(Math.max(500, Math.min(timeoutMs, STRIPE_TIMEOUT_MS))),
     });
     if (!res.ok) log.warn('link.deactivate_failed', { status: res.status });
     return res.ok;
@@ -119,11 +119,12 @@ export async function deactivatePaymentLink(linkId: string, fetchImpl: typeof fe
 /**
  * Active Payment Links this app created for ONE booking, found through Stripe (GET /v1/payment_links?active=true, newest first, then matched on
  * our `booking_id` metadata). Used only when the booking has no stored link id (a link texted before the id was stored). Bounded: at most
- * `maxPages` pages of 100 and `budgetMs` in total, so a cancel never hangs on a big account. Returns [] when Stripe is not configured or fails.
+ * `maxPages` pages of 100 and `budgetMs` in total, so a cancel never hangs on a big account. `complete` is false when Stripe failed (the caller may retry); nothing is returned when Stripe is not configured.
+ * NEVER on a request path: the caller runs it in the background (payments/link-store.ts), because the platform account's active list holds every tenant's links.
  * Stripe has no metadata filter for payment links, so an account with more than `maxPages * 100` active links is only searched that far (documented).
  */
-export async function findActivePaymentLinksForBooking(bookingId: string, opts: { fetchImpl?: typeof fetch; maxPages?: number; budgetMs?: number } = {}): Promise<string[]> {
-  if (!hasStripe() || !/^[0-9a-f-]{36}$/i.test(bookingId)) return [];
+export async function findActivePaymentLinksForBooking(bookingId: string, opts: { fetchImpl?: typeof fetch; maxPages?: number; budgetMs?: number; businessId?: string } = {}): Promise<{ ids: string[]; complete: boolean }> {
+  if (!hasStripe() || !/^[0-9a-f-]{36}$/i.test(bookingId)) return { ids: [], complete: true };
   const fetchImpl = opts.fetchImpl ?? fetch;
   const deadline = Date.now() + (opts.budgetMs ?? 20_000);
   const found: string[] = [];
@@ -135,18 +136,20 @@ export async function findActivePaymentLinksForBooking(bookingId: string, opts: 
       const res = await fetchImpl(`https://api.stripe.com/v1/payment_links?${qs}`, {
         headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` }, signal: AbortSignal.timeout(Math.min(STRIPE_TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
       });
-      if (!res.ok) { log.warn('link.lookup_failed', { status: res.status }); break; }
+      if (!res.ok) { log.warn('link.lookup_failed', { status: res.status }); return { ids: found, complete: false }; }
       const json = (await res.json()) as { data?: { id?: string; metadata?: Record<string, string> | null }[]; has_more?: boolean };
       const rows = json.data ?? [];
-      for (const r of rows) if (typeof r.id === 'string' && r.metadata?.booking_id === bookingId) found.push(r.id);
+      // Tenant scope: the platform account holds every business's links; a link counts only when it names this booking AND (when it names one) this business.
+      for (const r of rows) if (typeof r.id === 'string' && r.metadata?.booking_id === bookingId && (!opts.businessId || !r.metadata?.business_id || r.metadata.business_id === opts.businessId)) found.push(r.id);
       if (!json.has_more || rows.length === 0) break;
       after = rows[rows.length - 1].id ?? null;
       if (!after) break;
     }
   } catch (err) {
     log.warn('link.lookup_error', { err });
+    return { ids: found, complete: false };
   }
-  return found;
+  return { ids: found, complete: true }; // reaching the page / time budget without an error is final (the documented bound); `complete: false` is an error
 }
 
 export function appUrl(): string {

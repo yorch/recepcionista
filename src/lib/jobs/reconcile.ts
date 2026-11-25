@@ -1,10 +1,12 @@
 /** Job wrapper: metering reconciliation (voice/reconcile.ts) and cap-warning safety net (billing/warnings.ts). Imported by jobs/index.ts. */
-import { listBusinessIdsWithUsageChangedSince, listLiveBusinessesForJobs, prisma, recordAudit, withLease } from '@/lib/db';
+import { listBusinessesWithUsageChangedSince, listLiveBusinessesForJobs, prisma, recordAudit, withLease } from '@/lib/db';
 import { checkUsageWarnings } from '@/lib/billing/warnings';
 import { logger } from '@/lib/log';
 import { reconcileUnmeteredCalls, settlePendingForwards } from '@/lib/voice/reconcile';
 import { drainDirtyAgents } from '@/lib/voice/agent-resync';
 import { reconcileStuckRefunds } from '@/lib/refund-service';
+import { drainLinkDeactivations } from '@/lib/payments/link-store';
+import { sweepStaleOwnerReplies } from '@/lib/messaging/owner-reply';
 
 const log = logger('jobs/reconcile');
 
@@ -33,6 +35,16 @@ export async function runReconcileJob(opts: { now?: Date; dryRun?: boolean; fetc
     const refunds = await reconcileStuckRefunds({ now, dryRun: opts.dryRun });
     report.counts = { ...report.counts, refunds_stuck: refunds.considered, refunds_resolved: refunds.resolved };
     report.processed += refunds.resolved;
+    // Deposit links of cancelled bookings whose background deactivation failed (Stripe down, ...): retried for up to 3 days.
+    if (!opts.dryRun) {
+      const links = await drainLinkDeactivations({ now, fetchImpl: opts.fetchImpl });
+      report.counts = { ...report.counts, link_deactivations: links.considered, link_deactivations_done: links.done };
+    }
+    // Owner voice replies left in 'sending' by a crash: moved to 'uncertain' (never retried), so the dashboard stops saying "waiting".
+    if (!opts.dryRun) {
+      const stale = await sweepStaleOwnerReplies(now);
+      report.counts = { ...report.counts, owner_replies_swept: stale };
+    }
   } catch (err) {
     report.errors++;
     report.items.push({ outcome: 'error', detail: { error: (err as Error).message.slice(0, 200) } });
@@ -74,6 +86,7 @@ export async function runUsageWarningsJob(opts: { now?: Date; dryRun?: boolean; 
       const startedAt = new Date();
       let ids: string[];
       let full = true;
+      let cursor: Date | null = null; // set when more businesses changed than one pass reads: the next pass continues from here
       if (opts.businessId) ids = (await listLiveBusinessesForJobs({ businessId: opts.businessId })).map((b) => b.id);
       else {
         const [since, lastFull] = await Promise.all([readMarker('since'), readMarker('full')]);
@@ -81,7 +94,9 @@ export async function runUsageWarningsJob(opts: { now?: Date; dryRun?: boolean; 
         if (full) ids = (await listLiveBusinessesForJobs()).map((b) => b.id);
         else {
           const retry = (await prisma.processedEvent.findMany({ where: { source: RETRY_SOURCE }, select: { id: true }, take: 5000 })).map((r) => r.id);
-          ids = [...new Set([...(await listBusinessIdsWithUsageChangedSince(new Date(since!.getTime() - CHANGED_SLACK_MS))), ...retry])];
+          const changed = await listBusinessesWithUsageChangedSince(new Date(since!.getTime() - CHANGED_SLACK_MS));
+          if (changed.truncated && changed.last) cursor = changed.last;
+          ids = [...new Set([...changed.ids, ...retry])];
         }
       }
       report.counts = { visited: ids.length, full_sweep: full ? 1 : 0 };
@@ -91,17 +106,18 @@ export async function runUsageWarningsJob(opts: { now?: Date; dryRun?: boolean; 
         for (const w of res) {
           report.items.push({ business_id: id, outcome: w.outcome, detail: { kind: w.kind, level: w.level } });
           if (w.outcome === 'sent') report.processed++;
-          if (w.outcome === 'failed') report.errors++;
+          if (w.outcome === 'failed' || w.outcome === 'error') report.errors++;
         }
         if (!opts.businessId) {
           // Something deferred (quiet hours) or failed stays on the list until a later visit finishes it; a clean visit removes the marker.
-          const open = res.some((w) => w.outcome === 'deferred_quiet_hours' || w.outcome === 'failed');
+          const open = res.some((w) => w.outcome === 'deferred_quiet_hours' || w.outcome === 'failed' || w.outcome === 'error');
           if (open) await prisma.processedEvent.upsert({ where: { source_id: { source: RETRY_SOURCE, id } }, create: { source: RETRY_SOURCE, id, status: 'processing' }, update: { createdAt: new Date() } });
           else await prisma.processedEvent.deleteMany({ where: { source: RETRY_SOURCE, id } });
         }
       }
       if (!opts.businessId && !opts.dryRun) {
-        await writeMarker('since', startedAt);
+        // Normally everything up to now; after a truncated read only up to the last business read (the slack is added back when reading).
+        await writeMarker('since', cursor ? new Date(cursor.getTime() + CHANGED_SLACK_MS) : startedAt);
         if (full) await writeMarker('full', startedAt);
       }
     };

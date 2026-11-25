@@ -170,6 +170,8 @@ model Call {
   /// Forward seconds of a transferred call that are still to be written to the usage counters (set before the AI part is recorded, cleared
   /// once the forward part is recorded): the reconcile job finishes a forward write that failed, so those seconds are never lost.
   forwardPendingSecs Int?      @map("forward_pending_secs")
+  /// The dedupe key (call sid, else conversation id) the forward seconds were / will be metered under: stored with forward_pending_secs so a later-filled call_sid cannot make the settle job meter them again under a new key.
+  forwardPendingKey  String?   @map("forward_pending_key")
 
   business         Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
   bookings         Booking[]
@@ -718,7 +720,7 @@ model OwnerReply {
   /// What the owner approved, as typed by the assistant after the read-back (<= 160 chars, no links / numbers).
   body          String
   segments      Int       @default(1)
-  /// 'proposed' | 'sending' | 'sent' | 'cancelled' | 'expired' | 'refused' | 'failed' (CHECK).
+  /// 'proposed' | 'sending' | 'sent' | 'uncertain' | 'cancelled' | 'expired' | 'refused' | 'failed' (CHECK). 'uncertain' = a send that may or may not have gone out (stalled claim, provider timeout): never retried.
   status        String    @default("proposed")
   /// Why a reply was 'refused' / 'failed' (opted_out, quiet_hours, no_consent, cap, daily_limit, customer_limit, lead_gone, ...).
   refuseReason  String?   @map("refuse_reason")

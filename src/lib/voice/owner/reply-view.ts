@@ -1,7 +1,10 @@
 /** What the dashboard sees of an owner voice reply: the words and the customer's first name + last 4 digits, never the full number. */
 import type { OwnerReply } from '@prisma/client';
 
-export type PublicReplyStatus = 'waiting' | 'sent' | 'cancelled' | 'expired' | 'refused' | 'failed';
+export type PublicReplyStatus = 'waiting' | 'sending' | 'sent' | 'uncertain' | 'cancelled' | 'expired' | 'refused' | 'failed';
+
+/** A 'sending' row older than this is shown as 'uncertain' even before the reconcile job moves it (a crash between the claim and the outcome). */
+export const STALE_SENDING_VIEW_MS = 5 * 60_000;
 
 export interface PublicOwnerReply {
   id: string;
@@ -16,9 +19,9 @@ export interface PublicOwnerReply {
   sent_at: string | null;
 }
 
-export const publicReplyStatus = (r: Pick<OwnerReply, 'status' | 'expiresAt'>, now: Date = new Date()): PublicReplyStatus => {
+export const publicReplyStatus = (r: Pick<OwnerReply, 'status' | 'expiresAt'> & { decidedAt?: Date | null }, now: Date = new Date()): PublicReplyStatus => {
   if (r.status === 'proposed') return r.expiresAt.getTime() > now.getTime() ? 'waiting' : 'expired';
-  if (r.status === 'sending') return 'waiting';
+  if (r.status === 'sending') return r.decidedAt && now.getTime() - r.decidedAt.getTime() > STALE_SENDING_VIEW_MS ? 'uncertain' : 'sending';
   return r.status as PublicReplyStatus;
 };
 

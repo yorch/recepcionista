@@ -153,4 +153,76 @@ integration('residual gaps (postgres)', () => {
     await agents.drainDirtyAgents({ now: new Date(Date.now() + 3_600_000) });
     expect((await db.getKnowledgeBase(biz.id))!.call_script).toBe(buildCallScript({ services }, { vertical: 'plumbing' }));
   });
+
+  // ---------------------------------------------------------------- report 17 (L7, L8)
+
+  test('17 L7: a visit whose check hit an error keeps the business on the retry list (it is not a clean visit)', async () => {
+    const biz = await live(100);
+    await use(biz.id, 90);
+    await prisma.processedEvent.deleteMany({ where: { source: 'usage-warn-retry', id: biz.id } });
+    await prisma.processedEvent.create({ data: { source: 'usage-warn-retry', id: biz.id, status: 'processing' } });
+    await prisma.$executeRawUnsafe('ALTER TABLE usage_counters RENAME TO usage_counters_rv17');
+    let rep;
+    try { rep = await withEnv(ENFORCED, async () => job.runUsageWarningsJob({ now: noon(), full: true })); }
+    finally { await prisma.$executeRawUnsafe('ALTER TABLE usage_counters_rv17 RENAME TO usage_counters'); }
+    expect(rep.items.some((i) => i.business_id === biz.id && i.outcome === 'error')).toBe(true);
+    expect(rep.errors).toBeGreaterThanOrEqual(1);
+    expect(await prisma.processedEvent.count({ where: { source: 'usage-warn-retry', id: biz.id } })).toBe(1); // still owed a visit
+    // the next healthy visit sends the warning and clears the marker
+    await withEnv(ENFORCED, async () => job.runUsageWarningsJob({ now: noon(), full: true }));
+    expect(await alerts(biz.id)).toBe(1);
+    expect(await prisma.processedEvent.count({ where: { source: 'usage-warn-retry', id: biz.id } })).toBe(0);
+  });
+
+  test('17 L8: the changed-since list is oldest change first with a cursor, so more changed businesses than one pass reads are continued, not skipped', async () => {
+    const ids = [(await live()).id, (await live()).id, (await live()).id];
+    for (const id of ids) await use(id, 1);
+    try {
+      for (let i = 0; i < ids.length; i++) await prisma.$executeRaw`UPDATE usage_counters SET updated_at = now() + ${i + 10} * interval '1 day' WHERE business_id = ${ids[i]}`; // distinct, far in the future (nothing else is that new)
+      const since = new Date(Date.now() + 9 * 86_400_000);
+      const first = await db.listBusinessesWithUsageChangedSince(since, 2);
+      expect(first.ids).toEqual([ids[0], ids[1]]);
+      expect(first.truncated).toBe(true);
+      const next = await db.listBusinessesWithUsageChangedSince(first.last!, 2);
+      expect(next.ids).toEqual([ids[2]]);
+      expect(next.truncated).toBe(false);
+    } finally { await prisma.$executeRaw`UPDATE usage_counters SET updated_at = now() WHERE business_id = ANY(${ids}::text[])`; }
+  });
+
+  test('17 L8: the call-script rebuild never overwrites an owner edit saved between its read and its write, and recognises a script generated for an older services list', async () => {
+    const { buildCallScript } = await import('@/lib/kb');
+    const oldServices = [{ name: 'Old service', base_price: 100, duration_minutes: 60 }];
+    const services = [{ name: 'New service', base_price: 200, duration_minutes: 60 }];
+    const biz = await newBusiness({ agent_id: null });
+    await prisma.business.update({ where: { id: biz.id }, data: { vertical: 'electrical' } });
+    // generated for the OLD services and the OLD trade: recognised (the header line is ignored) and rebuilt for the current services
+    await db.upsertKnowledgeBase(biz.id, { services, faqs: [], pricing_notes: '', system_prompt: 'p', call_script: buildCallScript({ services: oldServices }, { vertical: 'hvac' }) });
+    expect(await agents.rebuildGeneratedCallScript(biz.id)).toBe(true);
+    expect((await db.getKnowledgeBase(biz.id))!.call_script).toBe(buildCallScript({ services }, { vertical: 'electrical' }));
+    // the owner saves their own script while a rebuild is between read and write: the edit wins
+    await db.upsertKnowledgeBase(biz.id, { call_script: buildCallScript({ services }, { vertical: 'hvac' }) });
+    const wrote = await agents.rebuildGeneratedCallScript(biz.id, { beforeWrite: async () => { await db.upsertKnowledgeBase(biz.id, { call_script: 'The owner just typed this.' }); } });
+    expect(wrote).toBe(false);
+    expect((await db.getKnowledgeBase(biz.id))!.call_script).toBe('The owner just typed this.');
+  });
+
+  test('17 L8: the orphan anonymise sweep walks every row with a cursor (live-booking rows ahead of it do not hide the rest), and old orphan rows follow retention', async () => {
+    const cal = await import('@/lib/db/calendar');
+    const biz = await newBusiness();
+    const mk = (n: number, anonymized: boolean) => prisma.booking.create({ data: { businessId: biz.id, customerName: anonymized ? 'Erased' : 'Live', customerPhone: '+13055550100', service: 'AC repair', scheduledAt: new Date(Date.now() + n * 86_400_000), ...(anonymized ? { anonymizedAt: new Date() } : {}) } });
+    const live: string[] = [], dead: string[] = [];
+    for (let i = 0; i < 6; i++) live.push((await mk(i + 1, false)).id);
+    for (let i = 0; i < 4; i++) dead.push((await mk(i + 10, true)).id);
+    for (const [i, bookingId] of [...live, ...dead].entries()) {
+      await prisma.calendarOrphanedEvent.create({ data: { businessId: biz.id, bookingId, googleEventId: `ev${i}_${biz.id.slice(0, 6)}`, calendarId: 'primary', accountEmail: 'o@example.test', service: 'AC repair', startsAt: new Date() } });
+    }
+    expect(await cal.anonymizeOrphanedEvents(null, { pageSize: 2 })).toBe(4);
+    expect(await prisma.calendarOrphanedEvent.count({ where: { businessId: biz.id, bookingId: null, service: '' } })).toBe(4);
+    expect(await prisma.calendarOrphanedEvent.count({ where: { businessId: biz.id, bookingId: { in: live } } })).toBe(6); // live rows untouched
+    // retention: a reminder older than the retention window is deleted with the rest of the customer data
+    const old = await prisma.calendarOrphanedEvent.create({ data: { businessId: biz.id, bookingId: null, googleEventId: `old_${biz.id.slice(0, 6)}`, calendarId: 'primary', accountEmail: 'o@example.test', service: '', createdAt: new Date(Date.now() - 800 * 86_400_000) } });
+    await db.purgeExpiredData(new Date());
+    expect(await prisma.calendarOrphanedEvent.findUnique({ where: { id: old.id } })).toBeNull();
+    expect(await prisma.calendarOrphanedEvent.count({ where: { businessId: biz.id } })).toBe(10);
+  });
 });

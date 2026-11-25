@@ -6,9 +6,10 @@
  * (attempt n waits 2^n x 10 min after the base delay); after RECONCILE_MAX_ATTEMPTS the job gives up with an audit row and an error log.
  */
 import {
-  bumpReconcileAttempt, claimCallMetering, getCall, listCallsNeedingReconcile, listPendingForwards, setForwardPending, prisma, recordAudit, recordCallSeconds, releaseCallMetering, updateCall,
+  bumpReconcileAttempt, claimCallMetering, getCall, getCallDialSeconds, listCallsNeedingReconcile, listPendingForwards, setForwardPending, prisma, recordAudit, recordCallSeconds, releaseCallMetering, updateCall,
 } from '@/lib/db';
 import { meterForwardedCall } from '@/lib/voice/forward-metering';
+import { splitTransferSeconds } from '@/lib/voice/transfer';
 import { fetchConversation, type ConversationFetch, type FetchDeps } from '@/lib/voice/conversations';
 import { logger } from '@/lib/log';
 
@@ -75,10 +76,25 @@ export async function reconcileUnmeteredCalls(deps: ReconcileDeps = {}): Promise
       }
       const seconds = conv.snapshot.durationSecs ?? 0;
       if (!(await claimCallMetering(c.id, now))) { item('already_metered'); continue; }
+      // A call that was transferred (connected, or a dial-status callback reported bridged seconds) is NOT all AI time: the forwarded leg was
+      // already metered per call sid by the dial callback (or is metered below, deduplicated). Only the AI part counts against the AI minutes.
+      const dialSeconds = await getCallDialSeconds(c.id);
+      const transferred = seconds > 0 && (fresh.transfer_status === 'connected' || (dialSeconds ?? 0) > 0);
+      let aiWritten = false;
       try {
-        if (seconds > 0) await recordCallSeconds(c.business_id, seconds, now);
+        if (transferred) {
+          const split = splitTransferSeconds({ durationSec: seconds, transcript: null, dialSeconds });
+          const sid = c.call_sid ?? c.conversation_id ?? c.id;
+          if (split.forward > 0) await setForwardPending(c.id, split.forward, sid);
+          if (split.ai > 0) { await recordCallSeconds(c.business_id, split.ai, now); aiWritten = true; }
+          let forward = await meterForwardedCall(sid, c.business_id, split.forward);
+          if (forward === 'failed') forward = await meterForwardedCall(sid, c.business_id, split.forward);
+          if (forward !== 'failed') await setForwardPending(c.id, null).catch(() => undefined);
+          else if (!aiWritten) throw new Error('forward metering failed'); // nothing written: give the claim back
+          else log.error('reconcile.forward_part_failed', { call: c.id, business: c.business_id, action: 'settlePendingForwards writes the pending forward seconds' });
+        } else if (seconds > 0) await recordCallSeconds(c.business_id, seconds, now);
       } catch (err) {
-        await releaseCallMetering(c.id); // the write failed: leave it for the next pass
+        if (!aiWritten) { await setForwardPending(c.id, null).catch(() => undefined); await releaseCallMetering(c.id); } // nothing written: leave it for the next pass
         throw err;
       }
       await updateCall(c.id, { ...(seconds > 0 && !fresh.duration_sec ? { duration_sec: seconds } : {}), ...(fresh.ended_at ? {} : { ended_at: now.toISOString() }) });
@@ -122,7 +138,7 @@ export async function settlePendingForwards(opts: { now?: Date; afterMinutes?: n
   out.considered = rows.length;
   if (opts.dryRun) return out;
   for (const r of rows) {
-    const outcome = await meterForwardedCall(r.call_sid ?? r.conversation_id ?? r.id, r.business_id, r.seconds);
+    const outcome = await meterForwardedCall(r.key ?? r.call_sid ?? r.conversation_id ?? r.id, r.business_id, r.seconds); // the key postcall used, else the best guess
     if (outcome === 'failed') { out.failed++; continue; }
     await setForwardPending(r.id, null);
     out.settled++;

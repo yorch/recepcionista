@@ -483,7 +483,7 @@ suite('multi-business accounts (postgres)', () => {
     expect((await activeOf(again)).revokedBusinessIds ?? []).toEqual([]);
   });
 
-  test('residual L5: a disabled or removed membership revokes the business for the account\'s other sessions; a fresh invitation lifts it', async () => {
+  test('residual L5: a disabled or removed membership revokes the business for the account\'s other sessions; a fresh invitation lifts it only for the accepting session', async () => {
     const extra = `biz_mx_${run}`;
     extraBiz.push(extra);
     await db.prisma.business.create({ data: { id: extra, name: 'Extra', status: 'live' } });
@@ -503,8 +503,19 @@ suite('multi-business accounts (postgres)', () => {
     expect((await switchTo(await signIn('visitor'), extra)).status).toBe(200);
     // removal (the person keeps the account: they belong to A as well)
     expect((await db.removeMembership(ids.visitor, extra)).ok).toBe(true);
-    await db.addMembership({ user_id: ids.visitor, business_id: extra, role: 'staff' }); // invited again and accepted: the grant is fresh
-    expect((await switchTo(s1, extra)).status).toBe(200); // the old session regains it only through that explicit new grant
+    // report 17 M3: invited again and accepted. Only the session that ACCEPTED lifts its own sign-out; the person's other sessions (a stolen
+    // laptop that was signed out of this business) stay revoked until a new login.
+    const accepting = await db.prisma.userSession.findFirst({ where: { userId: ids.visitor }, orderBy: { createdAt: 'desc' } }); // the sign-in made just above
+    await db.prisma.userSession.update({ where: { id: accepting!.id }, data: { revokedBusinessIds: [extra] } });
+    await db.addMembership({ user_id: ids.visitor, business_id: extra, role: 'staff', session_id: accepting!.id });
+    expect((await db.prisma.userSession.findUnique({ where: { id: accepting!.id } }))!.revokedBusinessIds).toEqual([]); // the accepting session
+    expect((await switchTo(s1, extra)).status).toBe(404); // the old sessions stay revoked: a fresh grant is not their consent
+    expect((await switchTo(s2, extra)).status).toBe(404);
+    expect((await activeOf(s1)).revokedBusinessIds).toContain(extra);
+    // without a session (an admin-side grant) nothing is lifted anywhere
+    await db.removeMembership(ids.visitor, extra);
+    await db.addMembership({ user_id: ids.visitor, business_id: extra, role: 'staff' });
+    expect((await activeOf(s1)).revokedBusinessIds).toContain(extra);
     await db.removeMembership(ids.visitor, extra);
     expect((await activeOf(s1)).revokedBusinessIds).toContain(extra);
   });

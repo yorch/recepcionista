@@ -62,9 +62,12 @@ export const OWNER_TOOL_SPECS: Record<OwnerToolName, OwnerToolSpec> = {
     required: ['lead_ref', 'message', 'confirmed'],
   },
   mark_lead_handled: {
-    description: 'OWNER LINE ONLY. Mark a listed customer as handled so they are not listed again. Sends nothing to anyone.',
-    properties: { lead_ref: { type: 'string', description: 'The lead number from list_recent_leads on this call.' } },
-    required: ['lead_ref'],
+    description: 'OWNER LINE ONLY. Mark a listed customer as handled so they are not listed again. Sends nothing to anyone. First call with confirmed=false: it returns a read-back to say to the owner. After the owner says yes, call again with the same lead_ref and confirmed=true. A few per day at most.',
+    properties: {
+      lead_ref: { type: 'string', description: 'The lead number from list_recent_leads on this call.' },
+      confirmed: { type: 'boolean', description: 'false = only read it back. true = ONLY after the owner clearly said yes to the read-back.' },
+    },
+    required: ['lead_ref', 'confirmed'],
   },
   get_callback_number: {
     description: 'OWNER LINE ONLY. Text the owner the customer\'s phone number so the owner can call them back. The number is only texted to the owner phone, never spoken, and nothing is sent to the customer.',

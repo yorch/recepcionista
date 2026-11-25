@@ -6,6 +6,7 @@
  * one business and one reply row; what makes it single-use and 30-minute is the row's status and expiry (messaging/owner-reply.ts).
  */
 import { prisma } from '@/lib/db';
+import { normalizeInbound } from '@/lib/messaging/keywords';
 import { appSecretKey } from '@/lib/totp';
 import { cancelOwnerReply, confirmOwnerReply, type ReplyOutcome, type ReplyRefusal } from '@/lib/messaging/owner-reply';
 import { codesEqual, ownerCode, type OwnerSmsCommand } from './code';
@@ -45,8 +46,11 @@ export function outcomeText(lang: Lang, o: ReplyOutcome): string {
     case 'sent': return say(lang, `Sent${who(o.name)}. It cannot be undone.`, `Enviado${who(o.name)}. No se puede deshacer.`);
     case 'refused': return say(lang, `Not sent: ${REASON[o.reason][0]}. Nothing was sent.`, `No se envió: ${REASON[o.reason][1]}. No se envió nada.`);
     case 'failed': return say(lang, 'The text could not be sent, and it will not be retried. Nothing more was done.', 'No se pudo enviar el mensaje y no se reintentará.');
+    case 'uncertain': return say(lang, 'The text may or may not have gone out. It will not be retried. Check the dashboard before sending it again.', 'No se sabe si el mensaje salió. No se reintentará. Revise el panel antes de enviarlo de nuevo.');
     case 'expired': return say(lang, 'That code expired, so nothing was sent. Ask again if you still want it.', 'Ese código venció y no se envió nada. Pídalo de nuevo si todavía lo desea.');
-    case 'already': return o.status === 'sent' || o.status === 'sending'
+    case 'already': return o.status === 'uncertain'
+      ? say(lang, 'That text may or may not have gone out. It will not be retried. Check the dashboard before sending it again.', 'No se sabe si ese mensaje salió. No se reintentará. Revise el panel antes de enviarlo de nuevo.')
+      : o.status === 'sent' || o.status === 'sending'
       ? say(lang, 'That text was already handled. Nothing more was sent.', 'Ese mensaje ya se gestionó. No se envió nada más.')
       : say(lang, `Nothing was sent: that reply is ${o.status}.`, `No se envió nada: esa respuesta está ${o.status}.`);
   }
@@ -66,4 +70,26 @@ export async function handleReplyCode(business: Business, cmd: OwnerSmsCommand, 
     return say(lang, `Too late to cancel: that reply is ${r.status}.`, `Ya no se puede cancelar: esa respuesta está ${r.status}.`);
   }
   return outcomeText(lang, await confirmOwnerReply(business, hit.id, now));
+}
+
+/**
+ * A BARE "NO" (or "YES") from the verified owner phone while a drafted reply is waiting. The spoof warning in the confirmation text says "Not you?
+ * Reply NO ..."; an owner who types only NO must still be able to stop it. NO cancels every reply of this business that is still waiting (the safe
+ * direction: nothing is ever sent by it); a bare YES never sends, it asks for the code. Null when nothing is waiting or the text is something else.
+ */
+export async function handleBareReplyAnswer(business: Business, body: string | null | undefined, now: Date = new Date()): Promise<string | null> {
+  if (!ownerReplyEnabled()) return null;
+  const word = normalizeInbound(body);
+  const isNo = word === 'NO' || word === 'N';
+  const isYes = word === 'YES' || word === 'Y' || word === 'SI' || word === 'OK';
+  if (!isNo && !isYes) return null;
+  const waiting = await prisma.ownerReply.findMany({ where: { businessId: business.id, status: 'proposed', expiresAt: { gt: now } }, select: { id: true } });
+  if (waiting.length === 0) return null;
+  const lang: Lang = business.locale_default === 'es' ? 'es' : 'en';
+  if (isYes) return say(lang, 'Please reply YES with the 6-character code from the text. Nothing was sent.', 'Responda SI con el código de 6 caracteres del mensaje. No se envió nada.');
+  let n = 0;
+  for (const w of waiting) if ((await cancelOwnerReply(business, w.id, now)).cancelled) n++;
+  return n > 0
+    ? say(lang, `Cancelled ${n} waiting text${n === 1 ? '' : 's'} to customers. Nothing was sent.`, `Se cancel${n === 1 ? 'ó 1 mensaje' : `aron ${n} mensajes`} en espera a clientes. No se envió nada.`)
+    : null;
 }

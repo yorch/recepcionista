@@ -5,7 +5,6 @@
  * Everything the model supplies is data: the message is scanned (no links, emails, phone numbers, digit codes, payment requests, instruction-like text),
  * names are cut down to one plain word, and a lead is described only by fields the server derived (kind, first name, last 4 digits, time).
  */
-import crypto from 'node:crypto';
 import { ownerTextProblem, type OwnerTextProblem } from '@/lib/kb-patch';
 import { clampAlertBody } from '@/lib/voice/owner-alert';
 import { smsSegments, STOP_FOOTER, withStopFooter } from '@/lib/messaging/policy';
@@ -19,13 +18,69 @@ const say = (lang: Lang, en: string, es: string): string => (lang === 'es' ? es 
 
 export type ReplyBodyProblem = OwnerTextProblem | 'digits' | 'payment' | 'symbols' | 'too_long_sms';
 
-const SMART: Record<string, string> = { '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...', '–': '-', '—': '-', ' ': ' ' };
-/** Digit runs that look like a code, account or phone number (a clock time "3:30" or a price "$99" is fine). */
-const DIGIT_RES: RegExp[] = [/\d{5,}/, /\d{3}[\s-]\d{3}\b/, /\b(?:\d[\s.,-]*){8,}\b/];
+const SMART: Record<string, string> = { '‘': "'", '’': "'", '“': '"', '”': '"', '…': '...', '–': '-', '—': '-', ' ': ' ' };
+/**
+ * Digit runs that look like a code, account or phone number (a clock time "3:30" or a price "$99" is fine). Run on text whose digits are all ASCII
+ * (see foldDigits) and with spelled-out digits turned into digits (see spellToDigits). Separators: space . , - / ( ).
+ */
+const DIGIT_RES: RegExp[] = [/\d{5,}/, /\d{3}[\s\-./)(]+\d{3}\b/, /\b(?:\d[\s.,\-()]*){8,}\b/];
+/** Toll-free numbers written with letters ("1-800-FLOWERS", "800-FLOWERS", "1 800 FLOWERS") and "555-CALL" shapes. */
+const VANITY_RES: RegExp[] = [
+  /\b1[\s.\-()]*8(?:00|33|44|55|66|77|88)\b/i, /\b\(?8(?:00|33|44|55|66|77|88)\)?[\s.\-]+[a-z]{4,}\b/i, /\b\d{3}[\s.\-]+[A-Z]{4,}\b/,
+];
+/** A link or short link spelled out ("example dot com slash pay", "bitly/abc"). */
+const LINKWORD_RES: RegExp[] = [
+  /\b(?:dot|punto)\s+(?:com|net|org|io|co|me|us|app|ly|info|biz|link|xyz|shop|online|site|store|click|mx|es)\b/i, /\b(?:slash|barra)\b/i,
+  /\b(?:bit\s*\.?\s*ly|tiny\s*url|goo\s*\.?\s*gl|ow\s*\.?\s*ly|cutt\s*\.?\s*ly|rb\s*\.?\s*gy|is\s*\.?\s*gd|short\s*url|t\s*\.\s*co|l\s*\.\s*ink)\b/i,
+  /\bh\s*t\s*t\s*p\s*s?\s*:/i, /\bw\s*w\s*w\s*\./i, /\bat\s+(?:the\s+)?(?:gmail|yahoo|outlook|hotmail|icloud)\b/i,
+];
 /** Asking the customer to pay / send / read out something: the phishing shapes. A relay of the owner's words must not become one. */
-const PAYMENT_RE = /\b(?:gift ?cards?|wire|wiring|western union|money ?gram|venmo|zelle|cash ?app|paypal|bitcoin|crypto|bank|routing|account number|verification code|security code|one[- ]time|otp|tarjeta de regalo|giro|transferencia|cuenta bancaria|codigo de verificacion|código de verificación)\b/i;
+const PAYMENT_RE = /\b(?:gift ?cards?|wire|wiring|western union|money ?gram|venmo|zelle|cash ?app|paypal|bitcoin|crypto|bank|routing|account number|verification code|security code|one[- ]time|otp|apple ?pay|google ?pay|samsung ?pay|ssn|social security|log ?in|sign ?in|pass ?words?|pass ?codes?|pin|cvv|cvc|card (?:number|details|info(?:rmation)?|on file)|credit card|debit card|deposit link|payment link|pay(?:ing)? (?:online|link|now)|tarjeta de regalo|tarjeta de cr[eé]dito|tarjeta de d[eé]bito|n[uú]mero de tarjeta|giro|transferencia|cuenta bancaria|contrase[nñ]a|seguro social|inicio de sesi[oó]n|enlace de pago|codigo de verificacion|c[oó]digo de verificaci[oó]n)\b/i;
+/** The same brands with every space and symbol removed ("Zel le", "C a s h A p p", "g.i.f.t c4rd"): distinctive terms only, so no word-in-word false hits. */
+const PAYMENT_SQUASHED: string[] = [
+  'giftcard', 'westernunion', 'moneygram', 'cashapp', 'zelle', 'venmo', 'paypal', 'bitcoin', 'cryptocurrency', 'applepay', 'googlepay', 'samsungpay',
+  'routingnumber', 'accountnumber', 'verificationcode', 'securitycode', 'cardnumber', 'carddetails', 'creditcard', 'debitcard', 'onetimecode', 'socialsecurity',
+  'depositlink', 'paymentlink', 'tarjetaderegalo', 'numerodetarjeta', 'enlacedepago', 'codigodeverificacion',
+];
 /** Only letters, digits, spaces and plain punctuation: no emoji, markup, brackets or other symbols. */
 const SYMBOL_RE = /[^\p{L}\p{N}\p{M}\s.,;:!?'"()\-/&%$+*¿¡]/u;
+/** Letters of any script other than Latin (Cyrillic or Greek look-alikes of Latin letters): refused outright. */
+const NON_LATIN_LETTER_RE = /(?!\p{Script=Latin})\p{L}/u;
+
+const SPELLED: Record<string, string> = {
+  zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9',
+  cero: '0', uno: '1', dos: '2', tres: '3', cuatro: '4', cinco: '5', seis: '6', siete: '7', ocho: '8', nueve: '9',
+};
+const SPELLED_RE = new RegExp(`\\b(?:${Object.keys(SPELLED).join('|')})\\b`, 'gi');
+
+/** Every Unicode decimal digit (full-width, Arabic-Indic, Devanagari, mathematical, ...) as its ASCII digit. */
+export function foldDigits(text: string): string {
+  const isNd = (cp: number): boolean => cp >= 0 && /\p{Nd}/u.test(String.fromCodePoint(cp));
+  let out = '';
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    if (cp < 128 || !isNd(cp)) { out += ch; continue; }
+    let n = 0;
+    while (isNd(cp - 1 - n)) n++; // decimal digit blocks come in aligned runs of ten, each starting at zero
+    out += String(n % 10);
+  }
+  return out;
+}
+
+/** "917 five five five 0199" -> "917 5 5 5 0199" (spelled digits, English and Spanish). */
+export const spellToDigits = (text: string): string => text.replace(SPELLED_RE, (w) => SPELLED[w.toLowerCase()] ?? w);
+
+/** The text a scanner should read: NFKC (full-width letters and digits, ligatures), then every digit as ASCII. */
+export const scanText = (body: string): string => foldDigits(body.normalize('NFKC'));
+
+function squashedPayment(text: string): boolean {
+  const base = text.normalize('NFKC').toLowerCase().normalize('NFD').replace(/\p{M}+/gu, '');
+  const variants = [
+    base, base.replace(/0/g, 'o').replace(/1/g, 'l').replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's').replace(/7/g, 't').replace(/\$/g, 's').replace(/@/g, 'a'),
+    base.replace(/0/g, 'o').replace(/1/g, 'i').replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's').replace(/7/g, 't').replace(/\$/g, 's').replace(/@/g, 'a'),
+  ];
+  return variants.some((v) => { const sq = v.replace(/[^\p{L}\p{N}]/gu, ''); return PAYMENT_SQUASHED.some((t) => sq.includes(t)); });
+}
 
 export type ReplyBody = { ok: true; body: string } | { ok: false; problem: ReplyBodyProblem; flagged: boolean };
 
@@ -43,10 +98,22 @@ export function validateReplyBody(raw: unknown): ReplyBody {
   const body = normalizeReplyBody(raw);
   const problem = ownerTextProblem(body, OWNER_REPLY_MAX_CHARS);
   if (problem) return { ok: false, problem, flagged: problem === 'injection' || problem === 'tool_name' || problem === 'control' };
-  if (body.includes('@') || body.includes('#')) return { ok: false, problem: 'url', flagged: false };
-  if (DIGIT_RES.some((re) => re.test(body))) return { ok: false, problem: 'digits', flagged: false };
-  if (PAYMENT_RE.test(body)) return { ok: false, problem: 'payment', flagged: false };
-  if (SYMBOL_RE.test(body)) return { ok: false, problem: 'symbols', flagged: false };
+  const refuse = (p: ReplyBodyProblem): ReplyBody => ({ ok: false, problem: p, flagged: false });
+  // Look-alike letters (Cyrillic i in "gift", Greek o ...) cannot be read by the word scanners: only Latin letters are relayed.
+  if (NON_LATIN_LETTER_RE.test(body)) return refuse('symbols');
+  // Everything below reads the NFKC + ASCII-digit form, so full-width and Arabic-Indic digits and ligatures cannot hide a number or a brand.
+  const text = scanText(body);
+  if (text !== body) {
+    const folded = ownerTextProblem(text, 10_000);
+    if (folded) return { ok: false, problem: folded, flagged: folded === 'injection' || folded === 'tool_name' || folded === 'control' };
+  }
+  if (text.includes('@') || text.includes('#')) return refuse('url');
+  if (LINKWORD_RES.some((re) => re.test(text))) return refuse('url');
+  const spelled = spellToDigits(text);
+  if (VANITY_RES.some((re) => re.test(text))) return refuse('digits');
+  if (DIGIT_RES.some((re) => re.test(text) || re.test(spelled))) return refuse('digits');
+  if (PAYMENT_RE.test(text) || squashedPayment(text)) return refuse('payment');
+  if (SYMBOL_RE.test(body)) return refuse('symbols');
   return { ok: true, body };
 }
 
@@ -98,7 +165,7 @@ export const last4Of = (e164: string): string => e164.replace(/\D/g, '').slice(-
 /** The confirmation text to the owner's phone. Shows the message EXACTLY as it will be sent (it must fit unclipped). */
 export function ownerReplyConfirmSms(lang: Lang, o: { name: string | null; last4: string; body: string; code: string; callAt?: string }): string {
   const who = o.name ? `${o.name} (...${o.last4})` : `...${o.last4}`;
-  const from = o.callAt ? say(lang, ` Call at ${o.callAt}. Not you? Reply NO.`, ` Llamada a las ${o.callAt}. No fue usted? Responda NO.`) : '';
+  const from = o.callAt ? say(lang, ` Call at ${o.callAt}. Not you? Reply NO ${o.code}.`, ` Llamada a las ${o.callAt}. No fue usted? Responda NO ${o.code}.`) : '';
   return say(lang,
     `Reply YES ${o.code} to text ${who}: "${o.body}". NO ${o.code} cancels. Cannot be undone once sent. Expires in 30 min.${from}`,
     `Responda SI ${o.code} para enviar a ${who}: "${o.body}". NO ${o.code} cancela. No se deshace al enviarse. Vence en 30 min.${from}`);
@@ -150,6 +217,3 @@ export function parseLeadRef(raw: unknown): number | null {
   const n = Number(m[1]);
   return n >= 1 && n <= OWNER_REPLY_LEADS_SHOWN ? n : null;
 }
-
-/** Stable short hash for markers that must not hold a phone number in clear (processed_events ids). */
-export const markerHash = (businessId: string, e164: string): string => crypto.createHash('sha256').update(`owner-lead|${businessId}|${e164}`).digest('hex').slice(0, 24);

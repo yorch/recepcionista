@@ -9,7 +9,7 @@
  * off exponentially (2 min, doubling, capped at 1 h) and after MAX_ATTEMPTS the job gives up loudly (log.error + audit row
  * `agent.resync_gave_up`) because somebody has to look.
  */
-import { getBusiness, getKnowledgeBase, prisma, recordAudit, upsertKnowledgeBase, withLease } from '@/lib/db';
+import { getBusiness, getKnowledgeBase, prisma, recordAudit, withLease } from '@/lib/db';
 import { buildCallScript } from '@/lib/kb';
 import { VERTICALS } from '@/lib/types';
 import { resyncAfterKbChange } from '@/lib/voice/owner/apply';
@@ -32,22 +32,28 @@ export async function markAgentDirty(businessId: string, now: Date = new Date())
   } catch (err) { log.error('mark_failed', { business: businessId, err }); }
 }
 
+/** The generated script's first line names the top services ("CALL SCRIPT — a, b"): ignored when deciding whether a script is generated, so one written for an older services list is still recognised. */
+const withoutHeader = (script: string): string => script.replace(/^CALL SCRIPT — .*$/m, 'CALL SCRIPT —').trim();
+
 /**
  * Bring the GENERATED call script in line with the business's current vertical. A vertical change rebuilds it inline, but when that rebuild
  * could not write the knowledge base row the script stayed the previous trade's. The retry cannot know the previous vertical, so it recognises
  * a generated script by content: empty, or identical to what ANY vertical generates for these services. An owner-edited script matches none of
- * them and is never touched. Idempotent; returns whether the script was rewritten. Throws on a database error (the drain then keeps the marker).
+ * them and is never touched (the header line, which lists the services, is ignored, so a script generated for an OLDER services list is still recognised). The write is a compare-and-swap on the script that was read, so an owner edit saved in between wins. Idempotent; returns whether the script was rewritten. Throws on a database error (the drain then keeps the marker).
  */
-export async function rebuildGeneratedCallScript(businessId: string): Promise<boolean> {
+export async function rebuildGeneratedCallScript(businessId: string, hooks: { /** Test seam: runs between the read and the write. */ beforeWrite?: () => Promise<void> } = {}): Promise<boolean> {
   const business = await getBusiness(businessId);
   const kb = await getKnowledgeBase(businessId);
   if (!business || !kb) return false;
   const wanted = buildCallScript({ services: kb.services }, business);
   if (kb.call_script === wanted) return false;
-  const generated = !kb.call_script.trim() || VERTICALS.some((v) => kb.call_script === buildCallScript({ services: kb.services }, { vertical: v }));
+  const stripped = withoutHeader(kb.call_script);
+  const generated = !kb.call_script.trim() || VERTICALS.some((v) => stripped === withoutHeader(buildCallScript({ services: kb.services }, { vertical: v })));
   if (!generated) return false;
-  await upsertKnowledgeBase(businessId, { call_script: wanted });
-  return true;
+  await hooks.beforeWrite?.();
+  // Compare-and-swap on the script we read: an owner edit saved between the read and this write changes the column, matches no row, and WINS.
+  const res = await prisma.knowledgeBase.updateMany({ where: { businessId, callScript: kb.call_script }, data: { callScript: wanted } });
+  return res.count === 1;
 }
 
 export interface DrainAgentsResult { considered: number; synced: number; failed: number; gave_up: number }

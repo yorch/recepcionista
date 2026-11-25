@@ -11,7 +11,7 @@ import { appSecretKey } from '@/lib/totp';
 import { logger } from '@/lib/log';
 import { ownerCallinEnabled } from './config';
 import { codesEqual, ownerCode, parseOwnerSms, undoBucket, undoScope, withinTtl } from './code';
-import { handleReplyCode } from './reply-sms';
+import { handleBareReplyAnswer, handleReplyCode } from './reply-sms';
 import { applyOwnerChange, auditOwnerKb, rejectOwnerChange, revertOwnerChange, type ChangeActor } from './apply';
 import type { Business, OwnerKbChange } from '@/lib/types';
 
@@ -54,7 +54,11 @@ async function findByCode(businessId: string, code: string, now: Date): Promise<
 export async function handleOwnerSms(business: Business, from: string, body: string | null | undefined, now: Date = new Date()): Promise<string | null> {
   if (!ownerCallinEnabled()) return null;
   const cmd = parseOwnerSms(body);
-  if (!cmd) return null;
+  if (!cmd) {
+    // A bare NO / YES from the owner phone while a drafted customer reply is waiting (the spoof warning's cancel path). Strangers get nothing.
+    if (!isVerifiedOwnerSender(business, from)) return null;
+    return handleBareReplyAnswer(business, body, now);
+  }
   // Anyone else typing "YES K7M2QX" is just a stranger's text: no reply, nothing revealed, nothing changed.
   if (!isVerifiedOwnerSender(business, from)) return null;
   const es = business.locale_default === 'es';

@@ -882,6 +882,7 @@ integration('telephony phase 2 (postgres)', () => {
       const row = (await prisma.call.findUnique({ where: { id: call.id } }))!;
       expect(row.meteredAt).not.toBeNull(); // the claim is kept: the AI part is in
       expect(row.forwardPendingSecs).toBe(60); // ... and the forward part is remembered
+      expect(row.forwardPendingKey).toBe(call.callSid); // ... with the metering key postcall used (17 L8)
       expect(await usageOf(biz.id)).toEqual([40, 1]);
       // still failing: the job reports it and keeps the marker
       const stuck = await reconcile.settlePendingForwards({ now: new Date(Date.now() + 5000), afterMinutes: 0 });
@@ -910,6 +911,46 @@ integration('telephony phase 2 (postgres)', () => {
     await reconcile.settlePendingForwards({ now: new Date(), afterMinutes: 1 });
     expect(await usageOf(biz2.id)).toEqual([0, 120]); // 60 recorded directly above + 60 by the callback; the job added none
     expect((await prisma.call.findUnique({ where: { id: call2.id } }))!.forwardPendingSecs).toBeNull();
+  });
+
+  test('17 M5: reconcile of a TRANSFERRED call whose post-call webhook never arrived bills only the AI part; the forwarded leg is metered once per call sid (never twice)', async () => {
+    const old = new Date(Date.now() - 3 * 3600_000);
+    // (a) the dial-status callback already metered 60 forward seconds: reconcile adds the 120 AI seconds only
+    const a = await newBusiness({ agent_id: uniq('agent') });
+    const callA = await newCall(a, { startedAt: old, transferStatus: 'connected' });
+    await db.recordDialSeconds(callA.callSid!, 60);
+    const { meterForwardedCall } = await import('@/lib/voice/forward-metering');
+    expect(await meterForwardedCall(callA.callSid!, a.id, 60)).toBe('metered'); // what the callback did
+    const ra = await reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => conversation(180) });
+    expect(ra.items.find((i) => i.call_id === callA.id)?.outcome).toBe('metered');
+    expect(await usageOf(a.id)).toEqual([120, 60]); // not [180, 60]
+    expect((await prisma.call.findUnique({ where: { id: callA.id } }))!.forwardPendingSecs).toBeNull();
+    // (b) connected, no dial duration known: the whole call is forward time (documented fallback), written once
+    const b = await newBusiness({ agent_id: uniq('agent') });
+    const callB = await newCall(b, { startedAt: old, transferStatus: 'connected' });
+    await reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => conversation(180) });
+    expect(await usageOf(b.id)).toEqual([0, 180]);
+    // (c) only a dial duration (status never settled): split by it
+    const c = await newBusiness({ agent_id: uniq('agent') });
+    const callC = await newCall(c, { startedAt: old, transferStatus: 'attempted' });
+    await db.recordDialSeconds(callC.callSid!, 50);
+    await reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => conversation(200) });
+    expect(await usageOf(c.id)).toEqual([150, 50]);
+    // a late webhook or a second pass adds nothing (the claim is shared)
+    await reconcile.reconcileUnmeteredCalls({ fetchConversation: async () => conversation(200) });
+    expect(await usageOf(c.id)).toEqual([150, 50]);
+    expect(callB.id).toBeTruthy();
+  });
+
+  test('17 L8: the pending-forward marker keeps the metering key it was written under, so a call sid filled in later cannot make the job meter the same seconds again', async () => {
+    const biz = await newBusiness({ agent_id: uniq('agent') });
+    const call = await newCall(biz, { transferStatus: 'connected', callSid: null, meteredAt: new Date(Date.now() - 600_000), forwardPendingSecs: 60, forwardPendingKey: 'conv-key-1' });
+    const { meterForwardedCall } = await import('@/lib/voice/forward-metering');
+    expect(await meterForwardedCall('conv-key-1', biz.id, 60)).toBe('metered'); // postcall's own write DID land; only clearing the marker failed
+    await prisma.call.update({ where: { id: call.id }, data: { callSid: uniq('CAlate') } }); // the call sid arrives afterwards
+    await reconcile.settlePendingForwards({ now: new Date(), afterMinutes: 1 });
+    expect(await usageOf(biz.id)).toEqual([0, 60]); // not 120
+    expect((await prisma.call.findUnique({ where: { id: call.id } }))!.forwardPendingSecs).toBeNull();
   });
 
   test('residual L3: when the AI write itself fails nothing is pending and the claim is given back', async () => {
