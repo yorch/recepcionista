@@ -201,21 +201,57 @@ integration('voice tools route (postgres)', () => {
     expect(rows.every((s) => s.status === 'failed')).toBe(true);
   });
 
-  test('create_payment_link texts the booking/caller number only and answers without leaking the link', async () => {
+  test('create_payment_link: the amount comes from the deposit policy, never from the model; the link texts the caller number only', async () => {
     const biz = await newBusiness();
     const caller = '+13055550606';
     const live = await db.createCall({ business_id: biz.id, caller_phone: caller });
+    // No policy: the AI cannot ask for a deposit at all, whatever amount it sends.
+    const off = await call('create_payment_link', { agent_id: biz.agent_id, call_id: live.id, amount_cents: 5000 });
+    expect(off.body.ok).toBe(false);
+    expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'payment_link' } })).toBe(0);
+
+    expect((await db.setDepositPolicy(biz.id, { enabled: true, mode: 'fixed', fixed_cents: 5000 })).ok).toBe(true);
+    // review 21 L1: a link is always tied to a booking made on THIS call; without one nothing is created or texted
+    const noBooking = await call('create_payment_link', { agent_id: biz.agent_id, call_id: live.id, amount_cents: 99_999 });
+    expect(noBooking.body.ok).toBe(false);
+    expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'payment_link' } })).toBe(0);
+    const made = await call('create_booking', bookingArgs({ agent_id: biz.agent_id, call_id: live.id, scheduled_at: wall(TUE(), '09:00') }));
+    expect(made.body.ok).toBe(true);
     const r = await call('create_payment_link', {
-      agent_id: biz.agent_id, call_id: live.id, amount_cents: 5000, to: '+19995550123', caller_phone: '+19995550124',
+      agent_id: biz.agent_id, call_id: live.id, amount_cents: 99_999, to: '+19995550123', caller_phone: '+19995550124',
     });
     expect(r.body.ok).toBe(true);
     expect(r.body.data).toBeNull();
     const sms = await prisma.smsLog.findMany({ where: { businessId: biz.id, kind: 'payment_link' } });
     expect(sms.map((s) => s.toPhone)).toEqual([caller]);
-    // dollars-not-cents mistakes are re-asked, not charged
-    const small = await call('create_payment_link', { agent_id: biz.agent_id, call_id: live.id, amount_cents: 50 });
-    expect(small.body.ok).toBe(false);
-    expect(await prisma.smsLog.count({ where: { businessId: biz.id, kind: 'payment_link' } })).toBe(1);
+    expect(sms[0].body).toContain('$50'); // the policy's amount, not the model's 99,999
+    expect(sms[0].bookingId).toBeTruthy(); // the call's single booking was attached automatically
+  });
+
+  test('create_payment_link, percentage policy: the price is the CATALOG price of the service, never the model\'s estimate (review 21 M3)', async () => {
+    const biz = await newBusiness();
+    await prisma.knowledgeBase.upsert({
+      where: { businessId: biz.id },
+      create: { businessId: biz.id, services: [{ name: 'AC repair', base_price: 400, duration_minutes: 60 }], faqs: [], pricingNotes: '', callScript: '', systemPrompt: '' },
+      update: { services: [{ name: 'AC repair', base_price: 400, duration_minutes: 60 }] },
+    });
+    expect((await db.setDepositPolicy(biz.id, { enabled: true, mode: 'percent', percent: 25, min_cents: 5000, max_cents: 30_000 })).ok).toBe(true);
+    const live = await db.createCall({ business_id: biz.id, caller_phone: '+13055550707' });
+    // the model claims the job costs $1: the deposit must still be 25% of the owner's $400, not the owner's minimum chosen by the caller
+    const made = await call('create_booking', bookingArgs({ agent_id: biz.agent_id, call_id: live.id, scheduled_at: wall(TUE(), '10:00'), price_estimate: 1 }));
+    expect(made.body.ok).toBe(true);
+    const r = await call('create_payment_link', { agent_id: biz.agent_id, call_id: live.id });
+    expect(r.body.ok).toBe(true);
+    const sms = await prisma.smsLog.findMany({ where: { businessId: biz.id, kind: 'payment_link' } });
+    expect(sms[0].body).toContain('$100');
+    // a service with no catalog price gives no amount (the owner is asked to call)
+    const biz2 = await newBusiness();
+    expect((await db.setDepositPolicy(biz2.id, { enabled: true, mode: 'percent', percent: 25 })).ok).toBe(true);
+    const live2 = await db.createCall({ business_id: biz2.id, caller_phone: '+13055550708' });
+    await call('create_booking', bookingArgs({ agent_id: biz2.agent_id, call_id: live2.id, scheduled_at: wall(TUE(), '10:00'), price_estimate: 400 }));
+    const none = await call('create_payment_link', { agent_id: biz2.agent_id, call_id: live2.id });
+    expect(none.body.ok).toBe(false);
+    expect(await prisma.smsLog.count({ where: { businessId: biz2.id, kind: 'payment_link' } })).toBe(0);
   });
 
   test('unknown tools and tool-name variants', async () => {

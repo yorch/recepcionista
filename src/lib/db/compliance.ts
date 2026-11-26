@@ -227,6 +227,8 @@ export interface PurgeCounts {
   sms_logs: number;
   briefings: number;
   bookings_anonymized: number;
+  /** Customer texts of the owner's inbox (inbound_messages) older than the window. */
+  inbound_messages: number;
   /** Briefing audio files removed from disk (0 on a dry run). */
   audio_files?: number;
   /** Provider-side voicemail recordings (Twilio) deleted along with the purged calls (0 on a dry run). */
@@ -241,7 +243,7 @@ export interface PurgeCounts {
  */
 export async function previewExpiredData(now: Date = new Date()): Promise<PurgeCounts> {
   const one = async (rows: Promise<{ n: number }[]>) => (await rows)[0]?.n ?? 0;
-  const [bookings, calls, sms, briefings, events] = await Promise.all([
+  const [bookings, calls, sms, briefings, events, inbound] = await Promise.all([
     one(prisma.$queryRaw`
       SELECT count(*)::int AS n FROM "bookings" bk JOIN "businesses" b ON bk."business_id" = b."id"
        WHERE bk."anonymized_at" IS NULL
@@ -258,8 +260,11 @@ export async function previewExpiredData(now: Date = new Date()): Promise<PurgeC
     one(prisma.$queryRaw`
       SELECT count(*)::int AS n FROM "call_transcript_events" e JOIN "calls" c ON c."id" = e."call_id" JOIN "businesses" b ON c."business_id" = b."id"
        WHERE c."started_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`),
+    one(prisma.$queryRaw`
+      SELECT count(*)::int AS n FROM "inbound_messages" m JOIN "businesses" b ON m."business_id" = b."id"
+       WHERE m."received_at" < ${now}::timestamptz - make_interval(days => b."retention_days")`),
   ]);
-  return { calls, transcript_events: events, sms_logs: sms, briefings, bookings_anonymized: bookings };
+  return { calls, transcript_events: events, sms_logs: sms, briefings, bookings_anonymized: bookings, inbound_messages: inbound };
 }
 
 /**
@@ -276,7 +281,7 @@ export async function previewExpiredData(now: Date = new Date()): Promise<PurgeC
 export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: boolean } = {}): Promise<PurgeCounts> {
   if (opts.dryRun) return previewExpiredData(now);
   // Cutoff per business, evaluated in UTC (timestamp columns hold UTC wall time).
-  const { bookings, calls, sms, briefingRows, queued, events } = await prisma.$transaction(async (tx) => {
+  const { bookings, calls, sms, briefingRows, queued, events, inbound } = await prisma.$transaction(async (tx) => {
     const bookings = await tx.$executeRaw`
       UPDATE "bookings" bk
          SET "customer_name" = ${REDACTED_NAME}, "customer_phone" = ${REDACTED_PHONE}, "phone_e164" = NULL, "address" = NULL,
@@ -300,6 +305,11 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
       DELETE FROM "sms_log" s USING "businesses" b
        WHERE s."business_id" = b."id"
          AND s."created_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")`;
+    // The owner's inbox (customer texts) follows the same window. received_at is timestamptz: compared as an instant.
+    const inbound = await tx.$executeRaw`
+      DELETE FROM "inbound_messages" m USING "businesses" b
+       WHERE m."business_id" = b."id"
+         AND m."received_at" < ${now}::timestamptz - make_interval(days => b."retention_days")`;
     // Owner voice replies hold the customer's number and the words sent: they follow the same retention window.
     await tx.$executeRaw`
       DELETE FROM "owner_replies" r USING "businesses" b
@@ -315,13 +325,13 @@ export async function purgeExpiredData(now: Date = new Date(), opts: { dryRun?: 
        WHERE br."business_id" = b."id"
          AND br."created_at" < (${now}::timestamptz AT TIME ZONE 'UTC') - make_interval(days => b."retention_days")
       RETURNING br."audio_url"`;
-    return { bookings, calls, sms, briefingRows, queued, events };
+    return { bookings, calls, sms, briefingRows, queued, events, inbound };
   });
   const audio = removeBriefingAudio(briefingRows.map((r) => r.audio_url));
   const rec = await drainQueuedRecordings(queued);
   if (bookings > 0) await redactCalendarEvents(null); // sweep: Google events of every anonymised booking
   const counts: PurgeCounts = {
-    calls: calls.length, transcript_events: events, sms_logs: sms, briefings: briefingRows.length, bookings_anonymized: bookings, audio_files: audio,
+    calls: calls.length, transcript_events: events, sms_logs: sms, briefings: briefingRows.length, bookings_anonymized: bookings, inbound_messages: inbound, audio_files: audio,
     recordings: rec.deleted, recordings_pending: rec.pending,
   };
   log.info('retention.purged', { ...counts });
@@ -349,6 +359,8 @@ export interface EraseCounts {
   /** Texts to the customer PLUS owner alerts / other texts that mention them (by number, booking or name). */
   sms_logs: number;
   bookings_anonymized: number;
+  /** Texts the customer sent to the business (the owner's inbox), deleted by sender number. */
+  inbound_messages: number;
   /** Briefings whose narration/stats cover a day the customer appears in (deleted; the evening note is regenerable). */
   briefings: number;
   audio_files: number;
@@ -366,6 +378,42 @@ export interface CustomerRecords {
 
 /** Names worth matching in free text: long enough not to hit common words. */
 const MIN_NAME_LEN = 4;
+
+/** Lowercase ASCII letters and digits only (accents folded): what survives the GSM-7 clamp, the quote swap and the link masking of an owner alert. */
+const alnum = (s: string): string => s.normalize('NFD').replace(/\p{M}+/gu, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/**
+ * Owner-forward alerts written BEFORE the log kept only a redacted line (`Customer text (...1234): "<their words>". Reply from Messages ...`): they
+ * carry the customer's own words but no number, booking or name. Matched by the shape + last 4 digits AND the opening words of one of THIS
+ * customer's inbox messages, so another customer with the same last 4 digits is never matched. New forwards store no words (messaging/inbox).
+ */
+async function legacyOwnerForwardIds(db: Reader, businessId: string, e164: string): Promise<string[]> {
+  const inbound = await db.$queryRaw<{ body: string }[]>`SELECT "body" FROM "inbound_messages" WHERE "business_id" = ${businessId} AND "from_e164" = ${e164}`;
+  if (inbound.length === 0) return [];
+  // The forward text was built from the inbox body by exactly these two functions (links masked as [link], quotes swapped, then clamped to GSM-7 where an emoji or a
+  // non-Latin letter became "?"), so the OPENING of the quoted words is reproduced exactly instead of guessed from Latin letters only. Dynamic imports: no module cycle.
+  const { safeForward } = await import('@/lib/messaging/inbox-copy');
+  const { clampAlertBody } = await import('@/lib/voice/owner-alert');
+  const keys = inbound.map((m) => clampAlertBody(safeForward(m.body, 140)).slice(0, 24)).filter((k) => k.replace(/[?\s]/g, '').length >= 4 || k.length >= 12);
+  const fragments = inbound.map((m) => alnum(m.body).slice(0, 24)).filter((f) => f.length >= 8);
+  if (fragments.length === 0 && keys.length === 0) return [];
+  const last4 = e164.slice(-4);
+  const en = `Customer text (...${last4}): "`;
+  const es = `Mensaje de un cliente (...${last4}): "`;
+  // `%` in front: the alert may start with "Possible opt-out: " / "Posible baja: ".
+  const rows = await db.$queryRaw<{ id: string; body: string }[]>`
+    SELECT "id", "body" FROM "sms_log"
+     WHERE "business_id" = ${businessId} AND "kind" = 'owner_alert'
+       AND ("body" LIKE ${`%${en}%`} OR "body" LIKE ${`%${es}%`})`;
+  return rows.filter((r) => {
+    const at = [en, es].map((m) => r.body.indexOf(m)).filter((i) => i >= 0).sort((x, y) => x - y)[0];
+    if (at === undefined) return false;
+    const quoted = r.body.slice(at + (r.body.startsWith(es, at) ? es.length : en.length));
+    if (keys.some((k) => quoted.startsWith(k))) return true;
+    const a = alnum(r.body);
+    return fragments.some((f) => a.includes(f));
+  }).map((r) => r.id);
+}
 
 /**
  * Locate a customer's records, matched on the customer's E.164 number (legacy rows without an E.164 match on the last
@@ -406,7 +454,9 @@ export async function locateCustomerRecords(db: Reader, businessId: string, id: 
             OR "booking_id" = ANY(${bookingIds}::text[])
             OR regexp_replace("body", '[^0-9]', '', 'g') LIKE ${likeDigits}
             OR ("kind" = 'owner_alert' AND "body" ILIKE ANY(${namePatterns}::text[])))`;
-  const smsIds = smsRows.filter((r) => r.matched || textMentions(r.body, e164, country)).map((r) => r.id);
+  const smsIdSet = new Set(smsRows.filter((r) => r.matched || textMentions(r.body, e164, country)).map((r) => r.id));
+  for (const id2 of await legacyOwnerForwardIds(db, businessId, e164)) smsIdSet.add(id2);
+  const smsIds = [...smsIdSet];
   const briefingRows = await db.$queryRaw<{ id: string; transcript: string; by_day: boolean }[]>`
     SELECT br."id", br."transcript",
            (br."transcript" ILIKE ANY(${namePatterns}::text[])
@@ -461,8 +511,13 @@ export async function eraseCustomerData(businessId: string, phone: string, count
     const briefings = await tx.$queryRaw<{ audio_url: string | null }[]>`
       DELETE FROM "briefings" WHERE "business_id" = ${businessId} AND "id" = ANY(${rec.briefingIds}::text[])
       RETURNING "audio_url"`;
+    // The customer's own texts to the business (inbox), by sender number: the words they wrote are theirs.
+    const inbound = await tx.$executeRaw`
+      DELETE FROM "inbound_messages" WHERE "business_id" = ${businessId} AND "from_e164" = ${id.e164}`;
     await tx.$executeRaw`
       DELETE FROM "owner_replies" WHERE "business_id" = ${businessId} AND "to_e164" = ${id.e164}`; // voice replies to this customer (number + text)
+    // Limiter keys that embed the number (`inbox:sender:<business>:<e164>`, `manual-sms:to:...`, `inbox-forward:sender:...`): nothing derived from it outlives erasure.
+    await tx.$executeRaw`DELETE FROM "rate_limit_buckets" WHERE "key" LIKE ${`%:${businessId}:${id.e164}`}`;
     // The keyed "lead handled" markers of the owner voice-reply channel (both trust classes): nothing derived from the number outlives erasure.
     await tx.processedEvent.deleteMany({ where: { source: HANDLED_SOURCE, id: { in: (['v', 'u'] as const).map((c) => handledMarkerId(businessId, id.e164 as string, c)) } } });
     const events = await tx.$executeRaw`
@@ -473,7 +528,7 @@ export async function eraseCustomerData(businessId: string, phone: string, count
     // Same transaction as the DELETE: the recordings are on the deletion queue before the last reference to them is gone.
     const queued = await enqueueRecordingDeletions(tx, calls.map((c) => ({ url: c.recording_url, businessId, conversationId: c.conversation_id })));
     return {
-      counts: { calls: calls.length, transcript_events: events, sms_logs: sms, bookings_anonymized: bookings, briefings: briefings.length },
+      counts: { calls: calls.length, transcript_events: events, sms_logs: sms, bookings_anonymized: bookings, inbound_messages: inbound, briefings: briefings.length },
       audio: briefings.map((r) => r.audio_url),
       queued,
       bookingIds: rec.bookingIds,

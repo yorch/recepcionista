@@ -28,6 +28,8 @@ export const RESCHEDULE_REJECTIONS: Partial<Record<BookingRejection, { status: n
   closed_date: { status: 422, error: 'The business is closed that date (holiday closure).' },
   before_open: { status: 422, error: 'That is before opening time.' },
   after_close: { status: 422, error: 'The job would run past closing time.' },
+  too_soon: { status: 422, error: 'That is sooner than the minimum notice the business requires.' },
+  too_far: { status: 422, error: 'That is further ahead than the business takes bookings.' },
   invalid_time: { status: 422, error: 'That is not a valid date and time.' },
   not_reschedulable: { status: 409, error: 'Only a pending or confirmed booking can be moved.' },
   booking_not_found: { status: 404, error: 'booking not found' },

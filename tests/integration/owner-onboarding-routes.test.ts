@@ -4,6 +4,7 @@
  */
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { confirmGoLive } from '../helpers/golive';
 import { cleanup, loadDb, loadPrisma, newBusiness, uniq } from '../helpers/fixtures';
 
 integration('owner onboarding routes: extract + provision (postgres)', () => {
@@ -58,11 +59,15 @@ integration('owner onboarding routes: extract + provision (postgres)', () => {
     await setBilling(biz.id, 'active');
     const owner = await login(biz.id, 'owner');
     await withEnv({ BILLING_ENFORCED: 'true' }, async () => {
+      // first run builds the knowledge base from the template; going live then needs the owner's service area and their confirmation of it
+      const first = await prov(biz.id, owner);
+      expect(first.status).toBe(422);
+      expect(((await first.json()) as any).code).toBe('kb_incomplete');
+      await confirmGoLive(biz.id);
       const res = await prov(biz.id, owner);
       expect(res.status).toBe(200);
       const body = (await res.json()) as any;
       expect(body.data.phone).toBe(biz.phone!);
-      expect(body.data.regenerated).toBe(true); // first run builds the knowledge base
     });
   });
 

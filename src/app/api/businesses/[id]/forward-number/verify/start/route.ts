@@ -8,6 +8,7 @@ import { createOwnerPhoneChallenge } from '@/lib/messaging/owner-verify';
 import { sendOwnerVerificationCode } from '@/lib/messaging';
 import { vetForwardNumber } from '@/lib/voice/forward-vet';
 import { actorOf, announceCallHandlingChange } from '@/lib/voice/call-handling-changes';
+import { smsDelivered, SMS_PROVIDER_NOT_CONFIGURED } from '@/lib/messaging/delivery';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -48,7 +49,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     const { code, challenge, expires_at } = createOwnerPhoneChallenge(id, e164, Date.now(), 'forward-number');
     const sent = await sendOwnerVerificationCode(id, e164, code, 'forward-number');
-    if (sent.blocked || sent.result.status === 'failed') {
+    if (sent.blocked || !smsDelivered(sent.result.status)) {
+      if (sent.result.error === SMS_PROVIDER_NOT_CONFIGURED || sent.result.status === 'mock') return bad(SMS_PROVIDER_NOT_CONFIGURED, 503);
       log.warn('verify.start_failed', { business: id, blocked: sent.blocked ?? null, error: sent.result.error ?? null });
       const country403 = sent.result.error === 'destination country is not allowed';
       return bad(country403 ? 'texts to that country are not enabled for this account' : 'could not send the verification text', country403 ? 422 : 502);

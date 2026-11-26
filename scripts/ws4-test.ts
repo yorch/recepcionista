@@ -8,10 +8,10 @@
 import { execFileSync } from 'node:child_process';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { getBooking, getBusiness, listSms } from '../src/lib/db';
+import { getBooking, getBusiness, listSms, updateBusiness } from '../src/lib/db';
 import {
   confirmationSms, formatWhen, gratitudeSms, ownerAlertSms, ownerEscalationSms,
-  paymentLinkSms, reviewRequestSms, reviewUrl, SMS_LIMIT,
+  paymentLinkSms, reviewRequestSms, SMS_LIMIT,
   type Lang,
 } from '../src/lib/messaging/templates';
 
@@ -30,6 +30,8 @@ import { assertSafeDatabase, forwardedArgs } from './_safe-db';
 assertSafeDatabase('ws4-test');
 
 const BIZ = 'biz_miami_cool_air';
+/** The tenant's own review link (there is no platform default any more). */
+const reviewUrl = () => 'https://g.page/r/ws4-test/review';
 const CONFIRM_BOOKING = 'bk_demo_3';
 const GRATITUDE_BOOKING = 'bk_demo_2';
 
@@ -85,6 +87,7 @@ async function postJson(handler: (req: Request) => Promise<Response>, body: unkn
 async function main() {
   seed();
 
+  await updateBusiness(BIZ, { review_url: reviewUrl() });
   const business = await getBusiness(BIZ);
   const confirmBooking = await getBooking(CONFIRM_BOOKING);
   const gratBooking = await getBooking(GRATITUDE_BOOKING);
@@ -307,13 +310,12 @@ async function main() {
       amountCents: 18900,
       label: 'Emergency deposit',
       businessName: 'Miami Cool Air Conditioning',
-      last4: '4242',
       t: makeT('en'),
       locale: 'en',
     }),
   );
   check('success state says "Payment received"', successHtml.includes('Payment received'), successHtml.slice(0, 200));
-  check('success state confirms the tech', successHtml.includes('Your tech is confirmed'), successHtml.slice(0, 300));
+  check('success state confirms the appointment', successHtml.includes('your appointment is confirmed'), successHtml.slice(0, 300));
   check('success state shows the amount paid', successHtml.includes('$189.00'), successHtml.slice(0, 400));
 
   // ---------- 9. global invariant ----------

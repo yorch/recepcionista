@@ -6,7 +6,8 @@
  * the legacy flat shape; see processPostCall for correlation rules.
  */
 
-import { ok, fail } from '@/lib/http';
+import { ok, fail, readiness } from '@/lib/http';
+import { insecureDevAllowed } from '@/lib/auth';
 import { verifyElevenLabsSignature } from '@/lib/voice/elevenlabs';
 import { parsePostCallBody, processPostCall } from '@/lib/voice/postcall';
 
@@ -27,7 +28,7 @@ export async function POST(req: Request) {
   }
 }
 
-/** Health check so the dashboard can confirm the route is wired. */
+/** Readiness probe: 200 only when this route can authenticate ElevenLabs (the webhook secret is set, or the local-dev opt-in is on). */
 export async function GET() {
-  return ok({ ready: true, accepts: ['application/json'] });
+  return readiness(Boolean(process.env.ELEVENLABS_WEBHOOK_SECRET) || insecureDevAllowed(), { accepts: ['application/json'] });
 }

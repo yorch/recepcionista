@@ -206,7 +206,9 @@ Local development without Stripe: leave `STRIPE_SECRET_KEY` unset and set `DEMO_
 ## Releasing canceled tenants (numbers, agents)
 
 A business whose subscription ended keeps its Twilio number (monthly rent) and its ElevenLabs agent until an operator releases them.
-`scripts/release-canceled-tenants.ts` does that safely; **dry run by default**:
+the `tenant_release` job (admin job runner, `POST /api/admin/jobs/run {"job":"tenant_release"}`; a dry run unless `dry_run:false` AND `TENANT_RELEASE_JOB=on`, see docs/env-vars.md) and
+`scripts/release-canceled-tenants.ts` (the same logic, `--apply` also needs `TENANT_RELEASE_JOB=on`) do that safely; **dry run by default**. With `TENANT_RELEASE_JOB=report` the daily
+job stores a dry-run report (`GET /api/admin/jobs` > `diagnostics.tenant_release`); with `on` it sends the heads-ups and releases what is due (max 10 tenants per run):
 
 ```sh
 # on the production host (tools container), after reading the output of the dry run add --apply; run it daily from cron
@@ -228,7 +230,7 @@ Rules (`src/lib/billing/release.ts`; tested in `tests/release-decision.test.ts` 
   `TWILIO_PHONE_NUMBER` is never released. The ElevenLabs agent is deleted (the shared phone number is detached from it first, best-effort), and the
   workspace tools (`/api/voice/tools/*`, shared by every tenant) are deleted **only when no other business still has an agent**; provisioning recreates them.
 - Provider calls are idempotent: a 404 (already gone) is success; mock mode (no `TWILIO_*` / `ELEVENLABS_API_KEY`, mock-pool numbers, `mock_agent_*` ids) calls nothing. A provider failure leaves
-  that database reference set, exits 1, and the next run retries.
+  that database reference set, exits 1, and the next run retries. A business whose release failed 5 times in a row is `needs_operator`: the daily job skips it (audit `billing.release_stuck` once, error log) and retries it every 7 days, and attempts are ordered least recently attempted first, so one permanent failure cannot starve the others (review 23 A4). While a tenant's imported ElevenLabs number cannot be removed, its agent and Twilio number are KEPT too (nothing half torn down; the next run does all of it). The job counts every business it ACTED on toward `MAX_RELEASES_PER_RUN` (10) whether or not the release ended clean, and stops after 3 businesses with a provider error in one run (`deferred_to_next_run`, circuit breaker); `counts.partial_error` lists the failing ones.
 - On success the business loses `phone`/`phone_e164`/`phone_key`/`agent_id` and becomes `paused`; audit `billing.tenant_released` (last 4 digits of the number only). Resubscribing and re-provisioning
   buys a new number: a released number cannot be recovered, which the heads-up mail says.
 

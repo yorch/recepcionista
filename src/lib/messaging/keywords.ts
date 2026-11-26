@@ -69,6 +69,29 @@ export function mentionsStopWord(body: string | null | undefined): boolean {
   return [...STOP, ...STOP_PAIRS].some((w) => text.includes(` ${w} `));
 }
 
+/** Plain-language ways to ask for no more texts that are not a keyword (the FCC accepts any reasonable means). Matched on the normalised text. */
+const REVOCATION_PHRASES: RegExp[] = [
+  /\b(?:DON T|DO NOT|DONT|NEVER|STOP) (?:TEXT|TEXTING|MESSAGE|MESSAGING|CALL|CALLING|CONTACT|CONTACTING|SEND|SENDING|EMAIL)/,
+  /\b(?:REMOVE|DELETE|TAKE) (?:ME|MY NUMBER|THIS NUMBER|US)\b/,
+  /\bNO MORE (?:TEXTS?|MESSAGES?|SMS)\b/,
+  /\bLEAVE ME ALONE\b/,
+  /\bWRONG (?:NUMBER|PERSON)\b/,
+  /\bNOT (?:THE PERSON|MY NUMBER|SOMEONE YOU)\b/,
+  /\bNO ME (?:ESCRIBA|ESCRIBAN|MANDE|MANDEN|ENVIE|ENVIEN|TEXTEE|LLAME|LLAMEN|CONTACTE)\b/,
+  /\b(?:QUITE|ELIMINE|BORRE|SAQUE) (?:ME|MI NUMERO|ESTE NUMERO)\b/,
+  /\b(?:NUMERO EQUIVOCADO|NO MAS (?:MENSAJES|TEXTOS))\b/,
+];
+
+/**
+ * Might this text be a request to stop receiving texts? True for a stop word anywhere (`mentionsStopWord`) and for the plain-language
+ * phrasings above. Not an automatic opt-out (it could be "stop by at 5"): the inbox sends NO auto-reply to it and flags it for the owner.
+ */
+export function looksLikeRevocation(body: string | null | undefined): boolean {
+  if (mentionsStopWord(body)) return true;
+  const text = normalizeInbound(body);
+  return REVOCATION_PHRASES.some((re) => re.test(text));
+}
+
 export function stopReply(businessName: string): string {
   return `${businessName}: You are unsubscribed and will receive no more texts from us. Reply START to resubscribe.`;
 }

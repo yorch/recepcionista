@@ -91,10 +91,22 @@ export async function collectLeads(business: Business, now: Date = new Date(), t
       select: { id: true, phoneE164: true, customerName: true, createdAt: true },
     }),
   ]);
+  // Inbox hook (customer texts): a NEW inbox message from a number that also has a call or booking in the window makes that lead a 'text' lead
+  // dated at the message, so "what came in" lists it first. A sender with no call/booking cannot be a voice-reply lead (owner_replies only
+  // references a call or a booking), so those stay in the dashboard inbox. Only the sender number and time are read, never the text.
+  const texts = await prisma.inboundMessage.findMany({
+    where: { businessId: business.id, status: 'new', receivedAt: { gte: since, lte: now } }, orderBy: { receivedAt: 'desc' }, take: 60, select: { fromE164: true, receivedAt: true },
+  });
+  const textAt = new Map<string, Date>();
+  for (const m of texts) if (!textAt.has(m.fromE164)) textAt.set(m.fromE164, m.receivedAt);
+  const withText = <T extends { kind: LeadKind; e164: string; at: Date }>(l: T): T => {
+    const t = textAt.get(l.e164);
+    return t && t.getTime() > l.at.getTime() ? { ...l, kind: 'text' as const, at: t } : l;
+  };
   const all: Omit<Lead, 'n' | 'textable'>[] = [
     ...calls.map((c) => ({ kind: callKind(c), rowKind: 'call' as const, rowId: c.id, e164: c.callerE164 as string, name: firstNameOf(c.callerName), last4: last4Of(c.callerE164 as string), at: c.startedAt })),
     ...bookings.map((b) => ({ kind: 'booking' as const, rowKind: 'booking' as const, rowId: b.id, e164: b.phoneE164 as string, name: firstNameOf(b.customerName), last4: last4Of(b.phoneE164 as string), at: b.createdAt })),
-  ].sort((a, b) => b.at.getTime() - a.at.getTime() || a.rowId.localeCompare(b.rowId));
+  ].map(withText).sort((a, b) => b.at.getTime() - a.at.getTime() || a.rowId.localeCompare(b.rowId));
   const owner = business.owner_phone_e164 ?? null;
   const seen = new Set<string>();
   const out: Omit<Lead, 'n'>[] = [];

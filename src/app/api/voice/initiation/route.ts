@@ -15,6 +15,8 @@
  */
 import { getBusinessByAgentId, getBusinessByPhone, setCallTrust, setTransferStatus, updateCall, upsertCallForConversation } from '@/lib/db';
 import { firstMessageFor, verifyToolSecret } from '@/lib/voice/elevenlabs';
+import { insecureDevAllowed } from '@/lib/auth';
+import { readiness } from '@/lib/http';
 import { allowMissedCallAlert, callGate, outOfServiceOverride, pausedOverride } from '@/lib/voice/capacity';
 import { resolveCallRoute } from '@/lib/voice/call-mode';
 import { markPausedNative } from '@/lib/voice/non-ai';
@@ -175,7 +177,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 }
 
-/** Probe for provisioning checks; reveals nothing about tenants. */
+/** Readiness probe (reveals nothing about tenants): 200 only when the tool secret that authenticates this webhook is set (or the local-dev opt-in is on). */
 export async function GET() {
-  return json({ ready: true });
+  return readiness(Boolean(process.env.ELEVENLABS_TOOL_SECRET) || insecureDevAllowed());
 }

@@ -10,6 +10,7 @@ import { DEFAULT_TIMEZONE, tzOf } from '@/lib/time';
 import { formatCents } from '@/lib/money';
 import { policySentence } from '@/lib/refunds';
 import { packOf, tx } from '@/lib/verticals';
+import { validateReviewUrl } from '@/lib/business-config';
 
 export type Lang = 'en' | 'es' | 'mixed';
 
@@ -168,33 +169,61 @@ export function gratitudeSms({ business, booking, language = 'en' }: GratitudeAr
 
   if (language === 'es') {
     return clip(
-      `Hola ${name}, ¿cómo quedó el ${service}? Responda 1-5. — ${business.name}`,
+      `Hola ${name}, ¿cómo quedó el ${service}? Responda 1-5. — ${assistantNameOf(business)}, ${business.name}`,
     );
   }
   if (language === 'mixed') {
     return clip(
-      `Hola ${name}, how did the ${service} go? Responda 1-5. — ${business.name}`,
+      `Hola ${name}, how did the ${service} go? Responda 1-5. — ${assistantNameOf(business)}, ${business.name}`,
     );
   }
-  return clip(`Hi ${name}, how did the ${service} go? Reply 1-5. — ${business.name}`);
+  return clip(`Hi ${name}, how did the ${service} go? Reply 1-5. — ${assistantNameOf(business)}, ${business.name}`);
 }
 
-/** Where a 4–5 star customer is sent. Overridable per deployment. */
-export function reviewUrl(): string {
-  return process.env.REVIEW_URL || 'https://g.page/r/demo/review';
+/** The name the assistant goes by in customer texts when the owner has not chosen one. */
+export const DEFAULT_ASSISTANT_NAME = 'Maria';
+
+/** The business's assistant name (`businesses.assistant_name`, NULL = the platform default). */
+export function assistantNameOf(business: Pick<Business, 'assistant_name'>): string {
+  return safeText(business.assistant_name, 40) || DEFAULT_ASSISTANT_NAME;
+}
+
+/**
+ * Where a 4-5 star customer is sent: the business's OWN Google review link, or null when none is set. There is no platform or
+ * environment fallback on purpose: a shared link would send every tenant's customers to somebody else's reviews.
+ */
+export function reviewLinkOf(business: Pick<Business, 'review_url'>): string | null {
+  const v = validateReviewUrl(business.review_url ?? null);
+  return v.ok ? v.value : null;
 }
 
 export interface ReviewRequestArgs {
   business: Business;
   booking: Booking;
-  reviewUrl: string;
+  /** The business's review link (`reviewLinkOf`); null/empty = no link: the text only says thanks. */
+  reviewUrl?: string | null;
+  language?: Lang;
 }
 
-export function reviewRequestSms({ business, booking, reviewUrl }: ReviewRequestArgs): string {
+/** Room for ". Reply STOP to opt out" (the footer the send path adds) inside the 300-character text. */
+const REVIEW_BODY_MAX = SMS_LIMIT - 26;
+
+export function reviewRequestSms({ business, booking, reviewUrl, language = 'en' }: ReviewRequestArgs): string {
   const name = firstName(booking.customer_name);
-  return clip(
-    `Thank you ${name}! 30 seconds for a quick review? ${reviewUrl} ¡Gracias! — ${business.name}`,
-  );
+  const who = `${assistantNameOf(business)}, ${business.name}`;
+  const link = reviewUrl?.trim() || null;
+  const es = language === 'es';
+  if (!link) {
+    return clip(es ? `¡Gracias ${name}! Nos alegra que le haya ido bien. — ${who}` : `Thank you ${name}! We are glad it went well. ¡Gracias! — ${who}`);
+  }
+  // The link is never cut: when the text is too long the words AROUND it shrink (the signature, then the greeting), in this order.
+  const tiers = es
+    ? [`¡Gracias ${name}! ¿Nos deja una reseña de 30 segundos? ${link} — ${who}`, `¡Gracias ${name}! ¿Una reseña de 30 segundos? ${link} — ${business.name}`, `¡Gracias! Reseña: ${link} — ${business.name}`]
+    : [`Thank you ${name}! 30 seconds for a quick review? ${link} ¡Gracias! — ${who}`, `Thank you ${name}! Quick review? ${link} — ${business.name}`, `Thank you! Review: ${link} — ${business.name}`];
+  const fit = tiers.find((t) => [...t].length <= REVIEW_BODY_MAX);
+  if (fit) return fit;
+  // Even the shortest wording does not fit (a very long business name or a legacy link): the text without the link, never a cut one.
+  return clip(es ? `¡Gracias ${name}! Nos alegra que le haya ido bien. — ${business.name}` : `Thank you ${name}! We are glad it went well. — ${business.name}`);
 }
 
 export interface OwnerEscalationArgs {

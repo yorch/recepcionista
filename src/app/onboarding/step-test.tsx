@@ -13,7 +13,7 @@ import { packOf, tx } from '@/lib/verticals';
 
 const POLL_MS = 4000;
 
-export function TestStep({ businessId, status: initial, isAdmin, go }: StepProps) {
+export function TestStep({ businessId, status: initial, isAdmin, demoEnabled, go }: StepProps) {
   const t = useT();
   const [status, setStatus] = useState<OnboardingStatus>(initial);
   const [pollError, setPollError] = useState(false);
@@ -66,7 +66,7 @@ export function TestStep({ businessId, status: initial, isAdmin, go }: StepProps
         {status.phone_mock ? (
           <p role="note" className="mt-4 rounded-xl border border-warn-line bg-warn-bg px-3.5 py-2.5 text-[13px] text-warn">
             {t('ts.mockNote')}
-            {isAdmin ? <> <Link href="/dashboard/demo" className="font-semibold underline">{t('ts.useDemo')}</Link></> : null}
+            {isAdmin && demoEnabled ? <> <Link href="/dashboard/demo" className="font-semibold underline">{t('ts.useDemo')}</Link></> : null}
           </p>
         ) : null}
       </Card>

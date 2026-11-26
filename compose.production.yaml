@@ -1,7 +1,6 @@
 # Production stack for a host that already runs Traefik.
 #
 #   ./deploy.sh              # build, migrate, start
-#   ./deploy.sh --seed       # …and load the demo dataset
 #
 # Prerequisites on the host (both one-time):
 #   docker network create traefik
@@ -85,16 +84,16 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 
-  # Opt-in demo data. Destructive by design: scripts/seed.ts clears every table
-  # first, so it is behind a profile and never runs on a plain `up`.
-  #   docker compose -f compose.production.yaml --profile seed run --rm seed
+  # One-shot operator tools (profile `seed` is a historical name): run a script from ./scripts, e.g.
+  #   docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/release-canceled-tenants.ts --force-i-know
+  # It NEVER seeds the demo data: scripts/seed.ts refuses NODE_ENV=production, and deploy.sh has no --seed.
   seed:
     profiles: ["seed"]
     build:
       context: .
       target: tools
     image: ${TOOLS_IMAGE:-recepcionista-tools:local}
-    command: ["bun", "scripts/seed.ts"]
+    command: ["bun", "-e", "console.error('pass a script to run, e.g. bun scripts/verify-deploy.ts (the demo seed is refused in production)')"]
     env_file:
       - .env
     environment:

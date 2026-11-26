@@ -3,6 +3,7 @@
  * overlap and slot validation. Everything is computed in the business time zone.
  */
 import { isClosedDate } from './closures';
+import { hasFreeCrew, type CrewBusy } from './crews';
 import { addDaysToDateKey, dayOfWeek, localDateKey, parseHhmm, zonedTimeToUtc } from './time';
 import type { Hours, TimeSlot } from './types';
 
@@ -25,8 +26,11 @@ export function intervalsOverlap(a: Interval, b: Interval): boolean {
   return a.start < b.end && b.start < a.end;
 }
 
-export function hasConflict(candidate: Interval, busy: Interval[]): boolean {
-  return busy.some((b) => intervalsOverlap(candidate, b));
+/** `bufferMin` keeps that much free time on BOTH sides of the candidate (a buffer of 0 is the plain overlap rule). */
+export function hasConflict(candidate: Interval, busy: Interval[], bufferMin = 0): boolean {
+  const pad = Math.max(0, bufferMin) * 60_000;
+  const c = pad ? { start: candidate.start - pad, end: candidate.end + pad } : candidate;
+  return busy.some((b) => intervalsOverlap(c, b));
 }
 
 export function bookingInterval(b: { scheduled_at: string; duration_minutes?: number | null }): Interval {
@@ -54,7 +58,7 @@ export function openWindow(hours: Hours | undefined | null, dateKey: string, tz:
   return end > start ? { start, end } : null;
 }
 
-export type SlotRejection = 'past' | 'closed_day' | 'closed_date' | 'before_open' | 'after_close';
+export type SlotRejection = 'past' | 'closed_day' | 'closed_date' | 'before_open' | 'after_close' | 'too_soon' | 'too_far';
 
 /**
  * Is [start, start+duration) a legal appointment? It must start now-or-later (plus
@@ -69,9 +73,12 @@ export function validateSlot(
   nowMs: number,
   leadMin = 0,
   closedDates?: readonly string[] | null,
+  opts: { horizonDays?: number | null } = {},
 ): { ok: true } | { ok: false; reason: SlotRejection } {
-  if (!Number.isFinite(startMs) || startMs < nowMs + leadMin * 60_000) return { ok: false, reason: 'past' };
+  if (!Number.isFinite(startMs) || startMs < nowMs) return { ok: false, reason: 'past' };
+  if (startMs < nowMs + leadMin * 60_000) return { ok: false, reason: 'too_soon' }; // inside the minimum notice
   const dateKey = localDateKey(startMs, tz);
+  if (opts.horizonDays != null && dateKey >= addDaysToDateKey(localDateKey(nowMs, tz), opts.horizonDays)) return { ok: false, reason: 'too_far' };
   if (isClosedDate(closedDates, dateKey)) return { ok: false, reason: 'closed_date' };
   const window = openWindow(hours, dateKey, tz);
   if (!window) return { ok: false, reason: 'closed_day' };
@@ -86,7 +93,13 @@ export function buildSlots(
   tz: string,
   durationMin: number,
   busy: Interval[],
-  opts: { stepMin?: number; nowMs?: number; leadMin?: number; closedDates?: readonly string[] | null } = {},
+  opts: {
+    stepMin?: number; nowMs?: number; leadMin?: number; closedDates?: readonly string[] | null;
+    /** Free time kept around every busy interval (bookings AND calendar blocks). */
+    bufferMin?: number;
+    /** With `crews`, bookings are listed per crew in `crewBusy` (`busy` then holds only blocks that stop EVERY crew, e.g. the owner's Google Calendar). */
+    crews?: number; crewBusy?: readonly CrewBusy[];
+  } = {},
 ): TimeSlot[] {
   const window = openWindow(hours, dateKey, tz, opts.closedDates);
   if (!window) return [];
@@ -94,12 +107,13 @@ export function buildSlots(
   const dur = durationMin * 60_000;
   const earliest = opts.nowMs != null ? opts.nowMs + (opts.leadMin ?? 0) * 60_000 : -Infinity;
   const slots: TimeSlot[] = [];
+  const buffer = opts.bufferMin ?? 0;
+  const pad = Math.max(0, buffer) * 60_000;
   for (let t = window.start; t + dur <= window.end; t += step) {
-    slots.push({
-      start: new Date(t).toISOString(),
-      end: new Date(t + dur).toISOString(),
-      available: t >= earliest && !hasConflict({ start: t, end: t + dur }, busy),
-    });
+    const cand = { start: t, end: t + dur };
+    let free = t >= earliest && !hasConflict(cand, busy, buffer);
+    if (free && opts.crewBusy) free = hasFreeCrew(opts.crews ?? 1, { start: t - pad, end: t + dur + pad }, opts.crewBusy);
+    slots.push({ start: new Date(t).toISOString(), end: new Date(t + dur).toISOString(), available: free });
   }
   return slots;
 }

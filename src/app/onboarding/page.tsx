@@ -1,8 +1,10 @@
+import { demoModeEnabled } from '@/lib/auth';
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { getBusiness, listBusinesses } from '@/lib/db';
 import { getServerPrincipal } from '@/lib/session';
 import { planPriceDisplay, planPriceDisplayAnnual } from '@/app/site-config';
+import { planCapLines, planPriceTexts } from '@/lib/billing/price';
 import { annualAvailable } from '@/lib/providers/stripe-billing';
 import { getLocale, getT } from '@/lib/i18n/server';
 import { OnboardingFlow } from './flow';
@@ -41,13 +43,17 @@ export default async function OnboardingPage({
 
   const step = first(sp.step);
   const checkout = first(sp.checkout);
+  // Real price from Stripe (cached, fail-soft to the display text) and the caps the metering enforces.
+  const prices = await planPriceTexts(locale, { monthly: planPriceDisplay(locale), annual: planPriceDisplayAnnual(locale) });
   return (
     <OnboardingFlow
       businessId={businessId}
       isAdmin={isAdmin}
-      priceDisplay={planPriceDisplay(locale)}
+      demoEnabled={demoModeEnabled()}
+      priceDisplay={prices.monthly}
       annualAvailable={annualAvailable()}
-      annualDisplay={planPriceDisplayAnnual(locale)}
+      annualDisplay={prices.annual}
+      capLines={planCapLines(locale)}
       requestedStep={STEP_IDS.includes(step as StepId) ? (step as StepId) : null}
       checkout={checkout === 'success' || checkout === 'cancel' ? checkout : null}
       resumable={resumable}

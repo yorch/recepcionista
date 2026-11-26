@@ -4,6 +4,8 @@ import { getBooking, getBusiness } from '@/lib/db';
 import type { Lang } from '@/lib/messaging/templates';
 import { createAndSendPaymentLink } from '@/lib/messaging/actions';
 import { limitRequest } from '@/lib/ratelimit';
+import { depositPolicyOf } from '@/lib/business-config';
+import { resolveDepositAmount } from '@/lib/payments/deposit';
 import type { SmsLog } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -40,22 +42,23 @@ export async function POST(req: Request) {
     if (!business) return fail('business not found', 404);
     if (!body.booking_id || typeof body.booking_id !== 'string') return fail('booking_id is required', 422);
 
-    const amountCents = Number(body.amount_cents);
-    if (!Number.isFinite(amountCents) || amountCents < 100 || amountCents > 50000) {
-      return fail('amount_cents must be between 100 and 50000', 422);
-    }
-
     // Always generate the link server-side; any caller-supplied `url` is ignored
     // (otherwise this route is an open "SMS arbitrary link" primitive).
     const booking = await getBooking(body.booking_id);
     if (!booking || booking.business_id !== business.id) return fail('booking not found', 404);
     if (booking.anonymized_at || !booking.customer_phone) return fail('booking has no customer phone on file', 422);
     if (booking.status === 'cancelled') return fail('the booking is cancelled; a deposit link cannot be created for it', 409);
+    if (booking.deposit_paid) return fail('the deposit of this booking is already paid', 409);
+    const decision = resolveDepositAmount({
+      policy: depositPolicyOf(business), priceEstimateCents: booking.price_estimate ?? null, requestedCents: body.amount_cents,
+      storedCents: booking.deposit_amount ?? null, actor: 'owner',
+    });
+    if (!decision.ok) return fail(decision.error, 422);
     const { sms, body: text, link } = await createAndSendPaymentLink({
       business,
       booking,
       to: booking.customer_phone,
-      amountCents,
+      amountCents: decision.cents,
       language: body.language,
     });
 

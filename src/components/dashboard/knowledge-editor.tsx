@@ -20,6 +20,9 @@ import type { Business, ExtractionResult, KnowledgeBase } from '@/lib/types';
 type BizFields = Pick<Business, 'name' | 'owner_name' | 'service_area' | 'hours' | 'url'> & Partial<Pick<Business, 'vertical'>>;
 type KbFields = Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes' | 'call_script' | 'system_prompt'>;
 
+/** What the server reports about pushing the edit to the live voice agent. */
+type AgentSync = { agent: 'synced' | 'skipped' | 'failed' };
+
 const NO_ERRORS: DraftErrors = { services: {}, faqs: {}, hours: {} };
 
 export function KnowledgeEditor({
@@ -61,12 +64,15 @@ export function KnowledgeEditor({
       toast.error(t('kb.ed.fixFields'));
       return;
     }
+    let sync: AgentSync | undefined;
     try {
-      await request(`/api/businesses/${businessId}`, { method: 'PATCH', body: toBusinessPatch(draft) });
-      await request(`/api/businesses/${businessId}/onboarding-status/knowledge`, {
+      const biz = await request<{ agent_sync?: AgentSync }>(`/api/businesses/${businessId}`, { method: 'PATCH', body: toBusinessPatch(draft) });
+      const saved = await request<{ agent_sync?: AgentSync }>(`/api/businesses/${businessId}/onboarding-status/knowledge`, {
         method: 'PUT',
         body: { ...toKnowledgePayload(draft), call_script: script, ...(extractedFrom ? { extracted_from: extractedFrom } : {}) },
       });
+      // The knowledge save is the last push; a failed business push earlier is still reported (the retry covers both).
+      sync = saved?.agent_sync?.agent === 'failed' || biz?.agent_sync?.agent === 'failed' ? { agent: 'failed' } : saved?.agent_sync;
     } catch (err) {
       toast.error(errorText(t, err));
       return;
@@ -74,7 +80,10 @@ export function KnowledgeEditor({
     setBaseline({ snap: snapshot(draft), script });
     setExtractedFrom(null);
     setMergeNote(null);
-    toast.success(t('kb.ed.saved'));
+    // Honest about the live agent: "next call" only when the push really succeeded.
+    if (sync?.agent === 'failed') toast.warning(t('kb.ed.savedPending'));
+    else if (sync?.agent === 'skipped') toast.success(t('kb.ed.savedNoAgent'));
+    else toast.success(t('kb.ed.saved'));
     router.refresh();
   }
 

@@ -217,7 +217,9 @@ describe('M2: honest forwarding by line kind', () => {
 
   test('lineKind: native only with ElevenLabs configured (or forced); forwarding is a webhook-line feature', () => {
     expect(lineKind({})).toBe('webhook');
-    expect(lineKind({ ELEVENLABS_API_KEY: 'k' })).toBe('webhook');
+    // per-tenant imported lines: a key alone makes the deployment native unless they are switched off
+    expect(lineKind({ ELEVENLABS_API_KEY: 'k' })).toBe('native');
+    expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_TENANT_LINES: 'off' })).toBe('webhook');
     expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p' })).toBe('native');
     // L5 (round 6): `webhook` contradicting a configured native line is IGNORED (the safe reading wins) and reported as a mismatch
     expect(lineKind({ ELEVENLABS_API_KEY: 'k', ELEVENLABS_PHONE_NUMBER_ID: 'p', VOICE_LINE_KIND: 'webhook' })).toBe('native');

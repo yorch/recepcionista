@@ -1,13 +1,15 @@
-import { ok, fail } from '@/lib/http';
+import { ok, fail, readiness } from '@/lib/http';
+import { insecureDevAllowed } from '@/lib/auth';
 import { getBusinessByPhone, listBusinesses, createCall, getCallBySid, updateCall } from '@/lib/db';
-import { syncAgent, getSignedUrl, firstMessageFor, bindPhoneNumber, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { syncAgent, getSignedUrl, firstMessageFor, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { registerTwilioCall } from '@/lib/voice/elevenlabs-phone';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { allowMissedCallAlert, callGate, outOfServiceFirstMessage, pausedFirstMessage } from '@/lib/voice/capacity';
 import { resolveCallRoute } from '@/lib/voice/call-mode';
-import { markForwarded, markPaused, markUnavailable } from '@/lib/voice/non-ai';
+import { markAiUnavailable, markForwarded, markPaused, markUnavailable } from '@/lib/voice/non-ai';
 import { forwardAllowance, voicemailAllowance } from '@/lib/voice/forward-metering';
 import { vetForwardNumber } from '@/lib/voice/forward-vet';
-import { forwardRingSeconds, forwardTwiml, pausedTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
+import { forwardRingSeconds, forwardTwiml, lineNoticeTwiml, pausedTwiml, twimlResponse, unavailableTwiml } from '@/lib/voice/twiml';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import { missedCallText } from '@/lib/voice/non-ai';
 import { makeT } from '@/lib/i18n';
@@ -54,6 +56,8 @@ async function getCallSid(callSid: string, businessId: string) {
 }
 
 export async function POST(req: Request) {
+  // A signed Twilio call (form post) is ALWAYS answered with TwiML; only the unsigned demo UI (JSON) gets JSON.
+  const isJson = (req.headers.get('content-type') ?? '').includes('application/json');
   try {
     const { payload, form } = await readPayload(req);
     const verdict = verifyTwilioSignature(req, form);
@@ -71,6 +75,7 @@ export async function POST(req: Request) {
     const business: Business | null = matched ?? (all.length === 1 ? all[0] : null);
     if (!business) {
       log.error('no_business', { to: to || null, from: from || null });
+      if (!isJson) return twimlResponse(unavailableTwiml());
       return fail('no business configured — run scripts/seed.ts', 404);
     }
     log.info('routed', {
@@ -114,11 +119,21 @@ export async function POST(req: Request) {
         let agentMock = true;
         let wsUrl: string | null = null;
         try {
-          const agent = await syncAgent({ business, kb: null });
+          const agent = await syncAgent({ business, kb: null }) // syncAgent loads the stored KB itself;
           agentId = agent.agent_id;
           agentMock = agent.mock;
           if (agentId) wsUrl = (await getSignedUrl(agentId)).signed_url ?? null;
         } catch (err) { log.error('owner_agent_setup_failed', { business: business.id, err }); }
+        if (!isJson) {
+          // Webhook line: connect the owner to the private assistant through ElevenLabs' register-call TwiML (UNVERIFIED shape, voice/elevenlabs-phone.ts),
+          // else say plainly that the owner line is not available here. Never JSON to Twilio.
+          if (agentId && !agentMock && registerCallEnabled()) {
+            const rc = await registerTwilioCall({ agentId, from, to, dynamicVariables: { ...ownerEntry.variables, call_sid: callSid, caller_phone: from }, configOverride: ownerEntry.override as unknown as Record<string, unknown> });
+            if (rc.ok) return twimlResponse(rc.twiml);
+            log.warn('owner_register_call_failed', { business: business.id, error: rc.error });
+          }
+          return twimlResponse(lineNoticeTwiml('owner'));
+        }
         return ok({
           agent_id: agentId, business_id: business.id, call_id: call.id, business_name: business.name, caller_phone: from || null,
           ws_url: wsUrl, mock: agentMock || !wsUrl, owner_mode: true, dynamic_variables: ownerEntry.variables,
@@ -133,7 +148,6 @@ export async function POST(req: Request) {
     if (route.action === 'ai' && (business.call_mode ?? 'ai') === 'forward') {
       log.warn('forward_not_applied', { business: business.id, why: route.why });
     }
-    const isJson = (req.headers.get('content-type') ?? '').includes('application/json');
     let refusal: string | null = null;
     // The CALLER is the reason a forward was refused (their own hourly budget): the owner is not texted about it.
     let callerLimited = false;
@@ -213,6 +227,7 @@ export async function POST(req: Request) {
           : null;
         log.warn('handed_off_out_of_service', { business: business.id, call: call.id, reason: gate.reason, owner_notified: alert?.notified ?? false, alert_suppressed: alert === null });
       }
+      if (!isJson) return twimlResponse(unavailableTwiml()); // the honest out-of-service line, never JSON to Twilio
       return ok({
         agent_id: '',
         business_id: business.id,
@@ -230,21 +245,33 @@ export async function POST(req: Request) {
     let agentId = '';
     let agentMock = true;
     try {
-      const agent = await syncAgent({ business, kb: null });
+      const agent = await syncAgent({ business, kb: null }) // syncAgent loads the stored KB itself;
       agentId = agent.agent_id;
       agentMock = agent.mock;
-      if (agentId && !agentMock) {
-        try { await bindPhoneNumber(agentId); } catch { /* best-effort */ }
-      }
     } catch (err) {
       log.error('agent_setup_failed', { business: business.id, err });
     }
 
     // Server-side evidence that the agent opens with the disclosure: its first message (firstMessageFor, which
-    // always contains the notice) was just pushed to a real agent, or this is the scripted demo that speaks the
-    // same text. If the agent refresh failed the old first message stands, so the state stays 'unknown'.
-    if ((!hasElevenLabs() || !agentMock) && call.consent_status !== 'declined') {
+    // always contains the notice) was just pushed to a real agent, or this is the scripted demo (outside production) that
+    // speaks the same text. If the agent refresh failed, or production has no ElevenLabs key (nothing speaks any notice),
+    // the state stays 'unknown'.
+    if ((!agentMock || (!hasElevenLabs() && process.env.NODE_ENV !== 'production')) && call.consent_status !== 'declined') {
       await updateCall(call.id, { recording_disclosed: true, consent_status: 'disclosed' });
+    }
+
+    if (!isJson) {
+      // Signed Twilio form post: the AI is connected through ElevenLabs' register-call TwiML when it works (UNVERIFIED shape, isolated in
+      // voice/elevenlabs-phone.ts); otherwise the caller gets the honest voicemail (never JSON, never silence).
+      if (agentId && !agentMock && registerCallEnabled()) {
+        const rc = await registerTwilioCall({ agentId, from, to, dynamicVariables: { business_id: business.id, call_sid: callSid, caller_phone: from } });
+        if (rc.ok) {
+          log.info('call_started', { business: business.id, call: call.id, agent: agentId, live: true, via: 'register_call' });
+          return twimlResponse(rc.twiml);
+        }
+        log.warn('register_call_failed', { business: business.id, call: call.id, error: rc.error });
+      }
+      return voicemailFallback(business, call, from, callSid, stirStatus);
     }
 
     let wsUrl: string | null = null;
@@ -271,11 +298,28 @@ export async function POST(req: Request) {
       fallback_script: firstMessageFor(business),
     });
   } catch (err) {
+    log.error('incoming_failed', { err });
+    if (!isJson) return twimlResponse(lineNoticeTwiml('ai'));
     return fail(err, 500);
   }
 }
 
-/** Twilio health-check / browser probe. Reveals nothing about tenants. */
+/** ELEVENLABS_REGISTER_CALL=off skips the register-call connection (the AI branch of a webhook line then always takes a voicemail). Default on. */
+const registerCallEnabled = (): boolean => (process.env.ELEVENLABS_REGISTER_CALL ?? '').trim().toLowerCase() !== 'off';
+
+/** The AI cannot be reached on this webhook line: the caller is told so plainly and may leave a recorded message (same budget checks as a paused line). */
+async function voicemailFallback(business: Business, call: Awaited<ReturnType<typeof createCall>>, from: string, callSid: string, stirStatus: string | null): Promise<Response> {
+  const vm = await voicemailAllowance(business.id, process.env, { business, callSid: callSid || null, from, stirStatus });
+  if (!vm.ok) {
+    const callerCaused = vm.why === 'caller_limited' || vm.why === 'unknown_reserved';
+    await markUnavailable(business, call, from, vm.why === 'cap_reached' ? 'the voicemail minutes of this month are used up' : callerCaused ? 'too many calls from this number' : 'too many voicemails this hour', { notify: !callerCaused, known: vm.known });
+    return twimlResponse(unavailableTwiml());
+  }
+  await markAiUnavailable(business, call, from);
+  return twimlResponse(pausedTwiml(business, '/api/voice/voicemail'));
+}
+
+/** Readiness probe (reveals nothing about tenants): 200 only when Twilio signatures can be verified (TWILIO_AUTH_TOKEN set, or the local-dev opt-in is on). */
 export async function GET() {
-  return ok({ ready: true });
+  return readiness(Boolean(process.env.TWILIO_AUTH_TOKEN) || insecureDevAllowed());
 }

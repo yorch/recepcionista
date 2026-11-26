@@ -83,8 +83,8 @@ describe('kb readiness', () => {
   test('blockers: <3 priced services, no hours, no FAQ', () => {
     const r = kbReadiness({ services: [...svc(2), { name: 'Free quote', base_price: null }], faqs: [{ question: 'q', answer: ' ' }] }, { hours: { monday: null }, service_area: [], owner_name: '' });
     expect(r.ready).toBe(false);
-    expect(r.blockers.map((b) => b.key).sort()).toEqual(['faqs', 'hours', 'services']);
-    expect(r.warnings.map((b) => b.key).sort()).toEqual(['owner_name', 'service_area']);
+    expect(r.blockers.map((b) => b.key).sort()).toEqual(['faqs', 'hours', 'service_area', 'services']); // the service area is the owner's own input: required, never defaulted
+    expect(r.warnings.map((b) => b.key).sort()).toEqual(['owner_name']);
     expect(r.score).toBeLessThan(50);
   });
   test('3 services and 1 FAQ pass the gate but warn', () => {

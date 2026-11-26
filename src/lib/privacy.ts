@@ -17,6 +17,8 @@ export interface CustomerExport {
   sms: unknown[];
   /** Evening briefings (narration + stats) that cover a day the customer appears in, or mention them. */
   briefings: unknown[];
+  /** Texts the customer sent to the business (the owner's inbox). */
+  inbound_messages: unknown[];
   sms_opted_out: boolean;
   /** Voicemail recordings of this business that were deleted here but whose provider-side deletion is still PENDING (retried automatically); 0 = nothing outstanding. */
   recording_deletions_pending: number;
@@ -29,12 +31,13 @@ export async function exportCustomerData(businessId: string, phone: string, coun
     locateCustomerRecords(prisma, businessId, id, country),
     isOptedOut(businessId, id.e164),
   ]);
-  const [calls, bookings, sms, briefings, events] = await Promise.all([
+  const [calls, bookings, sms, briefings, events, inbound] = await Promise.all([
     prisma.call.findMany({ where: { id: { in: rec.callIds } }, orderBy: { startedAt: 'asc' } }),
     prisma.booking.findMany({ where: { id: { in: rec.bookingIds } }, orderBy: { scheduledAt: 'asc' } }),
     prisma.smsLog.findMany({ where: { id: { in: rec.smsIds } }, orderBy: { createdAt: 'asc' } }),
     prisma.briefing.findMany({ where: { id: { in: rec.briefingIds } }, orderBy: { date: 'asc' } }),
     prisma.callTranscriptEvent.findMany({ where: { callId: { in: rec.callIds } }, orderBy: [{ callId: 'asc' }, { seq: 'asc' }] }),
+    prisma.inboundMessage.findMany({ where: { businessId, fromE164: id.e164 }, orderBy: { receivedAt: 'asc' } }),
   ]);
   return {
     business_id: businessId,
@@ -48,6 +51,7 @@ export async function exportCustomerData(businessId: string, phone: string, coun
     })),
     transcript_events: events.map((e) => ({ call_id: e.callId, seq: e.seq, role: e.role, text: e.text, at: e.at.toISOString(), is_final: e.isFinal })),
     bookings, sms, briefings,
+    inbound_messages: inbound,
     sms_opted_out: optedOut,
     recording_deletions_pending: (await recordingDeletionStatus(businessId)).pending,
   };

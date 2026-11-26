@@ -84,7 +84,38 @@ export interface Business {
   past_due_since?: string | null;
   sms_cap_override?: number | null;
   call_minutes_cap_override?: number | null;
+  /** This tenant's own AI line (docs/design/mock-replacement-contracts.md): the ElevenLabs phone-number id and the Twilio phone sid. The shared env ELEVENLABS_PHONE_NUMBER_ID is only a fallback. */
+  elevenlabs_phone_number_id?: string | null;
+  twilio_phone_sid?: string | null;
+  /** Google review link (https, <= 300 chars) texted after a job; null = none. */
+  review_url?: string | null;
+  /** What the assistant calls itself (1-40 chars); null = platform default. */
+  assistant_name?: string | null;
+  /** Deposit policy. deposit_enabled=false (default) = no policy (legacy: the amount is whatever the agent / owner asks for). Cents are integers within 100..100000. */
+  deposit_enabled?: boolean;
+  deposit_mode?: DepositMode;
+  deposit_fixed_cents?: number | null;
+  deposit_percent?: number | null;
+  deposit_min_cents?: number | null;
+  deposit_max_cents?: number | null;
+  /** Scheduling config. Defaults: 60 / 60 / 14 / 0 / 1 (see DEFAULT_SCHEDULING in src/lib/business-config.ts). */
+  slot_minutes?: 15 | 30 | 60;
+  min_lead_minutes?: number;
+  horizon_days?: number;
+  buffer_minutes?: number;
+  crews?: number;
+  /** Go-live confirmation of the template content (see contentConfirmationState). */
+  content_confirmed_at?: string | null;
+  content_confirmed_hash?: string | null;
+  /** Opt-in: the provider's native call transfer to the owner (default false). */
+  native_transfer_enabled?: boolean;
 }
+
+export type DepositMode = 'fixed' | 'percent';
+export const DEPOSIT_SOURCES = ['stripe', 'manual'] as const;
+export type DepositSource = (typeof DEPOSIT_SOURCES)[number];
+export const BOOKING_CREATED_VIA = ['ai', 'dashboard', 'sms', 'api', 'system'] as const;
+export type BookingCreatedVia = (typeof BOOKING_CREATED_VIA)[number];
 
 export type Locale = 'en' | 'es';
 export const LOCALES: readonly Locale[] = ['en', 'es'];
@@ -191,6 +222,15 @@ export interface Booking {
   refunded_at?: string | null;
   /** Card dispute on the deposit (Stripe charge.dispute.* events): none | open | won | lost. */
   dispute_status?: DisputeStatus;
+  /** How the deposit was paid: 'stripe' | 'manual' (owner marked it) | null (unknown / unpaid). */
+  deposit_source?: DepositSource | null;
+  /** Who (user id / 'admin_token') and when marked the deposit paid manually. */
+  deposit_marked_by?: string | null;
+  deposit_marked_at?: string | null;
+  /** Where the booking came from (default 'ai'). */
+  created_via?: BookingCreatedVia;
+  /** Crew 1..businesses.crews the job is assigned to (default 1). */
+  crew?: number;
 }
 
 export type DisputeStatus = 'none' | 'open' | 'won' | 'lost';
@@ -202,6 +242,8 @@ export interface BriefingStats {
   /** INTEGER CENTS */
   revenue: number;
   flags: number;
+  /** How the transcript was written: by the AI writer, or by the automatic template (no key / provider failure). Absent on older briefings. */
+  narration?: 'ai' | 'automatic';
 }
 
 export interface Briefing {
@@ -214,18 +256,56 @@ export interface Briefing {
   created_at: string;
 }
 
+export const SMS_KINDS = ['confirmation', 'payment_link', 'gratitude', 'review_request', 'owner_alert', 'manual', 'owner_inbox_reply', 'inbox_autoreply', 'other'] as const;
+export type SmsKind = (typeof SMS_KINDS)[number];
+
 export interface SmsLog {
   id: ID;
   business_id: ID;
   to_phone: string;
   body: string;
-  kind: 'confirmation' | 'payment_link' | 'gratitude' | 'review_request' | 'owner_alert' | 'manual' | 'other';
+  kind: SmsKind;
   /** Which booking this message belongs to — makes confirmation dedupe exact. */
   booking_id?: ID | null;
   provider_id?: string | null;
   status: 'queued' | 'sent' | 'failed' | 'mock' | 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent' | 'blocked_cap' | 'blocked_owner_unverified';
   /** Why this text was allowed, e.g. 'transactional_booking' | 'caller_initiated' | 'express_opt_in' | 'owner_alert'. */
   consent_basis?: string | null;
+  /** The E.164 that actually sent the text (null: unknown yet / not sent), and whether it was the tenant's own line, the shared sender or the Messaging Service pool. */
+  from_e164?: string | null;
+  sender_kind?: 'tenant' | 'shared' | 'service' | null;
+  created_at: string;
+}
+
+export type InboundStatus = 'new' | 'handled' | 'ignored';
+export const INBOUND_STATUSES: readonly InboundStatus[] = ['new', 'handled', 'ignored'];
+
+/** A customer text received on the business's number (the owner's inbox). */
+export interface InboundMessage {
+  id: ID;
+  business_id: ID;
+  from_e164: string;
+  from_phone: string;
+  /** At most 1600 chars. */
+  body: string;
+  twilio_message_sid: string;
+  received_at: string;
+  status: InboundStatus;
+  handled_at: string | null;
+  handled_by: string | null;
+  forwarded_to_owner_at: string | null;
+  auto_replied_at: string | null;
+  booking_id: ID | null;
+}
+
+/** Metadata of stored briefing audio (the bytes are only read by getBriefingAudio). */
+export interface BriefingAudioMeta {
+  briefing_id: ID;
+  content_type: string;
+  size_bytes: number;
+  voice_id: string | null;
+  /** SHA-256 of the transcript the clip was made from (null: a clip stored before this was recorded). */
+  text_hash: string | null;
   created_at: string;
 }
 

@@ -1,4 +1,9 @@
 import type { Metadata } from 'next';
+import { notFound } from 'next/navigation';
+import { demoModeEnabled } from '@/lib/auth';
+import { hasTwilio } from '@/lib/providers/twilio';
+import { hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { hasLlm } from '@/lib/providers/llm';
 import { countCalls, getKnowledgeBase } from '@/lib/db';
 import { getDashboardContext, requireRolePage } from '@/lib/dashboard-context';
 import { Card, CardHead } from '@/components/ui/card';
@@ -14,6 +19,8 @@ export async function generateMetadata(): Promise<Metadata> {
 export const dynamic = 'force-dynamic';
 
 export default async function DemoPage() {
+  // The demo console wipes data, fakes calls and sends demo texts: it does not exist unless demo mode is on (and never in production).
+  if (!demoModeEnabled()) notFound();
   const t = await getT();
   const ctx = await getDashboardContext();
   requireRolePage(ctx, 'admin'); // demo console wipes data and sends SMS: admin only
@@ -64,17 +71,17 @@ export default async function DemoPage() {
           <Card className="p-5">
             <p className="text-xs uppercase tracking-wider text-dim">{t('demo.integrations')}</p>
             <div className="mt-2 flex flex-wrap gap-1.5">
-              <Badge tone={process.env.ELEVENLABS_API_KEY ? 'routine' : 'unsure'}>
-                ElevenLabs {process.env.ELEVENLABS_API_KEY ? t('demo.live') : t('demo.mock')}
+              <Badge tone={hasElevenLabs() ? 'routine' : 'unsure'}>
+                ElevenLabs {hasElevenLabs() ? t('demo.live') : t('demo.mock')}
               </Badge>
-              <Badge tone={process.env.TWILIO_AUTH_TOKEN ? 'routine' : 'unsure'}>
-                Twilio {process.env.TWILIO_AUTH_TOKEN ? t('demo.live') : t('demo.mock')}
+              <Badge tone={hasTwilio() ? 'routine' : 'unsure'}>
+                Twilio {hasTwilio() ? t('demo.live') : t('demo.mock')}
               </Badge>
               <Badge tone={process.env.STRIPE_SECRET_KEY ? 'routine' : 'unsure'}>
                 Stripe {process.env.STRIPE_SECRET_KEY ? t('demo.live') : t('demo.mock')}
               </Badge>
-              <Badge tone={process.env.OPENAI_API_KEY ? 'routine' : 'unsure'}>
-                LLM {process.env.OPENAI_API_KEY ? t('demo.live') : t('demo.mock')}
+              <Badge tone={hasLlm() ? 'routine' : 'unsure'}>
+                LLM {hasLlm() ? t('demo.live') : t('demo.mock')}
               </Badge>
             </div>
           </Card>

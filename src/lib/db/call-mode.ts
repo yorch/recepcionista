@@ -13,7 +13,7 @@ import { logger } from '@/lib/log';
 import { defaultPhoneCountry, phoneCountry } from '@/lib/phone';
 import { forwardTarget } from '@/lib/voice/call-mode';
 import { validateForwardNumber } from '@/lib/voice/forward-number';
-import { forwardingSupported, lineKind, type LineKind } from '@/lib/voice/line';
+import { effectiveLineKindFor, forwardingSupported, type LineKind } from '@/lib/voice/line';
 import type { CallMode } from '@/lib/types';
 
 const log = logger('db');
@@ -80,7 +80,7 @@ export async function setCallMode(
     if (!cur) return { ok: false as const, reason: 'not_found' as const };
     const target = mode ?? (cur.callMode as CallMode);
     if (mode === 'forward') {
-      if (!forwardingSupported(opts.line ?? lineKind())) return { ok: false as const, reason: 'forward_unsupported' as const };
+      if (!forwardingSupported(opts.line ?? effectiveLineKindFor({ elevenlabs_phone_number_id: cur.elevenlabsPhoneNumberId }), process.env, { native_transfer_enabled: cur.nativeTransferEnabled })) return { ok: false as const, reason: 'forward_unsupported' as const };
       if (!dialable(cur).ok) return { ok: false as const, reason: 'forward_number_unverified' as const };
     }
     const row = await tx.business.update({

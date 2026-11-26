@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { ManualRefund } from './deposit-section';
 import { useReauth } from '@/components/dashboard/reauth';
 import { ApiError, apiRequest } from '@/hooks/use-api';
 import { errorText } from '@/lib/i18n/api-errors';
@@ -82,6 +83,13 @@ export function RefundSection({ booking, refund, onChanged }: {
   }, [booking.id, guard, onChanged, t]);
 
   if (!booking.deposit_paid || paid <= 0) return null;
+
+  // A deposit the owner marked paid by hand never went through Stripe: it is refunded off-platform and only RECORDED here.
+  if (booking.deposit_source === 'manual') {
+    return booking.status === 'cancelled' || status === 'refunded'
+      ? <ManualRefund booking={booking} onChanged={onChanged} />
+      : <p className="mt-3 text-xs text-dim">{t('refund.cancelFirst')}</p>;
+  }
 
   if (status === 'refunded') {
     return <p className="mt-3 text-[13px] text-mint-text">{t('refund.done', { amount: money(booking.refund_amount_cents, locale), date: booking.refunded_at ? t('refund.doneOn', { date: new Intl.DateTimeFormat(intlTag(locale), { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(booking.refunded_at)) }) : '' })}</p>;

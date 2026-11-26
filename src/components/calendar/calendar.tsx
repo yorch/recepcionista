@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookingPanel } from './booking-panel';
+import { BookingFormDialog } from './booking-form-dialog';
 import { DayList } from './day-list';
 import { MonthGrid } from './month-grid';
 import { StatusLegend } from './status';
@@ -14,7 +15,7 @@ import { useLocale, useT } from '@/lib/i18n/client';
 import { intlTag, type Locale } from '@/lib/i18n/core';
 import { groupByDay, monthGrid, nextDate, previousDate, rangeFor, type CalendarView, type WeekStart } from '@/lib/calendar';
 import { addDaysToDateKey, isDateKey } from '@/lib/time';
-import type { BookingsRangeResult } from '@/app/api/bookings/route';
+import type { BookingCreateResult, BookingsRangeResult } from '@/app/api/bookings/route';
 import type { Booking, Hours } from '@/lib/types';
 
 const VIEWS: CalendarView[] = ['week', 'day', 'month'];
@@ -49,6 +50,8 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Booking | null>(null);
+  const [creating, setCreating] = useState<{ date: string; time: string | null } | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
   const [mobileDay, setMobileDay] = useState(initial.view === 'day' ? initial.date : (initial.days.includes(todayKey) ? todayKey : initial.days[0]));
   const [now, setNow] = useState<number | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -118,7 +121,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
     else setMobileDay((cur) => (rangeFor(v, d, tz, ws).days.includes(cur) ? cur : rangeFor(v, d, tz, ws).days.includes(todayKey) ? todayKey : rangeFor(v, d, tz, ws).days[0]));
   };
 
-  const open = useCallback((b: Booking, el: HTMLElement) => { openerRef.current = el; setSelected(b); }, []);
+  const open = useCallback((b: Booking, el: HTMLElement) => { openerRef.current = el; setSelected(b); setFlash(null); }, []);
   const close = useCallback(() => {
     setSelected(null);
     const el = openerRef.current;
@@ -128,6 +131,16 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
     setSelected(b);
     setData((d) => ({ ...d, items: d.items.map((x) => (x.id === b.id ? b : x)) }));
   }, []);
+
+  const created = useCallback((r: BookingCreateResult) => {
+    setCreating(null);
+    const b = r.booking;
+    setData((d) => (new Date(b.scheduled_at) >= new Date(d.from) && new Date(b.scheduled_at) < new Date(d.to) ? { ...d, items: [...d.items, b].sort((x, y) => x.scheduled_at.localeCompare(y.scheduled_at)) } : d));
+    setSelected(b);
+    const n = r.notice;
+    setFlash(`${t('nb.created')}${n ? (n.delivered ? t('notice.texted') : n.status === 'blocked_quiet_hours' ? t('notice.quiet') : n.status === 'skipped' ? t('notice.noNumber') : t('notice.failed')) : ''}`);
+  }, [t]);
+  const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
   const items = data.items;
   const weeks = useMemo(() => (view === 'month' ? monthGrid(date, ws) : []), [view, date, ws]);
@@ -149,6 +162,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
             <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 6l6 6-6 6" /></svg>
           </Button>
         </div>
+        {canManage ? <Button className="min-h-11" onClick={() => setCreating({ date: view === 'day' ? date : (local.days.includes(todayKey) ? todayKey : local.days[0] ?? date), time: null })}>{t('nb.button')}</Button> : null}
         <h2 aria-live="polite" className="min-w-0 flex-1 basis-48 text-[16px] font-semibold tracking-tight text-white">{titleFor(locale, view, date, local.days)}</h2>
         <label className="flex items-center gap-2 text-xs text-mute">
           <span className="sr-only sm:not-sr-only">{t('cal.goTo')}</span>
@@ -203,6 +217,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
           <Button variant="outline" onClick={() => setRetry((n) => n + 1)}>{t('common.retry')}</Button>
         </div>
       ) : null}
+      {flash ? <p role="status" className="mt-3 rounded-xl border border-mint-line bg-mint-bg px-3 py-2 text-[13px] text-mint-text">{flash}</p> : null}
       {data.truncated ? <p role="status" className="mt-3 text-xs text-warn">{t('cal.truncated')}</p> : null}
 
       <div className="mt-4">
@@ -218,6 +233,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
               <TimeGrid
                 days={gridDays} bookings={items} hours={hours} tz={tz} todayKey={todayKey} now={now} loading={loading}
                 selectedId={selected?.id ?? null} onOpen={open} onOpenDay={(d) => go('day', d)}
+                onEmptySlot={canManage ? (d, m) => setCreating({ date: d, time: hhmm(m) }) : undefined}
               />
             </div>
             <div className="md:hidden">
@@ -262,6 +278,7 @@ export function Calendar({ businessId, canManage, hours, todayKey, initial }: Ca
         </p>
       ) : null}
 
+      {creating ? <BookingFormDialog mode="create" tz={tz} businessId={businessId} prefill={creating} onClose={() => setCreating(null)} onCreated={created} /> : null}
       {selected ? <BookingPanel key={selected.id} booking={selected} tz={tz} canManage={canManage} onClose={close} onChanged={changed} /> : null}
     </section>
   );

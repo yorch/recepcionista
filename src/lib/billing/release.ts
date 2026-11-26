@@ -17,6 +17,7 @@ import { prisma } from '@/lib/db/client';
 import { clearBusinessProviderResources, recordAudit, withLease } from '@/lib/db';
 import { notifyOwners } from '@/lib/billing/emails';
 import { releaseNumber, type ReleaseNumberResult } from '@/lib/providers/twilio';
+import { releaseTenantLine } from '@/lib/voice/tenant-line';
 import { deleteAgent, deleteAgentTools, type ReleaseAgentResult, type ReleaseToolsResult } from '@/lib/voice/elevenlabs';
 import { logger } from '@/lib/log';
 
@@ -62,6 +63,8 @@ export interface ReleaseFacts {
   has_owner_email: boolean;
   phone_shared: boolean;
   agent_shared: boolean;
+  /** The tenant's own imported ElevenLabs number (phnum_...), when it has one: deleted before the agent and the Twilio number. */
+  line_id?: string | null;
   /** Another business still has an agent (the workspace tools are shared and must stay). */
   other_agents_exist: boolean;
 }
@@ -128,7 +131,7 @@ export async function loadReleaseFacts(businessId: string, now: Date = new Date(
   const b = await prisma.business.findUnique({
     where: { id: businessId },
     select: {
-      id: true, name: true, billingStatus: true, plan: true, currentPeriodEnd: true, trialEndsAt: true, phone: true, phoneE164: true, agentId: true,
+      id: true, name: true, billingStatus: true, plan: true, currentPeriodEnd: true, trialEndsAt: true, phone: true, phoneE164: true, agentId: true, elevenlabsPhoneNumberId: true,
       users: { where: { role: 'owner', disabledAt: null }, select: { email: true } },
     },
   });
@@ -154,7 +157,7 @@ export async function loadReleaseFacts(businessId: string, now: Date = new Date(
     phone: b.phone, phone_e164: b.phoneE164, agent_id: b.agentId, recent_calls: recent,
     notified_at: noticeAt && (!since || noticeAt >= since) ? noticeAt : null,
     has_owner_email: b.users.length > 0,
-    phone_shared: phoneShared > 0, agent_shared: agentShared > 0, other_agents_exist: otherAgents > 0,
+    line_id: b.elevenlabsPhoneNumberId ?? null, phone_shared: phoneShared > 0, agent_shared: agentShared > 0, other_agents_exist: otherAgents > 0,
   };
 }
 
@@ -162,6 +165,7 @@ export interface ReleaseOutcome {
   number: { phone_last4: string | null; result: ReleaseNumberResult | { skipped: string } | null };
   agent: { agent_id: string | null; result: ReleaseAgentResult | { skipped: string } | null };
   tools: ReleaseToolsResult | { skipped: string } | null;
+  line?: { result: Awaited<ReturnType<typeof releaseTenantLine>> | null };
   cleared: { phone: boolean; agent: boolean };
   errors: string[];
 }
@@ -170,6 +174,7 @@ export interface ReleaseDeps {
   releaseNumber?: (e164: string, deps?: { callerBusinessId?: string | null }) => Promise<ReleaseNumberResult>;
   deleteAgent?: typeof deleteAgent;
   deleteAgentTools?: typeof deleteAgentTools;
+  releaseLine?: typeof releaseTenantLine;
 }
 
 const last4 = (p: string | null) => (p ? p.slice(-4) : null);
@@ -182,20 +187,32 @@ export async function executeRelease(
   const doNumber = deps.releaseNumber ?? releaseNumber;
   const doAgent = deps.deleteAgent ?? deleteAgent;
   const doTools = deps.deleteAgentTools ?? deleteAgentTools;
+  const doLine = deps.releaseLine ?? releaseTenantLine;
 
   const lostLease = (step: string): boolean => {
     if (!ctx.signal?.aborted) return false;
     out.errors.push(`${step}: lease lost, stopped before the provider call (retry later)`);
     return true;
   };
+  // 0) the tenant's own imported ElevenLabs number (detached from the agent, then deleted). If it cannot be removed the Twilio number is kept
+  //    this round (a retry finishes both), so no imported number ever points at a number that no longer exists.
+  let lineGone = true;
+  if (f.line_id && !lostLease('line')) {
+    const r = await doLine(f.id);
+    out.line = { result: r };
+    if (!r.ok) { lineGone = false; out.errors.push(`line: ${r.error}`); }
+  }
   // 1) the agent first: it stops answering before the line disappears.
   let agentGone = false;
-  if (f.agent_id && !lostLease('agent')) {
+  if (f.agent_id && !lineGone) {
+    // The line could not be removed (a provider outage): the agent stays too, so nothing is half torn down; the next run does both.
+    out.agent.result = { skipped: 'the imported voice line could not be removed yet; the agent is kept until it is' };
+  } else if (f.agent_id && !lostLease('agent')) {
     if (f.agent_shared) {
       out.agent.result = { skipped: 'another business uses this agent; kept at the provider' };
       agentGone = true; // only this business's reference is dropped
     } else {
-      const r = await doAgent(f.agent_id);
+      const r = await doAgent(f.agent_id, f.line_id ? { phoneNumberIds: [f.line_id] } : {});
       out.agent.result = r;
       agentGone = r.ok;
       if (!r.ok) out.errors.push(`agent: ${r.error ?? 'failed'}`);
@@ -204,7 +221,8 @@ export async function executeRelease(
   }
   // 2) the number.
   const number = f.phone_e164 ?? f.phone;
-  if (number && !lostLease('number')) {
+  if (number && !lineGone) out.number.result = { skipped: 'the imported voice line could not be removed yet; the number is kept until it is' };
+  else if (number && !lostLease('number')) {
     if (f.phone_shared) {
       out.number.result = { skipped: 'another business uses this number; kept at the provider' };
       out.cleared.phone = Boolean(await clearBusinessProviderResources(f.id, { phone: true }));
@@ -292,8 +310,56 @@ export async function processBusiness(
   return report;
 }
 
-/** Ids of every business the script should look at (canceled/unpaid). */
-export async function listReleaseCandidates(): Promise<string[]> {
+/** After this many CONSECUTIVE failed release attempts a business is `stuck`: it needs an operator, so it stops competing for the run's budget. */
+export const STUCK_AFTER_FAILED_ATTEMPTS = 5;
+/** A stuck business is tried again only this often (a slow, cheap retry in case the operator fixed the cause). */
+export const STUCK_RETRY_DAYS = 7;
+export const STUCK_ACTION = 'billing.release_stuck';
+
+export interface CandidateState { id: string; last_attempt_at: Date | null; failed_attempts: number; stuck: boolean }
+
+/**
+ * The canceled / unpaid businesses in the order a run should work through them, with their attempt history (audit `billing.tenant_released`, one row per attempt, written
+ * whether or not it ended clean): never-attempted first (oldest first), then the LEAST recently attempted. So a business whose release fails for a reason that never clears
+ * on its own (the line is the shared id, ELEVENLABS_API_KEY is gone, the line belongs to another business) falls to the back after every attempt and can never starve the
+ * others (review 23 A4). `stuck` = STUCK_AFTER_FAILED_ATTEMPTS consecutive failures with the last one less than STUCK_RETRY_DAYS ago.
+ */
+export async function listReleaseCandidateStates(now: Date = new Date()): Promise<CandidateState[]> {
   const rows = await prisma.business.findMany({ where: { billingStatus: { in: ['canceled', 'unpaid'] } }, select: { id: true }, orderBy: { createdAt: 'asc' } });
-  return rows.map((r) => r.id);
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const hist = await prisma.$queryRaw<{ business_id: string; at: Date; failed: boolean }[]>`
+    SELECT business_id, at, failed FROM (
+      SELECT business_id, at,
+             (COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(meta->'errors') = 'array' THEN meta->'errors' ELSE '[]'::jsonb END), 0) > 0 OR meta->>'truncated' = 'true') AS failed,
+             ROW_NUMBER() OVER (PARTITION BY business_id ORDER BY at DESC) AS rn
+        FROM audit_events WHERE action = ${RELEASED_ACTION} AND business_id = ANY(${ids}::text[])
+    ) t WHERE rn <= ${STUCK_AFTER_FAILED_ATTEMPTS + 1} ORDER BY business_id, at DESC`;
+  const byBiz = new Map<string, { at: Date; failed: boolean }[]>();
+  for (const h of hist) byBiz.set(h.business_id, [...(byBiz.get(h.business_id) ?? []), { at: h.at, failed: h.failed }]);
+  const states = ids.map((id, index): CandidateState & { index: number } => {
+    const list = byBiz.get(id) ?? [];
+    let failed = 0;
+    for (const h of list) { if (!h.failed) break; failed++; }
+    const last = list[0]?.at ?? null;
+    return { id, index, last_attempt_at: last, failed_attempts: failed, stuck: failed >= STUCK_AFTER_FAILED_ATTEMPTS && last !== null && now.getTime() - last.getTime() < STUCK_RETRY_DAYS * DAY_MS };
+  });
+  states.sort((x, y) => (x.last_attempt_at?.getTime() ?? -Infinity) - (y.last_attempt_at?.getTime() ?? -Infinity) || x.index - y.index);
+  return states.map((st) => ({ id: st.id, last_attempt_at: st.last_attempt_at, failed_attempts: st.failed_attempts, stuck: st.stuck }));
+}
+
+/** Ids of every business the script should look at (canceled/unpaid), least recently attempted first (a manual run also tries a stuck business). */
+export async function listReleaseCandidates(): Promise<string[]> {
+  return (await listReleaseCandidateStates()).map((s) => s.id);
+}
+
+/** Alert (once per stuck episode: audit `billing.release_stuck`, and an error log line) that a business needs an operator. Never throws. */
+export async function flagStuckRelease(state: CandidateState, now: Date = new Date()): Promise<boolean> {
+  try {
+    const already = await prisma.auditEvent.findFirst({ where: { businessId: state.id, action: STUCK_ACTION, at: { gte: state.last_attempt_at ?? new Date(0) } }, select: { id: true } });
+    if (already) return false;
+    log.error('release.stuck', { business: state.id, failed_attempts: state.failed_attempts, action: `needs an operator: see the audit trail (${RELEASED_ACTION}) errors; retried in ${STUCK_RETRY_DAYS} days` });
+    await recordAudit({ actor_kind: 'system', business_id: state.id, action: STUCK_ACTION, target: `business:${state.id}`, meta: { failed_attempts: state.failed_attempts, last_attempt_at: state.last_attempt_at?.toISOString() ?? null, at: now.toISOString() } });
+    return true;
+  } catch (err) { log.warn('release.stuck_flag_failed', { err }); return false; }
 }

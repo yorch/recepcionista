@@ -7,6 +7,7 @@ import { countryForBusiness, listAllBookingsInRange, listBookingsPage } from '@/
 import { PageHeader } from '@/components/ui/page-header';
 import { Calendar } from '@/components/calendar/calendar';
 import { Agenda } from '@/components/calendar/agenda';
+import { NewBookingButton } from '@/components/calendar/new-booking-button';
 import { cn } from '@/components/ui/cn';
 import { defaultWeekStart, isCalendarDateKey, isCalendarView, parseWeekStart, rangeFor } from '@/lib/calendar';
 import { localDateKey, tzOf } from '@/lib/time';
@@ -35,7 +36,7 @@ export default async function BookingsPage({ searchParams }: { searchParams: Pro
   let body: React.ReactNode;
   if (tab === 'agenda') {
     const initial = await listBookingsPage(biz.id, { direction: 'upcoming', limit: 25 });
-    body = <Agenda businessId={biz.id} tz={tz} initial={initial} />;
+    body = <Agenda key={initial.items.map((i) => `${i.id}:${i.status}`).join('|')} businessId={biz.id} tz={tz} initial={initial} canManage={canManage} />;
   } else {
     const view = isCalendarView(one(q.view)) ? (one(q.view) as 'week' | 'day' | 'month') : 'week';
     const rawDate = one(q.date);
@@ -55,10 +56,13 @@ export default async function BookingsPage({ searchParams }: { searchParams: Pro
         title={t('booking.pageTitle')}
         subtitle={t('booking.pageSubtitle')}
         right={
+          <div className="flex flex-wrap items-center gap-3">
+            {canManage && tab === 'agenda' ? <NewBookingButton businessId={biz.id} tz={tz} today={todayKey} /> : null}
           <nav aria-label={t('booking.tabsLabel')} className="inline-flex gap-1 rounded-2xl border border-line p-1">
             <Link href="/dashboard/bookings" aria-current={tab === 'calendar' ? 'page' : undefined} className={tabClass(tab === 'calendar')}>{t('booking.tab.calendar')}</Link>
             <Link href="/dashboard/bookings?tab=agenda" aria-current={tab === 'agenda' ? 'page' : undefined} className={tabClass(tab === 'agenda')}>{t('booking.tab.agenda')}</Link>
           </nav>
+          </div>
         }
       />
       <div className="mt-6">{body}</div>

@@ -3,10 +3,11 @@
  * callers (voice tools, gratitude sweep). Calling these directly avoids an
  * authenticated HTTP hop to ourselves and guarantees ONE side effect per call.
  */
-import { claimEvent, countryForBusiness, findRecentSms, getBooking, getBusiness, releaseEvent, updateBooking } from '@/lib/db';
+import { claimEvent, countryForBusiness, findRecentSms, getBooking, getBusiness, releaseEvent, setDepositAmountIfUnpaid, updateBooking } from '@/lib/db';
 import { confirmationSms, FOLLOWUP_NOTICE_RE, gratitudeSms, paymentLinkSms, type Lang } from '@/lib/messaging/templates';
 import { sameNumber } from '@/lib/phone';
 import { sendAndLog } from '@/lib/messaging';
+import { smsDelivered } from '@/lib/messaging/delivery';
 import { appUrl, createPaymentLink } from '@/lib/providers/stripe';
 import { checkoutRefundNote } from '@/lib/refunds';
 import { BookingCancelledError, rememberPaymentLink } from '@/lib/payments/link-store';
@@ -68,7 +69,7 @@ export async function sendConfirmation(
     const { sms } = await sendAndLog({
       business_id: business.id, to, body, kind: 'confirmation', booking_id: booking.id,
     });
-    const delivered = sms.status === 'sent' || sms.status === 'mock';
+    const delivered = smsDelivered(sms.status);
     if (delivered && FOLLOWUP_NOTICE_RE.test(body) && sameNumber(to, booking.customer_phone, countryForBusiness(business))
       && !booking.followup_consent_at) {
       await updateBooking(booking.id, { followup_consent_at: new Date().toISOString(), followup_consent_source: FOLLOWUP_CONSENT_SOURCE });
@@ -115,7 +116,7 @@ export async function createAndSendPaymentLink(input: PaymentLinkInput) {
     refundNote: checkoutRefundNote(business, appUrl()),
   });
   // Remember what is owed so the pay page and dashboard read it from the DB (cents).
-  if (booking && !booking.deposit_paid) await updateBooking(booking.id, { deposit_amount: amountCents });
+  if (booking && !booking.deposit_paid) await setDepositAmountIfUnpaid(booking.id, amountCents); // conditional: a stale snapshot never rewrites a paid deposit
   if (booking && !link.mock) await rememberPaymentLink(booking.id, link.id);
 
   const text = paymentLinkSms({

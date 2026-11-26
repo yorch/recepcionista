@@ -4,7 +4,8 @@
  * review is permanent and a callback is not.
  */
 import { getBooking, getBusiness } from '@/lib/db';
-import { ownerEscalationSms, reviewRequestSms, reviewUrl } from '@/lib/messaging/templates';
+import { ownerEscalationSms, reviewLinkOf, reviewRequestSms } from '@/lib/messaging/templates';
+import { customerLanguage } from '@/lib/booking-changes';
 import { sendAndLog } from '@/lib/messaging';
 import type { SmsLog } from '@/lib/types';
 
@@ -29,7 +30,9 @@ export async function routeGratitudeReply(bookingId: string, score: number): Pro
   if (!business) throw new GratitudeReplyError('business not found', 404);
 
   if (score >= 4) {
-    const body = reviewRequestSms({ business, booking, reviewUrl: reviewUrl() });
+    // The business's OWN review link; with none set the text only says thanks (never a placeholder or another business's link).
+    const lang = await customerLanguage(booking, business);
+    const body = reviewRequestSms({ business, booking, reviewUrl: reviewLinkOf(business), language: lang === 'es' ? 'es' : 'en' });
     const { sms } = await sendAndLog({
       business_id: business.id,
       to: booking.customer_phone,

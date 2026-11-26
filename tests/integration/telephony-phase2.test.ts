@@ -209,7 +209,8 @@ integration('telephony phase 2 (postgres)', () => {
   const formPost = (url: string, params: Record<string, string>, h: (r: Request) => Promise<Response>) => h(new Request(url, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': twilioSignature(url, params) }, body: new URLSearchParams(params).toString(),
   }));
-  const FWD = { callMode: 'forward', forwardNumber: '+13055550142', forwardNumberE164: '+13055550142', forwardNumberVerifiedAt: new Date() };
+  // nativeTransferEnabled: live transfer is a per-business opt-in on top of the NATIVE_TRANSFER capability
+  const FWD = { callMode: 'forward', forwardNumber: '+13055550142', forwardNumberE164: '+13055550142', forwardNumberVerifiedAt: new Date(), nativeTransferEnabled: true };
   const ring = (biz: { phone?: string | null }, from: string, stir?: string, sid: string = uniq('CA')) =>
     formPost(URL_IN, { AccountSid: ACCOUNT, CallSid: sid, CallStatus: 'ringing', From: from, To: biz.phone!, ...(stir ? { StirVerstat: stir } : {}) }, incoming);
   const kindOf = (xml: string) => (xml.includes('<Dial') ? 'dial' : xml.includes('<Record') ? 'record' : 'hangup');
@@ -347,6 +348,19 @@ integration('telephony phase 2 (postgres)', () => {
     expect(b.dynamic_variables.transfer_destination).toBe('+13055550142');
   }));
 
+  test('transfer: NATIVE_TRANSFER on but the business has NOT opted in -> no destination, forward mode is the paused script, the tool refuses with a callback', () => withEnv({ NATIVE_TRANSFER: 'on', FORWARD_MAX_CONCURRENT: '50' }, async () => {
+    const biz = await newBusiness();
+    await prisma.business.update({ where: { id: biz.id }, data: { ...FWD, nativeTransferEnabled: false } });
+    const body = await (await init(biz.agent_id!, biz.phone!, uniq('CA'))).json() as InitBody;
+    expect(body.dynamic_variables.transfer_mode).toBe('off');
+    expect(body.dynamic_variables.transfer_destination).toBe('');
+    const sid = uniq('CA');
+    const r = await (await toolsRoute.POST(toolRequest('transfer_to_human', { agent_id: biz.agent_id, call_sid: sid, conversation_id: uniq('conv'), caller_phone: phone(), reason: 'wants the owner' }), { params: Promise.resolve({ tool: 'transfer_to_human' }) })).json() as { ok: boolean; data?: { approved?: boolean; why?: string } };
+    expect(r.ok).toBe(false);
+    expect(r.data?.approved).not.toBe(true);
+    expect(outboundCalls).toEqual([]);
+  }));
+
   test('transfer_to_human tool: flag off -> honest refusal + callback; flag on -> approved once, status attempted; outside hours -> callback', async () => {
     const biz = await newBusiness();
     await prisma.business.update({ where: { id: biz.id }, data: { ...FWD, callMode: 'ai' } });
@@ -390,13 +404,14 @@ integration('telephony phase 2 (postgres)', () => {
     }) as unknown as typeof fetch;
     return { fetchImpl, bodies };
   }
-  async function provision(env: Record<string, string | undefined>, api = fakeAgentApi()) {
+  async function provision(env: Record<string, string | undefined>, api = fakeAgentApi(), optIn = false) {
     const prev = globalThis.fetch; globalThis.fetch = api.fetchImpl;
     try {
       return await withEnv({ ELEVENLABS_API_KEY: 'xi-test', APP_URL: 'https://app.example.test', ...env }, async () => {
         el.clearToolIdCache();
         const biz = await newBusiness({ agent_id: null });
-        const r = await el.createOrUpdateAgent({ business: biz, kb: null });
+        if (optIn) await prisma.business.update({ where: { id: biz.id }, data: { nativeTransferEnabled: true } });
+        const r = await el.createOrUpdateAgent({ business: (await db.getBusiness(biz.id))!, kb: null });
         return { r, api };
       });
     } finally { globalThis.fetch = prev; }
@@ -411,7 +426,11 @@ integration('telephony phase 2 (postgres)', () => {
     const off = await provision({ LANGUAGE_DETECTION: 'off' });
     expect(off.api.bodies[0].conversation_config.agent.prompt.built_in_tools.language_detection).toBeUndefined();
     expect(off.api.bodies[0].conversation_config.language_presets).toBeUndefined();
-    const on = await provision({ NATIVE_TRANSFER: 'on' });
+    // capability on but the business has NOT opted in: still no transfer tool / rule
+    const optedOut = await provision({ NATIVE_TRANSFER: 'on' });
+    expect(optedOut.api.bodies[0].conversation_config.agent.prompt.built_in_tools.transfer_to_number).toBeUndefined();
+    expect(optedOut.api.bodies[0].conversation_config.agent.prompt.prompt).not.toContain('# Live transfer');
+    const on = await provision({ NATIVE_TRANSFER: 'on' }, fakeAgentApi(), true);
     const t = on.api.bodies[0].conversation_config.agent.prompt.built_in_tools.transfer_to_number!;
     expect(t.params.transfer_rules![0].provider_configs[0].config.transfer_destination.destination).toBe('{{transfer_destination}}');
     expect(on.api.bodies[0].conversation_config.agent.prompt.prompt).toContain('# Live transfer');

@@ -46,6 +46,7 @@ const PUBLIC_API_EXACT = new Set([
   '/api/pay/mock-complete',
   '/api/sms/gratitude-reply',
   '/api/sms/inbound',
+  '/api/sms/status', // Twilio per-message delivery status callback: verifies the Twilio signature itself
   '/api/integrations/google/webhook', // Google Calendar push: authenticated by the channel id + resource id + HMAC channel token (constant time)
 ]);
 const PUBLIC_API_PREFIX = ['/api/voice/tools/'];
@@ -229,9 +230,9 @@ export function internalAuthHeaders(): Record<string, string> {
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
-/** Demo-only routes (reset/simulate) are 404 unless DEMO_MODE=true. */
+/** Demo-only routes (reset/simulate/mock-complete) are 404 unless DEMO_MODE=true, and NEVER in production (a leaked flag is inert). */
 export function demoModeEnabled(): boolean {
-  return process.env.DEMO_MODE === 'true';
+  return process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 }
 
 /**

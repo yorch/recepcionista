@@ -6,6 +6,7 @@ import { toE164 } from '@/lib/phone';
 import { checkVerificationStart } from '@/lib/messaging/verify-limits';
 import { createOwnerPhoneChallenge } from '@/lib/messaging/owner-verify';
 import { sendOwnerVerificationCode } from '@/lib/messaging';
+import { smsDelivered, SMS_PROVIDER_NOT_CONFIGURED } from '@/lib/messaging/delivery';
 import { logger } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
@@ -51,7 +52,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     const { code, challenge, expires_at } = createOwnerPhoneChallenge(id, e164);
     const sent = await sendOwnerVerificationCode(id, e164, code);
-    if (sent.blocked || sent.result.status === 'failed') {
+    if (sent.blocked || !smsDelivered(sent.result.status)) {
+      // Nothing was sent (Twilio not configured): never say "code sent". Honest 503 so the UI can show the failure.
+      if (sent.result.error === SMS_PROVIDER_NOT_CONFIGURED || sent.result.status === 'mock') return bad(SMS_PROVIDER_NOT_CONFIGURED, 503);
       log.warn('verify.start_failed', { business: id, blocked: sent.blocked ?? null, error: sent.result.error ?? null });
       const msg = sent.result.error === 'destination country is not allowed'
         ? 'texts to that country are not enabled for this account'

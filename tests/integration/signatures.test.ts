@@ -44,10 +44,11 @@ integration('provider webhook signatures (postgres)', () => {
     const params = twilioParams(biz.phone!);
     const res = await twilioPost(params, twilioSignature(INCOMING_URL, params));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { data: { business_id: string; call_id: string; caller_phone: string; mock: boolean } };
-    expect(body.data).toMatchObject({ business_id: biz.id, caller_phone: params.From, mock: true });
-    const call = await db.getCall(body.data.call_id);
-    expect(call).toMatchObject({ business_id: biz.id, caller_phone: params.From, status: 'in_progress' });
+    // a signed Twilio call is answered with TwiML (never JSON); no AI is configured here, so it is the honest voicemail
+    expect(res.headers.get('content-type')).toContain('xml');
+    expect(await res.text()).toContain('<Say');
+    const call = await db.getCallBySid(params.CallSid);
+    expect(call).toMatchObject({ business_id: biz.id, caller_phone: params.From });
     expect(outboundCalls).toEqual([]);
   });
 

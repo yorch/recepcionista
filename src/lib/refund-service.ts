@@ -22,7 +22,7 @@ import type { Booking } from '@/lib/types';
 const log = logger('refund');
 
 export type RefundFailure =
-  | { ok: false; status: 404 | 409 | 422 | 502; code: 'not_found' | 'no_deposit' | 'invalid_amount' | 'already_refunded' | 'in_progress' | 'policy_ineligible' | 'provider_refused' | 'outcome_unknown' | 'no_payment_reference'; error: string; policy?: Eligibility; booking?: Booking };
+  | { ok: false; status: 404 | 409 | 422 | 502; code: 'not_found' | 'no_deposit' | 'invalid_amount' | 'already_refunded' | 'in_progress' | 'policy_ineligible' | 'provider_refused' | 'outcome_unknown' | 'no_payment_reference' | 'manual_deposit'; error: string; policy?: Eligibility; booking?: Booking };
 
 export type RefundResult =
   | { ok: true; booking: Booking; amount_cents: number; status: 'refunded' | 'pending'; replayed: boolean; override: boolean; policy: Eligibility; partial: boolean; notice: NoticeResult | null }
@@ -37,6 +37,11 @@ export async function refundDeposit(input: {
   const business = await getBusiness(input.businessId);
   if (!business) return { ok: false, status: 404, code: 'not_found', error: 'business not found' };
 
+  // A deposit the owner marked as paid manually (cash, Zelle...) never went through Stripe: there is nothing to refund there. The owner refunds it
+  // the way it was taken and records that with recordManualRefund (never a Stripe call, never a customer text claiming a card refund).
+  if (first.deposit_paid && first.deposit_source === 'manual') {
+    return { ok: false, status: 409, code: 'manual_deposit', error: 'this deposit was marked as paid manually: refund it the way you received it, then record the manual refund', booking: first };
+  }
   const paid = first.deposit_paid && first.deposit_amount ? Math.round(first.deposit_amount) : 0;
   const amountCheck = checkRefundAmount(input.amount_cents, paid > 0 ? paid : 0);
   if (!amountCheck.ok) return { ok: false, status: paid > 0 ? 422 : 409, code: paid > 0 ? 'invalid_amount' : 'no_deposit', error: amountCheck.error };
@@ -300,4 +305,40 @@ export async function reconcileStuckRefunds(opts: { now?: Date; dryRun?: boolean
     log.error('refund.reconcile_failed', { err });
   }
   return out;
+}
+
+
+// ── manual deposits: record a refund made OFF-platform ───────────────────────────────────────────────────────
+
+export type ManualRefundResult =
+  | { ok: true; booking: Booking; amount_cents: number; replayed: boolean }
+  | { ok: false; status: 404 | 409 | 422; code: 'not_found' | 'not_manual' | 'invalid_amount' | 'already_refunded'; error: string };
+
+/**
+ * Record that the owner refunded a MANUAL deposit themselves (cash back, Zelle...). No provider is called and the customer is not texted:
+ * this is bookkeeping only. Only a booking whose deposit was marked paid manually qualifies (a Stripe deposit is refunded through Stripe:
+ * refundDeposit). One record per booking; the same amount again is an idempotent replay. Audited (`booking.refund_recorded_manual`).
+ */
+export async function recordManualRefund(input: { businessId: string; bookingId: string; amount_cents?: unknown; actor: ChangeActor; now?: Date }): Promise<ManualRefundResult> {
+  const now = input.now ?? new Date();
+  const first = await getBooking(input.bookingId);
+  if (!first || first.business_id !== input.businessId) return { ok: false, status: 404, code: 'not_found', error: 'booking not found' };
+  if (!first.deposit_paid || first.deposit_source !== 'manual') return { ok: false, status: 409, code: 'not_manual', error: 'only a deposit marked as paid manually can be recorded as refunded manually; a card deposit is refunded through Stripe' };
+  const paid = first.deposit_amount && first.deposit_amount > 0 ? Math.round(first.deposit_amount) : 0;
+  const check = checkRefundAmount(input.amount_cents, paid);
+  if (!check.ok) return { ok: false, status: 422, code: 'invalid_amount', error: check.error };
+  if (first.refund_status === 'refunded') {
+    return first.refund_amount_cents === check.amount_cents
+      ? { ok: true, booking: first, amount_cents: check.amount_cents, replayed: true }
+      : { ok: false, status: 409, code: 'already_refunded', error: 'a manual refund was already recorded for this deposit' };
+  }
+  if (first.refund_status === 'not_applicable') await prisma.booking.updateMany({ where: { id: first.id, refundStatus: 'not_applicable' }, data: { refundStatus: 'none' } });
+  const rec = await recordRefund(first.id, { amount_cents: check.amount_cents, status: 'refunded', at: now });
+  if (!rec.updated) return { ok: false, status: 409, code: 'already_refunded', error: 'a refund is already recorded for this deposit' };
+  await recordAudit({
+    actor_kind: input.actor.kind, actor_user_id: input.actor.user_id ?? null, business_id: first.business_id, action: 'booking.refund_recorded_manual',
+    target: `booking:${first.id}`, ip: input.actor.ip ?? null, meta: { ...(input.actor.meta ?? {}), amount_cents: check.amount_cents, deposit_cents: paid, partial: check.amount_cents < paid },
+  });
+  await emitBookingChanged(first.id, 'refunded', first.business_id);
+  return { ok: true, booking: (await getBooking(first.id)) ?? first, amount_cents: check.amount_cents, replayed: false };
 }

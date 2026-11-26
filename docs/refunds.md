@@ -66,3 +66,7 @@ hours (9 pm to 8 am business time; the panel says so and offers "Text the custom
 - Not handled: refunds after 180 days (Stripe's limit), multiple partial refunds through the app (one per booking), refunding to a different card, tax.
 - Unverified against a live Stripe account: the `custom_text[submit][message]` field of Payment Links (documented, never exercised here) and the exact
   event payloads beyond the fields used (`payment_intent`, `amount`, `amount_refunded`, `status`, `metadata`).
+
+## Manual deposits (marked paid by the owner)
+
+An owner may mark a deposit as paid outside Stripe (cash, Zelle...): `POST /api/bookings/:id/deposit/mark-paid` (owner, step-up, audited, `deposit_source = 'manual'`; the booking's open payment link is deactivated). Such a deposit **never goes through Stripe**: `POST /api/bookings/:id/refund` answers 409 `manual_deposit` (no provider call, even with `override`), the panel offers **Record manual refund** instead (`POST /api/bookings/:id/refund/manual`, owner, step-up, audited as `booking.refund_recorded_manual`, no customer text), and the owner gives the money back the way it was taken. A manual mark can be undone (`/deposit/unmark`) until a refund is recorded. A Stripe payment that arrives later replaces the manual mark.

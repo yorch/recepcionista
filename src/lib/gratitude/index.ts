@@ -4,6 +4,8 @@
  * so the sweep can be run repeatedly without double-texting anyone.
  */
 import { sendGratitude } from '@/lib/messaging/actions';
+import { smsDelivered } from '@/lib/messaging/delivery';
+import { customerLanguage } from '@/lib/booking-changes';
 import { logger } from '@/lib/log';
 import { countryForBusiness, getBusiness, listBookingsStartedBetween, listGratitudeSmsTo } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
@@ -80,7 +82,10 @@ export async function runGratitudeSweep(businessId?: string, opts: { signal?: Ab
     // No recorded consent: do not even attempt (no blocked row per sweep); the owner sees the count.
     if (!booking.followup_consent_at) { r.skipped++; r.skipped_no_consent++; continue; }
     try {
-      const { sms } = await sendGratitude(booking.id, 'en');
+      // The follow-up goes out in the language of the call that made the booking, else the business's default language.
+      const business = await getBusiness(booking.business_id);
+      const language = business ? await customerLanguage(booking, business) : 'en';
+      const { sms } = await sendGratitude(booking.id, language);
       if (sms.status.startsWith('blocked')) {
         r.skipped++;
         if (sms.status === 'blocked_opt_out') r.skipped_opt_out++;
@@ -90,6 +95,8 @@ export async function runGratitudeSweep(businessId?: string, opts: { signal?: Ab
         else r.skipped_error++;
         continue; // quiet hours / cap are retried by the next sweep; opt-outs are not
       }
+      // Failed or (in production) mock: nothing reached the customer, so it is not counted as sent.
+      if (!smsDelivered(sms.status)) { r.skipped++; r.skipped_error++; continue; }
       ids.push(booking.id);
     } catch (err) {
       log.warn('sweep.error', { booking: booking.id, err });

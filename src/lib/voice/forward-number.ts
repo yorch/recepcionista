@@ -34,6 +34,15 @@ export function forwardDenyAreaCodes(env: Record<string, string | undefined> = p
   return new Set([...DEFAULT_DENY_AREA_CODES, ...extra]);
 }
 
+/**
+ * A NANP (+1) number in a premium, toll-free or international-rate area code (Caribbean, Pacific territories) or a 976 exchange: where a text or a
+ * call costs far more than in the US and revenue-share pumping lives. Texts the platform did not ask for (inbox auto-reply) are never sent there.
+ */
+export function highRateNanpDestination(e164: string, env: Record<string, string | undefined> = process.env): boolean {
+  if (!e164.startsWith('+1') || e164.length !== 12) return false;
+  return forwardDenyAreaCodes(env).has(e164.slice(2, 5)) || e164.slice(5, 8) === '976';
+}
+
 /** libphonenumber number types that are never a person's phone: premium, shared-cost, personal-number, UAN, toll-free, pager, voicemail. */
 const BLOCKED_TYPES = new Set(['PREMIUM_RATE', 'SHARED_COST', 'PERSONAL_NUMBER', 'UAN', 'TOLL_FREE', 'PAGER', 'VOICEMAIL']);
 

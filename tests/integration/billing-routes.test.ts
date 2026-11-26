@@ -61,22 +61,34 @@ integration('billing routes (postgres)', () => {
   const row = (id: string) => prisma.business.findUniqueOrThrow({ where: { id } });
   const admin = { bearer: true };
 
-  test('checkout: owner of the business, verified email, mock mode (non-production)', async () => {
+  test('checkout: owner of the business, verified email, mock mode (non-production, DEMO_MODE)', async () => {
+    const biz = await newBusiness();
+    const owner = await login(biz.id, 'owner');
+    await withEnv({ DEMO_MODE: 'true' }, async () => {
+      const res = await checkout(req('POST', '/api/billing/checkout', owner, {}));
+      expect(res.status).toBe(200);
+      const body = await json(res);
+      expect(body.data.mock).toBe(true);
+      expect(body.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}`);
+    });
+  });
+
+  test('checkout in mock mode WITHOUT DEMO_MODE is an honest 503, not a link that 404s', async () => {
     const biz = await newBusiness();
     const owner = await login(biz.id, 'owner');
     const res = await checkout(req('POST', '/api/billing/checkout', owner, {}));
-    expect(res.status).toBe(200);
-    const body = await json(res);
-    expect(body.data.mock).toBe(true);
-    expect(body.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}`);
+    expect(res.status).toBe(503);
+    expect((await json(res)).data?.url).toBeUndefined();
   });
 
   test('checkout: return_path is allowlisted (mock activation returns to /onboarding, hostile values are ignored)', async () => {
     const biz = await newBusiness();
     const owner = await login(biz.id, 'owner');
-    const ok = await json(await checkout(req('POST', '/api/billing/checkout', owner, { return_path: '/onboarding' })));
+    const [ok, evil] = await withEnv({ DEMO_MODE: 'true' }, async () => [
+      await json(await checkout(req('POST', '/api/billing/checkout', owner, { return_path: '/onboarding' }))),
+      await json(await checkout(req('POST', '/api/billing/checkout', owner, { return_path: 'https://evil.test/' }))),
+    ]);
     expect(ok.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}&return_path=%2Fonboarding`);
-    const evil = await json(await checkout(req('POST', '/api/billing/checkout', owner, { return_path: 'https://evil.test/' })));
     expect(evil.data.url).toBe(`https://app.example.test/api/billing/mock-activate?business_id=${biz.id}`);
     await withEnv({ DEMO_MODE: 'true' }, async () => {
       const act = await mockActivate(req('GET', `/api/billing/mock-activate?business_id=${biz.id}&return_path=%2Fonboarding`, owner));
@@ -120,7 +132,9 @@ integration('billing routes (postgres)', () => {
     expect((await status(req('GET', `/api/billing/status?business_id=${b.id}`, ownerA))).status).toBe(404);
     // admins must name a business; a named one works
     expect((await checkout(req('POST', '/api/billing/checkout', admin, {}))).status).toBe(422);
-    expect((await checkout(req('POST', '/api/billing/checkout', admin, { business_id: b.id }))).status).toBe(200);
+    await withEnv({ DEMO_MODE: 'true' }, async () => {
+      expect((await checkout(req('POST', '/api/billing/checkout', admin, { business_id: b.id }))).status).toBe(200);
+    });
   });
 
   test('mock mode is refused in production (503) and missing price is a config error', async () => {

@@ -14,7 +14,7 @@ export const DEFAULT_TICK_SECONDS = 60;
 export const MIN_TICK_SECONDS = 5;
 export const MAX_TICK_SECONDS = 3600;
 
-export const JOB_NAMES = ['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions', 'reconcile', 'usage_warnings', 'google_calendar'] as const;
+export const JOB_NAMES = ['daily_briefing', 'gratitude_sweep', 'cleanup', 'retention', 'recording_deletions', 'reconcile', 'usage_warnings', 'google_calendar', 'tenant_release', 'grandfather'] as const;
 export type JobName = (typeof JOB_NAMES)[number];
 export const isJobName = (v: unknown): v is JobName => typeof v === 'string' && (JOB_NAMES as readonly string[]).includes(v);
 

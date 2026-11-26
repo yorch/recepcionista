@@ -85,7 +85,9 @@ for (const v of VERTICALS) describe(`pack shape: ${v}`, () => {
     for (const lang of ['en', 'es'] as const) {
       const d = draftFromPack(v, lang, 'Jorge', 'Acme');
       expect(hasErrors(validateDraft(d))).toBe(false);
-      expect(readinessOfDraft(d, v).blockers).toEqual([]);
+      // A template never invents the service area: it is the one thing the owner must still type in.
+      expect(readinessOfDraft(d, v).blockers.map((b) => b.key)).toEqual(['service_area']);
+      expect(readinessOfDraft({ ...d, serviceArea: 'Dade County' }, v).blockers).toEqual([]);
     }
   });
   test('emergency block is internally consistent', () => {
@@ -325,14 +327,18 @@ describe('messaging and briefing read the pack', () => {
     expect(paymentLinkSms({ business: biz('electrical'), amount_cents: 5000, url: 'https://x.test/p' })).toContain('deposit for electrical visit');
     expect(paymentLinkSms({ business: biz('hvac'), amount_cents: 5000, url: 'https://x.test/p' })).toContain('deposit for service');
   });
-  test('briefing fallback names the pack provider word on an emergency day; hvac keeps "el tech"', () => {
+  test('the automatic briefing states only data-derived facts (no invented action or customer reaction), for every trade', () => {
     const data = {
       calls: [{ id: 'c1', urgency: 'emergency', summary: 's', language: 'es', caller_name: 'Ana', flagged_reason: 'x' }],
       bookings: [], flagged: [], deposits: 0, stats: { revenue: 0 },
     } as never;
-    expect(fallbackScript(biz('hvac'), data)).toContain('el tech está enterado');
-    expect(fallbackScript(biz('plumbing'), data)).toContain('el plomero está enterado');
-    expect(fallbackScript(biz('dental'), data)).toContain('el consultorio está enterado');
+    for (const v of ['hvac', 'plumbing', 'dental'] as const) {
+      const es = fallbackScript(biz(v), data);
+      expect(es).toContain('resumen automático');
+      expect(es).toContain('1 llamada marcada como emergencia'.replace('1 llamada', 'Una llamada'));
+      expect(es).not.toMatch(/está enterado|quedó tranquilo|dejar todo listo|la manejé|Aproveché/i);
+      expect(fallbackScript(biz(v), data, 'en')).not.toMatch(/knows|is calm|get everything ready|handled it/i);
+    }
   });
   test('owner call-in prompt names the trade, carries no tenant data, keeps its rules', () => {
     const p = ownerPrompt({ name: 'Acme', locale_default: 'en', vertical: 'plumbing' });

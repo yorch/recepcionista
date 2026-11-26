@@ -5,6 +5,7 @@
 import crypto from 'node:crypto';
 import { claimEvent, completeEvent, prisma, releaseEvent } from '@/lib/db';
 import { sendAndLog } from '@/lib/messaging';
+import { demoModeEnabled } from '@/lib/auth';
 import { ownerAlertStatus } from '@/lib/messaging/owner';
 import { isGsm7 } from '@/lib/messaging/policy';
 import { rateLimit } from '@/lib/ratelimit';
@@ -88,6 +89,8 @@ export interface AlertOptions {
   class?: OwnerAlertClass;
   /** The call this alert is about: identical alerts for one call are sent once, and the first emergency of a call is never starved. */
   callId?: string | null;
+  /** What the sms_log row keeps instead of the text sent (an alert that QUOTES a customer keeps no copy of their words: privacy export / erasure). */
+  logBody?: string;
 }
 
 async function claimStatus(source: string, id: string): Promise<string | null> {
@@ -141,7 +144,7 @@ export async function alertOwner(business: Business, body: string, opts: AlertOp
       }
     }
     const { sms, result: sent, blocked } = await sendAndLog({
-      business_id: business.id, to: business.owner_phone as string, body: text, kind: 'owner_alert',
+      business_id: business.id, to: business.owner_phone as string, body: text, kind: 'owner_alert', ...(opts.logBody ? { log_body: opts.logBody } : {}),
     });
     if (blocked) {
       log.error('owner_alert.blocked', { business: business.id, blocked });
@@ -149,7 +152,7 @@ export async function alertOwner(business: Business, body: string, opts: AlertOp
       return { notified: false, reason: blocked === 'blocked_owner_unverified' ? 'owner_unverified' : 'sms_failed', sms };
     }
     // 'mock' means no Twilio configured: only counts as delivered in explicit demo mode.
-    const delivered = sent.status === 'sent' || (sent.status === 'mock' && process.env.DEMO_MODE === 'true');
+    const delivered = sent.status === 'sent' || (sent.status === 'mock' && demoModeEnabled());
     if (!delivered) {
       log.error('owner_alert.not_delivered', { business: business.id, status: sent.status, error: sent.error ?? null });
       await giveBack();

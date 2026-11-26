@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { checkSameOrigin } from '@/lib/auth';
-import { afterResponse, allowPerEmail, emailFailure, limitIp, sendVerificationEmail } from '@/lib/account-flows';
+import { afterResponse, allowPerEmail, emailFailure, limitIp, sendVerificationEmail, sendVerificationEmailReported } from '@/lib/account-flows';
 import { getUserByEmail, normalizeEmail } from '@/lib/db';
 import { authenticate } from '@/lib/session';
 import { validatePublicEmail } from '@/lib/user-policy';
@@ -50,7 +50,7 @@ export async function POST(req: Request) {
   try {
     const user = await getUserByEmail(email);
     if (user && !user.email_verified_at && !user.disabled_at) {
-      await afterResponse('resend.verification', () => sendVerificationEmail(user));
+      await afterResponse('resend.verification', () => sendVerificationEmailReported(user, 'resend'));
     }
   } catch (err) {
     log.error('error', { err });

@@ -3,6 +3,7 @@ import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/se
 import { getBusiness, getKnowledgeBase, recordAudit, upsertKnowledgeBase } from '@/lib/db';
 import { buildCallScript, buildSystemPrompt } from '@/lib/kb';
 import { normalizeUrl } from '@/lib/extraction/url';
+import { syncPromptAfterEdit, type PromptSyncOutcome } from '@/lib/voice/agent-resync';
 import type { FAQ, KnowledgeBase, Service } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -62,7 +63,7 @@ function cleanFaqs(v: unknown): FAQ[] | null {
 export async function PUT(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
-): Promise<ReturnType<typeof ok<KnowledgeBase>> | ReturnType<typeof fail>> {
+): Promise<ReturnType<typeof ok<KnowledgeBase & { agent_sync: PromptSyncOutcome }>> | ReturnType<typeof fail>> {
   const auth = await authenticate(req, { role: 'owner' });
   if (!auth.ok) return auth.response as ReturnType<typeof fail>;
   try {
@@ -109,7 +110,9 @@ export async function PUT(
         });
       }
     }
-    return ok<KnowledgeBase>(saved);
+    // Before provisioning there is no agent ('skipped'); afterwards the edit reaches the live agent now (failure: queued for retry and reported).
+    const agent_sync = await syncPromptAfterEdit(id);
+    return ok<KnowledgeBase & { agent_sync: PromptSyncOutcome }>({ ...saved, agent_sync });
   } catch (err) {
     return authErrorResponse(err) ?? fail(err, 400);
   }

@@ -9,10 +9,10 @@
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall, upsertCallForConversation,
-  updateCall, setTransferStatus, createBooking as dbCreateBooking, BookingRejectedError,
+  updateCall, setTransferStatus, createBooking as dbCreateBooking, BookingRejectedError, prisma, toBooking,
 } from '@/lib/db';
 import { slotsForDate, nextAvailable } from '@/lib/scheduler';
-import { clampDuration, DEFAULT_DURATION_MIN } from '@/lib/availability';
+import { clampDuration, DEFAULT_DURATION_MIN, openWindow } from '@/lib/availability';
 import {
   addDaysToDateKey, isDateKey, localDateKey, parseScheduledAt, partsInTz, spokenTimeInTz, tzOf,
 } from '@/lib/time';
@@ -21,6 +21,7 @@ import { logger } from '@/lib/log';
 import { normalizePhone } from '@/lib/providers/twilio';
 import { E164 } from '@/lib/messaging/recipient';
 import { sendAndLog } from '@/lib/messaging';
+import { smsDelivered as smsWasDelivered } from '@/lib/messaging/delivery';
 import { SERVICE_ALIASES } from '@/lib/verticals/aliases';
 import { CALL_911_EN, CALL_911_ES, call911For, call911Hazards } from '@/lib/voice/emergency';
 import { alertField, alertOwner, type OwnerAlert } from '@/lib/voice/owner-alert';
@@ -32,10 +33,12 @@ import { TOOL_NAMES, type ToolName } from '@/lib/kb';
 import { CAPACITY_EXEMPT_TOOLS, pausedToolMessage } from '@/lib/voice/capacity';
 import { resolveCallRoute } from '@/lib/voice/call-mode';
 import { cancelBookingTool, rescheduleBookingTool } from '@/lib/voice/tools-bookings';
-import { decideTransfer, nativeTransferEnabled, noteTransferAttempt, transferApprovedMessage, transferRefusalMessage } from '@/lib/voice/transfer';
+import { decideTransfer, transferEnabledFor, noteTransferAttempt, transferApprovedMessage, transferRefusalMessage } from '@/lib/voice/transfer';
 
 export { CALL_911_EN, CALL_911_ES };
 import { createAndSendPaymentLink, sendConfirmation } from '@/lib/messaging/actions';
+import { depositPolicyOf, schedulingOf } from '@/lib/business-config';
+import { resolveDepositAmount } from '@/lib/payments/deposit';
 import type { Business, Call, SmsLog, TimeSlot } from '@/lib/types';
 
 const log = logger('voice-tools');
@@ -133,8 +136,8 @@ async function alternativeClause(business: Business, lang: ToolLanguage, duratio
   const slot = (await nextAvailable(business, 1, durationMinutes))[0];
   if (!slot) {
     return say(lang,
-      'Nothing is open in the next two weeks.',
-      'No hay nada disponible en las próximas dos semanas.');
+      `Nothing is open in the next ${schedulingOf(business).horizon_days} days.`,
+      `No hay nada disponible en los próximos ${schedulingOf(business).horizon_days} días.`);
   }
   return say(lang,
     `I can do ${whenPhrase(slot.start, lang, tzOf(business))} instead.`,
@@ -304,11 +307,15 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
     }
 
     let slots: TimeSlot[];
-    let dayFull = false;
+    // Why the asked day has nothing: beyond the booking window, in the past, a closed day, or really full. The caller is told the true one.
+    let whyNone: 'full' | 'too_far' | 'closed' | 'past' | null = null;
     if (dateStr) {
       slots = (await slotsForDate(business, dateStr, duration)).filter((s) => s.available).slice(0, 3);
       if (slots.length === 0) {
-        dayFull = true;
+        const today = localDateKey(Date.now(), tz);
+        whyNone = dateStr < today ? 'past'
+          : dateStr >= addDaysToDateKey(today, schedulingOf(business).horizon_days) ? 'too_far'
+            : openWindow(business.hours, dateStr, tz, business.closed_dates) ? 'full' : 'closed';
         slots = await nextAvailable(business, 3, duration);
       }
     } else {
@@ -319,17 +326,19 @@ export async function checkAvailability(args: CheckAvailabilityArgs): Promise<To
       return {
         ok: false,
         message: say(lang,
-          'I do not have anything open in the next two weeks — let me have the owner call you with times.',
-          'No tengo nada disponible en las próximas dos semanas — voy a pedirle al dueño que le llame con horarios.'),
+          `I do not have anything open in the next ${schedulingOf(business).horizon_days} days — let me have the owner call you with times.`,
+          `No tengo nada disponible en los próximos ${schedulingOf(business).horizon_days} días — voy a pedirle al dueño que le llame con horarios.`),
         data: { slots: [] },
       };
     }
 
     const list = describeSlots(slots, lang, tz);
     const multiple = slots.length > 1;
-    const prefix = dayFull
-      ? say(lang, `That day is full, but I have ${list}`, `Ese día está lleno, pero tengo ${list}`)
-      : say(lang, `I have ${list}`, `Tengo ${list}`);
+    const prefix = whyNone === 'full' ? say(lang, `That day is full, but I have ${list}`, `Ese día está lleno, pero tengo ${list}`)
+      : whyNone === 'too_far' ? say(lang, `That is further ahead than we are booking right now, but I have ${list}`, `Eso está más lejos de lo que estamos agendando ahora, pero tengo ${list}`)
+        : whyNone === 'closed' ? say(lang, `We are closed that day, but I have ${list}`, `Ese día estamos cerrados, pero tengo ${list}`)
+          : whyNone === 'past' ? say(lang, `That day has already passed, but I have ${list}`, `Ese día ya pasó, pero tengo ${list}`)
+            : say(lang, `I have ${list}`, `Tengo ${list}`);
     const message = multiple
       ? say(lang, `${prefix} — which works better?`, `${prefix} — ¿cuál le queda mejor?`)
       : say(lang, `${prefix} open — does that work for you?`, `${prefix} disponible — ¿le queda bien?`);
@@ -475,7 +484,7 @@ export async function createBooking(args: CreateBookingArgs): Promise<ToolResult
       try {
         const confirmation = await sendConfirmation(booking.id, lang, { to: textTo });
         sms = confirmation;
-        smsDelivered = confirmation.sms.status === 'sent' || confirmation.sms.status === 'mock';
+        smsDelivered = smsWasDelivered(confirmation.sms.status);
       } catch (err) {
         log.warn('confirmation.failed', { booking: booking.id, err });
       }
@@ -519,6 +528,12 @@ async function rejectionResult(
       return { ok: false, data, message: say(lang,
         `That job would run past our closing time. ${alt}`,
         `Ese trabajo terminaría después de nuestra hora de cierre. ${alt}`) };
+    case 'too_soon':
+      return { ok: false, data, message: say(lang,
+        `We need a little more notice than that. ${alt}`, `Necesitamos un poco más de anticipación. ${alt}`) };
+    case 'too_far':
+      return { ok: false, data, message: say(lang,
+        `That is further ahead than we are booking right now. ${alt}`, `Eso está más lejos de lo que estamos agendando ahora. ${alt}`) };
     case 'closed_day':
     case 'closed_date':
     case 'before_open':
@@ -595,7 +610,7 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
       };
     }
 
-    if (sent.status === 'failed') {
+    if (sent.status === 'failed' || !smsWasDelivered(log.status)) {
       return {
         ok: false,
         message: say(lang,
@@ -617,8 +632,6 @@ export async function sendSmsTool(args: SendSmsArgs): Promise<ToolResult> {
   }
 }
 
-const DEPOSIT_CAP_CENTS = 50_000;
-
 export interface CreatePaymentLinkArgs extends BaseArgs {
   amount_cents?: number | string;
   description?: string;
@@ -631,33 +644,50 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
 
-    const requested = Math.round(Number(args.amount_cents));
-    if (!Number.isFinite(requested) || requested <= 0) {
-      return {
-        ok: false,
-        message: say(lang,
-          'How much should the deposit be for?',
-          '¿De cuánto sería el depósito?'),
-      };
-    }
-    if (requested < 100) {
-      // Cents expected (18900 = $189). A value under $1 is almost certainly dollars: re-ask rather than make a $1.89 link.
-      return {
-        ok: false,
-        message: say(lang,
-          'Let me double check the deposit amount. How much should it be?',
-          'Déjeme confirmar el monto del depósito. ¿De cuánto sería?'),
-        data: { reason: 'amount_below_minimum', received: requested },
-      };
-    }
-    const capped = requested > DEPOSIT_CAP_CENTS;
-    const amountCents = capped ? DEPOSIT_CAP_CENTS : requested;
+    // The amount is decided by the business's deposit policy on the server: whatever the model sent in `amount_cents` is ignored.
     const description = str(args.description) || 'Service deposit';
 
     const bookingId = str(args.booking_id);
     const found = bookingId ? await getBooking(bookingId) : null;
-    const booking = found && found.business_id === business.id ? found : null;
     const call = await resolveCall(business, args);
+    // Only a booking made on THIS call can take a deposit from here (a booking id the model invents or reuses from elsewhere is ignored).
+    let booking = found && found.business_id === business.id && call && found.call_id === call.id ? found : null;
+    // No (valid) booking id: the call's single open booking is the one (a link must always be tied to a booking, or its payment can never be matched).
+    if (!booking && call) {
+      const mine = await prisma.booking.findMany({ where: { businessId: business.id, callId: call.id, status: { not: 'cancelled' } }, orderBy: { createdAt: 'desc' }, take: 2 });
+      if (mine.length === 1) booking = toBooking(mine[0]);
+    }
+    if (!booking) {
+      return {
+        ok: false,
+        message: say(lang,
+          'I cannot set up a deposit without a booking made on this call — let me have the owner call you about it.',
+          'No puedo preparar un depósito sin una cita hecha en esta llamada — voy a pedirle al dueño que le llame para eso.'),
+        data: { reason: 'no_booking' },
+      };
+    }
+    // The price behind a PERCENTAGE deposit is the owner's catalog price for the service, never the model's estimate (the caller, or an injected
+    // prompt, could otherwise pick the deposit by saying the job costs a dollar). No catalog price = no amount (the owner is asked to call).
+    const kb = await getKnowledgeBase(business.id);
+    const listed = kb ? matchService(kb.services, booking.service)[0] : undefined;
+    const catalogCents = listed?.base_price != null && listed.base_price > 0 ? dollarsToCents(listed.base_price) : null;
+    const decision = resolveDepositAmount({
+      policy: depositPolicyOf(business), priceEstimateCents: catalogCents, actor: 'ai',
+    });
+    if (!decision.ok) {
+      return {
+        ok: false,
+        message: say(lang,
+          'I cannot set up a deposit from here — let me have the owner call you about it.',
+          'No puedo preparar un depósito desde aquí — voy a pedirle al dueño que le llame para eso.'),
+        data: { reason: decision.reason === 'disabled' ? 'deposits_not_enabled' : 'deposit_amount_unknown' },
+      };
+    }
+    if (booking?.deposit_paid) {
+      return { ok: true, message: say(lang, 'The deposit for that booking is already paid.', 'El depósito de esa cita ya está pagado.'), data: { already_paid: true } };
+    }
+    const amountCents = decision.cents;
+    const capped = decision.capped;
     // Recipient is never taken from the model: this call's verified caller number, or (only when there is none)
     // the number on a booking that was made on THIS call.
     const to = normalizePhone(
@@ -688,7 +718,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     }
 
     const spoken = formatCents(amountCents);
-    if (sms && sms.status !== 'sent' && sms.status !== 'mock') {
+    if (sms && !smsWasDelivered(sms.status)) {
       // The link exists but the text was blocked (opt-out, plan cap, ...): never claim it is on its way.
       return {
         ok: false,
@@ -1017,7 +1047,7 @@ async function transferToHuman(args: HandoffArgs): Promise<ToolResult> {
     const business = await resolveBusiness(args);
     if (!business) return missingBusiness(lang);
     const call = await resolveCall(business, args);
-    const decision = nativeTransferEnabled()
+    const decision = transferEnabledFor(business)
       ? await decideTransfer(business, { callSid: call?.call_sid ?? str(args.call_sid), from: call?.caller_phone ?? platformCaller(args), stirStatus: call?.stir_status ?? null })
       : ({ ok: false, why: 'disabled' } as const);
     if (decision.ok) {

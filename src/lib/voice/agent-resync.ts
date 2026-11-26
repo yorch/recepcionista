@@ -32,6 +32,27 @@ export async function markAgentDirty(businessId: string, now: Date = new Date())
   } catch (err) { log.error('mark_failed', { business: businessId, err }); }
 }
 
+export interface PromptSyncOutcome {
+  /** 'skipped': no live agent to update (no provider key, or none created yet); 'failed': the provider call failed. */
+  agent: 'synced' | 'skipped' | 'failed';
+  /** A failure left the business marked dirty: the `reconcile` job retries with backoff. */
+  retry_queued: boolean;
+}
+
+/**
+ * After a dashboard edit that changes what the agent is told (knowledge base, business name / hours / area / website): rebuild the stored
+ * prompt and push it to the live agent. A failed push marks the business dirty so it is retried; callers report `agent` honestly
+ * (never "she will use this on the next call" unless it is 'synced'). Never throws.
+ */
+export async function syncPromptAfterEdit(businessId: string): Promise<PromptSyncOutcome> {
+  const r = await resyncAfterKbChange(businessId);
+  if (r.agent === 'failed') {
+    await markAgentDirty(businessId);
+    return { agent: 'failed', retry_queued: true };
+  }
+  return { agent: r.agent, retry_queued: false };
+}
+
 /** The generated script's first line names the top services ("CALL SCRIPT — a, b"): ignored when deciding whether a script is generated, so one written for an older services list is still recognised. */
 const withoutHeader = (script: string): string => script.replace(/^CALL SCRIPT — .*$/m, 'CALL SCRIPT —').trim();
 

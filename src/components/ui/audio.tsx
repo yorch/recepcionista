@@ -4,8 +4,8 @@ import { useT } from '@/lib/i18n/client';
 import { cn } from './cn';
 
 export function VoicePlayer({
-  src, label, className, bars = 42, preload, idleLabel,
-}: { src?: string | null; label: string; className?: string; bars?: number; preload?: 'none' | 'metadata' | 'auto'; idleLabel?: string }) {
+  src, label, className, bars = 42, preload, idleLabel, emptyLabel,
+}: { src?: string | null; label: string; className?: string; bars?: number; preload?: 'none' | 'metadata' | 'auto'; idleLabel?: string; /** Shown when there is no audio at all (default: "audio pending"). */ emptyLabel?: string }) {
   const t = useT();
   const ref = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -54,9 +54,11 @@ export function VoicePlayer({
           <div className="flex items-baseline justify-between gap-3">
             <p className="truncate text-xs font-medium text-soft">{label}</p>
             <span className="shrink-0 text-xs tabular-nums text-dim">
-              {!src ? t('audio.pending') : missing ? t('audio.unavailable') : playing ? t('audio.playing') : (idleLabel ?? t('audio.voiceNote'))}
+              {!src ? (emptyLabel ?? t('audio.pending')) : missing ? t('audio.unavailable') : playing ? t('audio.playing') : (idleLabel ?? t('audio.voiceNote'))}
             </span>
           </div>
+          {/* DECORATION, not the audio's waveform: the bar heights are a fixed pseudo-random pattern (no audio analysis). The only real
+              information is the filled portion, which is the playback progress (role=progressbar). */}
           <div
             role="progressbar"
             aria-label={`${t('audio.progress')}, ${label}`}

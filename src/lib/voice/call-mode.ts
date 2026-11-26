@@ -16,14 +16,14 @@ import { openWindow } from '@/lib/availability';
 import { defaultPhoneCountry, phoneCountry } from '@/lib/phone';
 import { localDateKey, tzOf } from '@/lib/time';
 import { validateForwardNumber } from '@/lib/voice/forward-number';
-import { FORWARD_UNAVAILABLE, forwardingSupported, lineKind, type LineKind } from '@/lib/voice/line';
+import { effectiveLineKindFor, FORWARD_UNAVAILABLE, forwardingSupported, type LineKind } from '@/lib/voice/line';
 import type { Business, CallMode, Hours } from '@/lib/types';
 
 export const CALL_MODES: readonly CallMode[] = ['ai', 'paused', 'forward'];
 export const isCallMode = (v: unknown): v is CallMode => typeof v === 'string' && (CALL_MODES as readonly string[]).includes(v);
 
 type ModeFields = Pick<Business, 'call_mode' | 'forward_number_e164' | 'forward_number_verified_at' | 'forward_during_hours' | 'owner_phone_e164' | 'owner_phone_verified_at' | 'hours' | 'timezone' | 'closed_dates'>
-  & { phone_e164?: string | null };
+  & { phone_e164?: string | null; native_transfer_enabled?: boolean | null; elevenlabs_phone_number_id?: string | null };
 
 type TrustFields = Pick<ModeFields, 'forward_number_e164' | 'forward_number_verified_at' | 'owner_phone_e164' | 'owner_phone_verified_at' | 'phone_e164'>;
 
@@ -73,16 +73,16 @@ export type CallRoute =
 /**
  * What happens to a call arriving now. THE one decision shared by the phone paths, the voice tools and the dashboard, so they
  * cannot disagree (the tools refuse booking / texting exactly when this is not 'ai'). `line` is the kind of line the call is on
- * (default: this deployment's); on a 'native' line `forward` can never happen, so a due forward is the paused script.
+ * (default: what answers THIS business's number, `effectiveLineKindFor`); on a 'native' line `forward` can never happen, so a due forward is the paused script.
  */
-export function resolveCallRoute(b: ModeFields, now: Date = new Date(), line: LineKind = lineKind()): CallRoute {
+export function resolveCallRoute(b: ModeFields, now: Date = new Date(), line: LineKind = effectiveLineKindFor(b)): CallRoute {
   const mode = b.call_mode ?? 'ai';
   if (mode === 'paused') return { action: 'paused' };
   if (mode !== 'forward') return { action: 'ai', why: 'mode_ai' };
   const target = forwardTarget(b);
   if (!target.ok) return { action: 'ai', why: target.why === 'rejected' ? 'forward_number_rejected' : 'forward_number_unverified' };
   if (b.forward_during_hours && !isOpenNow(b.hours, tzOf(b.timezone), now, b.closed_dates)) return { action: 'ai', why: 'forward_outside_hours' };
-  if (!forwardingSupported(line)) return { action: 'paused', why: 'forward_unavailable_on_line' };
+  if (!forwardingSupported(line, process.env, b)) return { action: 'paused', why: 'forward_unavailable_on_line' };
   return { action: 'forward', to: target.to };
 }
 
@@ -90,7 +90,7 @@ export function resolveCallRoute(b: ModeFields, now: Date = new Date(), line: Li
 export type CallModeLabelCode = 'forward_unavailable' | 'paused' | 'forwarding' | 'ai_after_hours' | 'ai_rejected' | 'ai_unverified' | 'ai';
 
 /** Same decision as callModeLabel, as a code the dashboard localizes (`callmode.label.<code>`). */
-export function callModeLabelCode(b: ModeFields, now: Date = new Date(), line: LineKind = lineKind()): CallModeLabelCode {
+export function callModeLabelCode(b: ModeFields, now: Date = new Date(), line: LineKind = effectiveLineKindFor(b)): CallModeLabelCode {
   const r = resolveCallRoute(b, now, line);
   if (r.action === 'paused') return r.why === 'forward_unavailable_on_line' ? 'forward_unavailable' : 'paused';
   if (r.action === 'forward') return 'forwarding';
@@ -103,7 +103,7 @@ export function callModeLabelCode(b: ModeFields, now: Date = new Date(), line: L
 }
 
 /** Short English status line for the dashboard toggle, e.g. "AI is answering calls" (the UI localizes it from `callModeLabelCode`). */
-export function callModeLabel(b: ModeFields, now: Date = new Date(), line: LineKind = lineKind()): { text: string; tone: 'ok' | 'warn' | 'info' } {
+export function callModeLabel(b: ModeFields, now: Date = new Date(), line: LineKind = effectiveLineKindFor(b)): { text: string; tone: 'ok' | 'warn' | 'info' } {
   const r = resolveCallRoute(b, now, line);
   if (r.action === 'paused') {
     return r.why === 'forward_unavailable_on_line'
@@ -146,7 +146,7 @@ export interface CallModeView {
   tone: 'ok' | 'warn' | 'info';
 }
 
-export function callModeView(b: ModeFields & { forward_number?: string | null }, opts: { full?: boolean } = {}, now: Date = new Date(), line: LineKind = lineKind()): CallModeView {
+export function callModeView(b: ModeFields & { forward_number?: string | null }, opts: { full?: boolean } = {}, now: Date = new Date(), line: LineKind = effectiveLineKindFor(b)): CallModeView {
   const target = forwardTarget(b);
   const trusted = target.ok ? target.to : null;
   const label = callModeLabel(b, now, line);
@@ -158,7 +158,7 @@ export function callModeView(b: ModeFields & { forward_number?: string | null },
     forward_verified: trusted !== null,
     forward_is_owner_phone: trusted !== null && !b.forward_number_verified_at,
     route_now: resolveCallRoute(b, now, line).action,
-    forward_supported: forwardingSupported(line),
+    forward_supported: forwardingSupported(line, process.env, b),
     forward_blocked: !target.ok && target.why === 'rejected' ? (target.error ?? 'this number cannot be used for forwarding') : null,
     label: label.text,
     label_code: callModeLabelCode(b, now, line),

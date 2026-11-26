@@ -84,6 +84,37 @@ model Business {
   /// Holiday closures: a list of YYYY-MM-DD dates in the business zone (<= 366; CHECK in the migration). A listed date has no slots.
   closedDates      Json    @default("[]") @map("closed_dates")
 
+  // ---- mock-replacement configuration (migration 20261208120000; see docs/design/mock-replacement-contracts.md) ----
+  /// This tenant's own AI line: the ElevenLabs phone-number id (phnum_...) and the Twilio phone sid (PN...). The shared env
+  /// ELEVENLABS_PHONE_NUMBER_ID is only a fallback for tenants without their own. Both unique: one number belongs to one business.
+  elevenlabsPhoneNumberId String? @unique @map("elevenlabs_phone_number_id")
+  twilioPhoneSid          String? @unique @map("twilio_phone_sid")
+  /// Google review link texted after a job. https only, <= 300 chars (CHECK).
+  reviewUrl               String? @map("review_url")
+  /// What the assistant calls itself on calls / texts. 1-40 chars (CHECK); NULL = the platform default.
+  assistantName           String? @map("assistant_name")
+  /// Deposit policy. enabled=false means "no policy": the legacy behaviour (the deposit amount is whatever the agent / owner asks for).
+  depositEnabled          Boolean @default(false) @map("deposit_enabled")
+  /// 'fixed' | 'percent' (CHECK). fixed uses deposit_fixed_cents; percent uses deposit_percent of the price estimate, clamped to min/max cents.
+  depositMode             String  @default("fixed") @map("deposit_mode")
+  depositFixedCents       Int?    @map("deposit_fixed_cents")
+  depositPercent          Int?    @map("deposit_percent")
+  depositMinCents         Int?    @map("deposit_min_cents")
+  depositMaxCents         Int?    @map("deposit_max_cents")
+  /// Scheduling grid and rules (defaults reproduce the previous hard-coded behaviour): slot step in minutes (15 | 30 | 60), minimum lead time
+  /// before a slot is offered, how many days ahead are offered, a buffer kept free around every booking, and the number of parallel crews.
+  slotMinutes             Int     @default(60) @map("slot_minutes")
+  minLeadMinutes          Int     @default(60) @map("min_lead_minutes")
+  horizonDays             Int     @default(14) @map("horizon_days")
+  bufferMinutes           Int     @default(0) @map("buffer_minutes")
+  crews                   Int     @default(1) @db.SmallInt
+  /// Go-live confirmation of the template content: when the owner confirmed it, and the fingerprint of the content they confirmed
+  /// (services / prices / service area). A changed fingerprint means the confirmation is stale (see src/lib/db/content-confirmation.ts).
+  contentConfirmedAt      DateTime? @map("content_confirmed_at") @db.Timestamptz(6)
+  contentConfirmedHash    String?   @map("content_confirmed_hash")
+  /// Opt-in to the provider's native call transfer to the owner (instead of the Twilio dial leg). Default off.
+  nativeTransferEnabled   Boolean   @default(false) @map("native_transfer_enabled")
+
   knowledgeBase KnowledgeBase?
   calls         Call[]
   bookings      Booking[]
@@ -101,6 +132,7 @@ model Business {
   calendarOrphans     CalendarOrphanedEvent[]
   ownerKbChanges      OwnerKbChange[]
   ownerReplies        OwnerReply[]
+  inboundMessages     InboundMessage[]
 
   @@index([phoneKey])
   @@index([phoneE164])
@@ -236,6 +268,15 @@ model Booking {
   refundRequestedAt       DateTime? @map("refund_requested_at") @db.Timestamptz(6)
   /// 'none' | 'open' | 'won' | 'lost' (CHECK in the migration); set from charge.dispute.* events.
   disputeStatus           String    @default("none") @map("dispute_status")
+  /// How the deposit was paid: 'stripe' (webhook) | 'manual' (the owner marked it paid: cash, Zelle...) | NULL (unknown / legacy / not paid). CHECK.
+  depositSource           String?   @map("deposit_source")
+  /// Who (user id, or 'admin_token') and when marked the deposit as paid manually. Set together with deposit_source = 'manual'.
+  depositMarkedBy         String?   @map("deposit_marked_by")
+  depositMarkedAt         DateTime? @map("deposit_marked_at") @db.Timestamptz(6)
+  /// Where the booking came from: 'ai' (default / legacy) | 'dashboard' | 'sms' | 'api' | 'system'. CHECK.
+  createdVia              String    @default("ai") @map("created_via")
+  /// Which crew (1..businesses.crews) the job is assigned to. The overlap exclusion constraint is per (business, crew).
+  crew                    Int       @default(1) @db.SmallInt
 
   business        Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
   call            Call?              @relation(fields: [callId], references: [id], onDelete: SetNull)
@@ -244,6 +285,7 @@ model Booking {
   smsLog          SmsLog[]
   calendarLink    CalendarEventLink?
   leadReplies     OwnerReply[]       @relation("OwnerReplyLeadBooking")
+  inboundMessages InboundMessage[]
 
   @@index([businessId, scheduledAt])
   @@index([businessId, phoneE164])
@@ -262,10 +304,58 @@ model Briefing {
   stats      Json     @default("{}")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  audio    BriefingAudio?
 
   @@unique([businessId, date])
   @@map("briefings")
+}
+
+/// Durable briefing audio (bytes in Postgres, <= 5 MB, CHECK). Cascades with its briefing (retention, erasure, business delete).
+/// `briefings.audio_url` stays the playable URL; for stored audio it is `/api/briefings/<briefing id>/audio`.
+model BriefingAudio {
+  id          String   @id @default(uuid())
+  briefingId  String   @unique @map("briefing_id")
+  contentType String   @map("content_type")
+  bytes       Bytes
+  voiceId     String?  @map("voice_id")
+  /// SHA-256 of the transcript the clip was synthesized from: a failed regeneration never deletes a clip of the SAME text, and a repeat request for the same text and voice is not synthesized again.
+  textHash    String?  @map("text_hash")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  briefing Briefing @relation(fields: [briefingId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@map("briefing_audio")
+}
+
+/// A customer text received on the business's number that is not a STOP/START keyword: the owner's inbox. Deduped on the Twilio MessageSid.
+model InboundMessage {
+  id                 String    @id @default(uuid())
+  businessId         String    @map("business_id")
+  /// Sender in E.164 (what erasure matches on) and as received.
+  fromE164           String    @map("from_e164")
+  fromPhone          String    @map("from_phone")
+  body               String
+  twilioMessageSid   String    @unique @map("twilio_message_sid")
+  receivedAt         DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+  /// 'new' | 'handled' | 'ignored' (CHECK). handled/ignored require handled_at.
+  status             String    @default("new")
+  handledAt          DateTime? @map("handled_at") @db.Timestamptz(6)
+  /// user id (or 'admin_token') that handled it.
+  handledBy          String?   @map("handled_by")
+  forwardedToOwnerAt DateTime? @map("forwarded_to_owner_at") @db.Timestamptz(6)
+  autoRepliedAt      DateTime? @map("auto_replied_at") @db.Timestamptz(6)
+  bookingId          String?   @map("booking_id")
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  booking  Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, receivedAt])
+  @@index([businessId, status, receivedAt])
+  @@index([businessId, fromE164])
+  @@index([bookingId])
+  @@map("inbound_messages")
 }
 
 model SmsLog {
@@ -281,6 +371,11 @@ model SmsLog {
   status       String   @default("queued")
   /// Why we were allowed to send: 'transactional_booking' | 'caller_initiated' | 'express_opt_in' | 'owner_alert' | ...
   consentBasis String?  @map("consent_basis")
+  /// The E.164 of the number that ACTUALLY sent the text (the tenant's own line, the shared platform sender, or the pool number a Messaging Service picked,
+  /// learned from Twilio's status callback). NULL: unknown (a Messaging Service text whose callback has not arrived), written before review 23, or nothing was sent.
+  fromE164     String?  @map("from_e164")
+  /// 'tenant' | 'shared' | 'service' (validated in the app: no CHECK, so adding the column stays a catalog-only change). NULL when nothing was sent.
+  senderKind   String?  @map("sender_kind")
   createdAt    DateTime @default(now()) @map("created_at")
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
@@ -288,6 +383,9 @@ model SmsLog {
 
   @@index([businessId, createdAt])
   @@index([businessId, toE164])
+  /// Routes a customer's reply to a number that is not a tenant's own (messaging/sender resolveInboundRoute): by the RECORDED sender only. Built CONCURRENTLY
+  /// by 20261210120100_sms_log_from_index.
+  @@index([fromE164, toE164, createdAt])
   @@index([consentBasis, createdAt])
   @@index([bookingId])
   @@map("sms_log")

@@ -15,7 +15,8 @@ import { publicKbChange } from '@/lib/voice/owner/view';
 import { OwnerReplies } from '@/components/dashboard/owner-replies';
 import { publicOwnerReply } from '@/lib/voice/owner/reply-view';
 import { ReadinessChecklist } from '@/components/knowledge/readiness-checklist';
-import { readinessOf } from '@/lib/kb/readiness';
+import { readinessForGoLive, contentStateOf, contentHashOf } from '@/lib/kb/readiness-server';
+import { ContentConfirmCard } from '@/components/knowledge/content-confirm';
 import { money } from '@/lib/format';
 import { dollarsToCents } from '@/lib/money';
 
@@ -55,7 +56,8 @@ export default async function KnowledgePage() {
         </div>
       ) : isOwner ? (
         <div className="mt-6">
-          <ReadinessChecklist readiness={readinessOf(kb, biz, locale)} className="mb-6" />
+          <ReadinessChecklist readiness={readinessForGoLive(kb, biz, locale)} className="mb-6" />
+          <ContentConfirmCard businessId={biz.id} initialState={contentStateOf(biz, kb)} contentHash={contentHashOf(biz, kb)} />
           <KnowledgeEditor
             businessId={biz.id}
             business={{ name: biz.name, owner_name: biz.owner_name ?? null, service_area: biz.service_area, hours: biz.hours, url: biz.url ?? null, vertical: biz.vertical ?? 'hvac' }}

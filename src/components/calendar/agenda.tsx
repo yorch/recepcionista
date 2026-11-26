@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { StatusIcon } from './status';
+import { BookingPanel } from './booking-panel';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/components/ui/cn';
 import { STATUS_META } from '@/lib/calendar';
@@ -14,7 +15,7 @@ import type { Booking } from '@/lib/types';
 type Direction = 'upcoming' | 'past';
 
 /** The list view ("Agenda"): upcoming jobs soonest first, or past jobs newest first, with cursor "Load more". */
-export function Agenda({ businessId, tz, initial }: { businessId: string; tz: string; initial: Page<Booking> }) {
+export function Agenda({ businessId, tz, initial, canManage = false }: { businessId: string; tz: string; initial: Page<Booking>; canManage?: boolean }) {
   const t = useT();
   const locale = useLocale();
   const [direction, setDirection] = useState<Direction>('upcoming');
@@ -22,6 +23,11 @@ export function Agenda({ businessId, tz, initial }: { businessId: string; tz: st
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const page = state[direction];
+  const [selected, setSelected] = useState<Booking | null>(null);
+  const changed = (b: Booking) => {
+    setSelected(b);
+    setState((s) => ({ upcoming: s.upcoming && { ...s.upcoming, items: s.upcoming.items.map((x) => (x.id === b.id ? b : x)) }, past: s.past && { ...s.past, items: s.past.items.map((x) => (x.id === b.id ? b : x)) } }));
+  };
 
   async function fetchPage(dir: Direction, cursor: string | null) {
     setLoading(true);
@@ -76,6 +82,7 @@ export function Agenda({ businessId, tz, initial }: { businessId: string; tz: st
                 {b.deposit_amount ? <p className={cn('text-xs', b.deposit_paid ? 'text-mint-text' : 'text-warn')}>{b.deposit_paid ? t('agenda.depositPaid') : t('agenda.deposit', { amount: money(b.deposit_amount, locale) })}</p> : null}
                 {b.dispute_status && b.dispute_status !== 'none' ? <p className={cn('text-xs', b.dispute_status === 'won' ? 'text-mint-text' : 'text-warn')}>{t('agenda.dispute', { status: t(`agenda.dispute.${b.dispute_status}` as 'agenda.dispute.open') })}</p> : null}
               </div>
+              <Button variant="outline" className="shrink-0 px-3" aria-label={t('agenda.openFor', { name: b.customer_name })} aria-haspopup="dialog" onClick={() => setSelected(b)}>{t('agenda.open')}</Button>
             </li>
           );
         })}
@@ -90,6 +97,7 @@ export function Agenda({ businessId, tz, initial }: { businessId: string; tz: st
           <Button variant="outline" disabled={loading} onClick={() => fetchPage(direction, page.next_cursor)}>{loading ? t('common.loading') : t('agenda.loadMore')}</Button>
         </div>
       ) : null}
+      {selected ? <BookingPanel key={selected.id} booking={selected} tz={tz} canManage={canManage} onClose={() => setSelected(null)} onChanged={changed} /> : null}
     </section>
   );
 }

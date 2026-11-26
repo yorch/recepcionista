@@ -10,6 +10,7 @@ import {
 } from '@/lib/db';
 import { buildSystemPrompt } from '@/lib/kb';
 import { syncAgent, hasElevenLabs } from '@/lib/voice/elevenlabs';
+import { markAgentDirty } from '@/lib/voice/agent-resync';
 import { logger } from '@/lib/log';
 import type { AuditActorKind, OwnerKbChange, OwnerKbSource } from '@/lib/types';
 
@@ -76,6 +77,7 @@ export async function applyOwnerChange(businessId: string, changeId: string, act
   if (res.ok && res.changed) {
     await auditOwnerKb('applied', businessId, actor, res.change);
     const sync = await resyncAfterKbChange(businessId);
+    if (sync.agent === 'failed') await markAgentDirty(businessId); // the reconcile job retries; the change itself is saved
     log.info('applied', { business: businessId, change: changeId, via: actor.via, agent: sync.agent });
   }
   return res;
@@ -91,7 +93,7 @@ export async function revertOwnerChange(businessId: string, changeId: string, ac
   const res = await revertKbChange(businessId, changeId);
   if (res.ok && res.changed) {
     await auditOwnerKb('reverted', businessId, actor, res.change);
-    await resyncAfterKbChange(businessId);
+    if ((await resyncAfterKbChange(businessId)).agent === 'failed') await markAgentDirty(businessId);
   } else if (!res.ok && res.reason === 'changed_since') {
     const change = await getKbChange(businessId, changeId);
     await auditOwnerKb('revert_conflict', businessId, actor, change, { fields: res.conflicts ?? [] });

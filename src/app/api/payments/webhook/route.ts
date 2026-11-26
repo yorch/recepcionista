@@ -116,7 +116,7 @@ async function handleEvent(
       const objectId = typeof object.id === 'string' ? object.id : null;
       const intent = type === 'payment_intent.succeeded' ? objectId : (typeof object.payment_intent === 'string' ? object.payment_intent : null);
       await setBookingStripeRefs(booking.id, { payment_intent_id: intent, checkout_session_id: type === 'checkout.session.completed' ? objectId : null });
-      const { updated } = await markDepositPaid(booking.id, amountCents);
+      const { updated, replaced_manual: replacedManual } = await markDepositPaid(booking.id, amountCents);
       if (updated) {
         await emitBookingChanged(booking.id, 'updated', booking.business_id);
         const business = await getBusiness(booking.business_id);
@@ -127,13 +127,23 @@ async function handleEvent(
           await prisma.booking.updateMany({ where: { id: booking.id, refundStatus: 'not_applicable' }, data: { refundStatus: 'none' } });
           await recordAudit({ actor_kind: 'webhook', business_id: booking.business_id, action: 'payment.paid_for_cancelled_booking', target: `booking:${booking.id}`, meta: { amount_cents: amountCents, event: event.id ?? null } });
         }
+        // The owner had already marked this deposit as received by hand: the customer paid TWICE. The card payment now owns the row (it can be refunded
+        // from the booking); the cash/Zelle payment is the owner's to give back. Never silent.
+        if (replacedManual) {
+          await recordAudit({
+            actor_kind: 'webhook', business_id: booking.business_id, action: 'payment.paid_over_manual_deposit', target: `booking:${booking.id}`,
+            meta: { amount_cents: amountCents, manual_amount_cents: replacedManual.amount_cents, manual_refund_cents: replacedManual.refund_status === 'refunded' ? replacedManual.refund_amount_cents : null, event: event.id ?? null },
+          });
+        }
         if (business?.owner_phone) {
           await sendAndLog({
             business_id: business.id,
             to: business.owner_phone,
             body: ownerAlertSms({
               business,
-              text: lateForCancelled
+              text: replacedManual
+                ? `Card payment ${money(amountCents)} arrived from ${booking.customer_name} for ${booking.service}, a deposit you had marked as received${replacedManual.amount_cents ? ` (${money(replacedManual.amount_cents)})` : ''}. They paid twice: refund one of them (the card payment from the booking in your dashboard).`
+                : lateForCancelled
                 ? `Deposit ${money(amountCents)} paid by ${booking.customer_name} for a CANCELLED booking (${booking.service}). Refund it from the booking in your dashboard.`
                 : `Deposit ${money(amountCents)} paid by ${booking.customer_name} for ${booking.service}.`,
             }),

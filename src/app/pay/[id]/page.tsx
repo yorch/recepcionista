@@ -1,6 +1,9 @@
 import type { Metadata } from 'next';
-import { notFound } from 'next/navigation';
-import { getBooking, getBusiness } from '@/lib/db';
+import { notFound, redirect } from 'next/navigation';
+import { getBooking, getBookingPaymentLinkId, getBusiness } from '@/lib/db';
+import { demoModeEnabled } from '@/lib/auth';
+import { lookupPaymentLink } from '@/lib/payments/link-lookup';
+import { PayUnavailable } from './unavailable';
 import Link from 'next/link';
 import { Checkout } from './checkout';
 import { policySentence } from '@/lib/refunds';
@@ -14,10 +17,11 @@ import { getCall } from '@/lib/db';
 import type { Locale } from '@/lib/i18n/core';
 
 /**
- * The page a customer lands on in mock mode. The amount, description and business name
- * come from the DATABASE, looked up by booking id — never from query params, which a
- * customer (or anyone with the link) could edit. The old `mock_<random>` ids with
- * query-param amounts remain for the local demo only (NODE_ENV !== 'production').
+ * /pay/<bookingId>. PRODUCTION never renders a card form: a booking whose deposit link is still live is sent to Stripe's own page
+ * (the link's `buy.stripe.com` URL, looked up on Stripe, cached briefly); an already-paid booking shows the receipt; anything else shows an
+ * honest "this link is not available, call the business" page. The demo card form exists only outside production AND with DEMO_MODE=true.
+ * The amount, description and business name come from the DATABASE, looked up by booking id, never from query params. The old
+ * `mock_<random>` ids with query-param amounts remain for the local demo only (NODE_ENV !== 'production' and DEMO_MODE).
  *
  * Booking resolution: `/pay/<bookingId>` or `/pay/mock_x?booking=<bookingId>`.
  */
@@ -91,35 +95,33 @@ export default async function PayPage({
     </I18nProvider>
   );
 
+  const demoForm = !isProd && demoModeEnabled();
+
   if (booking) {
     const business = biz;
     policyBusiness = business;
     businessName = business?.name ?? t('pay.defaultProvider');
     label = t('pay.depositFor', { service: booking.service });
-    if (booking.deposit_amount && booking.deposit_amount > 0) {
-      amountCents = booking.deposit_amount;
-    } else if (!isProd && isMockId) {
-      amountCents = demoAmount(first(query.amount));
-    } else {
-      notFound();
-    }
+    const hasAmount = Boolean(booking.deposit_amount && booking.deposit_amount > 0);
+    if (!hasAmount && !(demoForm && isMockId)) notFound();
+    amountCents = hasAmount ? (booking.deposit_amount as number) : demoAmount(first(query.amount));
     if (booking.deposit_paid) {
       return scoped(
         <>
-          <PaymentReceived
-            reference={id}
-            amountCents={amountCents}
-            label={label}
-            businessName={businessName}
-            last4="----"
-            t={t}
-            locale={locale}
-          />
+          <PaymentReceived reference={id} amountCents={amountCents} label={label} businessName={businessName} t={t} locale={locale} />
           <PolicyNote business={policyBusiness} locale={locale} />
         </>,
       );
     }
-  } else if (isMockId && !isProd) {
+    if (!demoForm) {
+      // No demo card form here. A live Stripe link: go there. Otherwise tell the customer plainly (never a fake payment page).
+      if (booking.status !== 'cancelled') {
+        const found = await lookupPaymentLink(await getBookingPaymentLinkId(booking.id).catch(() => null));
+        if (found.state === 'active') redirect(found.url);
+      }
+      return scoped(<PayUnavailable businessName={businessName} businessPhone={business?.phone ?? null} t={t} />);
+    }
+  } else if (isMockId && demoForm) {
     // Local demo only: a bare mock link with no booking. Values are clamped and cosmetic.
     amountCents = demoAmount(first(query.amount));
     label = (first(query.for)?.trim() || t('pay.defaultLabel')).slice(0, 80);

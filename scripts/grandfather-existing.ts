@@ -42,6 +42,11 @@ async function main() {
   if (apply && !beforeRaw) usageExit('--before <ISO instant> is required with --apply');
   const cutoff = beforeRaw ? new Date(beforeRaw) : null;
   if (beforeRaw && (!cutoff || Number.isNaN(cutoff.getTime()))) usageExit(`--before "${beforeRaw}" is not a valid ISO date`);
+  // The same switch as the admin jobs (src/lib/jobs/tenants.ts): a real run needs TENANT_RELEASE_JOB=on. Without --apply this is a dry run.
+  if (apply && (process.env.TENANT_RELEASE_JOB ?? '').trim().toLowerCase() !== 'on') {
+    console.error('[grandfather-existing] --apply is refused: set TENANT_RELEASE_JOB=on to allow real releases / comps (the dry run needs nothing).');
+    process.exit(2);
+  }
   if (!cutoff) {
     console.warn('No --before given: nothing will be selected (a cutoff is required to comp anyone). Showing the reasons only.\n');
   }

@@ -6,7 +6,10 @@
  *     - at least 3 services with a price (> $0)
  *     - opening hours set (at least one open day)
  *     - at least 1 FAQ (a question with an answer)
- *   RECOMMENDED (a warning; never blocks): 5+ priced services, 3+ FAQs, a service area, the owner's name.
+ *     - a service area (the owner's own input: it is never defaulted to a county, so an unknown area is empty and required)
+ *     - the owner's confirmation of the services, prices and service area (`content`; see db/content-confirmation.ts). Only when the caller
+ *       says it knows the state (`content_state`), and never for a business that is already live.
+ *   RECOMMENDED (a warning; never blocks): 5+ priced services, 3+ FAQs, the owner's name.
  *
  * `score` is 0-100 (weighted, partial credit): a progress meter, not a gate. Only `blockers` gate.
  */
@@ -20,7 +23,7 @@ export const RECOMMENDED_PRICED_SERVICES = 5;
 export const MIN_FAQS = 1;
 export const RECOMMENDED_FAQS = 3;
 
-export type ReadinessKey = 'services' | 'hours' | 'faqs' | 'service_area' | 'owner_name';
+export type ReadinessKey = 'services' | 'hours' | 'faqs' | 'service_area' | 'owner_name' | 'content';
 
 export interface ReadinessItem {
   key: ReadinessKey;
@@ -39,7 +42,9 @@ export interface Readiness {
 
 export interface ReadinessKb { services: Pick<Service, 'name' | 'base_price'>[]; faqs: Pick<FAQ, 'question' | 'answer'>[] }
 /** The business facts that live outside the KB. Omit a field to skip its check (unknown is not "missing"). */
-export interface ReadinessFacts { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null; /** The business's trade: only used to give an example service in the messages (the default vertical when null). */ vertical?: Vertical | null }
+export interface ReadinessFacts { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null; /** The business's trade: only used to give an example service in the messages (the default vertical when null). */ vertical?: Vertical | null;
+  /** Has the owner confirmed the services / prices / service area (contentConfirmationState)? Omit to skip the check (unknown is not "missing"). */
+  content_state?: 'unconfirmed' | 'confirmed' | 'stale' }
 
 const hasText = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0;
 
@@ -73,8 +78,14 @@ export function kbReadiness(kb: ReadinessKb | null | undefined, facts: Readiness
 
   if (facts.service_area !== undefined) {
     if ((facts.service_area ?? []).some(hasText)) score += 10;
-    else warnings.push({ key: 'service_area', message: L('Add the areas you serve so she can tell callers when you cannot come.', 'Agregue las zonas que atiende para que ella pueda avisar a los llamantes cuando usted no pueda ir.') });
+    else blockers.push({ key: 'service_area', message: L('Add the cities or counties you serve so she can tell callers when you cannot come.', 'Agregue las ciudades o condados que atiende para que ella pueda avisar a los llamantes cuando usted no pueda ir.') });
   } else score += 10;
+
+  if (facts.content_state !== undefined && facts.content_state !== 'confirmed') {
+    blockers.push({ key: 'content', message: facts.content_state === 'stale'
+      ? L('Your services, prices or service area changed since you last confirmed them: confirm them again before she goes live.', 'Sus servicios, precios o zona de servicio cambiaron desde la última confirmación: confírmelos de nuevo antes de que ella empiece a atender.')
+      : L('Confirm that your services, prices and service area are right: she quotes them to callers.', 'Confirme que sus servicios, precios y zona de servicio son correctos: ella se los dice a los llamantes.') });
+  }
 
   if (facts.owner_name !== undefined) {
     if (hasText(facts.owner_name)) score += 5;
@@ -85,8 +96,8 @@ export function kbReadiness(kb: ReadinessKb | null | undefined, facts: Readiness
 }
 
 /** Readiness of a saved business + KB. */
-export function readinessOf(kb: ReadinessKb | null | undefined, business: { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null; vertical?: Vertical | null }, lang: Lang = 'en'): Readiness {
-  return kbReadiness(kb, { hours: business.hours ?? {}, service_area: business.service_area ?? [], owner_name: business.owner_name ?? null, vertical: business.vertical ?? null }, lang);
+export function readinessOf(kb: ReadinessKb | null | undefined, business: { hours?: Hours | null; service_area?: string[] | null; owner_name?: string | null; vertical?: Vertical | null }, lang: Lang = 'en', contentState?: ReadinessFacts['content_state']): Readiness {
+  return kbReadiness(kb, { hours: business.hours ?? {}, service_area: business.service_area ?? [], owner_name: business.owner_name ?? null, vertical: business.vertical ?? null, ...(contentState ? { content_state: contentState } : {}) }, lang);
 }
 
 /** The editable onboarding draft (prices as dollar strings, hours per day). Mirrors components/knowledge/model.ts without importing it. */

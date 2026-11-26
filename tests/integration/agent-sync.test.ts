@@ -6,12 +6,19 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
-import { cleanup, loadDb, loadPrisma, newBusiness, uniq } from '../helpers/fixtures';
+import { cleanup, loadDb, loadPrisma, newBusiness as baseNewBusiness, uniq } from '../helpers/fixtures';
 import { fakeElevenLabs } from '../helpers/fake-elevenlabs';
 
 integration('agent sync (postgres)', () => {
   let db: Awaited<ReturnType<typeof loadDb>>;
   let prisma: Awaited<ReturnType<typeof loadPrisma>>;
+  // Live transfer is per business (opt-in) on top of the NATIVE_TRANSFER capability: these tests exercise the full tool set, so the businesses opt in.
+  const newBusiness = async (o: Parameters<typeof baseNewBusiness>[0] = {}, optIn = true) => {
+    const b = await baseNewBusiness(o);
+    if (!optIn) return b;
+    await prisma.business.update({ where: { id: b.id }, data: { nativeTransferEnabled: true } });
+    return (await db.getBusiness(b.id))!;
+  };
   let el: typeof import('@/lib/voice/elevenlabs');
   let resync: (req: Request) => Promise<Response>;
   const userIds: string[] = [];
@@ -90,6 +97,33 @@ integration('agent sync (postgres)', () => {
       expect(fake.agentToolNames(r.agent_id)).toEqual(EXPECTED_TOOLS.filter((n) => !['transfer-to-human', 'propose-kb-change', 'list-recent-changes', 'undo-last-change', 'draft-reply', 'get-callback-number', 'list-recent-leads', 'mark-lead-handled'].includes(n)));
       expect(fake.agents.get(r.agent_id)!.conversation_config.agent.prompt.built_in_tools.transfer_to_number).toBeUndefined();
     }, { NATIVE_TRANSFER: undefined, OWNER_CALLIN_ENABLED: 'false' });
+  });
+
+  test('a business that has NOT opted in to live transfer never gets the transfer tool, rule or system tool, even with NATIVE_TRANSFER=on; an assistant name is spoken', async () => {
+    await withFake(async (fake) => {
+      const biz = await newBusiness({ agent_id: null }, false);
+      await prisma.business.update({ where: { id: biz.id }, data: { assistantName: 'Sofia' } });
+      const r = await el.syncAgent({ business: (await db.getBusiness(biz.id))!, kb: null });
+      expect(fake.agentToolNames(r.agent_id)).not.toContain('transfer-to-human');
+      const cfg = fake.agents.get(r.agent_id)!.conversation_config.agent;
+      expect(cfg.prompt.built_in_tools.transfer_to_number).toBeUndefined();
+      expect(cfg.prompt.prompt).not.toContain('# Live transfer');
+      expect(cfg.prompt.prompt).toContain('Your name is Sofia');
+      expect(cfg.first_message).toContain('this is Sofia');
+      expect(cfg.first_message).not.toContain('Maria');
+      // honest tool descriptions: the handoff tool texts the owner and offers a callback; it does not transfer the call
+      const desc = (name: string) => [...fake.tools.values()].find((t) => t.config.name === name)?.config.description as string;
+      expect(desc('handoff-to-human')).toContain('does NOT connect or transfer');
+      expect(desc('handoff-to-human')).not.toMatch(/^Transfer the caller/);
+      expect([...fake.tools.values()].some((t) => t.config.name === 'transfer-to-human')).toBe(false); // not even registered while nobody opted in
+      await el.syncAgent({ business: await newBusiness({ agent_id: null }), kb: null }); // an opted-in business
+      expect(desc('transfer-to-human')).toContain('only then say you are connecting them');
+      expect(cfg.prompt.prompt).toContain('does NOT connect or transfer the call');
+      // no assistant name stored: the documented default
+      const plain = await newBusiness({ agent_id: null }, false);
+      const r2 = await el.syncAgent({ business: plain, kb: null });
+      expect(fake.agents.get(r2.agent_id)!.conversation_config.agent.first_message).toContain('this is Maria');
+    });
   });
 
   test('idempotent: syncing again updates the same agent, creates no duplicate tools or agents and keeps the same tool ids; a changed voice is picked up', async () => {

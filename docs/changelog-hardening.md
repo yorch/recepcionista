@@ -407,3 +407,90 @@ One hand-written migration, `20261207120000_review16_fixes` (additive, re-runnab
 | 17 M4 payment links on cancel | no Stripe call unless a link was attempted; queued, background, short timeouts, tenant scoped, retried by the reconcile job | `tests/integration/phase2.test.ts` |
 | 17 M5 reconcile metering | a transferred call is split with `splitTransferSeconds`; the forwarded leg goes through the per-sid forward metering | `tests/integration/telephony-phase2.test.ts` |
 | 17 L6-L8 | stuck-refund pass ordered by last check; a usage-warning check error keeps the retry marker; changed-since list ordered with a cursor; orphan sweep with a cursor and retention coverage; call-script rebuild is a compare-and-swap and recognises older generated scripts; pending-forward key stored | `phase2.test.ts`, `residual-gaps.test.ts`, `telephony-phase2.test.ts` |
+
+
+## Mock replacement, agent B: customer messages, privacy tools, review link (docs/review/18f #8, #16/N3, #17 part)
+
+No migration (the Phase 1 tables `inbound_messages` and the `sms_log.kind` values `manual`, `owner_inbox_reply`, `inbox_autoreply` are used as built).
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| #16 / N3 customer texts dropped | stored in the inbox, forwarded to the verified owner phone (quiet hours and an hourly budget respected), acknowledged once per sender per 24 h, dashboard Messages page with triage, replies and a text log | `tests/integration/messages-inbox.test.ts`, `tests/messaging-inbox-pure.test.ts` |
+| #8 placeholder review link | per-business `review_url` (Settings); `REVIEW_URL` and the `g.page/r/demo/review` fallback removed; no link set = thank-you without a link; texts signed with `assistant_name` (default Maria) | same |
+| #17 privacy export / erase UI | owner-only Settings card; lookup, JSON download and erase with typed confirmation, step-up, rate limits, audit rows | same |
+| #17 manual text / SMS log | `POST .../messages/send` (known customers only, per-recipient limit) and the Text log tab | same |
+
+## Mock replacement, agent A: per-tenant AI line, honest provisioning, webhook TwiML, transfer opt-in, assistant name (docs/review/18f #3, #6, #21, #22, N2 voice side, N5, N8, part of #32)
+
+* **One module for the provider's phone shapes**: `src/lib/voice/elevenlabs-phone.ts` (import, list, get, bind/detach, delete, register-call; documented schemas, UNVERIFIED live; no throw, secret-free errors, the Twilio token only in the import body). `src/lib/voice/tenant-line.ts` orchestrates it with the database: `ensureTenantLine` (adopts an existing import of the same E.164, never takes an id another business owns, re-imports a deleted one, keeps the Twilio SMS URL, stores `elevenlabs_phone_number_id` and the Twilio `PN` sid), `releaseTenantLine`.
+* **Provisioning** refuses before any purchase when `ELEVENLABS_API_KEY` is missing in production or with real Twilio (503 `voice_provider_not_configured`), treats a mock agent as a failure there (502), imports the number and binds the tenant's own agent (502 `voice_line_failed`, number kept, retry resumes). `deploy.sh` now dies when Twilio is configured without the ElevenLabs key. `bindPhoneNumber(agentId, business)` binds the tenant's own number; the shared `ELEVENLABS_PHONE_NUMBER_ID` is a single-business fallback that is never rebound across tenants. The agent re-created by a resync re-binds the tenant's own number.
+* **Admin repair** (`POST /api/admin/repair-numbers`) also imports/binds existing numbers (`items[].line`), dry run by default. **Release** deletes the tenant's imported number before the agent and the Twilio number.
+* **`/api/voice/incoming`**: a signed Twilio call is always answered with TwiML (out-of-service, unknown number, owner line, AI via register-call or an honest voicemail); no more per-call `bindPhoneNumber` (it rebound the shared number on every call); the `kb: null` repair was already fixed (N5).
+* **Live transfer is per business** (`native_transfer_enabled`, with the global `NATIVE_TRANSFER` capability): the transfer tool, rule and system tool exist on an agent only for a business that opted in; call-mode forward on the native line, the initiation webhook and the `transfer_to_human` tool all use `transferEnabledFor(business)`. Tool/prompt wording: `handoff_to_human` texts the owner and offers a callback; `transfer_to_human` connects.
+* **Assistant name** (`businesses.assistant_name`, default "Maria") in the first message, the agent prompt (`# Your name`) and the owner prompt. Settings > Receptionist and phone line (`PATCH /api/businesses/:id/line`, owner only, audited, EN+ES).
+
+
+## Mock replacement, agent C: dashboard bookings, deposits, plan price, pay page (docs/review/18f #14, #17 part, #18, #23, #24, #25, 18b M3 / M4)
+
+No migration (the Phase 1 columns `deposit_*`, `created_via`, `crew` are used as built).
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| #18 / M4 no dashboard booking | `POST /api/bookings`, edit through `PATCH /api/bookings/:id`, no-show, "New booking" dialog (also from a clicked empty calendar slot), edit dialog, agenda rows open the booking panel; `src/lib/booking-manual.ts` calls the same `createBooking` / `rescheduleBooking` engine as the AI (hours, closed dates, per-crew overlap, Google busy, `created_via='dashboard'`, audit, Google push hook, optional text) | `tests/integration/booking-payments.test.ts`, `tests/booking-payments-pure.test.ts` |
+| #17 / M3 deposit tools | request / resend (`POST /api/bookings/:id/deposit`), copy the link, mark paid manually (owner, step-up, audited, `deposit_source='manual'`, open Stripe link deactivated), undo, manual refund record; a manual deposit never reaches Stripe (409 `manual_deposit`) | same |
+| #24 deposit model | `src/lib/payments/deposit.ts`: the AI amount is computed from the policy (the model's `amount_cents` is ignored; no policy = no AI deposit; booking must be from this call); owner amounts must fit the policy range; `GET/PUT /api/businesses/:id/deposit-policy` + Settings card; tool spec and prompt text updated | same, `tests/integration/voice-tools.test.ts` |
+| #14 / #23 `/pay` | no card form in production: redirect to the live Stripe link (host checked), receipt without card digits or a false "we texted you", honest "not available" page | same |
+| #25 plan price | `src/lib/billing/price.ts` reads the Stripe Price (cached, fail-soft to the display text); Billing, onboarding and landing show it with the caps the metering enforces | `tests/booking-payments-pure.test.ts` |
+
+
+## Mock replacement, agent D: scheduling, time zone, briefing audio, LLM honesty, template gate, tenant jobs (docs/review/18f #9, #11, #12, #13, #26, #27, #28, #29, #31)
+
+No migration (the Phase 1 columns are used as built).
+
+| Item | Fix | Evidence |
+| --- | --- | --- |
+| #29 scheduling | slot grid / notice / horizon / buffer / crews read by availability, the voice tools, `createBooking`, `rescheduleBooking`, Google busy blocks; `too_soon` / `too_far` rejections; owner-initiated bookings and moves skip notice + horizon; Settings > Scheduling with crews help | `tests/platform-d-pure.test.ts`, `tests/integration/platform-d.test.ts` |
+| #11 time zone | `GET/PUT /api/businesses/:id/timezone`, area-code suggestion (never auto-applied), onboarding field + Settings card, DST-aware labels | same |
+| #12 briefing audio | ElevenLabs TTS with the business voice, `briefing_audio` storage, authenticated Range / ETag route, regenerate, prune, honest "unavailable" state; `say`/`afconvert` and disk writes removed | same |
+| #13 / #27 LLM | required in production (deploy.sh, boot banner, `/api/health` 503); `[auto]` call summaries and `automatic` briefings are labelled in data and UI and carry only data-derived facts; website import states it needs the LLM | same |
+| #9 template gate | no literal county, service area required, owner confirmation (fingerprint) required to go live, review-step checkbox + Knowledge card | same |
+| #26 seed | `deploy.sh --seed` refused, `seed.ts` refuses production, tools container no longer seeds | `tests/platform-d-pure.test.ts` |
+| #28 tenant jobs | `tenant_release` and `grandfather` admin jobs, dry run by default, `TENANT_RELEASE_JOB=on` to act, audit-only report | `tests/integration/platform-d.test.ts` |
+| #31 progress | real two-stage progress instead of timer labels | review |
+
+
+## Reviews 19-22 (`docs/review/19-adv-voice-line.md`, `20-adv-inbox-privacy.md`, `21-adv-bookings-payments.md`, `22-adv-platform-scheduling.md`)
+
+One migration, `20261209120000_review19_fixes` (hand written, re-runnable, zero drift; the unreleased `20261208120000` was edited: its constraint rebuild and CHECK validation moved here so the `businesses` locks are short). Evidence: `tests/review19-pure.test.ts`, `tests/integration/review19.test.ts`, `tests/db/mock-replacement-migration.test.ts` (populated upgrade from main, and from the first version of 20261208), plus the updated suites named in each report's "Resolution" section.
+
+| Report / finding | Fix |
+| --- | --- |
+| 20 H1 sender | Customer-facing and owner texts are sent from the tenant's own number (`messaging/sender.ts`, `sendSms({from})`); retry once from the shared sender when Twilio refuses it (21212/21606/21659/21660); a reply or STOP to the shared sender is routed by the last outbound text (index `sms_log (to_e164, created_at)`), a STOP applies to every business that texted the customer |
+| 20 H2 erasure / export | The owner-forward sms_log row keeps no customer words (`log_body`); legacy rows are matched by shape + last 4 + the customer's own opening words; erasure also deletes limiter keys derived from the number (L2) |
+| 20 M1 / M4 | The sender budget is spent before the business budget; at most 2 owner forwards per sender per hour |
+| 20 M2 | No auto-reply to a text that looks like an opt-out request; flagged `possible_opt_out`, the owner is told, one-tap `POST .../messages/:id/opt-out` |
+| 20 M3 | Bare domains, shorteners and IPs in the owner forward are masked |
+| 20 L1 / L3 | No auto-reply (and manual texts only to a booking) for Caribbean / territory / premium NANP numbers; review link limit 120 characters and a review text that never cuts the link |
+| 21 H1 / M1 | A card payment over a manual mark converts the row to `stripe`, resets the manual refund bookkeeping, audits `payment.paid_over_manual_deposit` and always texts the owner; mark-paid deactivates the link through the durable queue; unmark refused when a card payment is on file |
+| 21 M2 / M3 / L1-L3 | Conditional amount write and dead-on-arrival link deactivation; the AI deposit uses the catalog price and only for a booking made on the call; monotonic percentage deposits; price lookup single-flight + stale-while-revalidate; demo checkout leaves `deposit_source` empty |
+| 19 F1-F7 | Repair never writes the Voice URL of an imported number and skips forward-mode tenants; call-mode surfaces use the business's own line (`effectiveLineKindFor`); `line:<id>` lease + duplicate-import cleanup; the shared fallback line is never adopted or deleted and an import bound to another business's agent is not adopted; assistant name must be a name; `refresh_credentials` repair option |
+| 22 M1-M4 | Migration split with `lock_timeout`; release cap counts every acted business + circuit breaker + agent kept while the line cannot be removed; owner slot list without notice / window; content fingerprint covers FAQs and descriptions |
+| 22 L1-L6 | Confirm with `expected_hash`; legacy time zones mapped to their IANA zone with audit rows; onboarding suggestion never overrides a chosen zone, options for St Thomas / Guam, split area codes ambiguous; honest "no slots" wording; briefing audio kept on a failed regeneration, metadata-only 304, ranges cut in Postgres, daily synthesis cap; horizon copy |
+
+
+## Review 23 (`docs/review/23-adv-final-verification.md`)
+
+Migrations: `20261209120000` lost its sms_log index and its GiST rebuild; `20261209120100_bookings_overlap_per_crew` (the rebuild, alone), `20261210120000_review23_fixes` (two nullable `sms_log` columns, metadata only) and `20261210120100_sms_log_from_index` (one `CREATE INDEX CONCURRENTLY`). Evidence: `tests/integration/review23.test.ts`, `tests/review23-pure.test.ts`, `tests/db/mock-replacement-migration.test.ts`, `tests/integration/tenant-line.test.ts`. Resolution table: the report.
+
+| Finding | Fix |
+| --- | --- |
+| A1 shared-sender misrouting | `sms_log.from_e164` / `sender_kind` record the number that really sent each text; a reply to a number that is not a tenant's own is matched only by that recorded sender; several candidates are ambiguous (no cancel, rating or inbox row, neutral acknowledgement, STOP stops each, owners flagged); `gratitude-reply` uses the same resolver |
+| A2 A2P registration | optional `TWILIO_MESSAGING_SERVICE_SID`: customer texts use `MessagingServiceSid`; purchase / adoption / repair add the number to the pool, release removes it; `/api/sms/status` learns the pool sender and audits delivery failures; boot + health warning without it |
+| A3 migration locks | one transaction per file: the GiST rebuild and the CONCURRENT index each live in their own file; the earlier lock claims were wrong and are corrected in the runbook |
+| A4 release starvation | least-recently-attempted ordering; 5 consecutive failed attempts = `needs_operator` (audit `billing.release_stuck`), weekly retry |
+| A5 F3 guard | `lineImportBlockedReason` inside `ensureTenantLine`: provisioning, provision re-run, agent re-sync and repair obey it |
+| A6 briefing cap | `canReuseBriefingAudio` is the one predicate for reuse and for the cap |
+| A7 deposit races | `SELECT ... FOR UPDATE` on the booking row in `markDepositPaid`, the manual mark and the unmark, plus conditional updates |
+| A8 legacy forward erasure | the forward text is reproduced exactly (link mask, quote swap, GSM-7 clamp) to match emoji / non-Latin / link openings and the "Possible opt-out" prefix; the rest is documented |
+| A9 line lease | the lease was already renewed (ttl/3, `withLease`); the duplicate-import cleanup now stops when the lease signal is aborted (checked before each delete) |
+| CI time of day | review 19 bookings use business-local slots; `TEST_CLOCK_SHIFT_HOURS` shifts the clock for the whole suite |

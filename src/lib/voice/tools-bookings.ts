@@ -17,6 +17,7 @@ import {
 } from '@/lib/db';
 import { cancelBooking, rescheduleAndNotify, type NoticeResult } from '@/lib/booking-changes';
 import { slotsForMove } from '@/lib/booking-slots';
+import { schedulingOf } from '@/lib/business-config';
 import { upcomingDateKeys } from '@/lib/availability';
 import { addDaysToDateKey, localDateKey, parseScheduledAt, partsInTz, spokenTimeInTz, tzOf } from '@/lib/time';
 import { toE164 } from '@/lib/phone';
@@ -232,11 +233,11 @@ export async function rescheduleBookingTool(args: BookingToolArgs): Promise<Tool
 
 async function rejection(lang: Lang, business: Business, booking: Booking, reason: string): Promise<ToolOut> {
   const tz = tzOf(business);
-  if (reason === 'slot_taken' || reason === 'calendar_busy' || reason === 'past' || reason === 'closed_day' || reason === 'closed_date' || reason === 'before_open' || reason === 'after_close') {
+  if (reason === 'slot_taken' || reason === 'calendar_busy' || reason === 'past' || reason === 'closed_day' || reason === 'closed_date' || reason === 'before_open' || reason === 'after_close' || reason === 'too_soon' || reason === 'too_far') {
     // Offer real alternatives from the calendar: the next free slots within two weeks.
     const alts: string[] = [];
-    for (const d of upcomingDateKeys(Date.now(), tz, 14)) {
-      for (const s of await slotsForMove(business, booking, d)) {
+    for (const d of upcomingDateKeys(Date.now(), tz, schedulingOf(business).horizon_days)) {
+      for (const s of await slotsForMove(business, booking, d, Date.now(), { customer: true })) {
         if (s.available && !s.current) { alts.push(when(s.start, lang, tz)); if (alts.length >= 3) break; }
       }
       if (alts.length >= 3) break;
@@ -246,7 +247,7 @@ async function rejection(lang: Lang, business: Business, booking: Booking, reaso
       : say(lang, "We're not open then.", 'No abrimos a esa hora.');
     const tail = alts.length > 0
       ? say(lang, ` I can do ${alts.join(', or ')}. Which works?`, ` Puedo ${alts.join(', o ')}. ¿Cuál le queda bien?`)
-      : say(lang, ' I do not have anything open in the next two weeks; I can have the owner call you.', ' No tengo nada disponible en las próximas dos semanas; puedo pedirle al dueño que le llame.');
+      : say(lang, ` I do not have anything open in the next ${schedulingOf(business).horizon_days} days; I can have the owner call you.`, ` No tengo nada disponible en los próximos ${schedulingOf(business).horizon_days} días; puedo pedirle al dueño que le llame.`);
     return { ok: false, message: `${why}${tail}`, data: { reason, alternatives: alts.length } };
   }
   return { ok: false, message: say(lang, 'I could not move that one; let me have the owner call you.', 'No pude cambiarla; voy a pedirle al dueño que le llame.'), data: { reason } };

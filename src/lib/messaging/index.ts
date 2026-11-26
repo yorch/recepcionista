@@ -9,6 +9,8 @@ import { tzOf } from '@/lib/time';
 import { decide, smsSegments, withStopFooter } from '@/lib/messaging/policy';
 import { isOwnerNumber, ownerAlertStatus } from '@/lib/messaging/owner';
 import { forwardVerificationText, ownerVerificationText, type VerifyPurpose } from '@/lib/messaging/owner-verify';
+import { smsDelivered } from '@/lib/messaging/delivery';
+import { tenantSmsSender } from '@/lib/messaging/sender';
 import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
@@ -25,6 +27,13 @@ export interface SendAndLogInput {
   booking_id?: string | null;
   /** Why this text is allowed (see messaging/policy). Required for gratitude / review_request. */
   consent_basis?: string | null;
+  /** Longest text INCLUDING the STOP footer (default 300). Owner-typed texts raise it so their words are never cut. */
+  max_chars?: number;
+  /**
+   * What sms_log stores instead of the text that was sent. Used when the text quotes a customer (the owner forward): the customer's words live ONLY
+   * in their inbox row, so erasing / exporting that customer finds every copy.
+   */
+  log_body?: string;
   /** Test seam. */
   now?: Date;
 }
@@ -77,7 +86,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     const sms = await logSms({
       business_id: input.business_id,
       to_phone: to,
-      body: input.body,
+      body: input.log_body ?? input.body,
       kind: input.kind,
       booking_id: input.booking_id ?? null,
       provider_id: null,
@@ -104,7 +113,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
   if (!decision.allow) return blockedResult(decision.reason, input.consent_basis ?? null);
 
   // The exact text that goes out (with the STOP footer): its segment count is what is metered and what the cap is checked against.
-  const text = decision.footer ? withStopFooter(input.body) : input.body;
+  const text = decision.footer ? withStopFooter(input.body, input.max_chars ?? 300) : input.body;
   const segments = Math.max(1, smsSegments(text));
 
   // Plan cap: customer-facing texts stop at the cap (a text that would not fit in what is left is blocked). The segments are
@@ -125,13 +134,14 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
   // The country allow-list does not apply to the owner's verified number (proven by possession).
   let result: SendSmsResult;
   try {
-    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass });
+    result = await sendSms(e164 ?? to, text, { anyCountry: ownerClass, from: tenantSmsSender(business), messagingService: true });
   } catch (err) {
     await refund();
     throw err;
   }
 
-  if (result.status === 'failed') {
+  // An undelivered text (provider failure, or a mock in production) burns no plan quota: the reservation is refunded.
+  if (!smsDelivered(result.status)) {
     await refund();
     log.warn('send.failed', {
       business: input.business_id,
@@ -157,15 +167,17 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     sms = await logSms({
       business_id: input.business_id,
       to_phone: to,
-      body: text,
+      body: input.log_body ?? text,
       kind: input.kind,
       booking_id: input.booking_id ?? null,
       provider_id: result.id || null,
       status: mapStatus(result.status),
       consent_basis: decision.consent_basis,
+      // WHICH number sent it (inbound routing of a reply reads this; a Messaging Service text without a known sender is filled in by the status callback).
+      ...(smsDelivered(result.status) ? { from_e164: result.from ?? null, sender_kind: result.sender ?? null } : {}),
     }, { country });
   } catch (err) {
-    if (result.status === 'failed') throw err; // nothing went out: an ordinary failure
+    if (!smsDelivered(result.status)) throw err; // nothing went out: an ordinary failure
     log.error('send.log_failed_after_send', { business: input.business_id, kind: input.kind, err });
     throw new SentNotLoggedError(result, err);
   }
@@ -193,7 +205,7 @@ export async function sendOwnerVerificationCode(
   }
   const verificationText = purpose === 'forward-number' ? forwardVerificationText(code) : ownerVerificationText(code); // fixed template: nothing tenant-controlled
   const result = await sendSms(phoneE164, verificationText);
-  if (result.status !== 'failed') await meterSms(businessId, smsSegments(verificationText));
+  if (smsDelivered(result.status)) await meterSms(businessId, smsSegments(verificationText));
   const sms = await logSms({
     business_id: businessId, to_phone: phoneE164,
     // The code itself is not retained in the log.

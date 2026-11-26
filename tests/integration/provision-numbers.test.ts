@@ -5,14 +5,17 @@
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { cleanup, loadDb, loadPrisma, newBusiness } from '../helpers/fixtures';
+import { fakeElevenLabs } from '../helpers/fake-elevenlabs';
 import { attemptFriendlyName, fakeNumberAllowed, isMockPoolNumber, provisionNumber, type NumberAttemptStore } from '../../src/lib/providers/twilio';
 
-const TWILIO_ENV = { TWILIO_ACCOUNT_SID: 'ACtest0000000000000000000000000000', TWILIO_PHONE_NUMBER: '+15005550006' };
+// Real provisioning needs a real voice provider too (#3): the ElevenLabs key is set and a fake ElevenLabs answers behind the fake Twilio.
+const TWILIO_ENV = { TWILIO_ACCOUNT_SID: 'ACtest0000000000000000000000000000', TWILIO_AUTH_TOKEN: 'twilio-token-test', TWILIO_PHONE_NUMBER: '+15005550006', ELEVENLABS_API_KEY: 'xi-test', ELEVENLABS_AGENT_ID: undefined, ELEVENLABS_PHONE_NUMBER_ID: undefined, VOICE_LINE_KIND: undefined, APP_URL: 'https://app.example.test' } as Record<string, string | undefined>;
 const BOUGHT = '+13057770199';
 const BOUGHT_2 = '+13057770198';
 
 interface FakeTwilio {
   fetch: typeof fetch;
+  el: ReturnType<typeof fakeElevenLabs>;
   calls: string[];
   buys: () => number;
   deletes: () => string[];
@@ -37,6 +40,7 @@ function fakeTwilio(opts: {
   /** Shared account state across fakes/concurrent tenants: numbers already bought. */
   account?: Map<string, string>;
 } = {}): FakeTwilio {
+  const el = fakeElevenLabs();
   const num = opts.number ?? BOUGHT;
   const account = opts.account ?? new Map<string, string>(); // number -> friendly name
   const calls: string[] = [];
@@ -71,12 +75,13 @@ function fakeTwilio(opts: {
       if (!account.has(q) && !(opts.existsAfter && listedOther)) return Response.json({ incoming_phone_numbers: [] });
       return Response.json({ incoming_phone_numbers: [{ phone_number: q, sid: `PN_${q.slice(-4)}`, friendly_name: listedOther ? opts.listedName : account.get(q) }] });
     }
-    if (method === 'DELETE') return new Response(null, { status: 204 });
+    if (method === 'DELETE' && url.includes('api.twilio.com')) return new Response(null, { status: 204 });
+    if (url.includes('api.elevenlabs.io')) return el.fetchImpl(input as Parameters<typeof fetch>[0], init as Parameters<typeof fetch>[1]);
     return Response.json({});
   }) as unknown as typeof fetch;
   return {
-    fetch: f, calls,
-    buys: () => calls.filter((c) => c.startsWith('POST /IncomingPhoneNumbers')).length,
+    fetch: f, calls, el,
+    buys: () => calls.filter((c) => c.startsWith('POST /IncomingPhoneNumbers.json')).length,
     deletes: () => calls.filter((c) => c.startsWith('DELETE ')),
   };
 }
@@ -276,7 +281,7 @@ integration('provision route: failure is a failure (postgres)', () => {
       let agentOk = false;
       const combined = (async (input: unknown, init?: { method?: string }) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
-        if (url.includes('api.twilio.com')) return twilio.fetch(input as any, init as any);
+        if (url.includes('api.twilio.com') || url.includes('/convai/phone-numbers')) return twilio.fetch(input as any, init as any);
         if (url.endsWith('/convai/agents/create')) return agentOk ? Response.json({ agent_id: 'agent_partial' }) : new Response('unavailable', { status: 503 });
         if (url.endsWith('/workspace/webhooks') && (init?.method ?? 'GET') === 'GET') return Response.json({ webhooks: [] });
         return Response.json({});
@@ -393,7 +398,7 @@ integration('provision route: failure is a failure (postgres)', () => {
 
   test('production without Twilio: 503, nothing stored, never live, no outbound call', async () => {
     const biz = await bare();
-    await withEnv({ NODE_ENV: 'production', BILLING_ENFORCED: 'true' }, async () => {
+    await withEnv({ NODE_ENV: 'production', BILLING_ENFORCED: 'true', ELEVENLABS_API_KEY: 'xi-test' }, async () => {
       const calls = fakeTwilio();
       const res = await withFetch(calls.fetch, () => post(biz.id));
       expect(res.status).toBe(503);
@@ -401,6 +406,94 @@ integration('provision route: failure is a failure (postgres)', () => {
       expect(calls.calls).toEqual([]);
     });
     expect(await row(biz.id)).toMatchObject({ phone: null, status: 'onboarding' });
+  });
+
+  test('#3: no ELEVENLABS_API_KEY in production (or with real Twilio): 503 BEFORE any number is bought, stays onboarding, audited; nothing orphaned', async () => {
+    for (const env of [{ ...TWILIO_ENV, ELEVENLABS_API_KEY: undefined, NODE_ENV: 'production' }, { ...TWILIO_ENV, ELEVENLABS_API_KEY: undefined }] as Record<string, string | undefined>[]) {
+      const biz = await bare();
+      await withEnv({ ...env, BILLING_ENFORCED: 'true' }, async () => {
+        const twilio = fakeTwilio();
+        const res = await withFetch(twilio.fetch, () => post(biz.id));
+        expect(res.status).toBe(503);
+        expect(((await res.json()) as any)).toMatchObject({ ok: false, code: 'voice_provider_not_configured', stage: 'voice', retryable: true });
+        expect(twilio.calls).toEqual([]); // not even a number search: nothing purchased, nothing to release
+        expect(twilio.el.calls).toEqual([]);
+        expect((await events(biz.id)).map((e) => e.action)).toEqual(['provision.voice_not_configured']);
+      });
+      expect(await row(biz.id)).toMatchObject({ phone: null, status: 'onboarding', agentId: null });
+    }
+  });
+
+  test('#6: a successful provision imports THE TENANT\'S OWN number into the voice provider and binds it to ITS agent; a second tenant never takes it; a retry adopts, never imports twice', async () => {
+    const a = await bare();
+    const b = await bare();
+    await withEnv({ ...TWILIO_ENV }, async () => {
+      const account = new Map<string, string>();
+      const t1 = fakeTwilio({ number: '+13057770301', account });
+      const res = await withFetch(t1.fetch, () => post(a.id));
+      expect(res.status).toBe(200);
+      const data = ((await res.json()) as any).data;
+      expect(data.line).toMatchObject({ adopted: false });
+      const rowA = await row(a.id);
+      expect(rowA.elevenlabsPhoneNumberId).toBe(data.line.phone_number_id);
+      expect(t1.el.phones.size).toBe(1);
+      const imported = t1.el.phones.get(rowA.elevenlabsPhoneNumberId!)!;
+      expect(imported).toMatchObject({ phone_number: '+13057770301', agent_id: rowA.agentId });
+      expect(t1.el.importBodies[0]).toMatchObject({ provider: 'twilio', phone_number: '+13057770301', sid: TWILIO_ENV.TWILIO_ACCOUNT_SID });
+      // the SMS URL stays ours, the Voice URL is never written on an imported line
+      const hookPosts = t1.calls.filter((c) => c.startsWith('POST /IncomingPhoneNumbers/'));
+      expect(hookPosts.length).toBeLessThanOrEqual(1);
+
+      // a second tenant gets its own number, its own import and its own agent: the first tenant's binding does not move
+      const t2 = fakeTwilio({ number: '+13057770302', account });
+      t2.el.phones.set(imported.phone_number_id, { ...imported }); // the same provider workspace
+      for (const [k, v] of t1.el.agents) t2.el.agents.set(k, v);
+      const res2 = await withFetch(t2.fetch, () => post(b.id));
+      expect(res2.status).toBe(200);
+      const rowB = await row(b.id);
+      expect(rowB.elevenlabsPhoneNumberId).not.toBe(rowA.elevenlabsPhoneNumberId);
+      expect(rowB.agentId).not.toBe(rowA.agentId);
+      expect(t2.el.phones.get(imported.phone_number_id)!.agent_id).toBe(rowA.agentId);
+      expect(t2.el.phones.get(rowB.elevenlabsPhoneNumberId!)).toMatchObject({ phone_number: '+13057770302', agent_id: rowB.agentId });
+
+      // re-provisioning with force (admin) after the id was lost: the existing import is ADOPTED, never imported twice
+      await prisma.business.update({ where: { id: a.id }, data: { elevenlabsPhoneNumberId: null, status: 'onboarding' } });
+      const before = t1.el.phones.size;
+      const t3 = fakeTwilio({ number: '+13057770301', account });
+      for (const [k, v] of t1.el.phones) t3.el.phones.set(k, { ...v });
+      for (const [k, v] of t1.el.agents) t3.el.agents.set(k, v);
+      const res3 = await withFetch(t3.fetch, () => post(a.id));
+      expect(res3.status).toBe(200);
+      expect(((await res3.json()) as any).data.line).toMatchObject({ adopted: true });
+      expect(t3.el.phones.size).toBe(before);
+      expect(t3.el.importBodies).toEqual([]);
+    });
+  });
+
+  test('#6: the import fails (provider error): 502 voice_line_failed, stays onboarding, the number is KEPT and a retry resumes (no second purchase)', async () => {
+    const biz = await bare();
+    await withEnv({ ...TWILIO_ENV }, async () => {
+      const account = new Map<string, string>();
+      const bad = fakeTwilio({ number: '+13057770303', account });
+      const badEl = fakeElevenLabs({ failImport: true });
+      for (const [k, v] of bad.el.tools) badEl.tools.set(k, v);
+      const combined = (async (input: unknown, init?: { method?: string }) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+        return url.includes('api.elevenlabs.io') ? badEl.fetchImpl(input as any, init as any) : bad.fetch(input as any, init as any);
+      }) as unknown as typeof fetch;
+      const res = await withFetch(combined, () => post(biz.id));
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as any;
+      expect(body).toMatchObject({ ok: false, code: 'voice_line_failed', stage: 'line', partial: { phone: '+13057770303', number_kept: true } });
+      expect(JSON.stringify(body)).not.toContain(TWILIO_ENV.TWILIO_AUTH_TOKEN);
+      expect(await row(biz.id)).toMatchObject({ phone: '+13057770303', status: 'onboarding', elevenlabsPhoneNumberId: null });
+      const good = fakeTwilio({ number: '+13057770303', account });
+      for (const [k, v] of badEl.agents) good.el.agents.set(k, v);
+      const ok = await withFetch(good.fetch, () => post(biz.id));
+      expect(ok.status).toBe(200);
+      expect(good.buys()).toBe(0);
+      expect(await row(biz.id)).toMatchObject({ status: 'live' });
+    });
   });
 
   test('production with Twilio configured: a purchase failure is a 502, not a fake number', async () => {

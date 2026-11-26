@@ -179,7 +179,7 @@ export function ownerTextFits(text: string): boolean {
 
 // ---------------------------------------------------------------------------------------------------------------- leads
 
-export type LeadKind = 'emergency' | 'handoff' | 'missed' | 'voicemail' | 'call' | 'booking';
+export type LeadKind = 'emergency' | 'handoff' | 'missed' | 'voicemail' | 'call' | 'booking' | 'text';
 
 const KIND_WORD: Record<LeadKind, [string, string]> = {
   emergency: ['an emergency call', 'una llamada de emergencia'],
@@ -188,6 +188,7 @@ const KIND_WORD: Record<LeadKind, [string, string]> = {
   voicemail: ['a voicemail', 'un mensaje de voz'],
   call: ['a call', 'una llamada'],
   booking: ['a booking', 'una cita'],
+  text: ['a text message', 'un mensaje de texto'],
 };
 
 /** "today around 3:12 PM" / "yesterday" / "3 days ago": the day in the business time zone. */

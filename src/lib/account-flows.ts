@@ -6,6 +6,7 @@
 import { after } from 'next/server';
 import { clientKey } from '@/lib/auth';
 import { createEmailToken } from '@/lib/db/email-tokens';
+import { recordAudit } from '@/lib/db';
 import { accountId } from '@/lib/login-throttle';
 import { limitRequest, rateLimit } from '@/lib/ratelimit';
 import { normalizeEmail } from '@/lib/db/users';
@@ -85,6 +86,26 @@ export async function sendVerificationEmail(user: { id: string; email: string; l
   const { token } = await createEmailToken({ purpose: 'verify', email: user.email, user_id: user.id });
   const t = verifyEmailTemplate({ link: emailLink(VERIFY_PATH, token), locale: user.locale });
   await deliver({ to: user.email, ...t });
+}
+
+/**
+ * The deferred (after-the-response) verification mail of a public route. The response cannot say whether it went out (the answer must be the same
+ * for every address), so a FAILURE must be visible somewhere else: an error log and an audit row (`auth.verification_email_failed`: user and
+ * error class only, never the address or the token). The person can always ask again (the resend form, or the banner once signed in), and an
+ * operator sees the outage instead of a silent "sent". Never throws.
+ */
+export async function sendVerificationEmailReported(user: { id: string; email: string; locale?: Locale }, source: 'signup' | 'resend'): Promise<boolean> {
+  try {
+    await sendVerificationEmail(user);
+    return true;
+  } catch (err) {
+    const kind = err instanceof EmailConfigError ? 'email_not_configured' : err instanceof EmailSendError ? 'email_send_failed' : 'error';
+    log.error('verification_email_failed', { source, user: user.id, kind });
+    await recordAudit({
+      actor_kind: 'user', actor_user_id: user.id, action: 'auth.verification_email_failed', target: `user:${user.id}`, meta: { source, kind },
+    }).catch(() => undefined);
+    return false;
+  }
 }
 
 /** Issue a one-hour, single-use reset link and mail it. */

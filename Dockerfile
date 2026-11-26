@@ -62,7 +62,7 @@ RUN DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build" \
     bun run build
 
 ############### tools ###############
-# Migrations and the demo seed run as one-shot containers from this target.
+# Migrations and operator scripts run as one-shot containers from this target (the demo seed refuses NODE_ENV=production).
 # It deliberately keeps the full dependency tree (prisma CLI, bun for TS) and
 # the app source, because `scripts/seed.ts` imports `src/lib/db` and the
 # tsconfig `@/*` path alias that resolves it.

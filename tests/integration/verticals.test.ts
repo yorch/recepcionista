@@ -6,6 +6,7 @@
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { cleanup, loadDb, loadPrisma, newBusiness, uniq } from '../helpers/fixtures';
+import { confirmGoLive } from '../helpers/golive';
 import { fakeElevenLabs } from '../helpers/fake-elevenlabs';
 
 integration('verticals (postgres)', () => {
@@ -172,6 +173,11 @@ integration('verticals (postgres)', () => {
     const biz = await newBusiness({ agent_id: null });
     await prisma.business.update({ where: { id: biz.id }, data: { vertical: 'dental', billingStatus: 'active' } });
     const owner = await login(biz.id);
+    // the template KB is built on the first run; going live then needs the service area and the owner's confirmation of the template content
+    const first = await provision(send('POST', `/api/businesses/${biz.id}/provision`, owner, {}), { params: Promise.resolve({ id: biz.id }) });
+    expect(first.status).toBe(422);
+    expect(((await first.json()) as any).code).toBe('kb_incomplete');
+    await confirmGoLive(biz.id);
     const res = await provision(send('POST', `/api/businesses/${biz.id}/provision`, owner, {}), { params: Promise.resolve({ id: biz.id }) });
     expect(res.status).toBe(200);
     const kb = ((await res.json()) as any).data.knowledge_base;

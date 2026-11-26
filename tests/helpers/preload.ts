@@ -22,3 +22,19 @@ if (url) {
   // Lets tests count the SQL statements a code path runs (src/lib/db/client.ts recordQueries). Never set in production.
   process.env.PRISMA_QUERY_EVENTS = '1';
 }
+
+// TEST_CLOCK_SHIFT_HOURS=<n>: run the suite as if the wall clock were n hours later (Date.now() and a bare `new Date()` only; explicit dates are untouched). Tests must
+// not depend on the time of day they run at (CI runs at any hour): `for h in 0 3 6 9 12 15 18 21; do TEST_CLOCK_SHIFT_HOURS=$h bun test <file>; done` proves it.
+const shiftHours = Number(process.env.TEST_CLOCK_SHIFT_HOURS ?? '');
+if (Number.isFinite(shiftHours) && shiftHours !== 0) {
+  const shiftMs = shiftHours * 3_600_000;
+  const RealDate = Date;
+  class ShiftedDate extends RealDate {
+    constructor(...args: unknown[]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (args.length === 0) super(RealDate.now() + shiftMs); else super(...(args as [any]));
+    }
+    static now(): number { return RealDate.now() + shiftMs; }
+  }
+  globalThis.Date = ShiftedDate as unknown as DateConstructor;
+}
