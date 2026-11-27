@@ -11,6 +11,7 @@ import { rateLimit } from '@/lib/ratelimit';
 import { checkSignupCapacity, createSignupAccount, parseSignupBody, recordSignupCreated, captchaRequired, signupAvailability, verifyTurnstile } from '@/lib/signup';
 import { logger } from '@/lib/log';
 import { localeOfRequest } from '@/lib/i18n/core';
+import { refuseIfMaintenance } from '@/lib/admin/maintenance';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -37,6 +38,9 @@ export async function POST(req: Request) {
   if (!checkSameOrigin(req.headers)) return fail(403, 'cross-site request refused');
   const limited = await limitIp(req, 'auth/signup', 5);
   if (limited) return limited;
+
+  const maintenance = refuseIfMaintenance(); // platform read-only mode: no new accounts (the proxy rule only sees user-cookie writes)
+  if (maintenance) return maintenance;
 
   if (!signupAvailability().open) {
     // Production without a captcha (and without the explicit opt-out): public signup is off. Invites still work.

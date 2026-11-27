@@ -50,7 +50,24 @@ async function post(path: string, body?: unknown) {
 }
 
 async function main() {
-  console.log('--- pages ---');
+  // Provider readiness as the SERVER sees it: with the secrets in the admin console (database) nothing can be read from the environment, so ask the console's own selftest
+  // (GET /api/admin/selftest, Bearer read; it returns which providers and secrets are set and from where, never a value).
+  console.log('--- provider readiness (admin selftest) ---');
+  if (!process.env.ADMIN_TOKEN) {
+    console.log('SKIP — ADMIN_TOKEN not set here (the selftest needs the Bearer token; the server only needs it when it has one)');
+  } else {
+    const st = await get('/api/admin/selftest');
+    let body: { ok?: boolean; data?: { providers?: { provider: string; ready: boolean; fields: Record<string, { set: boolean; source: string }> }[] } } = {};
+    try { body = JSON.parse(st.text); } catch { /* reported below */ }
+    check('selftest answers 200 with provider cards', st.status === 200 && Array.isArray(body.data?.providers), st.status);
+    check('selftest never carries a secret value', !/sk_(live|test)_|whsec_|AC[0-9a-f]{32}/i.test(st.text));
+    for (const c of body.data?.providers ?? []) {
+      const where = [...new Set(Object.values(c.fields).filter((f) => f.set).map((f) => f.source))].join('+') || 'unset';
+      console.log(`INFO — ${c.provider}: ${c.ready ? 'ready' : 'not ready'} (${where})`); // informational: a dev server legitimately runs on mocks
+    }
+  }
+
+  console.log('\n--- pages ---');
   for (const p of ['/', '/dashboard', '/dashboard/calls', '/dashboard/bookings',
     '/dashboard/knowledge', '/dashboard/briefings', '/dashboard/demo', '/onboarding', '/pay/mock_demo']) {
     const r = await get(p);

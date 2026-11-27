@@ -270,6 +270,12 @@ export async function authenticate(req: Request, opts: AuthenticateOptions = {})
   }
   if (!hasRole(res.principal, opts.role ?? 'staff')) return deny(403, 'forbidden');
   if (opts.verifiedEmail && !res.principal.email_verified) return deny(403, 'email_not_verified', 'email_not_verified');
+  // An admin USER changing a tenant needs an open support write grant (no silent full-write impersonation): see src/lib/admin/support-gate.ts.
+  if (res.principal.kind === 'admin' && res.principal.via === 'user' && !SAFE_METHODS.has(req.method)) {
+    const { supportWriteGate } = await import('@/lib/admin/support-gate');
+    const blocked = await supportWriteGate(req, res.principal);
+    if (blocked) return deny(blocked.status, blocked.error, blocked.code);
+  }
   return { ok: true, principal: res.principal, sessionId: res.sessionId, sudoAt: res.sudoAt ?? null };
 }
 

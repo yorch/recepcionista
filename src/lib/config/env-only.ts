@@ -61,14 +61,12 @@ export const ENV_ONLY: readonly EnvOnlyEntry[] = [
   { name: 'CREATE_USER_PASSWORD', reason: 'deploy_tooling', note: 'scripts/create-user.ts non-interactive password.', secret: true },
 ];
 
-/** Build-time `NEXT_PUBLIC_*` reads that stay literal property reads on the process environment (Next inlines them) until Phase 6 removes them. */
-export const BUILD_TIME_ENV = [
-  'NEXT_PUBLIC_TURNSTILE_SITE_KEY',
-  'NEXT_PUBLIC_PLAN_PRICE_DISPLAY',
-  'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL',
-  'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES',
-  'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES',
-] as const;
+/**
+ * Build-time `NEXT_PUBLIC_*` reads: NONE since Phase 6. The Turnstile site key and the plan price copy are read at request time from the config snapshot and handed to client
+ * components as props; their legacy `NEXT_PUBLIC_*` env names remain as ordinary runtime aliases (a dynamic read: Next never inlines them), so no build argument exists.
+ * The boundary test keeps this list empty: a literal `process.env.NEXT_PUBLIC_*` anywhere in src/ fails CI.
+ */
+export const BUILD_TIME_ENV: readonly string[] = [];
 
 /**
  * Retired (D11). They still behave as today for ONE more release but the startup banner warns; after `removeAfter` the names are

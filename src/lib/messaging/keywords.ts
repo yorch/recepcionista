@@ -104,9 +104,10 @@ export function consentReply(businessName: string): string {
   return `${businessName}: Thanks! We may text you after your visit to ask how it went. Reply STOP to opt out.`;
 }
 
-export function helpReply(businessName: string, phone?: string | null): string {
+export function helpReply(businessName: string, phone?: string | null, termsUrl?: string | null): string {
   const call = phone ? ` Call ${phone} for help.` : '';
-  return `${businessName}: appointment texts from our AI receptionist.${call} Reply STOP to opt out. Msg&data rates may apply.`;
+  const terms = termsUrl ? ` Terms: ${termsUrl}` : '';
+  return `${businessName}: appointment texts from our AI receptionist.${call} Reply STOP to opt out. Msg&data rates may apply.${terms}`;
 }
 
 export function escapeXml(s: string): string {

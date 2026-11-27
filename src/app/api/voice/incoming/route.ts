@@ -19,6 +19,7 @@ import { setCallTrust } from '@/lib/db';
 import { enterOwnerMode } from '@/lib/voice/owner/session';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
+import { knobOr } from '@/lib/admin/tenant-knobs';
 
 const log = logger('voice/incoming');
 
@@ -195,7 +196,7 @@ export async function POST(req: Request) {
         if (isJson) return ok({ business_id: business.id, call_id: call.id, call_mode: 'forward', forwarded: true, ws_url: null, mock: true });
         return twimlResponse(forwardTwiml(route.to, {
           callerId: business.phone_e164 ?? null, action: '/api/voice/voicemail', timeLimit: allowedSeconds, statusCallback: '/api/voice/dial-status',
-          ringSeconds: forwardRingSeconds(), screenUrl: '/api/voice/screen',
+          ringSeconds: await knobOr(business.id, 'forward.ring_seconds', forwardRingSeconds()), screenUrl: '/api/voice/screen',
         }));
       }
       if (!isJson) {

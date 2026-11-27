@@ -3,6 +3,12 @@ import { requireRecentAuth } from '@/lib/session';
 import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
 import { getBusiness, recordAudit } from '@/lib/db';
 import { isJobName, JOB_NAMES, runJob } from '@/lib/jobs';
+import { isBreakGlass } from '@/lib/admin/permissions';
+import { notifyAdmins } from '@/lib/admin/notify';
+import { SettingsError } from '@/lib/admin/settings-store';
+
+/** Jobs that delete data or act on tenants (critical tier in the console): a real run from a console session needs a written reason and notifies every admin. */
+export const CRITICAL_JOBS: readonly string[] = ['retention', 'tenant_release', 'grandfather'];
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -26,6 +32,10 @@ export async function POST(req: Request) {
     if (body.business_id !== undefined && body.job !== 'daily_briefing' && body.job !== 'gratitude_sweep' && body.job !== 'tenant_release') return fail('business_id only applies to daily_briefing, gratitude_sweep and tenant_release', 422);
     if (body.before !== undefined && (body.job !== 'grandfather' || typeof body.before !== 'string' || Number.isNaN(new Date(body.before).getTime()))) return fail('before (an ISO date-time) only applies to grandfather', 422);
     const dryRun = body.dry_run !== false;
+    const reason = typeof (body as { reason?: unknown }).reason === 'string' ? ((body as { reason?: string }).reason as string).trim() : '';
+    if ((body as { reason?: unknown }).reason !== undefined && (typeof (body as { reason?: unknown }).reason !== 'string' || reason.length > 500)) return fail('reason must be text of at most 500 characters', 422);
+    const consoleSession = !isBreakGlass(g.ctx.principal); // the break-glass Bearer is recovery and already audited + mailed per use; a console session carries the critical-tier rules
+    if (!dryRun && consoleSession && CRITICAL_JOBS.includes(body.job) && reason.length < 8) throw new SettingsError(422, 'reason_required', 'a reason of at least 8 characters is required to run this job for real');
     if (!dryRun) { // a real run sends texts / deletes data: step-up for a cookie session (a dry run changes nothing)
       const stale = requireRecentAuth(auth);
       if (stale) return stale;
@@ -40,8 +50,11 @@ export async function POST(req: Request) {
         actor_kind: auth.principal.kind === 'admin' && auth.principal.user ? 'user' : 'admin_token',
         actor_user_id: auth.principal.kind === 'admin' ? auth.principal.user?.id ?? null : null,
         business_id: businessId ?? null, action: 'jobs.manual_run', target: `job:${body.job}`,
-        meta: { processed: report.processed, errors: report.errors },
+        meta: { processed: report.processed, errors: report.errors, ...(reason ? { reason: reason.slice(0, 500) } : {}), role: g.ctx.role },
       });
+      if (consoleSession && CRITICAL_JOBS.includes(body.job)) {
+        void notifyAdmins({ subject: `[Recepcionista] The ${body.job} job was run for real from the admin console`, kind: 'job_run', business_id: businessId ?? null, lines: [`job: ${body.job}`, `processed: ${report.processed}, errors: ${report.errors}`, `role: ${g.ctx.role}`, `reason: ${reason}`] }).catch(() => undefined);
+      }
     }
     return ok(report);
   } catch (err) {

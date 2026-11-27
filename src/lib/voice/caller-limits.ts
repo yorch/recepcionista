@@ -27,6 +27,7 @@ import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { logger } from '@/lib/log';
 import { attestationLevel, type Attestation } from '@/lib/stir';
 import type { Business } from '@/lib/types';
+import { knobOr } from '@/lib/admin/tenant-knobs';
 
 const log = logger('voice/caller-limits');
 
@@ -161,7 +162,7 @@ export async function chargeCallBudget(kind: BudgetKind, ctx: BudgetContext, env
       return { ok: false, why: 'caller_limited', known };
     }
 
-    const total = businessBudget(kind, env);
+    const total = await knobOr(businessId, kind === 'forward' ? 'forward.calls_per_hour' : 'voicemail.calls_per_hour', businessBudget(kind, env));
     if (!known) {
       const share = Math.max(1, Math.floor((total * unknownSharePct(env)) / 100));
       const strangers = await spend(`voice/${kind}:unknown:${businessId}`, share, first);

@@ -8,6 +8,7 @@
 import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 import { configuredBaseUrl } from '@/lib/base-url';
+import { planPriceId } from '@/lib/admin/plan-catalog';
 
 const log = logger('stripe.billing');
 
@@ -20,7 +21,7 @@ export type BillingIntervalChoice = 'month' | 'year';
 
 /** The optional annual price id (STRIPE_PRICE_ID_ANNUAL). Offered only when set AND billing is configured: real Stripe, or the non-production mock checkout (so the demo can exercise the choice). */
 export const annualPriceId = (env: NodeJS.ProcessEnv = configEnv()): string | null => env.STRIPE_PRICE_ID_ANNUAL?.trim() || null;
-export const annualAvailable = (env: NodeJS.ProcessEnv = configEnv()): boolean => Boolean(annualPriceId(env)) && (Boolean(env.STRIPE_SECRET_KEY?.trim()) || !isProd(env));
+export const annualAvailable = (env: NodeJS.ProcessEnv = configEnv(), plan?: string | null): boolean => Boolean(planPriceId(plan, 'year') ?? annualPriceId(env)) && (Boolean(env.STRIPE_SECRET_KEY?.trim()) || !isProd(env));
 
 /** Validate a client-supplied interval: only 'month' or 'year' (anything else, or absent, is monthly). */
 export function parseInterval(raw: unknown): BillingIntervalChoice | 'invalid' {
@@ -117,6 +118,8 @@ export interface BillingBusiness {
   id: string;
   name: string;
   stripe_customer_id?: string | null;
+  /** The business's plan key: its price ids (admin console plans) are used at checkout when set. */
+  plan?: string | null;
 }
 
 /** Create a Stripe Customer for the business (metadata.business_id lets the webhook find it again). */
@@ -144,7 +147,8 @@ export interface CheckoutInput {
 /** Subscription Checkout Session: trial + card collected up front. Returns the hosted URL. */
 export async function createCheckoutSession(input: CheckoutInput, env: NodeJS.ProcessEnv = configEnv()): Promise<{ url: string; id: string }> {
   const yearly = input.interval === 'year';
-  const price = yearly ? annualPriceId(env) : env.STRIPE_PRICE_ID?.trim();
+  // The business's plan price (admin console plans) wins; a plan without one bills with the platform price (STRIPE_PRICE_ID / _ANNUAL).
+  const price = planPriceId(input.business.plan, yearly ? 'year' : 'month') ?? (yearly ? annualPriceId(env) : env.STRIPE_PRICE_ID?.trim());
   if (!price) throw new BillingConfigError(yearly ? 'STRIPE_PRICE_ID_ANNUAL is not set' : 'STRIPE_PRICE_ID is not set');
   const base = returnBaseUrl(env);
   const form = new URLSearchParams();

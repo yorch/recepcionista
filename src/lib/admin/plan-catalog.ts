@@ -53,3 +53,16 @@ export function planAllows(key: string | null | undefined, feature: PlanFeature)
 
 /** Max locations a plan allows (null = unlimited / unknown). */
 export const planMaxLocations = (key: string | null | undefined): number | null => planRow(key)?.max_locations ?? null;
+
+/** May an account that owns `owned` businesses add another one on this plan? Needs the `multi_location` feature and room under `max_locations` (unknown / unlimited => yes). */
+export function planAllowsLocation(key: string | null | undefined, owned: number): boolean {
+  if (!planAllows(key, 'multi_location')) return false;
+  const max = planMaxLocations(key);
+  return max === null || owned < max;
+}
+
+/** The Stripe price a plan bills with, or null (the platform price applies). `interval`: month | year. */
+export const planPriceId = (key: string | null | undefined, interval: 'month' | 'year'): string | null => {
+  const row = planRow(key);
+  return (interval === 'year' ? row?.stripe_price_id_annual : row?.stripe_price_id) ?? null;
+};

@@ -5,6 +5,7 @@ import { guardAdminRoute, adminFail, int } from '@/lib/admin/guard';
 import { AUDIT_EXPORT_MAX, auditCsv, searchAudit } from '@/lib/admin/audit-search';
 import { can } from '@/lib/admin/permissions';
 import { SettingsError } from '@/lib/admin/settings-store';
+import { enrichAudit } from '@/lib/admin/audit-enrich';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -22,7 +23,10 @@ export async function GET(req: Request) {
   if (!g.ok) return g.response;
   try {
     const query = { actor: q.get('actor') ?? undefined, action: q.get('action') ?? undefined, business_id: q.get('business_id') ?? undefined, from: q.get('from') ?? undefined, to: q.get('to') ?? undefined, q: q.get('q') ?? undefined, before: q.get('before') ?? undefined };
-    if (!exporting) return ok(await searchAudit({ ...query, limit: int(q.get('limit'), 50, 1, 200) }));
+    if (!exporting) {
+      const res = await searchAudit({ ...query, limit: int(q.get('limit'), 50, 1, 200) });
+      return ok({ ...res, items: await enrichAudit(res.items) }); // + business_name and actor_email for the console table
+    }
     if (!can(g.ctx.principal, 'audit.export')) throw new SettingsError(403, 'forbidden', 'not allowed to export');
     const format = q.get('format') === 'csv' ? 'csv' : 'json';
     const res = await searchAudit({ ...query, limit: int(q.get('limit'), 1000, 1, AUDIT_EXPORT_MAX) }, { max: AUDIT_EXPORT_MAX });

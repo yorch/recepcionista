@@ -12,6 +12,7 @@ import { cancelOwnerReply, confirmOwnerReply, type ReplyOutcome, type ReplyRefus
 import { codesEqual, ownerCode, type OwnerSmsCommand } from './code';
 import { ownerReplyEnabled } from './reply-config';
 import type { Business } from '@/lib/types';
+import { planAllows } from '@/lib/admin/plan-catalog';
 
 type Lang = 'en' | 'es';
 const say = (lang: Lang, en: string, es: string): string => (lang === 'es' ? es : en);
@@ -57,7 +58,7 @@ export function outcomeText(lang: Lang, o: ReplyOutcome): string {
 }
 
 export async function handleReplyCode(business: Business, cmd: OwnerSmsCommand, now: Date = new Date()): Promise<string | null> {
-  if (!ownerReplyEnabled()) return null;
+  if (!ownerReplyEnabled() || !planAllows(business.plan, 'owner_reply')) return null;
   const hit = await findReplyByCode(business.id, cmd.code, now);
   if (!hit) return null;
   const lang: Lang = business.locale_default === 'es' ? 'es' : 'en';
@@ -78,7 +79,7 @@ export async function handleReplyCode(business: Business, cmd: OwnerSmsCommand, 
  * direction: nothing is ever sent by it); a bare YES never sends, it asks for the code. Null when nothing is waiting or the text is something else.
  */
 export async function handleBareReplyAnswer(business: Business, body: string | null | undefined, now: Date = new Date()): Promise<string | null> {
-  if (!ownerReplyEnabled()) return null;
+  if (!ownerReplyEnabled() || !planAllows(business.plan, 'owner_reply')) return null;
   const word = normalizeInbound(body);
   const isNo = word === 'NO' || word === 'N';
   const isYes = word === 'YES' || word === 'Y' || word === 'SI' || word === 'OK';

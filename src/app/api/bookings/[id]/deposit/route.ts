@@ -59,7 +59,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     const decision = resolveDepositAmount({
       policy: depositPolicyOf(business), priceEstimateCents: booking.price_estimate ?? null, requestedCents: body.amount_cents,
-      storedCents: booking.deposit_amount ?? null, actor: 'owner',
+      storedCents: booking.deposit_amount ?? null, actor: 'owner', plan: business.plan ?? null,
     });
     if (!decision.ok) return fail(decision.error, 422);
     const resent = (booking.deposit_amount ?? 0) > 0;

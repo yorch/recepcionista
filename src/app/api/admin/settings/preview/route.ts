@@ -1,6 +1,7 @@
 import { ok } from '@/lib/http';
 import { guardAdminRoute, adminFail, readBody } from '@/lib/admin/guard';
 import { previewChanges, type SettingChange } from '@/lib/admin/settings-store';
+import { impactsFor } from '@/lib/admin/impact';
 import { SettingsError } from '@/lib/admin/settings-store';
 
 export const dynamic = 'force-dynamic';
@@ -17,6 +18,9 @@ export async function POST(req: Request) {
   try {
     const body = await readBody(req);
     if (!Array.isArray(body.changes)) throw new SettingsError(422, 'invalid_body', 'changes must be an array');
-    return ok(await previewChanges({ changes: body.changes as SettingChange[], actor: g.ctx.actor }));
+    const changes = body.changes as SettingChange[];
+    const preview = await previewChanges({ changes, adopt: body.adopt === true, actor: g.ctx.actor });
+    // Impact previews (counts of tenants / phones / rows the change would touch): read only, omitted when a preview cannot be computed.
+    return ok({ ...preview, impacts: await impactsFor(changes) });
   } catch (err) { return adminFail(err); }
 }

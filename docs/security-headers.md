@@ -63,7 +63,7 @@ Rollback in an incident is `CSP_REPORT_ONLY=true` plus a restart: pages keep wor
 
 ## Cloudflare Turnstile
 
-When `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (build time) or `TURNSTILE_SECRET_KEY` is set, the policy additionally allows exactly
+When the Turnstile site key (`signup.turnstile_site_key`, env alias `NEXT_PUBLIC_TURNSTILE_SITE_KEY`: read at request time from the config snapshot, env pin or console value, since Phase 6) or `TURNSTILE_SECRET_KEY` is set, the policy additionally allows exactly
 `https://challenges.cloudflare.com` in `script-src` (the widget's `api.js`; under `'strict-dynamic'` it is loaded by the nonced app script and the
 host entry only serves browsers without strict-dynamic support), in `connect-src`, and as the only `frame-src` (the challenge is an iframe). The same
 holds for the moderate policy used by `CSP_REPORT_ONLY=true`. With Turnstile off none of this is added. A test covers both modes (`tests/csp.test.ts`) and the

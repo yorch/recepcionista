@@ -14,7 +14,7 @@ Everything here was written once, in one pass; **the code is the source of truth
 | `src/lib/config/**` | extended here (`ConfigSnapshot.previousSecrets`, `envFromSnapshot`, `acceptedSecrets`, `verifierSecrets`, `pinnedByEnv`) | still dependency-free (edge-safe), still guarded by `tests/config-boundary.test.ts` |
 | `src/app/api/admin/**`, `src/app/api/businesses/[id]/settings-overrides` | this phase | JSON only |
 | `/admin` pages, the layout, i18n strings `admin.*`, forms generated from the registry, the "move to console" wizard, the markdown renderer of the legal pages (public pages `/terms`, `/privacy`, `/sms-terms`), the maintenance banner | **Phase 3 (UI)** | the forms use `GET /api/admin/settings` (schema info + source + lock) so they need no per-key code |
-| Phase 4 real connection tests behind `selftest` and `verifySecret`, the ElevenLabs provisioning that stores the webhook secret, price-copy removal of `NEXT_PUBLIC_*` (Phase 6) | later | hooks exist: `ApplyOptions.verifySecret`, `ProviderReadiness.tested` |
+| Phase 4 real connection tests behind `selftest` and `verifySecret`, the ElevenLabs provisioning that stores the webhook secret, price-copy removal of `NEXT_PUBLIC_*` (Phase 6, done by agent D) | later | hooks exist: `ApplyOptions.verifySecret`, `ProviderReadiness.tested` |
 
 ## 1. Tables (migration `20261211120000_admin_console_schema`)
 
@@ -253,3 +253,230 @@ Error codes (HTTP): `unknown_key` 422, `env_only` 422, `invalid_value` 422, `dup
 * `instance_heartbeats` are best effort (30 s); an instance that crashed shows as not alive after 90 s.
 * Impact preview counts (tenants over a lowered cap, owner phones invalidated by narrowing countries) are not computed.
 * Loader memory: all console rows (about 170 at most) and the plan catalog are held in memory per instance.
+
+## Agent B: providers and secrets (real connection tests, the `/admin/providers` page)
+
+Files: `src/lib/admin/provider-tests.ts` (server), `provider-meta.ts` and `provider-ui.ts` (pure, client-safe), `provider-provision.ts`; routes `src/app/api/admin/providers/route.ts`, `.../providers/[provider]/test/route.ts`; page `src/app/admin/providers/page.tsx`,
+components `src/components/admin/provider-{api,console,card,field,followup,rotation,test-result}`, `secret-field.tsx`; catalog `src/lib/i18n/catalog/adminProviders.ts` (prefix `ap.`). Tests: `tests/admin-providers-pure.test.ts`, `tests/admin-providers-ui.test.tsx`, `tests/integration/admin-providers.test.ts`.
+
+### Connection tests (`provider-tests.ts`)
+`testProvider(provider, { candidate? })` with `provider` in `twilio | elevenlabs | stripe | openai | anthropic | resend | smtp | google | turnstile`. A candidate is `{ "<registry key>": "<plaintext>" }`; every key not in it comes from the effective configuration (so a pair can be tested with the sid already stored).
+Result: `{ provider, outcome: ok | auth_failed | unreachable | misconfigured, tested_at, ms, scope: 'remote', checks?: { name: ok | failed | not_found | skipped }, livemode?, mode_changed?, account_changed?, orphaned_businesses? }`. Nothing else: no remote banner, status text or body, no credential.
+
+| Provider | Request (base URL hard-coded) | Reading |
+| --- | --- | --- |
+| twilio | `GET api.twilio.com/2010-04-01/Accounts/{sid}.json` (basic auth); with a Messaging Service `GET messaging.twilio.com/v1/Services/{MG}` | 200 + `active` ok; 401 / 404 auth_failed; suspended or missing service misconfigured |
+| elevenlabs | `GET api.elevenlabs.io/v1/user` | 401 auth_failed; 401 `missing_permissions` misconfigured |
+| stripe | `GET api.stripe.com/v1/balance`; price ids `GET /v1/prices/{id}`; for a candidate against a current key also `GET /v1/account` with both | mode of the key, price exists / recurring / same mode; 403 (restricted key) misconfigured |
+| openai / anthropic | `GET /v1/models` | the configured model must be listed |
+| resend | `GET api.resend.com/domains` | the sender domain must be verified; `restricted_api_key` (send-only) is ok |
+| smtp | DNS resolve, refuse private / loopback / link-local / metadata (`ssrf.ts`), then `nodemailer verify()` to the RESOLVED address (TLS name kept) | refused target misconfigured; login failure auth_failed |
+| google | `POST oauth2.googleapis.com/token` with a garbage code | `invalid_client` auth_failed, `invalid_grant` ok |
+| turnstile | `POST challenges.cloudflare.com/turnstile/v0/siteverify` with a garbage token | `invalid-input-secret` auth_failed |
+
+All requests: `redirect: manual`, 8 s timeout, body capped at 256 KB. Test seam: `setProviderTestDeps({ fetch, resolve, smtpVerify, ... })`; without an injected transport, `NODE_ENV=test` runs do not verify (so no test leaves the machine).
+
+### Routes
+| Method + path | Permission | Notes |
+| --- | --- | --- |
+| `POST /api/admin/providers/{provider}/test` | `providers.repair` (ops, owner, Bearer) for the stored configuration; `settings.secrets.write` (owner) for `{ candidate }` | 6 per minute; candidate keys limited to the provider's own fields; `422 invalid_body / invalid_value`, `404 not_found` for an unknown provider |
+| `GET /api/admin/providers` | `selftest.read` | `base_url`, `webhooks[] { id, card, path, url, secret_key, verifier_configured }`, `google_redirect`, `usage { numbers, agents, stripe_customers, messaging_service }`, `stripe_mode`, `follow_ups[] { action, pending, since, keys }` |
+| `GET /api/admin/selftest?live=1[&force=1]` | `selftest.read` | adds `test` and `tested` per card; ops / owner refresh (cache 5 minutes per provider and credential set), other roles get the cache; without `live=1` unchanged (`tested:false`, no network) |
+| `PUT /api/admin/secrets/{key}`, `POST /api/admin/settings/apply` | unchanged | now run `verifySecret` (test-before-save): `422 verification_failed` with `problems[]`; body flags `accept_unreachable`, `acknowledge_orphans`; `409 orphan_ack_required` (count in the message) for a Stripe key switch with `stripe_customer_id`s on file |
+
+### Provisioning
+`storeProvisionedWebhookSecret` (called by `POST /api/businesses/{id}/provision` right after the webhook is created): owner admin, key not pinned, console writable: stored as `elevenlabs.webhook_secret` (critical, audited, notification), response `webhook_secret_stored: true` and no `webhook_secret`. Any failure keeps the one-time display.
+
+### Page behaviour
+Cards from `provider-meta.ts` (`CARDS`); the keys on a card are exactly the secrets and provider ids plus the email group and `google.oauth_redirect_uri` (the rest of telephony / voice settings lives on agent A's settings pages: tested to be disjoint). Replace: test the candidate, preview (`/settings/preview` gives the reason / phrase
+requirements), reason + typed phrase, `PUT /secrets/{key}` (step-up through the console's reauth panel); Remove: preview, reason + phrase, `DELETE`. Plain fields: edit / reset to default through preview and apply. Follow-up banners (`follow_ups`) open a runner that does a dry run over all batches, then the real run
+(`next_cursor` loop, progress bar, stop after the current batch). The rotation panel reads `GET /api/admin/system` and loops `POST /api/admin/secrets/reencrypt`.
+
+### For the Overview page (agent C)
+Call `GET /api/admin/selftest?live=1` to show real provider status (each card has `test.outcome` and `tested`); the default call stays offline.
+
+
+## Agent A: console shell, settings pages, history, system, overview, legal pages, branding, maintenance (Phase 3 UI, part 1)
+
+Status: **built**. Tests: `tests/admin-console-ui.test.tsx` (pure model, safe markdown, diff, overview, move classification, maintenance, proxy, legal links, component server renders in EN and ES) and
+`tests/integration/admin-console-ui.test.tsx` (postgres: adopt, legal end to end, banner). Smoke: a headless Chrome run over the real pages (settings edit -> review -> apply -> history -> rollback,
+legal draft -> publish -> public page, move wizard, system, mobile widths) found no console error and no horizontal scroll.
+
+### A.1 Files (ownership)
+| Area | Files |
+| --- | --- |
+| Shell and gate | `src/app/admin/layout.tsx`, `src/lib/admin-ui/server.ts` (`requireAdminPage(permission?)`, `getAdminPageCtx`), `src/components/admin/{shell,provider,nav}.ts(x)` |
+| Pages | `src/app/admin/{page,history,system,legal,move}/page.tsx`, `src/app/admin/settings/[page]/page.tsx` (`/admin/settings` redirects to `voice`) |
+| Generated forms | `src/lib/admin-ui/model.ts` (page map, widget by kind, text <-> typed value, staging, field block), `src/lib/admin-ui/setting-text.ts` (Spanish label / help of every registry key), `src/components/admin/{settings-form,change-review,ui,errors,use-json}.ts(x)` |
+| History, import / export | `src/components/admin/{history,import-export}.tsx` |
+| System, overview, wizard | `src/components/admin/{system-page,overview,move-wizard}.tsx`, `src/lib/admin-ui/{overview,move}.ts` |
+| Legal | `src/components/admin/legal-editor.tsx`, `src/lib/markdown.ts` (safe parser), `src/components/legal/{markdown-view,legal-document,footer-links,consent-line}.tsx`, `src/app/{terms,privacy,sms-terms}/page.tsx`, `src/lib/{legal-links,legal-footer}.ts`, `src/lib/text-diff.ts` |
+| Notices | `src/components/platform-banner.tsx` (root layout), `src/lib/maintenance.ts` + one rule in `src/proxy.ts` |
+| i18n | `src/lib/i18n/catalog/adminConsole.ts` (prefix `ac.`); registry label / help: English on the registry entry, Spanish in `setting-text.ts` |
+
+Other console features add their pages to the SAME shell: one line in `src/components/admin/nav.ts` (`ADMIN_NAV`), a page under `src/app/admin/**` that calls `requireAdminPage(permission)`, and the client
+components use `useAdmin()` (`me`, `can(permission)`, `guard(action)` for the step-up retry). Agent B's `/admin/providers` already does.
+
+### A.2 The gate
+`/admin/**` pages: the proxy only checks a credential is present (`/admin` and `/api/admin` are NOT in the public lists; a request without one is redirected to `/login?next=` or 401); the layout then calls
+`getAdminPageCtx()`: the credential is validated against the database, a tenant owner / staff gets a **404** (the console is never advertised), an admin who still has to enrol in 2FA is redirected to the
+security page by `getServerResolution` (the 2FA invariant), and the permissions list comes from `can()`. A page may demand one permission (`requireAdminPage('legal.read')`); the nav shows only what the role
+holds; every write is enforced again by the API. CSP: no inline script, no external origin (nonce CSP unchanged).
+
+### A.3 Generated settings pages (`/admin/settings/{voice,messaging,signup,data,billing,content,scheduling,jobs,locales}`)
+* The page of a key is decided in `model.ts` (`KEY_PAGE` exceptions, then `GROUP_PAGE`); secrets, provider ids and the `email` / `calendar` / `payments` / `llm` groups belong to the provider cards (agent B) and
+  are on no settings page. `tests/admin-console-ui.test.tsx` fails when a console-editable key is on no page (or on two), or lacks a Spanish text.
+* Widget by kind: switch (bool), number (int, min / max / unit), select (enum), text / url / textarea (string, url), comma list or checkboxes (list, country_list; enum lists with up to 6 values), JSON (json).
+  Text goes through the registry schema (`fromText`), the same validator the server applies; an EMPTY optional field (default unset) stages "reset to default".
+* Every field shows its source badge (Default / Console / **Locked by environment** with the variable name), tier badge, `applies` note, range, default, ratchet direction ("can only be made stricter"), "Reset
+  to default" (stages a `remove`) and "Undo change". A locked / read-only / frozen field is disabled with the reason in words. `beforeunload` guards unsaved drafts.
+* Edits accumulate in a draft ("Staged changes: N"); **Review changes** calls `POST /settings/preview` (tier, `requires`, per-key before / after with the effective value, applies / follow-up notes), then asks
+  for the reason (sensitive and critical) and the **typed confirmation phrase** (critical) and applies with `expected_version` (a `stale_preview` re-reviews). Step-up: a `403 reauth_required` opens the existing
+  re-authentication panel and the action is retried once.
+
+### A.4 History, export / import, system, overview
+* `/admin/history`: change sets (filter by key, paging, status / tier / via, reason), per-key diff (secrets show fingerprints only), **rollback** as a new change set (reason always; critical sets also the typed phrase,
+  permission `settings.rollback(.critical)`), export (download JSON) and import with the dry-run diff first (`locked_by_env`, secrets, unknown, invalid are shown as skipped), then reason + phrase (owner only).
+* `/admin/system`: settings version, instances up to date, canary, keys locked by the environment (variable name and why), key ids, re-encryption state, loader problems, instance table with build SHA and applied
+  version, the **freeze** toggle (owner / ops freeze, owner unfreezes, an environment freeze cannot be lifted), and the environment-only names.
+* `/admin` (overview): provider readiness (from selftest; configuration only), job health (latest run per job and failures in 24 h), alerts the APIs can answer (provider incomplete, job errors, instance drift,
+  canary / integrity / re-encryption, freeze), recent critical changes. Stuck deletions and SMS delivery failures have no API and are listed as "not monitored yet".
+
+### A.5 "Move to console" and the `adopt` extension (the one backend change)
+A pinned key answers `409 locked_by_env` to every write, so copying a value into the console while the variable exists was impossible. `POST /settings/preview` and `/settings/apply` now accept **`adopt: true`**:
+for an environment-pinned NON-secret key it stores a console value that EQUALS the pinned value; any other value, a remove, or a secret is still `409 locked_by_env`. The row is dormant (the pin wins, shown as
+`console_value` in the listing) until the variable is deleted; after the next restart the console serves it. The wizard (`/admin/move`) lists the pinned non-secret keys, copies the chosen ones as one change
+set with the normal tier rules, and then lists the exact variable names that are safe to delete ("ready") and those where the console holds a different value ("differs"). Secrets are entered once in the provider cards.
+
+### A.6 Legal pages
+* Editor (`/admin/legal`): terms / privacy / sms_terms x en / es, markdown with a **live preview rendered by the same safe renderer as the public page**, one draft per page, version list (immutable), "load into
+  editor", **line diff between any two versions**, publish (owner: reason + typed `publish <slug>/<locale>`), unpublished state explained.
+* Safe markdown (`src/lib/markdown.ts`): headings, paragraphs, bold, italic, code, links, autolinks, lists, quotes, rules, fenced code. **No raw HTML ever** (it is text), no images, links only through `safeHref`
+  (http, https, mailto, site paths, `#fragments`; whitespace, control characters, backslashes, `//`, entities and every other scheme are refused), external links `rel="noopener noreferrer nofollow"`; input and nesting are
+  capped. React builds the elements; there is no `dangerouslySetInnerHTML`.
+* Public pages `/terms`, `/privacy`, `/sms-terms` (public paths, in `robots.txt` and the sitemap only while published): the published version in the visitor's language (English when that language has none, with
+  a notice), version and last-updated date. Unpublished: the not-found page.
+* Links: `legalLinks()` = the `legal.*_url` setting if set, else the built-in page when a version is published, else nothing. Used by the landing and refunds footers, the legal pages' footer, the signup consent
+  line, the account e-mails (verify / reset / invite: "Terms: <url>"; synchronous, so the built-in page appears once the 60 s published-pages cache is warm) and the SMS HELP reply ("Terms: <sms terms url>").
+
+### A.7 Notices and maintenance
+* `platform.announcement` and `platform.maintenance_mode` are shown by `PlatformBanner` (root layout, every page except `/admin`; plain text, escaped) and in the console shell. Freeze and maintenance banners are always visible
+  in the console.
+* **Read-only enforcement** (`src/lib/maintenance.ts`, one rule in `src/proxy.ts`): while the switch is on, a state-changing `/api/**` request made with a USER session cookie is refused with `503 { code: 'maintenance' }` and
+  `Retry-After: 300`. Never refused: reads, `/api/admin/*`, `/api/auth/*`, `/api/me/locale`, the Bearer token, the break-glass cookie and every webhook / provider callback (no user cookie), so calls, texts and payments keep
+  working. A DB admin working through the tenant dashboard is refused too (use the console, or switch maintenance off).
+
+### A.8 Residuals (agent A)
+* An unpublished legal page renders the not-found page with `noindex` but **status 200**: the root `loading.tsx` starts the stream before the page can call `notFound()` (Next 16 behaviour, same as `/pay/[id]`).
+* Brand fields (`brand.name`, support contact, company address) are editable and stored but no template or error page reads them yet (each reader is per-feature work); only the legal links, the banners and the
+  maintenance switch are consumed.
+* The impact preview of 24e (counts of affected tenants) is not computed: the review shows tier, requirements and the applies / follow-up notes.
+* The e-mail legal footer depends on a warm cache on that instance (see A.6); URL settings are always present.
+* Provider cards link nowhere from the "move" page (secrets are described, not linked).
+
+## Agent C: tenants, plans, administrators, support mode, entitlements and tenant knobs
+
+Files: pages `src/app/admin/{tenants,tenants/[id],plans,admins}/page.tsx`; components `src/components/admin/{tenants-page,tenant-detail,tenant-billing,tenant-ops,tenant-overrides,tenant-support,tenant-audit,tenant-action,tenant-errors,tenant-api,plans-page,admins-page}`, the owner card
+`src/components/dashboard/comfort-settings.tsx`, the dashboard banner `src/components/dashboard/support-banner.tsx`; catalog `src/lib/i18n/catalog/adminTenants.ts` (prefix `at.`, error codes `at.err.<code>`); server `src/lib/admin/{tenant-knobs,support-gate}.ts`;
+routes `POST /api/admin/tenants/{id}/support-view`, `POST /api/admin/tenants/{id}/actions`, `GET /api/admin/plans/prices`. Tests: `tests/admin-tenants-pure.test.tsx`, `tests/integration/admin-tenants.test.ts`.
+
+### Pages
+* `/admin/tenants` (permission `tenants.read`): server-side search (name, id start, phone digits, agent id, Stripe customer id, owner e-mail), filters status / billing / plan / trial ending in 7 days / past due / comped / suspended, keyset "Load more", usage columns (texts, AI / forward / voicemail minutes of the latest month), table on desktop, cards on phones.
+* `/admin/tenants/{id}`: tabs (arrow-key navigable): Overview (profile, provider ids READ ONLY, usage, closed dates, people), Billing and plan (status, plan from the plans table with its caps, trial end, paid-through / comp expiry, per-business cap overrides; only changed fields go to
+  `POST /api/admin/billing` with the reason as `note`: replaces the raw curl), Status and operations (suspend / reactivate with reason + typed phrase `suspend <name>`; clear owner-phone verification; clear trial fingerprint; release / repair numbers / resync agent for THIS business: dry-run preview first, the real run asks for a reason, release also the typed phrase `release <name>`),
+  Settings (the tenant override editor: platform value, effective value, bounds, owner-editable badge, reason note; `PUT / DELETE /api/admin/tenant-overrides`), Support, Audit (`GET /api/admin/audit?business_id=`, keyset).
+* `/admin/plans` (`plans.read`; editing needs `plans.write`): cards with the LIVE Stripe price of each plan id (`GET /api/admin/plans/prices`, cached 10 min, fail soft "price unavailable"), caps, features, public / comped / archived; editor with all fields, reason (8+ chars), archive / restore, delete (only an unused non-standard plan).
+* `/admin/admins` (`admins.read`): list with role, 2FA, disabled, sessions; invite (owner), role change (owner, never yourself), disable (owner, never yourself), enable and revoke sessions (owner / Bearer recovery), reset 2FA (owner, typed e-mail). The last enabled owner has its disable / role controls hidden and the server answers `409 last_owner`.
+* Navigation: three entries added to `ADMIN_NAV` (`/admin/tenants`, `/admin/plans`, `/admin/admins`), each guarded by its permission.
+
+### Support mode (no silent impersonation)
+* The tenant dashboard shell's admin business switcher posts to `POST /api/admin/tenants/{id}/support-view` (permission `tenants.read`, audited `support.view_opened`, sets the `rc_business` UI cookie) and refreshes. The dashboard shows a banner: read-only by default; in write mode the countdown and an exit button.
+  Every dashboard render by an admin user writes at most one `support.view` audit row per admin and tenant per 15 minutes (per process).
+* **The write gate** (`src/lib/admin/support-gate.ts`, called from `authenticate()` in `src/lib/session.ts`): an admin USER (personal account) sending a POST / PUT / PATCH / DELETE to any route outside `/api/admin/`, `/api/auth/`, `/api/health`, `/api/me` and `POST /api/businesses` must hold an OPEN support grant for the tenant it touches
+  (tenant from `/api/businesses/{id}/...`, `?business_id=`, else the `rc_business` cookie; with no tenant derivable any open grant counts). Otherwise `403 support_write_required` (UI text `at.err.support_write_required`). A `read_only` admin gets `403 forbidden`. Roles that can enter write mode: owner, ops, support (`tenants.support_enter`).
+  Not gated: GET, the Bearer token and its cookie session (break-glass, audited and mailed per use), the dev open mode.
+* Write mode: `POST /tenants/{id}/support-mode { reason }` (step-up, 30 minutes, needs a personal account); `DELETE` exits. The Support tab shows the state, the countdown and the history of grants.
+
+### Tenant actions route
+`POST /api/admin/tenants/{id}/actions { action, reason }`, permission `tenants.billing` (owner, ops), step-up, 20 per minute: `clear_owner_phone_verification` (owner phone back to unverified) and `clear_trial_fingerprint` (the business's card fingerprint and the fingerprints of its owners' e-mails).
+Audited `tenant.<action>` with `business_id`, `reason`, `changed`, `support_grant_id`. `POST /tenants/{id}/suspend` now also mails every admin (critical tier). `POST /release-tenant { reason }` records the reason (`billing.release_reason`) on a real run.
+
+### Plan entitlements (`planAllows`, `planAllowsLocation`, `planPriceId` in `plan-catalog.ts`)
+A plan without a feature entry allows it; the seeded plans keep every feature on, so behaviour for existing tenants is identical. Wired:
+| Feature | Where it is enforced |
+| --- | --- |
+| `owner_callin` | `detectOwnerCaller` (owner calls behave like any caller), `handleOwnerSms` (owner SMS commands ignored) |
+| `owner_reply` | reply tools `precheck`, reply SMS codes (`handleReplyCode`, bare YES / NO), `sendOwnerReply` refusal `disabled` |
+| `native_transfer` | `transferEnabledFor` |
+| `calendar_sync` | `syncOnce` (outcome `skipped`, reason `plan`) |
+| `deposits` | `resolveDepositAmount({ plan })` (AI tool, owner payment-link routes) |
+| `multi_location` + `max_locations` | `createBusinessForOwner`: the account's roomiest plan decides (`limit_reached`) |
+Checkout: `createCheckoutSession` bills the business plan's `stripe_price_id` / `stripe_price_id_annual` when set, else `STRIPE_PRICE_ID` / `_ANNUAL`; `annualAvailable(env, plan)` and `POST /api/billing/checkout` follow it. `voicemail` and `call_forwarding` stay data only (no plan gate wired: the forwarding code paths are shared with the metering caps).
+
+### Tenant knobs (`src/lib/admin/tenant-knobs.ts`)
+`knobOr(businessId, key, base)` (override validated + clamped at read, else the caller's own platform value), `knobFrom`, `quietWindowFor`, `loadTenantOverrides(Many)`; never throw. Wired: quiet hours (`isQuietHour(now, tz, window)` in `messaging/index.ts` decide, `inbox`, `manual`, `owner-reply`, `booking-manual`, `booking-changes`, briefing notice, gratitude sweep),
+briefing hour and on / off (`briefingSlot / nextBriefingAt(now, tz, hour)`, `runDailyBriefings`, job status), thank-you toggle (`runGratitudeJob`, outcome `skipped_disabled`), ring seconds (`/api/voice/incoming`), owner reply daily limit (`reply-tools`, `claimReply`),
+owner alert hourly limit, forward / voicemail calls per hour (`caller-limits.ts`, `forward-metering.ts`). The platform quiet-hours settings are also read by `isQuietHour` without a window (registry `messaging.quiet_*_hour`, default 21 / 8).
+Owner card: `/dashboard/settings#comfort` (quiet hours, briefing on / off and hour, thank-you texts, ring seconds) through `GET / PUT / DELETE /api/businesses/{id}/settings-overrides`; an admin in the support view sees it read only.
+
+### Residuals
+* The typed confirmation (`suspend <name>`, `release <name>`, the admin's e-mail for a 2FA reset) is enforced by the page; the server asks for the reason and the step-up (the existing routes were not changed to require a phrase).
+* The support gate resolves the tenant from the path, the query or the cookie; a body-only `business_id` on a tenant route is covered only by the "any open grant" rule. Reads of other tenant routes are audited once per 15 minutes per process, not per request.
+* `voicemail` and `call_forwarding` plan features are not gated.
+* The release / repair / resync previews show the server's own words (English) for the per-item outcome codes.
+* `billingMode()` still requires `STRIPE_PRICE_ID` for live checkout even when every plan carries its own price id.
+
+## Agent D: operations views, impact previews, maintenance helper, build-time config removal (Phase 3 UI part 4, Phase 6)
+
+Tests: `tests/admin-ops-pure.test.tsx` (model, maintenance, Phase 6, navigation, components in EN and ES), `tests/integration/admin-ops.test.ts` (postgres: roles and CSRF of every new route, SMS failures, claims, health history, alerts, usage and revenue, impact previews, job run rules, audit enrichment, instances, maintenance), the updated `tests/phase0-hardening-pure.test.ts` / `config-registry.test.ts` / `config-boundary.test.ts` (Phase 6). **No migration**: alert acknowledgements, notices and provider health points are audit rows.
+
+### D.1 Pages (`/admin/operations/*`, one nav entry "Operations", tabs on every page, filtered by permission)
+| Page | Permission | Contents |
+| --- | --- | --- |
+| `/admin/operations/alerts` | `system.read` | computed alerts with severity, count, since, the page that fixes it; acknowledge (hours + note) / show again (`jobs.run`, step-up); "send notice now"; recipients count; polls every minute |
+| `/admin/operations/jobs` | `jobs.read` (`jobs.run` to run) | runner state, per-job state / schedule / last run / next due / the registry setting that controls it (link to the generated settings page), **run now = mandatory dry-run preview (counts + rows) then Apply** (step-up; the critical jobs `retention`, `tenant_release`, `grandfather` also need a reason and the typed phrase `run <job>`; tenant release / grandfather real runs are blocked in the page while `TENANT_RELEASE_JOB` is not `on`), the last tenant release and grandfather reports as tables, run history (`job_runs`) with filters and paging |
+| `/admin/operations/audit` | `audit.read` (`audit.export` to download) | filters actor type / user id / action prefix / business / date range / text, business and admin e-mail columns, per-row detail (a `settings.change` / `settings.rollback` renders as a before / after table, secrets as fingerprints), CSV and JSON download (audited server side, 6 per minute) |
+| `/admin/operations/deliveries` | `audit.read` | SMS delivery failures: totals (sent, carrier failures, send failures, policy blocks, failure rate), by error code with its class and guidance, by tenant, by day, recent list with paging and filters (period, business, code); retry guidance |
+| `/admin/operations/events` | `system.read` | the idempotency table per source (webhook / job / internal): claims, finished, in progress, stuck (> 15 min), the stuck claims |
+| `/admin/operations/health` | `selftest.read` (`providers.repair` for "check all now") | provider health history: current outcome, share of passing checks, last pass / failure, recent points per provider |
+| `/admin/operations/instances` | `system.read` | heartbeat table: applied settings version vs published, build SHA, canary, ignored rows, alive / gone; mixed builds flagged |
+| `/admin/operations/usage` | `tenants.read` | tenants by status / billing / plan, MRR estimate, paying and past-due counts, usage vs caps (80% / at cap), closest to a cap, trials ending |
+
+### D.2 Routes (new; all JSON, `guardAdminRoute`, rate limited, same-origin CSRF for cookie writes)
+| Method + path | Permission | Notes |
+| --- | --- | --- |
+| `GET /api/admin/alerts` | `system.read` | `{ alerts[], summary, generated_at }`; alert = `{ id, kind, severity, count, subject, since, detail, href, acknowledged }` |
+| `POST, DELETE /api/admin/alerts/ack` | `jobs.run` + step-up | POST `{ id, hours? (1..336, default 24), reason? }` (404 for an alert that is not open, 409 `not_acknowledgeable` for a notice); DELETE `{ id }` withdraws. Audit `alerts.acknowledged` |
+| `GET, POST /api/admin/alerts/notify` | `system.read` / `jobs.run` + step-up | GET: recipient COUNT (never addresses); POST `{ include_warnings? }` mails the open unacknowledged critical alerts now |
+| `GET /api/admin/deliveries/sms` | `audit.read` | `?days=1..90&business_id=&code=<code|none>&before=&limit=` |
+| `GET /api/admin/deliveries/events` | `system.read` | `?hours=1..720` |
+| `GET /api/admin/provider-health` | `selftest.read` | `?days=1..90&provider=`; to run a check: `GET /api/admin/selftest?live=1&force=1` (now records) |
+| `GET /api/admin/usage` | `tenants.read` | usage and revenue overview |
+| `GET /api/admin/instances` | `system.read` | heartbeat table + `mixed_builds` |
+| changed: `POST /api/admin/settings/preview` | `settings.read` | adds `impacts[]` (see D.4) |
+| changed: `GET /api/admin/audit` | `audit.read` | items add `business_name` and `actor_email` (the CSV export is unchanged) |
+| changed: `POST /api/admin/jobs/run` | `jobs.run` | optional `reason` (<= 500); a real run of `retention`, `tenant_release` or `grandfather` from a CONSOLE session needs a reason of 8+ chars (`422 reason_required`) and mails every admin; the Bearer is exempt (already audited and mailed per use). Audit `jobs.manual_run` gains `reason` and `role` |
+| changed: `GET /api/admin/selftest?live=1`, `POST /api/admin/providers/{p}/test` | unchanged | record `provider.health` (not for a candidate test) |
+
+### D.3 Alerts (`src/lib/admin/alerts.ts`, kinds in `ops-model.ts`)
+Computed on every read, no table. `recording_deletions_stuck` (critical: a queue row alerted as not draining), `sms_delivery_failures` (24 h; critical from 20), `job_errors:<job>` (the latest real run of a job failed; critical from 3 in 24 h; carries the redacted error sample), `settings_integrity` (critical: `settings.integrity_failure` in 7 days, a failed canary, ignored rows), `settings_drift` (an alive instance behind the published version for more than 2 minutes), `instance_down` (no heartbeat in 90 s), `stuck_events` (claims `processing` for more than 15 minutes), `provider_unhealthy:<provider>` (latest health point not `ok`; critical for `auth_failed`), `notify_failures` (`admin.notify_failed`), `freeze_active` and `maintenance_active` (notices, not acknowledgeable). Acknowledgement: audit `alerts.acknowledged` (target `alert:<id>`, `until`, `count`, `reason`) silences until `until` unless the count grows (`isAcknowledged`). Routing: `dispatchAlertNotices` mails unacknowledged CRITICAL alerts through `notifyAdmins` (every enabled admin, `ALERT_EMAIL`, `platform.alert_recipients`), at most once per 6 h per alert unless it grew (`alerts.notified`); called from the hourly `cleanup` job (skipped under `NODE_ENV=test`) and by "send notice now". No notice carries a secret, a message body or a job error text.
+
+### D.4 Impact previews (`src/lib/admin/impact.ts`)
+`IMPACT_KEYS` maps registry keys to a preview function (the registry stays edge-safe, so the functions live next to the database code; a test checks every key exists): `billing.plan_sms_cap` / `trial_sms_cap` and `billing.plan_call_minutes_cap` / `trial_call_minutes_cap` (tenants newly at or over the cap this month, with the heaviest names), `messaging.sms_allowed_countries` (owner phones that become invalid), `jobs.retention_enabled` (rows a purge would delete per tenant: calls, texts, briefings, bookings anonymized), `billing.enforced` (live tenants without an active plan that would be refused), `billing.past_due_grace_days` (past-due tenants cut off at once), `jobs.tenant_release_mode` (queue size, stuck). The candidate configuration is the current environment view with the staged values layered on top (`withEnv`); the staged set is evaluated together. `impactsFor(changes)` never throws (a failing preview is omitted) and returns counts plus at most 10 `{ label, value }` rows, never a phone number or customer data. The review step renders them (`ImpactPanel` in `change-review.tsx`, sentences `ao.impact.<id>`).
+
+### D.5 Maintenance helper (`src/lib/admin/maintenance.ts`)
+`maintenanceActive()`, `maintenanceState()`, `maintenanceResponse()` (503, `Retry-After: 300`, `{ ok:false, error:'maintenance', code:'maintenance', message }`) and `refuseIfMaintenance()` (null or the 503). Policy: tenant-facing writes made with a user session cookie are refused at the proxy (agent A's rule); public signups are refused by the route (`POST /api/auth/signup` calls `refuseIfMaintenance()`); **provider webhooks are never refused or queued** (Twilio voice / sms / status, ElevenLabs, Stripe, Google push carry no user cookie and are processed normally), `/api/admin/*`, `/api/auth/*` and the Bearer pass. The banner UI stays agent A's (`PlatformBanner`, `maintenanceState()` is the data).
+
+### D.6 Phase 6: build-time config removed
+`site-config.ts` (`planPriceDisplay`, `planPriceDisplayAnnual`) reads `billing.price_display_*` and `src/app/signup/page.tsx` reads `signup.turnstile_site_key` from the config snapshot at request time and pass them to client components as props; `csp.ts` `turnstileConfigured()` reads the site key through `configEnv()` (the snapshot), not `process.env`. The `Dockerfile` has no `ARG` / `ENV NEXT_PUBLIC_*`, `compose.production.yaml` has no `build.args`, `deploy.sh` no longer says "build time"; `BUILD_TIME_ENV` is `[]` and the boundary test fails on any `process.env.NEXT_PUBLIC_*` in `src/`. The registry entries keep their legacy env names as plain runtime aliases (`applies: live`); a console value applies within about 10 seconds, an env value after a restart.
+
+### D.7 Scripts
+`scripts/verify-deploy.ts` calls `GET /api/admin/selftest` with `ADMIN_TOKEN` (Bearer read): it reports which providers the server holds and from where (env / console / default), FAILS when a required provider (twilio, elevenlabs, stripe, llm, email) is not ready, and explains a skipped "ACCEPTS correctly signed" check as "held in the console" instead of "not set" (the forged-request checks still need the plaintext in the local environment, which stays the fallback). It also asserts that `/api/admin/*` and `/admin` refuse anonymous access. `scripts/smoke.ts` adds a read-only selftest section (informational per provider; asserts the answer carries no secret value).
+
+### D.8 Residuals (agent D)
+* No background provider poller: the health history grows when the console tests providers.
+* The alert notice runs from the hourly cleanup job: with `JOBS=off` only the button sends it.
+* The stored tenant release / grandfather report keeps 40 rows (audit meta cap); the dry-run response has them all.
+* The SMS view cannot show failures whose status callback never arrived, and does not list `sms_log` rows individually (no bodies are ever shown).
+* MRR is an estimate (see `known-limitations.md`); usage rows are capped at 5000 businesses.
+* The overview page (agent A) still lists stuck deletions and SMS failures as "not monitored yet"; the alerts API now answers both, and `/admin/operations/alerts` is the place to look.

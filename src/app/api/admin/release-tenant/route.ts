@@ -1,6 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { requireRecentAuth } from '@/lib/session';
 import { guardAdminRoute } from '@/lib/admin/guard';
+import { recordAudit } from '@/lib/db';
 import { DEFAULT_GRACE_DAYS, DEFAULT_NOTIFY_DAYS, processBusiness } from '@/lib/billing/release';
 
 export const dynamic = 'force-dynamic';
@@ -41,6 +42,10 @@ export async function POST(req: Request) {
       actor: user ? { kind: 'user', user_id: user.id } : { kind: 'admin_token' },
     });
     if (!report) return fail('business not found', 404);
+    // The console asks for a written reason before a real release (critical tier): it is recorded next to the release rows.
+    if (!dryRun && typeof body.reason === 'string' && body.reason.trim()) {
+      await recordAudit({ actor_kind: user ? 'user' : 'admin_token', actor_user_id: user?.id ?? null, business_id: body.business_id, action: 'billing.release_reason', target: `business:${body.business_id}`, meta: { reason: body.reason.trim().slice(0, 500), role: g.ctx.role } });
+    }
     return ok({ dry_run: dryRun, ...report });
   } catch (err) {
     return fail(err, 500);

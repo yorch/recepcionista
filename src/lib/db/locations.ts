@@ -8,6 +8,7 @@ import { createBusiness } from './index';
 import { prisma } from './client';
 import { addMembership } from './memberships';
 import type { Business } from '@/lib/types';
+import { planAllowsLocation } from '@/lib/admin/plan-catalog';
 
 export const DEFAULT_MAX_BUSINESSES_PER_USER = 10;
 
@@ -32,6 +33,9 @@ export async function createBusinessForOwner(userId: string, input: { name: stri
     const owned = await tx.membership.findMany({ where: { userId, role: 'owner' }, select: { disabledAt: true } });
     if (!owned.some((m) => m.disabledAt === null)) return { ok: false as const, reason: 'not_owner' as const };
     if (owned.length >= max) return { ok: false as const, reason: 'limit_reached' as const };
+    // Plan entitlement: the plans of the businesses this account owns decide whether another location is allowed (the roomiest plan wins; no limit when unknown).
+    const plans = await tx.business.findMany({ where: { memberships: { some: { userId, role: 'owner' } } }, select: { plan: true } });
+    if (plans.length && !plans.some((b) => planAllowsLocation(b.plan, owned.length))) return { ok: false as const, reason: 'limit_reached' as const };
     const business = await createBusiness({ name: input.name }, tx);
     await addMembership({ user_id: userId, business_id: business.id, role: 'owner' }, tx);
     return { ok: true as const, business };

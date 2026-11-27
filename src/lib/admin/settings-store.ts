@@ -165,6 +165,11 @@ export interface ApplyOptions {
   verifySecret?: (key: string, plaintext: string) => Promise<boolean>;
   /** Permission set the actor needs per key: console writes, rollbacks (recovery) or imports. */
   mode?: 'write' | 'rollback' | 'import';
+  /**
+   * "Move to console" (Agent A): store, for an environment-PINNED non-secret key, a console value that EQUALS the pinned value (it stays dormant: the pin still wins until the
+   * variable is deleted). Any other value for a pinned key is still 409 `locked_by_env`. Secrets are never adopted.
+   */
+  adopt?: boolean;
 }
 
 export interface Preview {
@@ -223,7 +228,13 @@ async function plan(opts: ApplyOptions, db: Prisma.TransactionClient | typeof pr
       problems.push({ key, code: 'forbidden', message: `your role cannot ${mode === 'rollback' ? 'roll back' : 'write'} ${def.kind === 'secret' ? 'secrets' : def.tier === 'critical' ? 'critical settings' : 'settings'}${opts.actor.via === 'bearer' ? ' with the break-glass token (set ADMIN_TOKEN_ALLOW_SETTINGS=true to allow it)' : ''}` });
       continue;
     }
-    if (def.env && pinnedByEnv(def.env, opts.env)) { problems.push({ key, code: 'locked_by_env', message: `locked by the environment variable ${def.env}: change or remove it in the environment` }); continue; }
+    let adoptOf: unknown;
+    if (def.env && pinnedByEnv(def.env, opts.env)) {
+      const raw = (opts.env ?? configEnv())[def.env] ?? '';
+      const parsedPin = opts.adopt === true && def.kind !== 'secret' && change.remove !== true ? def.schema.fromText(raw) : null;
+      if (!parsedPin || !parsedPin.ok) { problems.push({ key, code: 'locked_by_env', message: `locked by the environment variable ${def.env}: change or remove it in the environment` }); continue; }
+      adoptOf = parsedPin.value;
+    }
     const row = byKey.get(key) ?? null;
     if (change.remove === true) {
       if (change.value !== undefined || change.secret !== undefined) { problems.push({ key, code: 'invalid_change', message: 'remove cannot carry a value' }); continue; }
@@ -246,6 +257,7 @@ async function plan(opts: ApplyOptions, db: Prisma.TransactionClient | typeof pr
     const chk = def.schema.check(change.value);
     if (!chk.ok) { problems.push({ key, code: 'invalid_value', message: chk.error }); continue; }
     if (chk.value === null || chk.value === undefined) { problems.push({ key, code: 'invalid_value', message: 'null is not a value: use remove' }); continue; }
+    if (adoptOf !== undefined && !sameValue(adoptOf, chk.value)) { problems.push({ key, code: 'locked_by_env', message: `locked by the environment variable ${def.env}: only the value the environment already holds can be copied to the console` }); continue; }
     planned.push({ def, change, op: row && sameValue(row.value, chk.value) ? 'noop' : 'set', row, newValue: chk.value });
   }
   // ratchets: compare the console value (or the default) with the target

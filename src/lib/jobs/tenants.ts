@@ -46,7 +46,7 @@ function describe(r: BusinessReport): JobItem {
 
 async function storeReport(action: string, report: JobReport, extra: Record<string, unknown>): Promise<void> {
   try {
-    await recordAudit({ actor_kind: 'system', action, target: `job:${report.job}`, meta: { at: report.at, dry_run: report.dry_run, processed: report.processed, errors: report.errors, counts: report.counts, ...extra } });
+    await recordAudit({ actor_kind: 'system', action, target: `job:${report.job}`, meta: { at: report.at, dry_run: report.dry_run, processed: report.processed, errors: report.errors, counts: report.counts, items_total: report.items.length, items: report.items.slice(0, 40).map((i) => [i.business_id ?? null, i.outcome]), ...extra } }); // items: [business id, outcome] pairs (the audit meta cap is 4 KB); the admin console renders the report as a table
   } catch (err) {
     log.warn('report.audit_failed', { err });
   }

@@ -54,7 +54,7 @@ const PUBLIC_API_EXACT = new Set([
 ]);
 const PUBLIC_API_PREFIX = ['/api/voice/tools/'];
 const PUBLIC_PAGE_EXACT = new Set([
-  '/robots.txt', '/sitemap.xml', '/', '/login', '/login/mfa', '/signup', '/refunds', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite',
+  '/robots.txt', '/sitemap.xml', '/', '/login', '/login/mfa', '/signup', '/refunds', '/terms', '/privacy', '/sms-terms', '/verify-email', '/verify-email-sent', '/forgot-password', '/reset-password', '/accept-invite',
 ]);
 const PUBLIC_PAGE_PREFIX = ['/pay/'];
 

@@ -21,7 +21,7 @@ remains. Not legal advice (see `docs/compliance.md`).
   but multi-region or active-active is not designed. The background job runner (daily briefing at 18:00 per business time zone, hourly gratitude sweep, hourly cleanup, and the retention purge when enabled) runs inside every app process under Postgres leases and idempotency claims, so a second instance repeats nothing. It is a timer, not a queue: if every instance is down at 18:00 the briefing is caught up when one returns, but only until local midnight; the briefing-ready text is skipped in quiet hours and when the SMS cap is full. Work per pass is bounded (10 briefings, 25 gratitude sweeps), so very large installs catch up over several ticks. `JOBS=off` stops all of it.
 - **Backups, restores, TLS termination and the reverse proxy are the operator's** (`DEPLOY.md`, `docs/runbook.md`). Per-client rate limits need `TRUSTED_PROXY=true` behind a proxy you control; without it all clients share one bucket.
 - **Plain-HTTP staging** works only with `CSP_UPGRADE_INSECURE=false` or an `http://` `APP_URL` (otherwise browsers upgrade subresources to HTTPS and fail); Twilio, Stripe and ElevenLabs call back over public HTTPS, so a staging box that must receive their webhooks needs HTTPS anyway.
-- `NEXT_PUBLIC_*` values (Turnstile site key, plan price text) are inlined at build time: changing them needs `./deploy.sh` (a rebuild), not a restart.
+- The Turnstile site key and the plan price copy are **runtime settings** since Phase 6 (read from the config snapshot at request time, no Docker build argument): a change in `.env` needs a restart, a change in the console applies within about 10 seconds. The legacy `NEXT_PUBLIC_*` names remain only as env aliases.
 
 ## Telephony, voice and messaging
 
@@ -132,3 +132,40 @@ Fixed since they were first documented (see `docs/changelog-hardening.md`, "Resi
 - **No automatic opt-out for plain-language revocation (report 20 M2).** The text gets no automatic reply and the owner can opt the number out in one tap; the app does not opt out on its own because a phrase like "stop by at 5" is an ordinary message.
 - **`clearContentConfirmation` is still never called (report 22 note).** A vertical switch that replaces the services changes the fingerprint, which has the same effect.
 
+## Providers and secrets console (agent B)
+
+* **Secrets without a remote endpoint** (ElevenLabs webhook secret, tool secret, Stripe webhook secrets, Google push secret) are checked for format only; the provider verifies them on first use. The result says so (`scope` local text).
+* **Stripe account comparison** needs `GET /v1/account` to be allowed for both keys; with a restricted key the account change is reported as unknown (`account_changed: null`) and the orphan acknowledgement is asked for.
+* **The language-model request timeout** (30 s) is a code constant, shown read-only; it is not a registry setting.
+* **Follow-up tracking** is derived from the settings revisions and the audit rows of the last COMPLETE real run of the action (last batch without `next_cursor`); a run limited to chosen `business_ids` also counts as complete.
+* **Registration status of webhooks** is the presence of the secret that verifies them (and the derived address); the console does not call Twilio / Stripe / ElevenLabs to read back what is registered there.
+* **SMTP test** connects to the resolved public address once; a relay that only accepts the name (SNI-routed multi-tenant relays are fine, relays with IP allow-lists keyed on the console's egress IP are not testable from a different host).
+
+## Console shell, settings pages and legal pages (agent A)
+
+* **An unpublished legal page is a soft 404**: the not-found page with `noindex`, HTTP status 200 (the root `loading.tsx` starts the stream first; `/pay/[id]` behaves the same). A hard 404 needs the root loading boundary removed or a database-aware proxy.
+* **Brand fields are stored, not consumed**: `brand.name`, support contact and company address are editable but no template, error page or e-mail footer reads them yet.
+* **Impact previews exist for nine keys only** (SMS and AI caps, supported countries, the retention job, billing enforcement, the past-due grace, the tenant release mode; agent D section below). Other keys show tier, requirements, before / after and the applies / follow-up note without counts.
+* **Maintenance mode is enforced at the proxy for user-cookie writes to `/api/**` only** (webhooks, the Bearer, the break-glass cookie and `/api/auth/*` pass by design); a DB admin working through the tenant dashboard is refused as well.
+* **E-mail legal footers** use the URL settings and, once warmed by any page footer or the publish action, the built-in page; a cold instance sends the first e-mail with URL settings only.
+* **`adopt` stores a dormant console value**: after deleting the variable the value is served only after the app restarts (the pin is read from the process environment); the wizard says so.
+* **The settings forms are English / Spanish only** (registry label and help: English on the entry, Spanish in `src/lib/admin-ui/setting-text.ts`); a new registry key without its Spanish text fails `tests/admin-console-ui.test.tsx`.
+
+## Tenants, plans, administrators and support mode (agent C)
+
+* **Typed confirmations are a page rule.** The server enforces the reason and the step-up; the phrase to type (`suspend <name>`, `release <name>`, an admin's e-mail for a 2FA reset) is checked by the page only.
+* **The support write gate finds the tenant from the path, the query string or the console cookie.** A tenant write whose business id is only in the body falls back to "any open grant of this admin". Reads are logged at most once per 15 minutes per admin, tenant and process.
+* **`voicemail` and `call_forwarding` plan features are not enforced** (the code paths are shared with the metering caps); the other six features are.
+* **Live checkout still needs `STRIPE_PRICE_ID`** (the platform price) even when every plan carries its own price id.
+
+## Operations views, alerts and build-time config (agent D)
+
+* **Provider health history is sampled, not continuous.** A point is recorded only when the console runs a connection test (the overview, the providers page, the "check all providers now" button); there is no background poller, so a quiet console has a sparse history. A point is written when the outcome changes or after 30 minutes.
+* **Alerts are computed on every read, acknowledgements are audit rows.** There is no alert table: an acknowledgement (`alerts.acknowledged`) silences an alert until it expires (at most 14 days) or the count grows. Notification mail (`alerts.notified`) goes to every administrator, `ALERT_EMAIL` and `platform.alert_recipients` from the hourly cleanup job (not under `NODE_ENV=test`), at most once per 6 hours per alert; with JOBS off nothing mails automatically and the "send notice now" button is the only trigger.
+* **SMS failures are only as complete as Twilio's status callbacks.** The platform never retries a failed text; `sms_log.status` is not rewritten by the callback, so the failure list comes from the `sms.delivery_failed` audit rows (error code, status, kind; never the text). A callback that never arrives is invisible.
+* **Webhook / event view reads the idempotency table**: a handler that fails and releases its claim leaves no row, so "recent failures" means claims that stayed `processing` for 15 minutes (the worker died or could not release), not every non-200 answer.
+* **MRR is an estimate**: active, non-comped, non-suspended tenants x the monthly equivalent of the plan price read from Stripe (annual / 12); discounts, tax, proration and mid-cycle changes are not modelled, and no price means no figure (`null`, never a guess). Past-due tenants are counted separately.
+* **Impact previews are counts, computed against the current data**: a tenant crossing a cap between the preview and the apply is not reflected (the apply carries `expected_version` for the settings, not for the data). Reaching a cap is `used >= cap`.
+* **The tenant release / grandfather reports store at most 40 rows** (audit meta cap 4 KB); a dry run returns every row to the page. Real runs of the critical jobs need a reason from a console session; the break-glass Bearer is exempt (it is audited and mailed per use).
+* **Maintenance mode**: signups are refused (503); a webhook is never refused and nothing is queued (it is processed normally); a request made with a user cookie is refused at the proxy. A tenant API call made with the Bearer passes by design.
+* **`deploy.sh` still requires the Turnstile pair in `.env`** for a production deploy (or the explicit opt-out), even when the pair is stored in the console: put it in `.env` too, or set `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` for the deploy and remove it afterwards.

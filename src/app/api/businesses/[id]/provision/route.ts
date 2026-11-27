@@ -17,6 +17,8 @@ import { logger } from '@/lib/log';
 import { limitRequest } from '@/lib/ratelimit';
 import { assertProvisioningAllowed, billingRequiredResponse } from '@/lib/billing/gate';
 import type { Principal } from '@/lib/session';
+import { storeProvisionedWebhookSecret } from '@/lib/admin/provider-provision';
+import { auditIp } from '@/lib/account-flows';
 import { withLease } from '@/lib/db';
 import type { Business, KnowledgeBase } from '@/lib/types';
 
@@ -44,6 +46,8 @@ export interface ProvisionResult {
   /** Shown ONCE, ONLY to an admin principal, when this call created the ElevenLabs post-call webhook. Store as ELEVENLABS_WEBHOOK_SECRET; it is not persisted or logged. */
   webhook_secret?: string;
   webhook_secret_notice?: string;
+  /** The post-call webhook secret was stored in the encrypted console store (nothing is shown): rotate or replace it from /admin/providers. */
+  webhook_secret_stored?: boolean;
 }
 
 /** True when the stored prompt no longer reflects the business's own facts. */
@@ -351,6 +355,7 @@ async function provision(
     let agentId: string | undefined;
     let agentMock: boolean | undefined;
     let webhookSecret: string | undefined;
+    let webhookSecretStored = false;
     let postCallPending = false;
     let agentFailure: string | null = null;
     let lineFailure: { code: string; error: string; retryable: boolean } | null = null;
@@ -385,7 +390,11 @@ async function provision(
         // Only an ADMIN call may create the platform-wide webhook (and so see its one-time signing secret).
         // A tenant call just attaches the existing one; if it is missing or cannot be looked up the step fails safely.
         const hook = await ensurePostCallWebhook({ allowCreate: principal.kind === 'admin' });
-        if (principal.kind === 'admin') webhookSecret = hook.webhook_secret;
+        if (principal.kind === 'admin') {
+          webhookSecret = hook.webhook_secret;
+          // The one-time secret of a NEW post-call webhook goes straight into the encrypted console store when it can take it (critical, audited), even if a later step fails; otherwise it is shown once as before.
+          if (webhookSecret) webhookSecretStored = await storeProvisionedWebhookSecret(principal, webhookSecret, auditIp(req));
+        }
         if (hook.webhook_id) {
           await registerPostCallWebhookOnAgent(agentId, hook.webhook_id);
         } else {
@@ -443,7 +452,8 @@ async function provision(
       ...(postCallPending ? { post_call_webhook_pending: true } : {}),
       ...(messagingServicePending ? { messaging_service_pending: true } : {}),
       ...(line ? { line } : {}),
-      ...(webhookSecret && principal.kind === 'admin' ? {
+      ...(webhookSecret && principal.kind === 'admin' && webhookSecretStored ? { webhook_secret_stored: true } : {}),
+      ...(webhookSecret && principal.kind === 'admin' && !webhookSecretStored ? {
         webhook_secret: webhookSecret,
         webhook_secret_notice: 'Store this as ELEVENLABS_WEBHOOK_SECRET in .env and redeploy. It is shown only once and is not saved by the app.',
       } : {}),

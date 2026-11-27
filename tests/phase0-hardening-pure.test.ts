@@ -242,32 +242,44 @@ describe('knowledge-base limits are single-sourced', () => {
   });
 });
 
-describe('build-time NEXT_PUBLIC_* config is passed to the image build and documented', () => {
-  const siteVars = [...new Set([...read('src/app/site-config.ts').matchAll(/NEXT_PUBLIC_[A-Z_]+/g)].map((m) => m[0]))];
-  test('site-config reads the five price/captcha vars (incl. the _ES ones)', () => {
-    expect(siteVars).toContain('NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES');
-    expect(siteVars).toContain('NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES');
-  });
+describe('Phase 6: no build-time NEXT_PUBLIC_* config (Turnstile site key and price copy are runtime settings)', () => {
   const dockerfile = read('Dockerfile');
   const compose = read('compose.production.yaml');
   const envExample = read('.env.example');
   const envDocs = read('docs/env-vars.md');
-  for (const v of ['NEXT_PUBLIC_TURNSTILE_SITE_KEY', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES']) {
-    test(`${v}: Dockerfile ARG + ENV, compose build arg, .env.example, docs/env-vars.md`, () => {
-      expect(dockerfile).toMatch(new RegExp(`^ARG ${v}=""`, 'm'));
-      expect(dockerfile).toContain(`${v}=$${v}`);
-      expect(compose).toContain(`${v}: \${${v}:-}`);
+  const NAMES = ['NEXT_PUBLIC_TURNSTILE_SITE_KEY', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES'];
+  test('site-config reads the price copy from the config snapshot, never from process.env', () => {
+    const site = read('src/app/site-config.ts');
+    expect(site).not.toMatch(/process\.env/);
+    expect(site).toContain("setting('billing.price_display_es')");
+    expect(site).toContain("setting('billing.price_display_annual_es')");
+  });
+  test('the signup page reads the site key from the snapshot and passes it down as a prop', () => {
+    const page = read('src/app/signup/page.tsx');
+    expect(page).not.toMatch(/process\.env/);
+    expect(page).toContain("setting('signup.turnstile_site_key')");
+  });
+  test('Dockerfile and compose carry no NEXT_PUBLIC build arg', () => {
+    expect(dockerfile).not.toMatch(/^\s*(ARG|ENV)\s+NEXT_PUBLIC_/m);
+    expect(dockerfile).not.toMatch(/^\s+NEXT_PUBLIC_\w+=\$/m);
+    expect(compose).not.toMatch(/^\s+NEXT_PUBLIC_[A-Z_]+:\s*\$\{/m);
+    expect(compose).not.toMatch(/^\s+args:/m);
+  });
+  test('deploy.sh does not tell the operator to rebuild for these values', () => {
+    expect(read('deploy.sh')).not.toMatch(/Set the site key before building/);
+  });
+  for (const v of NAMES) {
+    test(`${v}: still a runtime alias, in .env.example and docs/env-vars.md`, () => {
       expect(envExample).toMatch(new RegExp(`^#? ?${v}=`, 'm'));
       expect(envDocs).toContain(`\`${v}`);
     });
   }
-  test('every NEXT_PUBLIC_* read in src (except the removed origin) is a Dockerfile build arg', () => {
-    const used = new Set<string>();
+  test('no src file reads a NEXT_PUBLIC_* name from process.env (Next would inline it at build time)', () => {
     for (const f of walk(join(ROOT, 'src'))) {
       if (!/\.(ts|tsx)$/.test(f)) continue;
-      for (const m of readFileSync(f, 'utf8').matchAll(/process\.env\.(NEXT_PUBLIC_[A-Z_]+)/g)) used.add(m[1]);
+      const code = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1'); // comments may name them
+      expect(code).not.toMatch(/process\.env\.NEXT_PUBLIC_/);
     }
-    for (const v of used) expect(dockerfile).toContain(`ARG ${v}=`);
   });
 });
 

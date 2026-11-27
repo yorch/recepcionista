@@ -58,7 +58,7 @@ The module is **dependency-free** (relative imports only, no `node:` modules): t
 ### 2.2 The CI boundary rule
 
 `tests/config-boundary.test.ts` fails when a non-test file under `src/` reads the process environment outside `src/lib/config/**`, except:
-framework flags (`NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE`), the five build-time `NEXT_PUBLIC_*` names in `BUILD_TIME_ENV` (Next inlines them; Phase 6 removes them), and the boot reads of
+framework flags (`NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE`), no build-time `NEXT_PUBLIC_*` name any more (`BUILD_TIME_ENV` is empty since Phase 6: the Turnstile site key and the price copy are read from the snapshot at request time), and the boot reads of
 `src/lib/db/client.ts` (`DATABASE_URL`, `PRISMA_LOG`, `PRISMA_QUERY_EVENTS`) and `src/instrumentation.ts` (`DATABASE_URL`), which run before the config module can have loaded anything.
 `tests/config-registry.test.ts` fails when a registry env alias, an env-only name or a retired name is missing from `docs/env-vars.md`, when a default or bound is invalid, and when a registry default
 differs from what the readers apply today (so the registry cannot silently drift from the code). Per-entry schema tests are generated from the registry.
@@ -117,10 +117,10 @@ Precedence for a tenant: `clamp(tenant_override ?? platform_effective, platform_
 | 0 | single base-URL resolver, admin step-up, audit and rate limits, 2FA default, build args | done |
 | 1 | registry, `configEnv()` shim, boundary rule, job runner refactor, deprecation warnings | **done** (this document) |
 | 2 | tables (`platform_settings`, revisions, change sets, `settings_state`, heartbeats), loader plugged into `setSnapshotSource`, 10 s version poll, boot await and health gate, MAC check, admin API (`/api/admin/settings`, preview, apply, rollback, export/import) | **done (backend)** |
-| 3 | `/admin` shell, non-secret pages generated from the registry, change history, system page, "move to console" wizard | |
+| 3 | `/admin` shell, non-secret pages generated from the registry, change history, system page, "move to console" wizard | **done (agent A)**: see the Agent A section of `admin-console-contracts.md`; providers page: agent B |
 | 4 | secrets: envelope v2 + HKDF + kid, canary, write-only fields, test-connection under SSRF rules, paired atomic changes, dual-secret windows, critical notifications, Bearer restrictions | **done (backend)**; real test-connection calls still open (`verifySecret` hook, SMTP SSRF guard done) |
 | 5 | plans table, tenant overrides, tenant directory and detail, suspend, read-only support view | **done (backend)**; consumers of the overrides and plan features are per-feature work |
-| 6 | remove build-time config (`NEXT_PUBLIC_*` price copy and Turnstile site key) | |
+| 6 | remove build-time config (`NEXT_PUBLIC_*` price copy and Turnstile site key) | **done (agent D)**: server components read the snapshot and pass props; CSP reads the snapshot; no Docker build args; `BUILD_TIME_ENV = []` |
 | 7 | jobs history, audit search, delivery failures, brand, legal URLs and the markdown page editor with versions | **done (backend)**: `job_runs`, audit search + export, legal page versions, heartbeats; delivery-failure view and public legal pages open |
 | 8 | platform roles owner / ops / support / read-only | **done (backend)** |
 

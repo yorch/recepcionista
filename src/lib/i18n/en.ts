@@ -1,4 +1,8 @@
 /** English catalog = the merge of every area in ./catalog (each area keeps en and es side by side). Keys are the source of truth for MessageKey. GENERATED LIST: add an area file + one line here. */
+import { adminOps } from './catalog/adminOps';
+import { adminProviders } from './catalog/adminProviders';
+import { adminTenants } from './catalog/adminTenants';
+import { adminConsole } from './catalog/adminConsole';
 import { auth } from './catalog/auth';
 import { billing } from './catalog/billing';
 import { bookings } from './catalog/bookings';
@@ -19,6 +23,10 @@ import { shell } from './catalog/shell';
 import { voiceLine } from './catalog/voiceLine';
 
 export const en = {
+  ...adminOps.en,
+  ...adminProviders.en,
+  ...adminTenants.en,
+  ...adminConsole.en,
   ...auth.en,
   ...billing.en,
   ...bookings.en,

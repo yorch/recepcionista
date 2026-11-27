@@ -15,6 +15,7 @@ import { logger } from '@/lib/log';
 import { normalizePhone, sendSms } from '@/lib/providers/twilio';
 import type { SendSmsResult } from '@/lib/providers/twilio';
 import type { SmsLog } from '@/lib/types';
+import { quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 const log = logger('sms');
 
@@ -108,6 +109,7 @@ export async function sendAndLog(input: SendAndLogInput): Promise<SendAndLogOutp
     consentBasis: input.consent_basis,
     timezone: tzOf(business),
     now: input.now ?? new Date(),
+    quiet: await quietWindowFor(input.business_id),
   });
 
   if (!decision.allow) return blockedResult(decision.reason, input.consent_basis ?? null);

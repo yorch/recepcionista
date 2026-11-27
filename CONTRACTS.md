@@ -248,3 +248,31 @@ Full list in `docs/design/admin-console-contracts.md`. The ones other code depen
 - **Admin routes**: every `/api/admin/*` handler uses `guardAdminRoute(req, { permission, write?, rate? })`; permissions live in `src/lib/admin/permissions.ts` (`can(principal, permission)`); `Principal` admin variants carry `user.platform_role`.
 - **Job history**: `runJob()` records every run in `job_runs` (`opts.actor`, `opts.trigger`); call `runJob`, not the `runX` functions, from anything that should appear in the history.
 - **Plans**: `businesses.plan` references `plans.key`; a trigger registers unknown strings as hidden plans; `createUser({ role: 'admin' })` defaults `platform_role` to `owner`.
+
+## Providers and secrets page (agent B)
+
+`/admin/providers` (`src/app/admin/providers/page.tsx`, `src/components/admin/provider-*.tsx`, `secret-field.tsx`) is built on the existing console JSON routes plus: `GET /api/admin/providers`,
+`POST /api/admin/providers/{provider}/test`, `GET /api/admin/selftest?live=1`. Server modules: `src/lib/admin/provider-tests.ts` (real connection tests, `secretVerifier`, `providerWriteChecks`, `liveSelftest`),
+`provider-meta.ts` (pure: cards, pairs, webhook paths, follow-up arithmetic), `provider-ui.ts` (pure page model), `provider-provision.ts` (provisioning stores the ElevenLabs webhook secret). Details in
+`docs/design/admin-console-contracts.md` section "Agent B".
+
+## Console UI contracts (agent A)
+
+Full list in the Agent A section of `docs/design/admin-console-contracts.md`. The ones other code depends on:
+
+- **Console pages**: every `/admin/**` page calls `requireAdminPage(permission?)` (`src/lib/admin-ui/server.ts`); navigation entries live in `ADMIN_NAV` (`src/components/admin/nav.ts`); client components use `useAdmin()` (`me`, `can`, `guard`). Strings of the console use the `ac.` prefix (`src/lib/i18n/catalog/adminConsole.ts`).
+- **Settings forms** are generated from the registry: a key's page is decided in `src/lib/admin-ui/model.ts`; a new console-editable registry key needs its Spanish label / help in `src/lib/admin-ui/setting-text.ts` (CI enforces it) and appears on its page without UI code.
+- **`adopt: true`** on `POST /api/admin/settings/{preview,apply}`: only for an environment-pinned non-secret key and only with exactly the pinned value (dormant console copy); everything else on a pinned key is still `409 locked_by_env`.
+- **Legal links**: `legalLinks()` (async) / `legalFooterLinks()` (sync, templates) = `legal.*_url` setting, else the built-in page when published, else null. Never hard-code `/terms`.
+- **Markdown**: untrusted text goes through `parseMarkdown` / `MarkdownView` (`src/lib/markdown.ts`): no HTML, no images, links via `safeHref` only.
+- **Maintenance**: `platform.maintenance_mode` makes `maintenanceRefuses()` (proxy) answer `503 { code: 'maintenance' }` to user-cookie writes on `/api/**` (not `/api/admin/*`, `/api/auth/*`, webhooks, Bearer); `PlatformBanner` shows the notices.
+
+## Tenants, plans, administrators and support mode (agent C)
+
+`/admin/tenants`, `/admin/tenants/{id}`, `/admin/plans`, `/admin/admins` (`src/components/admin/{tenants-page,tenant-*,plans-page,admins-page}.tsx`) on the existing console routes plus `POST /api/admin/tenants/{id}/support-view`, `POST /api/admin/tenants/{id}/actions`, `GET /api/admin/plans/prices`.
+Contracts other code depends on: `authenticate()` refuses a tenant write from an admin USER without an open support grant (`403 support_write_required`, `src/lib/admin/support-gate.ts`); `planAllows / planAllowsLocation / planPriceId` (plan-catalog.ts) gate the features and checkout prices;
+`knobOr / knobFrom / quietWindowFor` (tenant-knobs.ts) are how feature code reads a per-business value; `isQuietHour(now, tz, window?)`, `briefingSlot(now, tz, hour?)` and `resolveDepositAmount({ plan })` take the tenant value as an optional argument. Details: `docs/design/admin-console-contracts.md` section "Agent C".
+
+## Operations views and Phase 6 (agent D)
+
+Full list in the Agent D section of `docs/design/admin-console-contracts.md`. The ones other code depends on: `refuseIfMaintenance()` / `maintenanceState()` (`src/lib/admin/maintenance.ts`) for any public write route the proxy rule cannot see (never a webhook); `impactsFor(changes)` and `IMPACT_KEYS` (`impact.ts`): a new registry key that needs a "what would this affect" count adds a preview function there; `evaluateAlerts()` / `dispatchAlertNotices()` (`alerts.ts`): a new alert kind is added to `ALERT_KINDS`, `ALERT_HREF`, the catalog (`ao.alert.<kind>.title|line|help`) and the evaluator; `recordProviderHealth()` after any provider test; **never** read `process.env.NEXT_PUBLIC_*` (Phase 6: `BUILD_TIME_ENV` is empty and CI fails on it): a value the browser needs is read on the server (`setting()` / `configEnv()`) and passed to the client component as a prop.

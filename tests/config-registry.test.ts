@@ -231,10 +231,11 @@ describe('documentation', () => {
     const missing = names.filter((n) => !doc.includes(`\`${n}`));
     expect(missing).toEqual([]);
   });
-  test('build-time names listed by the registry are exactly the NEXT_PUBLIC aliases', () => {
-    const nextPublic = ALL.filter((d) => d.env?.startsWith('NEXT_PUBLIC_')).map((d) => d.env).sort();
-    expect([...BUILD_TIME_ENV].sort()).toEqual(nextPublic as string[]);
-    for (const d of ALL.filter((x) => x.env?.startsWith('NEXT_PUBLIC_'))) expect(d.applies).toBe('restart_required');
+  test('Phase 6: no build-time names remain; the NEXT_PUBLIC aliases are runtime (live) settings', () => {
+    expect([...BUILD_TIME_ENV]).toEqual([]);
+    const nextPublic = ALL.filter((d) => d.env?.startsWith('NEXT_PUBLIC_'));
+    expect(nextPublic.map((d) => d.env).sort()).toEqual(['NEXT_PUBLIC_PLAN_PRICE_DISPLAY', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES', 'NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES', 'NEXT_PUBLIC_TURNSTILE_SITE_KEY']);
+    for (const d of nextPublic) expect(d.applies).toBe('live');
   });
   test('the architecture doc exists and names every tier and the precedence', () => {
     const arch = read('docs/design/admin-console-architecture.md');

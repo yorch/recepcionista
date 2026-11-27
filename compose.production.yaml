@@ -118,13 +118,6 @@ services:
     build:
       context: .
       target: runner
-      # Inlined at build time (see Dockerfile); changing them in .env needs `./deploy.sh` (it rebuilds).
-      args:
-        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}
-        NEXT_PUBLIC_PLAN_PRICE_DISPLAY: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY:-}
-        NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL:-}
-        NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES:-}
-        NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES:-}
     image: ${APP_IMAGE:-recepcionista-app:local}
     restart: unless-stopped
     init: true

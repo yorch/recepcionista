@@ -1,4 +1,8 @@
 /** Spanish catalog (neutral Latin-American Spanish, "usted"). Must carry exactly the keys and placeholders of ./en (tests/i18n-parity.test.ts). */
+import { adminOps } from './catalog/adminOps';
+import { adminProviders } from './catalog/adminProviders';
+import { adminTenants } from './catalog/adminTenants';
+import { adminConsole } from './catalog/adminConsole';
 import { auth } from './catalog/auth';
 import { billing } from './catalog/billing';
 import { bookings } from './catalog/bookings';
@@ -20,6 +24,10 @@ import { voiceLine } from './catalog/voiceLine';
 import type { en } from './en';
 
 export const es: Record<keyof typeof en, string> = {
+  ...adminOps.es,
+  ...adminProviders.es,
+  ...adminTenants.es,
+  ...adminConsole.es,
   ...auth.es,
   ...billing.es,
   ...bookings.es,

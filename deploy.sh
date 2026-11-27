@@ -99,12 +99,12 @@ if [[ -n "${GOOGLE_CLIENT_ID:-}" ]]; then
   [[ "${APP_URL:-}" == https://* ]] || die "Google Calendar needs APP_URL=https://... (OAuth redirect + push notifications are https only)"
 fi
 [[ "${GOOGLE_OAUTH_MOCK:-}" != "true" ]] || die "GOOGLE_OAUTH_MOCK=true is for local development only; remove it from the production .env"
-# Signup abuse control: the Turnstile site key (public, build time) and secret (server) only work as a pair.
+# Signup abuse control: the Turnstile site key (public) and secret (server) only work as a pair. Both are runtime settings (the .env file or the admin console): no rebuild is needed to change them.
 if [[ -n "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" && -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
   die "NEXT_PUBLIC_TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET_KEY is not: the widget would render but nothing would verify it."
 fi
 if [[ -n "${TURNSTILE_SECRET_KEY:-}" && -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]]; then
-  die "TURNSTILE_SECRET_KEY is set but NEXT_PUBLIC_TURNSTILE_SITE_KEY is not: every signup would fail closed (no token). Set the site key before building."
+  die "TURNSTILE_SECRET_KEY is set but NEXT_PUBLIC_TURNSTILE_SITE_KEY is not: every signup would fail closed (no token). Set the site key (NEXT_PUBLIC_TURNSTILE_SITE_KEY) in .env, or store the pair in the admin console."
 fi
 # Open signup REQUIRES a captcha in production (owner decision): the full Turnstile pair, or the explicit, loud opt-out
 # SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Without either the app refuses public signup (503 signup_disabled; invites still work),

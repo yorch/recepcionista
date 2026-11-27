@@ -5,6 +5,7 @@ import { buttonClass } from '@/components/ui/button';
 import { LocaleSwitcher } from '@/components/ui/locale-switcher';
 import { planPriceDisplay } from '@/app/site-config';
 import { planPriceTexts } from '@/lib/billing/price';
+import { LegalFooterLinks } from '@/components/legal/footer-links';
 import { getLocale, getT } from '@/lib/i18n/server';
 
 /** Public marketing page: static copy only. It never reads or renders any tenant's data. */
@@ -111,6 +112,7 @@ export default async function Home() {
           <Link href="/login" className="inline-flex min-h-11 items-center hover:text-soft">{t('land.signIn')}</Link>
           <Link href="/signup" className="inline-flex min-h-11 items-center hover:text-soft">{t('land.signUp')}</Link>
           <Link href="/refunds" className="inline-flex min-h-11 items-center hover:text-soft">{t('land.refunds')}</Link>
+          <LegalFooterLinks />
           <LocaleSwitcher compact />
         </nav>
       </footer>

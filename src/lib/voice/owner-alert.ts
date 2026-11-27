@@ -12,6 +12,7 @@ import { isGsm7 } from '@/lib/messaging/policy';
 import { rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
 import type { Business, SmsLog } from '@/lib/types';
+import { knobOr } from '@/lib/admin/tenant-knobs';
 
 const log = logger('owner-alert');
 
@@ -130,7 +131,7 @@ export async function alertOwner(business: Business, body: string, opts: AlertOp
         return { notified: state === 'done', reason: state === 'done' ? 'sent' : 'duplicate', sms: null };
       }
       claimedFirst = firstId ? await claimEvent('owner-alert-first', firstId, FIRST_OF_CALL_LEASE_MS) : false;
-      const limit = ownerAlertHourlyLimit();
+      const limit = await knobOr(business.id, 'owner.alert_hourly_limit', ownerAlertHourlyLimit());
       const hour = await rateLimit(`owner-alert:hour:${business.id}`, limit, ALERT_WINDOW_MS, { failClosed: true });
       if (!hour.allowed) {
         // Budget spent. The FIRST emergency of a call still goes out (life safety), up to a hard ceiling; everything else waits.

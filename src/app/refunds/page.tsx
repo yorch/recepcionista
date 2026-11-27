@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Logo } from '@/components/ui/logo';
 import { LocaleSwitcher } from '@/components/ui/locale-switcher';
+import { LegalFooterLinks } from '@/components/legal/footer-links';
 import { getT } from '@/lib/i18n/server';
 
 /**
@@ -47,7 +48,7 @@ export default async function RefundsPage() {
 
         <p className="mt-10 text-xs text-dim">{t('ref.disclaimer')}</p>
       </main>
-      <footer className="mt-auto pt-12 text-xs text-dim"><Link href="/" className="inline-flex min-h-11 items-center hover:text-soft">{t('ref.home')}</Link></footer>
+      <footer className="mt-auto flex flex-wrap items-center gap-x-5 pt-12 text-xs text-dim"><Link href="/" className="inline-flex min-h-11 items-center hover:text-soft">{t('ref.home')}</Link><LegalFooterLinks /></footer>
     </div>
   );
 }

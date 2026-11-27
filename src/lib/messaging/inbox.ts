@@ -28,6 +28,7 @@ import { looksLikeRevocation, normalizeInbound } from '@/lib/messaging/keywords'
 import { highRateNanpDestination } from '@/lib/voice/forward-number';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import type { Business, InboundMessage } from '@/lib/types';
+import { quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 const log = logger('sms/inbox');
 
@@ -135,7 +136,7 @@ async function forwardToOwner(business: Business, message: InboundMessage, now: 
   const status = ownerAlertStatus(business);
   if (status !== 'ok') return status === 'no_owner_phone' ? 'no_owner_phone' : 'owner_unverified';
   // Not at night: the message waits in the dashboard inbox (the badge counts it) instead of waking the owner.
-  if (isQuietHour(now, tzOf(business))) return 'quiet_hours';
+  if (isQuietHour(now, tzOf(business), await quietWindowFor(business.id))) return 'quiet_hours';
   // At most 2 owner texts per sender per hour: the rest waits in the inbox (and the badge), and the business budget below is not spent on it.
   const perSender = await rateLimit(`inbox-forward:sender:${business.id}:${message.from_e164}`, INBOX_SENDER_FORWARD_HOURLY_LIMIT, HOUR_MS, { failClosed: true });
   if (!perSender.allowed) return 'sender_budget';

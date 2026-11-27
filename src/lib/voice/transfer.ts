@@ -23,6 +23,7 @@ import { disclosureFor } from '@/lib/kb/disclosure';
 import { tzOf } from '@/lib/time';
 import { logger } from '@/lib/log';
 import type { Business } from '@/lib/types';
+import { planAllows } from '@/lib/admin/plan-catalog';
 
 const log = logger('voice/transfer');
 
@@ -31,8 +32,8 @@ export type Env = Record<string, string | undefined>;
 export const nativeTransferEnabled = (env: Env = configEnv()): boolean => (env.NATIVE_TRANSFER ?? '').trim().toLowerCase() === 'on';
 
 /** Live transfer is on for THIS business: the global capability AND the business's own opt-in (businesses.native_transfer_enabled, default off). */
-export const transferEnabledFor = (business: Pick<Business, 'native_transfer_enabled'> | null | undefined, env: Env = configEnv()): boolean =>
-  nativeTransferEnabled(env) && business?.native_transfer_enabled === true;
+export const transferEnabledFor = (business: (Pick<Business, 'native_transfer_enabled'> & { plan?: string | null }) | null | undefined, env: Env = configEnv()): boolean =>
+  nativeTransferEnabled(env) && business?.native_transfer_enabled === true && planAllows(business.plan, 'native_transfer');
 
 export type TransferWhy =
   | 'disabled' | 'no_number' | 'unverified' | 'rejected' | 'outside_hours' | 'no_plan' | 'cap_reached' | 'rate_limited' | 'caller_limited'

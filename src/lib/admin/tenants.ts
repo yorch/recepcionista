@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/client';
 import { auditRowData } from '@/lib/db/audit';
 import { setting } from '@/lib/config';
+import { closedDatesOf } from '@/lib/closures';
 import { listTenantKnobs } from './tenant-overrides';
 import { MAX_REASON, MIN_REASON, SettingsError, type StoreActor } from './settings-store';
 
@@ -106,7 +107,7 @@ export async function getTenantDetail(id: string): Promise<Record<string, unknow
     listTenantKnobs(id, 'platform'),
   ]);
   return {
-    id: b.id, name: b.name, status: b.status, timezone: b.timezone, vertical: b.vertical, locale_default: b.localeDefault, created_at: b.createdAt.toISOString(),
+    id: b.id, name: b.name, status: b.status, timezone: b.timezone, vertical: b.vertical, locale_default: b.localeDefault, created_at: b.createdAt.toISOString(), closed_dates: closedDatesOf(b.closedDates),
     contact: { phone: b.phone, owner_phone: b.ownerPhone, owner_name: b.ownerName, owner_phone_verified: b.ownerPhoneVerifiedAt !== null },
     provider_ids: { agent_id: b.agentId, elevenlabs_phone_number_id: b.elevenlabsPhoneNumberId, twilio_phone_sid: b.twilioPhoneSid, stripe_customer_id: b.stripeCustomerId, stripe_subscription_id: b.stripeSubscriptionId },
     billing: {

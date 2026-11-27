@@ -21,6 +21,7 @@ import { calPath, gcal } from './api';
 import { GoogleApiError, toApiError } from './http';
 import { markNeedsReauth, NeedsReauthError } from './tokens';
 import { BOOKING_PROP } from './push';
+import { planAllows } from '@/lib/admin/plan-catalog';
 
 const log = logger('gcal.sync');
 export const HORIZON_DAYS = 180;
@@ -197,7 +198,8 @@ export async function syncConnection(connectionId: string, opts: { now?: Date } 
 async function syncOnce(connectionId: string, now: Date): Promise<SyncOutcome> {
   const conn = await getCalendarConnectionById(connectionId);
   if (!conn || (conn.status !== 'active' && conn.status !== 'error')) return { outcome: 'skipped', reason: conn?.status ?? 'missing' };
-  const biz = await prisma.business.findUnique({ where: { id: conn.business_id }, select: { timezone: true } });
+  const biz = await prisma.business.findUnique({ where: { id: conn.business_id }, select: { timezone: true, plan: true } });
+  if (biz && !planAllows(biz.plan, 'calendar_sync')) return { outcome: 'skipped', reason: 'plan' }; // the plan does not include calendar sync (admin console plans)
   const tz = tzOf(biz?.timezone);
   try {
     const r = await runSync(conn, tz, now);

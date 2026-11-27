@@ -8,6 +8,7 @@
 import { integration, SECRETS, withEnv } from '../helpers/env';
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { cleanup, loadDb, loadPrisma, newBusiness, phone, twilioSignature, uniq } from '../helpers/fixtures';
+import { randomUUID } from 'node:crypto';
 import { hashPassword } from '../../src/lib/password';
 import { clearVoicemailCache } from '../../src/lib/voice/voicemail';
 
@@ -530,6 +531,8 @@ integration('review round 6 fixes (postgres)', () => {
   test('L4 a DB admin user is audited as actor kind "user" with the role in meta (not the break-glass "admin_token")', async () => {
     const biz = await newBusiness();
     const admin = await login(null, 'admin');
+    // an admin USER changes a tenant only inside an open support write grant (src/lib/admin/support-gate.ts)
+    await prisma.supportGrant.create({ data: { id: randomUUID(), userId: admin.user.id, businessId: biz.id, reason: 'test support write grant', startedAt: new Date(), expiresAt: new Date(Date.now() + 600_000) } });
     const res = await modeRoute.PATCH(api(`/api/businesses/${biz.id}/call-mode`, 'PATCH', { mode: 'paused' }, asCookie(admin.cookie)), ctx(biz.id));
     expect(res.status).toBe(200); // a fresh login counts as recent
     const row = await prisma.auditEvent.findFirst({ where: { businessId: biz.id, action: 'business.call_mode_changed' }, orderBy: { at: 'desc' } });

@@ -17,6 +17,7 @@ import { toE164 } from '@/lib/phone';
 import { countryForBusiness } from '@/lib/db';
 import { tzOf } from '@/lib/time';
 import type { Booking, Business } from '@/lib/types';
+import { quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 export const MAX_PRICE_CENTS = 10_000_000; // $100k sanity cap (same as the voice tool)
 
@@ -120,7 +121,7 @@ export async function createDashboardBooking(input: DashboardCreate): Promise<{ 
 export async function confirmationNotice(booking: Booking, business: Business, now: Date = new Date()): Promise<NoticeResult> {
   if (booking.anonymized_at) return { status: 'skipped', reason: 'anonymized', delivered: false };
   if (!booking.customer_phone?.trim()) return { status: 'skipped', reason: 'no_phone', delivered: false };
-  if (isQuietHour(now, tzOf(business))) return { status: 'blocked_quiet_hours', delivered: false };
+  if (isQuietHour(now, tzOf(business), await quietWindowFor(business.id))) return { status: 'blocked_quiet_hours', delivered: false };
   try {
     const out = await sendConfirmation(booking.id, await customerLanguage(booking, business));
     return { status: out.sms.status, delivered: smsDelivered(out.sms.status) };

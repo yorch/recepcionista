@@ -13,6 +13,7 @@
  *  - marketing : gratitude / review-request. Blocked when opted out, when no recorded consent
  *                basis exists, and during quiet hours (9pm-8am in the business timezone).
  */
+import { setting } from '@/lib/config';
 import { partsInTz } from '@/lib/time';
 import type { SmsLog } from '@/lib/types';
 
@@ -35,9 +36,17 @@ export function classify(kind: SmsLog['kind'], isOwnerRecipient: boolean): SmsCl
   return 'customer';
 }
 
-export function isQuietHour(now: Date, timezone: string): boolean {
+/**
+ * Is `now` inside the quiet window in the business zone? `window` is the business's effective window (platform window, or the tenant's stricter one:
+ * `quietWindowFor` in src/lib/admin/tenant-knobs.ts); without it the platform window applies (registry `messaging.quiet_*_hour`, default 21 to 8).
+ * A window with start === end is empty; start < end does not wrap midnight.
+ */
+export function isQuietHour(now: Date, timezone: string, window?: { start: number; end: number }): boolean {
   const h = partsInTz(now, timezone).hour;
-  return h >= QUIET_START_HOUR || h < QUIET_END_HOUR;
+  const start = window?.start ?? (setting('messaging.quiet_start_hour') as number | null) ?? QUIET_START_HOUR;
+  const end = window?.end ?? (setting('messaging.quiet_end_hour') as number | null) ?? QUIET_END_HOUR;
+  if (start === end) return false;
+  return start < end ? h >= start && h < end : h >= start || h < end;
 }
 
 export type BlockReason = 'blocked_opt_out' | 'blocked_quiet_hours' | 'blocked_no_consent';
@@ -53,6 +62,8 @@ export interface PolicyInput {
   consentBasis?: string | null;
   timezone: string;
   now: Date;
+  /** The business's effective quiet window (tenant override); the platform window when absent. */
+  quiet?: { start: number; end: number };
 }
 
 export function decide(input: PolicyInput): Decision {
@@ -60,7 +71,7 @@ export function decide(input: PolicyInput): Decision {
   if (cls === 'owner') return { allow: true, consent_basis: 'owner_alert', footer: false };
   if (input.optedOut) return { allow: false, reason: 'blocked_opt_out' };
   if (cls === 'customer') {
-    if (input.kind === 'manual' && isQuietHour(input.now, input.timezone)) return { allow: false, reason: 'blocked_quiet_hours' };
+    if (input.kind === 'manual' && isQuietHour(input.now, input.timezone, input.quiet)) return { allow: false, reason: 'blocked_quiet_hours' };
     const basis = input.consentBasis?.trim()
       || (input.kind === 'other' ? 'caller_initiated' : input.kind === 'manual' ? 'owner_manual' : 'transactional_booking');
     return { allow: true, consent_basis: basis, footer: true };
@@ -70,7 +81,7 @@ export function decide(input: PolicyInput): Decision {
   if (!(MARKETING_CONSENT_BASES as readonly string[]).includes(basis)) {
     return { allow: false, reason: 'blocked_no_consent' };
   }
-  if (isQuietHour(input.now, input.timezone)) return { allow: false, reason: 'blocked_quiet_hours' };
+  if (isQuietHour(input.now, input.timezone, input.quiet)) return { allow: false, reason: 'blocked_quiet_hours' };
   return { allow: true, consent_basis: basis, footer: true };
 }
 

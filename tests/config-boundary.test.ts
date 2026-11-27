@@ -2,7 +2,7 @@
  * CI boundary rule (24e 5.1 / 7 phase 1): NOTHING under src/ reads the process environment except src/lib/config/**, with these explicit,
  * reviewed exceptions:
  *   - `NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE`: framework flags, inlined or set by Next (read as literal property reads);
- *   - `NEXT_PUBLIC_*`: build-time values Next inlines, only the names in BUILD_TIME_ENV (Phase 6 removes them);
+ *   - `NEXT_PUBLIC_*`: none since Phase 6 (BUILD_TIME_ENV is empty): the Turnstile site key and the price copy are runtime settings;
  *   - boot code that runs before the config module can have loaded anything: the database URL / Prisma flags in src/lib/db/client.ts and
  *     the database target printed by src/instrumentation.ts.
  * Everything else (helper defaults, route handlers, jobs, providers) goes through `configEnv()` / `setting()`, so a console value reaches it.

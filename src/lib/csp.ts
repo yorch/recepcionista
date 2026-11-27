@@ -33,10 +33,9 @@ export interface CspOptions {
 
 export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 
-/** Is the Turnstile widget enabled for this deployment? (site key = public, build time; secret = server.) */
+/** Is the Turnstile widget enabled for this deployment? (site key = public, secret = server; both come from the config snapshot at request time since Phase 6.) */
 export function turnstileConfigured(env: Record<string, string | undefined> = configEnv()): boolean {
-  // The literal process.env.NEXT_PUBLIC_* read lets Next inline the build-time value into the proxy bundle.
-  return Boolean((env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY || '').trim());
+  return Boolean((env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY || '').trim());
 }
 
 /**

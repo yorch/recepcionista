@@ -4,6 +4,7 @@
  * (docs/i18n.md "Residual English"). Keep this file tiny and import-free: it ships to the browser.
  */
 export const API_ERROR_SLUGS: Record<string, string> = {
+  'maintenance': 'maintenance',
   'rate limit exceeded': 'rateLimit',
   'too many attempts, try again later': 'rateLimit',
   'too many attempts; try again later': 'rateLimit',

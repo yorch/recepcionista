@@ -27,6 +27,8 @@ import { bodyProblemMessage, customerReplyText, last4Of, leadLine, ownerReplyCon
 import { auditOwnerKb } from './apply';
 import type { OwnerGate, OwnerToolResult } from './tools';
 import type { OwnerReplyToolName } from './specs';
+import { knobOr } from '@/lib/admin/tenant-knobs';
+import { planAllows } from '@/lib/admin/plan-catalog';
 
 const log = logger('owner-reply-tools');
 type Lang = 'en' | 'es';
@@ -66,7 +68,7 @@ const fail = (lang: Lang, en: string, es: string): OwnerToolResult => ({ ok: fal
 /** The gate for every reply tool: feature on, call attested when the operator demands it, line not locked. */
 async function precheck(g: Gate): Promise<OwnerToolResult | null> {
   const { lang } = g;
-  if (!ownerReplyEnabled()) return fail(lang, 'Replying to customers by phone is turned off. You can text them from your own phone.', 'Responder a clientes por teléfono está desactivado. Puede escribirles desde su propio teléfono.');
+  if (!ownerReplyEnabled() || !planAllows(g.business.plan, 'owner_reply')) return fail(lang, 'Replying to customers by phone is turned off. You can text them from your own phone.', 'Responder a clientes por teléfono está desactivado. Puede escribirles desde su propio teléfono.');
   if (ownerReplyRequiresAttestation() && !(g.call.caller_verified === true || attestationLevel(g.call.stir_status) === 'A')) {
     return fail(lang, 'This call is not verified by the carrier, so I cannot work with customer details on it. Please use the dashboard.', 'Esta llamada no está verificada por el operador, así que no puedo trabajar con datos de clientes. Use el panel.');
   }
@@ -113,7 +115,7 @@ async function draft(g: Gate, args: Record<string, unknown>): Promise<OwnerToolR
   if (used >= OWNER_REPLY_DRAFTS_PER_CALL) return fail(lang, 'That is the limit of replies for one call. Please call again later.', 'Ese es el límite de respuestas por llamada. Llame de nuevo más tarde.');
   const trust = ownerTrustOf(call);
   const drafted = await prisma.ownerReply.count({ where: { businessId: business.id, ownerTrust: trust, createdAt: { gte: new Date(now.getTime() - 24 * 3600_000) } } });
-  if (drafted >= ownerReplyDailyLimit()) return fail(lang, 'The limit of replies for today was reached. Please try again tomorrow or text the customer yourself.', 'Se alcanzó el límite de respuestas de hoy. Intente mañana o escriba usted al cliente.');
+  if (drafted >= (await knobOr(business.id, 'owner.reply_daily_limit', ownerReplyDailyLimit()))) return fail(lang, 'The limit of replies for today was reached. Please try again tomorrow or text the customer yourself.', 'Se alcanzó el límite de respuestas de hoy. Intente mañana o escriba usted al cliente.');
 
   const v = validateReplyBody(args.message);
   if (!v.ok) {

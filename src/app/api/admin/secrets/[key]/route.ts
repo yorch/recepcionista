@@ -1,6 +1,8 @@
 import { ok } from '@/lib/http';
 import { guardAdminRoute, adminFail, readBody } from '@/lib/admin/guard';
-import { removeSecret, secretInfo, setSecret, SettingsError, type ApplyResult } from '@/lib/admin/settings-store';
+import { removeSecret, secretInfo, setSecret, SettingsError, type ApplyResult, type SettingChange } from '@/lib/admin/settings-store';
+import { settingDef } from '@/lib/config';
+import { providerWriteChecks } from '@/lib/admin/provider-tests';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -35,7 +37,10 @@ export async function PUT(req: Request, { params }: Ctx) {
       if (!body.paired || typeof body.paired !== 'object' || Array.isArray(body.paired) || Object.values(body.paired).some((v) => typeof v !== 'string')) throw new SettingsError(422, 'invalid_body', 'paired must be an object of strings');
       paired = body.paired as Record<string, string>;
     }
-    return ok(safe(await setSecret({ key, value: body.value, paired, reason: typeof body.reason === 'string' ? body.reason : '', confirm: typeof body.confirm === 'string' ? body.confirm : undefined, actor: g.ctx.actor })));
+    // test-before-save: the candidate is checked against the provider (the pair travels with it) and a Stripe mode / account switch needs `acknowledge_orphans`
+    const planned: SettingChange[] = [{ key, secret: body.value }, ...Object.entries(paired ?? {}).map(([k, v]): SettingChange => (settingDef(k)?.kind === 'secret' ? { key: k, secret: v } : { key: k, value: v }))];
+    const checks = await providerWriteChecks(planned, body);
+    return ok(safe(await setSecret({ key, value: body.value, paired, ...checks, reason: typeof body.reason === 'string' ? body.reason : '', confirm: typeof body.confirm === 'string' ? body.confirm : undefined, actor: g.ctx.actor })));
   } catch (err) { return adminFail(err); }
 }
 

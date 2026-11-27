@@ -116,7 +116,7 @@ password reset and invitations send mail; `log` is refused in production), the T
 `compose.production.yaml`), with `BILLING_ENFORCED=true` also `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and `STRIPE_BILLING_WEBHOOK_SECRET`, and
 `OWNER_PHONE_GRANDFATHER=true` only together with `OWNER_PHONE_GRANDFATHER_ACK=i-understand`. It also refuses
 `DEMO_MODE`, `ALLOW_INSECURE_DEV` or `STRIPE_ALLOW_UNSIGNED` set to `true`. The full table is `docs/env-vars.md`.
-`NEXT_PUBLIC_*` values are build arguments (compose passes them), so changing them needs a re-run of `./deploy.sh`.
+The `NEXT_PUBLIC_*` names (Turnstile site key, plan price copy) are runtime settings since Phase 6: no build argument, no rebuild; a change in `.env` needs a restart, a change in the admin console applies within about 10 seconds.
 
 **Existing customers and `BILLING_ENFORCED`.** Signup is public, so billing is enforced from the first deploy; comp the tenants that already exist (vetted, created before the cutoff you pass):
 `docker compose -f compose.production.yaml --profile seed run --rm seed bun scripts/grandfather-existing.ts --force-i-know --before <deploy time ISO>`

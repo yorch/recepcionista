@@ -543,7 +543,50 @@ Migration `20261211120000_admin_console_schema` (hand written, re-runnable, zero
 | T7 owner escalation: tenant overrides validated, clamped (write and read), owner comfort knobs only | Fixed | `tenant-overrides.ts`; `admin-routes.test.ts` tenant overrides |
 | T8 support: read only, 30 minute audited write mode | Fixed | `support.ts`; `admin-routes.test.ts` SUPPORT MODE |
 | T14 secret rollback inside 7 days; nulled by the cleanup job | Fixed (the test-connection before restore is the open `verifySecret` hook) | `settings-store.ts rollbackChangeSet`, `cleanup.ts` |
-| T15 test-before-save for credentials | Open | hook only (`ApplyOptions.verifySecret`); Phase 4 real tests |
+| T15 test-before-save for credentials | Fixed (agent B) | `provider-tests.ts` (`secretVerifier`, `providerWriteChecks`) wired into `PUT /secrets/{key}` and `POST /settings/apply`; Stripe orphan acknowledgement; `admin-providers-pure.test.ts`, `integration/admin-providers.test.ts` |
+| Provisioning showed the ElevenLabs webhook secret once and stored nothing | Fixed (agent B) | `provider-provision.ts`: an owner admin's provision stores it encrypted (critical, audited, admins mailed); a Bearer token, an env pin or a frozen console keep the one-time display |
+| Provider readiness without a real check | Fixed (agent B) | `GET /api/admin/selftest?live=1` (coarse real tests, cached 5 minutes); `POST /api/admin/providers/{provider}/test` (6 per minute) |
 | Plans table, entitlements | Partly | caps and comp wired; feature gates, `max_locations`, per-plan Stripe prices are data only |
 | Per-tenant overrides read by their consumers | Open | `tenantEffective()` exists; each reader still uses the platform value |
-| `/admin` UI, public legal pages, maintenance banner | Open (Phase 3) | contracts doc section 7 |
+| `/admin` UI, public legal pages, maintenance banner | Fixed in part (agent A: shell, settings pages, history, system, overview, move wizard, legal editor and public pages, banners; providers page: agent B; tenants / plans / audit / admins pages: see their sections) | contracts doc section 7 and the Agent A section |
+
+## Phase 3 UI, part 1: console shell, settings pages, history, system, legal pages, maintenance (agent A)
+
+| Item | State | Where |
+| --- | --- | --- |
+| `/admin` route tree with its own chrome, nav by permission, role badge, editing / read-only banner, locale switcher, step-up and 2FA state, freeze and maintenance banners | Fixed | `src/app/admin/layout.tsx`, `src/components/admin/{shell,provider,nav}` |
+| Server gate (admin only, 404 for tenants, 2FA invariant), `/admin` and `/api/admin` never public | Fixed | `src/lib/admin-ui/server.ts`, `src/proxy.ts`, `tests/admin-console-ui.test.tsx` |
+| Nine settings pages generated from the registry (widget by kind, shared validators, source badges, applies notes, reset, typed confirmation + reason, step-up retry) | Fixed | `src/lib/admin-ui/model.ts`, `src/components/admin/{settings-form,change-review}.tsx` |
+| Change history with diffs, rollback, export / import with dry-run diff | Fixed | `src/components/admin/{history,import-export}.tsx` |
+| System page (locked keys, instances and applied version, key ids, canary, freeze) and Overview (providers, jobs, alerts, critical changes) | Fixed | `system-page.tsx`, `overview.tsx`, `src/lib/admin-ui/overview.ts` |
+| "Move to console" (needed `adopt` on preview / apply: a pinned non-secret key accepts a console value equal to the pin) | Fixed | `move-wizard.tsx`, `src/lib/admin/settings-store.ts`, `tests/integration/admin-console-ui.test.tsx` |
+| Legal editor (markdown, safe live preview, drafts, versions, diff, publish with typed phrase) and public `/terms` `/privacy` `/sms-terms` (EN / ES, versioned, sitemap, robots) | Fixed | `legal-editor.tsx`, `src/lib/markdown.ts`, `src/components/legal/*`, `src/app/{terms,privacy,sms-terms}` |
+| Footer / signup / account e-mail / SMS HELP links to the legal pages (URL setting, else the built-in page) | Fixed | `src/lib/{legal-links,legal-footer}.ts` |
+| Maintenance banner, announcement banner, read-only tenant writes while maintenance is on | Fixed | `src/components/platform-banner.tsx`, `src/lib/maintenance.ts`, `src/proxy.ts` |
+| Soft 404 of an unpublished legal page, brand fields not consumed, no impact preview counts | Open | `docs/known-limitations.md` |
+
+## Phase 3 UI, part 3: tenants, plans, administrators, support mode, entitlements, tenant knobs (agent C)
+
+| Item | State | Where |
+| --- | --- | --- |
+| Tenant directory and detail (billing / comp, suspension with typed phrase and admin notice, clean-ups, per-business release / repair / resync with preview) | Fixed | `src/components/admin/tenant-*`, `POST /api/admin/tenants/{id}/actions`, `support-view` |
+| Silent full-write impersonation by admins in the tenant dashboard | Fixed | `src/lib/admin/support-gate.ts` in `authenticate()`: admin users need an open support grant to write a tenant; the switcher goes through `support-view` (audited); banner + read logging |
+| Plans editor with live Stripe prices; plan features, `max_locations`, per-plan Stripe prices wired | Fixed | `plans-page.tsx`, `GET /api/admin/plans/prices`, `plan-catalog.ts` (`planAllows`, `planAllowsLocation`, `planPriceId`), call sites in the contracts doc |
+| Tenant overrides not read by any code | Fixed | `src/lib/admin/tenant-knobs.ts` + readers (quiet hours, briefing, thank-you, ring seconds, owner reply and alert limits, call budgets) |
+| Owner comfort knobs UI | Fixed | `src/components/dashboard/comfort-settings.tsx` (Settings) |
+| Administrator management UI | Fixed | `/admin/admins` |
+
+## Operations views, impact previews and Phase 6 (agent D; `docs/design/admin-console-contracts.md` "Agent D")
+
+No migration. `tests/admin-ops-pure.test.tsx`, `tests/integration/admin-ops.test.ts`, and the updated Phase 6 tests.
+
+| Item | State | Where |
+| --- | --- | --- |
+| Operations pages: alerts, jobs (mandatory dry-run preview then Apply, history, tenant release and grandfather reports), audit log (filters, diff view, audited export), SMS delivery failures, webhook / event claims, provider health history, instances, usage and revenue | Fixed | `src/app/admin/operations/**`, `src/components/admin/ops-*.tsx`, `src/lib/admin/{alerts,deliveries,provider-health,usage-overview,instances,ops-model,audit-enrich}.ts`, routes `/api/admin/{alerts,alerts/ack,alerts/notify,deliveries/sms,deliveries/events,provider-health,usage,instances}` |
+| Alert notification routing to the admins / `ALERT_EMAIL` / `platform.alert_recipients` (critical, once per 6 h per alert) | Fixed | `dispatchAlertNotices` from the hourly cleanup job and "send notice now" |
+| Critical job runs from the console: reason + typed phrase + notification | Fixed | `POST /api/admin/jobs/run` (`CRITICAL_JOBS`), page phrase `run <job>` |
+| Tenant release / grandfather reports as tables | Fixed | audit `jobs.*_report` meta now carries `items` |
+| Impact previews (tenants over a lowered cap, owner phones invalid after narrowing countries, retention purge per tenant, billing enforcement, past-due grace, release queue) | Fixed | `src/lib/admin/impact.ts`, `POST /api/admin/settings/preview` `impacts[]`, `ImpactPanel` |
+| Maintenance: signups refused, webhooks never dropped, helper for the banner | Fixed | `src/lib/admin/maintenance.ts`, `POST /api/auth/signup` |
+| Phase 6: Turnstile site key and price copy read at request time, CSP from the snapshot, no Docker build args, `BUILD_TIME_ENV` empty | Fixed | `site-config.ts`, `signup/page.tsx`, `csp.ts`, `Dockerfile`, `compose.production.yaml`, `deploy.sh`, `env-only.ts` |
+| `verify-deploy` / `smoke` consult the server's selftest (secrets held in the console) | Fixed | `scripts/verify-deploy.ts`, `scripts/smoke.ts` |

@@ -8,6 +8,7 @@ import { EmailConfigError } from './index';
 import { makeT } from '@/lib/i18n';
 import type { Locale, TFunction } from '@/lib/i18n/core';
 import { configuredBaseUrl } from '@/lib/base-url';
+import { absoluteLegalUrl, legalFooterLinks } from '@/lib/legal-footer';
 
 export interface RenderedEmail {
   subject: string;
@@ -36,13 +37,26 @@ export const VERIFY_PATH = '/verify-email';
 export const RESET_PATH = '/reset-password';
 export const INVITE_PATH = '/accept-invite';
 
+/** "Terms: <url> / Privacy: <url>" for the foot of an account e-mail: only the pages that exist (URL setting, else the published built-in page); '' when none. */
+function legalLines(t: TFunction): string[] {
+  const links = legalFooterLinks();
+  const base = configuredBaseUrl(configEnv()) || 'http://localhost:3000';
+  return ([['terms', links.terms], ['privacy', links.privacy]] as const)
+    .map(([slug, link]) => [slug, absoluteLegalUrl(link, base)] as const)
+    .filter((x): x is readonly ['terms' | 'privacy', string] => Boolean(x[1]))
+    .map(([slug, url]) => `${t(slug === 'terms' ? 'ac.legal.footer.terms' : 'ac.legal.footer.privacy')}: ${url}`);
+}
+const legalText = (t: TFunction): string => { const l = legalLines(t); return l.length ? `\n\n${l.join('\n')}` : ''; };
+
 function wrap(title: string, paragraphs: string[], link: string, cta: string, footer: string, t: TFunction): string {
   const p = paragraphs.map((x) => `<p style="margin:0 0 12px">${escapeHtml(x)}</p>`).join('');
   return `<!doctype html><html><body style="font-family:system-ui,sans-serif;color:#111;line-height:1.5">`
     + `<h2 style="margin:0 0 16px">${escapeHtml(title)}</h2>${p}`
     + `<p style="margin:16px 0"><a href="${escapeHtml(link)}" style="background:#111;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none">${escapeHtml(cta)}</a></p>`
     + `<p style="margin:0 0 12px;font-size:13px;color:#555">${escapeHtml(t('mail.cta.fallback'))}<br>${escapeHtml(link)}</p>`
-    + `<p style="margin:0;font-size:13px;color:#555">${escapeHtml(footer)}</p></body></html>`;
+    + `<p style="margin:0;font-size:13px;color:#555">${escapeHtml(footer)}</p>`
+    + legalLines(t).map((l) => `<p style="margin:8px 0 0;font-size:12px;color:#777">${escapeHtml(l)}</p>`).join('')
+    + `</body></html>`;
 }
 
 export function verifyEmailTemplate(opts: { link: string; ttlHours?: number; locale?: Locale }): RenderedEmail {
@@ -52,7 +66,7 @@ export function verifyEmailTemplate(opts: { link: string; ttlHours?: number; loc
   const footer = t('mail.verify.footer');
   return {
     subject: t('mail.verify.subject'),
-    text: `${lines.join('\n\n')}\n\n${opts.link}\n\n${footer}\n`,
+    text: `${lines.join('\n\n')}\n\n${opts.link}\n\n${footer}${legalText(t)}\n`,
     html: wrap(t('mail.verify.title'), lines, opts.link, t('mail.verify.cta'), footer, t),
   };
 }
@@ -64,7 +78,7 @@ export function resetPasswordTemplate(opts: { link: string; ttlMinutes?: number;
   const footer = t('mail.reset.footer');
   return {
     subject: t('mail.reset.subject'),
-    text: `${lines.join('\n\n')}\n\n${opts.link}\n\n${footer}\n`,
+    text: `${lines.join('\n\n')}\n\n${opts.link}\n\n${footer}${legalText(t)}\n`,
     html: wrap(t('mail.reset.title'), lines, opts.link, t('mail.reset.cta'), footer, t),
   };
 }
@@ -95,7 +109,7 @@ export function inviteTemplate(opts: { link: string; businessName: string; invit
   const footer = t('mail.invite.footer');
   return {
     subject: t('mail.invite.subject'),
-    text: `${lines.join('\n\n')}\n\n${opts.link}\n\n${footer}\n`,
+    text: `${lines.join('\n\n')}\n\n${opts.link}\n\n${footer}${legalText(t)}\n`,
     html: wrap(t('mail.invite.title'), lines, opts.link, t('mail.invite.cta'), footer, t),
   };
 }

@@ -34,6 +34,7 @@ import {
 import { appBaseUrl } from '@/lib/email/templates';
 import { withJobRun, type JobTrigger } from '@/lib/admin/job-runs';
 import { cleanupConsoleTables } from '@/lib/admin/cleanup';
+import { dispatchAlertNotices } from '@/lib/admin/alerts';
 import { generateBriefing } from '@/lib/briefing';
 import { findGratitudeCandidates, runGratitudeSweep } from '@/lib/gratitude';
 import { logger } from '@/lib/log';
@@ -53,6 +54,7 @@ import type { JobBusiness } from '@/lib/db';
 import {
   briefingSlot, hourBucket, inQuietHours, JOB_NAMES, jobsSetting, nextBriefingAt, tickSeconds, type JobName,
 } from './schedule';
+import { knobFrom, loadTenantOverridesMany, quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 export { JOB_NAMES, isJobName, jobsSetting, tickSeconds, briefingSlot, nextBriefingAt, hourBucket } from './schedule';
 export type { JobName } from './schedule';
@@ -172,6 +174,9 @@ async function auditRun(report: JobReport): Promise<void> {
   });
 }
 
+/** The quiet window from already loaded overrides. */
+const quietFrom = (o: Record<string, unknown>) => ({ start: knobFrom<number>('messaging.quiet_start_hour', o), end: knobFrom<number>('messaging.quiet_end_hour', o) });
+
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err)).slice(0, 200);
 
 /**
@@ -201,7 +206,7 @@ export async function notifyOwnerOfBriefing(business: Business, briefing: Briefi
     const status = ownerAlertStatus(business);
     if (status === 'no_owner_phone') return 'skipped_no_owner_phone';
     if (status === 'unverified') return 'skipped_owner_unverified';
-    if (inQuietHours(now, business.timezone)) return 'skipped_quiet_hours';
+    if (inQuietHours(now, business.timezone, await quietWindowFor(business.id))) return 'skipped_quiet_hours';
     const body = makeT(await ownerLocaleFor(business))('alert.briefing', { date: briefing.date, url: `${appBaseUrl()}/dashboard/briefings` });
     const allowed = await checkSmsAllowed(business.id, now, smsSegments(body));
     if (!allowed.ok) return 'skipped_cap';
@@ -224,9 +229,12 @@ export async function runDailyBriefings(opts: RunOptions = {}): Promise<JobRepor
 
   // Cheap pass first (pure, no I/O): which tenants are due at all? After 18:00 local a finished tenant costs nothing per tick.
   const due: Array<{ b: JobBusiness; slot: ReturnType<typeof briefingSlot>; claimId: string }> = [];
+  const knobs = await loadTenantOverridesMany(businesses.map((b) => b.id)); // tenant comfort knobs: briefing on / off and hour
   for (const b of businesses) {
-    const slot = briefingSlot(now, b.timezone);
+    const o = knobs.get(b.id) ?? {};
+    const slot = briefingSlot(now, b.timezone, knobFrom<number>('jobs.briefing_hour', o));
     if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: 'skipped_billing' }); continue; }
+    if (knobFrom<boolean>('jobs.briefing_enabled', o) === false) { report.items.push({ business_id: b.id, outcome: 'skipped_disabled' }); continue; }
     if (!slot.due && !opts.force) continue; // not yet 18:00 there: not worth a report row
     // A manual (forced) run has its own claim so it never uses up the scheduled 18:00 run of that day.
     due.push({ b, slot, claimId: `${b.id}:${slot.date}${opts.force ? ':manual' : ''}` });
@@ -302,11 +310,13 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
   });
   const swept = new Set(sweptRows.map((r) => r.id));
 
+  const knobs = await loadTenantOverridesMany(businesses.map((b) => b.id));
   for (const b of businesses) {
     if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: 'skipped_billing' }); continue; }
     const claimId = `${bucket}:${b.id}`;
     if (swept.has(claimId)) continue;
-    if (inQuietHours(now, b.timezone)) { report.items.push({ business_id: b.id, outcome: 'skipped_quiet_hours' }); continue; }
+    if (knobFrom<boolean>('jobs.gratitude_enabled', knobs.get(b.id) ?? {}) === false) { report.items.push({ business_id: b.id, outcome: 'skipped_disabled' }); continue; }
+    if (inQuietHours(now, b.timezone, quietFrom(knobs.get(b.id) ?? {}))) { report.items.push({ business_id: b.id, outcome: 'skipped_quiet_hours' }); continue; }
     if (report.processed >= MAX_GRATITUDE_PER_TICK && !dryRun) { report.items.push({ business_id: b.id, outcome: 'deferred_to_next_tick' }); continue; }
     if (dryRun) {
       report.items.push({ business_id: b.id, outcome: 'would_sweep', detail: { candidates: await deps.countGratitudeCandidates(b.id) } });
@@ -382,6 +392,8 @@ export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
     report.items.push({ outcome: 'cleaned', detail: run.value });
     await markRun('cleanup', now);
     if (Object.values(run.value).some((n) => n > 0)) await auditRun(report);
+    // Alert routing (admin console): mail the open critical alerts to the admins / ALERT_EMAIL / platform.alert_recipients (at most once per 6 h per alert). Never throws; off under NODE_ENV=test so no test mails admins.
+    if (process.env.NODE_ENV !== 'test') await dispatchAlertNotices({ now });
   } catch (err) {
     report.errors++;
     report.items.push({ outcome: 'error', detail: { error: errMsg(err) } });
@@ -550,11 +562,13 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
     let next: Date | null = null;
     let note: string | undefined;
     if (name === 'daily_briefing') {
-      const ids = businesses.map((b) => `${b.id}:${briefingSlot(now, b.timezone).date}`);
+      const knobs = await loadTenantOverridesMany(businesses.map((b) => b.id));
+      const hourOf = (id: string) => knobFrom<number>('jobs.briefing_hour', knobs.get(id) ?? {});
+      const ids = businesses.map((b) => `${b.id}:${briefingSlot(now, b.timezone, hourOf(b.id)).date}`);
       const done = new Set((await prisma.processedEvent.findMany({ where: { source: BRIEFING_CLAIM_SOURCE, id: { in: ids }, status: 'done' }, select: { id: true } })).map((r) => r.id));
       for (const b of businesses) {
-        const slot = briefingSlot(now, b.timezone);
-        const t = slot.due && !done.has(`${b.id}:${slot.date}`) ? now : nextBriefingAt(now, b.timezone);
+        const slot = briefingSlot(now, b.timezone, hourOf(b.id));
+        const t = slot.due && !done.has(`${b.id}:${slot.date}`) ? now : nextBriefingAt(now, b.timezone, hourOf(b.id));
         if (!next || t < next) next = t;
       }
       note = `${businesses.length} live business(es) eligible`;

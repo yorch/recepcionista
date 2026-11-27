@@ -27,6 +27,7 @@ import { TimezoneSettings } from '@/components/dashboard/timezone-settings';
 import { SchedulingSettings } from '@/components/dashboard/scheduling-settings';
 import { schedulingOf } from '@/lib/business-config';
 import { inferTimeZoneFromPhone } from '@/lib/tz-infer';
+import { ComfortSettings } from '@/components/dashboard/comfort-settings';
 
 export async function generateMetadata(): Promise<Metadata> {
   return { title: (await getT())('set.metaTitle') };
@@ -114,6 +115,11 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       <Card className="mt-6" id="time-zone">
         <CardHead title={t('pd.tz.title')} subtitle={t('pd.tz.sub')} />
         <div className="p-4"><TimezoneSettings businessId={biz.id} initial={{ timezone: tzOf(biz), suggested: inferTimeZoneFromPhone(biz.owner_phone_e164 ?? biz.owner_phone ?? null) }} /></div>
+      </Card>
+
+      <Card className="mt-6" id="comfort">
+        <CardHead title={t('at.comfort.title')} subtitle={t('at.comfort.sub')} />
+        <div className="p-4"><ComfortSettings businessId={biz.id} readOnly={ctx.role === 'admin'} /></div>
       </Card>
 
       <Card className="mt-6" id="scheduling">

@@ -673,7 +673,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const listed = kb ? matchService(kb.services, booking.service)[0] : undefined;
     const catalogCents = listed?.base_price != null && listed.base_price > 0 ? dollarsToCents(listed.base_price) : null;
     const decision = resolveDepositAmount({
-      policy: depositPolicyOf(business), priceEstimateCents: catalogCents, actor: 'ai',
+      policy: depositPolicyOf(business), priceEstimateCents: catalogCents, actor: 'ai', plan: business.plan ?? null,
     });
     if (!decision.ok) {
       return {

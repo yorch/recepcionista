@@ -10,6 +10,7 @@ import { addDaysToDateKey, localDateKey, tzOf, zonedTimeToUtc } from '@/lib/time
 /** Local wall-clock hour the end-of-day briefing is generated. */
 export const BRIEFING_HOUR = 18;
 export const BRIEFING_TIME = `${BRIEFING_HOUR}:00`;
+const timeOf = (hour: number | undefined): string => (hour === undefined ? BRIEFING_TIME : `${Math.min(23, Math.max(0, Math.trunc(hour)))}:00`);
 
 export const DEFAULT_TICK_SECONDS = 60;
 export const MIN_TICK_SECONDS = 5;
@@ -51,23 +52,24 @@ export interface BriefingSlot {
   due: boolean;
 }
 
-export function briefingSlot(now: Date, timezone: string | null | undefined): BriefingSlot {
+/** `hour`: the business's effective briefing hour (tenant override, `jobs.briefing_hour`); 18 when absent. */
+export function briefingSlot(now: Date, timezone: string | null | undefined, hour?: number): BriefingSlot {
   const tz = tzOf(timezone);
   const date = localDateKey(now, tz);
-  const scheduled = zonedTimeToUtc(date, BRIEFING_TIME, tz);
+  const scheduled = zonedTimeToUtc(date, timeOf(hour), tz);
   return { date, scheduled_at: scheduled, due: now.getTime() >= scheduled.getTime() };
 }
 
 /** The next 18:00 local instant strictly after `now` that has not passed (today's if still ahead, else tomorrow's). */
-export function nextBriefingAt(now: Date, timezone: string | null | undefined): Date {
+export function nextBriefingAt(now: Date, timezone: string | null | undefined, hour?: number): Date {
   const tz = tzOf(timezone);
-  const today = briefingSlot(now, tz);
+  const today = briefingSlot(now, tz, hour);
   if (!today.due) return today.scheduled_at;
-  return zonedTimeToUtc(addDaysToDateKey(today.date, 1), BRIEFING_TIME, tz);
+  return zonedTimeToUtc(addDaysToDateKey(today.date, 1), timeOf(hour), tz);
 }
 
 /** Texts to the owner (briefing-ready notice) respect the same 9pm-8am quiet window as every other text. */
-export const inQuietHours = (now: Date, timezone: string | null | undefined): boolean => isQuietHour(now, tzOf(timezone));
+export const inQuietHours = (now: Date, timezone: string | null | undefined, window?: { start: number; end: number }): boolean => isQuietHour(now, tzOf(timezone), window);
 
 /** Hour bucket used to claim "this business was swept this hour" (UTC, so two instances always agree). */
 export const hourBucket = (now: Date): string => now.toISOString().slice(0, 13); // 2027-03-14T18

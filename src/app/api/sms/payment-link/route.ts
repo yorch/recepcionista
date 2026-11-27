@@ -51,7 +51,7 @@ export async function POST(req: Request) {
     if (booking.deposit_paid) return fail('the deposit of this booking is already paid', 409);
     const decision = resolveDepositAmount({
       policy: depositPolicyOf(business), priceEstimateCents: booking.price_estimate ?? null, requestedCents: body.amount_cents,
-      storedCents: booking.deposit_amount ?? null, actor: 'owner',
+      storedCents: booking.deposit_amount ?? null, actor: 'owner', plan: business.plan ?? null,
     });
     if (!decision.ok) return fail(decision.error, 422);
     const { sms, body: text, link } = await createAndSendPaymentLink({

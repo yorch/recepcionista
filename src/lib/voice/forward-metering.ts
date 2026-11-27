@@ -23,6 +23,7 @@ import {
 import { chargeCallBudget, businessBudget, type BudgetContext, type BudgetDenial } from '@/lib/voice/caller-limits';
 import { rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
+import { knobOr } from '@/lib/admin/tenant-knobs';
 
 const log = logger('voice/forward-metering');
 
@@ -68,7 +69,7 @@ export async function forwardAllowance(businessId: string, env: Record<string, s
       known = d.known;
       if (!d.ok) return { ok: false, why: d.why === 'caller_limited' ? 'caller_limited' : d.why === 'check_failed' ? 'check_failed' : 'rate_limited', known };
     } else {
-      const hour = await rateLimit(`voice/forward:hour:${businessId}`, forwardCallsPerHour(env), 60 * 60_000, { failClosed: true });
+      const hour = await rateLimit(`voice/forward:hour:${businessId}`, await knobOr(businessId, 'forward.calls_per_hour', forwardCallsPerHour(env)), 60 * 60_000, { failClosed: true });
       if (!hour.allowed) return { ok: false, why: 'rate_limited' };
     }
 
@@ -98,7 +99,7 @@ export async function voicemailAllowance(businessId: string, env: Record<string,
       const d = await chargeCallBudget('voicemail', ctx, env);
       return d.ok ? { ok: true } : { ok: false, why: d.why, known: d.known };
     }
-    return (await rateLimit(`voice/voicemail:hour:${businessId}`, voicemailsPerHour(env), 60 * 60_000, { failClosed: true })).allowed
+    return (await rateLimit(`voice/voicemail:hour:${businessId}`, await knobOr(businessId, 'voicemail.calls_per_hour', voicemailsPerHour(env)), 60 * 60_000, { failClosed: true })).allowed
       ? { ok: true } : { ok: false, why: 'business_budget' };
   } catch {
     return { ok: false, why: 'check_failed' };

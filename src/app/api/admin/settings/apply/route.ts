@@ -1,6 +1,7 @@
 import { ok } from '@/lib/http';
 import { guardAdminRoute, adminFail, readBody } from '@/lib/admin/guard';
 import { applyChanges, SettingsError, type SettingChange } from '@/lib/admin/settings-store';
+import { providerWriteChecks } from '@/lib/admin/provider-tests';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -20,9 +21,10 @@ export async function POST(req: Request) {
     const body = await readBody(req);
     if (!Array.isArray(body.changes)) throw new SettingsError(422, 'invalid_body', 'changes must be an array');
     if (body.expected_version !== undefined && !Number.isInteger(body.expected_version)) throw new SettingsError(422, 'invalid_body', 'expected_version must be an integer');
+    const checks = await providerWriteChecks(body.changes as SettingChange[], body, { dryRun: body.dry_run === true });
     const res = await applyChanges({
-      changes: body.changes as SettingChange[], reason: typeof body.reason === 'string' ? body.reason : undefined, confirm: typeof body.confirm === 'string' ? body.confirm : undefined,
-      expectedVersion: body.expected_version as number | undefined, dryRun: body.dry_run === true, actor: g.ctx.actor,
+      ...checks, changes: body.changes as SettingChange[], reason: typeof body.reason === 'string' ? body.reason : undefined, confirm: typeof body.confirm === 'string' ? body.confirm : undefined,
+      expectedVersion: body.expected_version as number | undefined, dryRun: body.dry_run === true, adopt: body.adopt === true, actor: g.ctx.actor,
     });
     return ok(res);
   } catch (err) { return adminFail(err); }
