@@ -58,4 +58,14 @@ describe('SMTP send: pinned to the validated address', () => {
       expect(transports).toHaveLength(0);
     }
   });
+  test('trust follows the variable that supplied the target: an env-pinned SMTP_HOST does not make a console SMTP_URL trusted', async () => {
+    const { sendEmail } = await import('../src/lib/email');
+    const saved = process.env.SMTP_HOST; process.env.SMTP_HOST = 'smtp.local.relay'; // pinned by the environment ...
+    try {
+      transports.length = 0; answers = ['127.0.0.1'];
+      // ... while the target comes from SMTP_URL (supplied by the console, not pinned): it is judged as a console relay and refused
+      await expect(sendEmail(msg, consoleEnv({ SMTP_HOST: 'smtp.local.relay', SMTP_URL: 'smtp://smtp.console.example:587' }))).rejects.toThrow(/smtp send failed/);
+      expect(transports).toHaveLength(0);
+    } finally { if (saved === undefined) delete process.env.SMTP_HOST; else process.env.SMTP_HOST = saved; }
+  });
 });

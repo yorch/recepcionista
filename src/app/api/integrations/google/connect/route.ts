@@ -15,7 +15,7 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET(req: Request) {
   if (googleMockRefused()) return fail('GOOGLE_OAUTH_MOCK is not allowed in production', 503);
-  const r = await scoped(req, 'owner');
+  const r = await scoped(req, 'owner', { stateChanging: true });
   if (!r.ok) return r.response;
   const { s } = r;
   if (!googleConfigured()) return fail('Google Calendar is not configured on this server', 503);

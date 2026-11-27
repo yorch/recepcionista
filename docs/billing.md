@@ -88,7 +88,7 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | text for the annual choice, e.g. `$1,490/year (2 months free)` (runtime setting: console or `.env` + restart, no rebuild) |
 | `STRIPE_BILLING_WEBHOOK_SECRET` | billing endpoint signing secret |
 | `BILLING_TRIAL_DAYS` | 0-90, default 7 |
-| `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh and compose. Outside production only `true` enforces |
+| `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh (an unset value is accepted only when the admin console holds it: checked after the stack is up; compose no longer demands it). Outside production only `true` enforces |
 | `BILLING_PAST_DUE_GRACE_DAYS` | default 5 |
 | `PLAN_SMS_CAP`, `PLAN_CALL_MINUTES_CAP` | default monthly caps (500 SMS segments, 300 minutes); per-business overrides win |
 | `TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP` | lower caps while `billing_status='trialing'` (defaults 50 segments, 30 minutes); never above the plan cap, per-business overrides win |

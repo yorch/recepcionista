@@ -64,11 +64,11 @@ describe('H2/H3/L5: permissions and the gate paths', () => {
 describe('M3: SSRF classification works on parsed addresses', () => {
   test('non-canonical spellings of private addresses are private', () => {
     for (const ip of ['::ffff:7f00:1', '0:0:0:0:0:0:0:1', '0::1', '::ffff:a9fe:a9fe', '::127.0.0.1', 'fec0::1', '2002:7f00:1::', '::', '0:0:0:0:0:0:0:0', '::ffff:127.0.0.1', '::FFFF:7F00:0001', '[::1]',
-      '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:db8::1', 'fe80::1%eth0', 'FC00::1', 'ff02::1', '64:ff9b::7f00:1', '2002:0a00:0001::1', '::ffff:0:7f00:1', '0000:0000:0000:0000:0000:ffff:c0a8:0101',
+      '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:db8::1', 'fe80::1%eth0', 'FC00::1', 'ff02::1', '64:ff9b::7f00:1', '64:ff9b::a00:1', '64:ff9b::c0a8:1', '64:ff9b:1::808:808', '2002:0a00:0001::1', '::ffff:0:7f00:1', '0000:0000:0000:0000:0000:ffff:c0a8:0101',
       '::192.168.0.1', '100::1', '169.254.169.254', '0.0.0.0', '100.64.0.1', 'not-an-ip', '']) expect([ip, isPrivateAddress(ip)]).toEqual([ip, true]);
   });
   test('public addresses stay public (v4, global unicast v6, v4-mapped public, 6to4 of a public v4)', () => {
-    for (const ip of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '2606:4700:4700::1111', '2a00:1450:4001:81b::200e', '::ffff:8.8.8.8', '::ffff:808:808', '2002:0808:0808::1']) expect([ip, isPrivateAddress(ip)]).toEqual([ip, false]);
+    for (const ip of ['8.8.8.8', '1.1.1.1', '172.32.0.1', '2606:4700:4700::1111', '2a00:1450:4001:81b::200e', '::ffff:8.8.8.8', '::ffff:808:808', '2002:0808:0808::1', '64:ff9b::808:808', '64:ff9b::0808:0808']) expect([ip, isPrivateAddress(ip)]).toEqual([ip, false]);
   });
   test('the groups parser handles every textual form and rejects junk', () => {
     expect(ipv6Groups('::1')).toEqual([0, 0, 0, 0, 0, 0, 0, 1]);

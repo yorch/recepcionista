@@ -139,7 +139,6 @@ async function sendSmtp(msg: EmailMessage, env: NodeJS.ProcessEnv): Promise<Emai
     let pinnedIp: string | null = null; // the address validated below: the connection goes to IT, so a second lookup (DNS rebinding) never happens
     let urlTarget: { host: string; port: number; secure: boolean; user: string | null; pass: string | null } | null = null;
     const rawUrl = (env.SMTP_URL ?? '').trim();
-    const trusted = pinnedByEnv('SMTP_HOST') || pinnedByEnv('SMTP_URL');
     if (rawUrl) {
       const t = smtpTargetOfUrl(rawUrl);
       if (!t) throw new Error('smtp target refused');
@@ -147,6 +146,8 @@ async function sendSmtp(msg: EmailMessage, env: NodeJS.ProcessEnv): Promise<Emai
       urlTarget = { host: t.host, port: t.port ?? 587, secure: u.protocol === 'smtps:' || env.SMTP_SECURE === 'true', user: u.username ? decodeURIComponent(u.username) : null, pass: u.password ? decodeURIComponent(u.password) : null };
     }
     const target = urlTarget ?? { host: env.SMTP_HOST ?? '', port: Number(env.SMTP_PORT) || 587, secure: env.SMTP_SECURE === 'true', user: env.SMTP_USER || null, pass: env.SMTP_PASS ?? '' };
+    // trust follows the variable that SUPPLIED the target: SMTP_URL wins over SMTP_HOST, so a console URL is never trusted just because SMTP_HOST is pinned by the environment (or the reverse)
+    const trusted = urlTarget ? pinnedByEnv('SMTP_URL') : pinnedByEnv('SMTP_HOST');
     if (!trusted) pinnedIp = await resolvePublicSmtpTarget(target.host, target.port);
     const nodemailer = await import('nodemailer');
     const timeouts = { connectionTimeout: SEND_TIMEOUT_MS, greetingTimeout: SEND_TIMEOUT_MS, socketTimeout: SEND_TIMEOUT_MS * 2 };

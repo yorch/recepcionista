@@ -617,3 +617,18 @@ Tests: `tests/review-fixes-pure.test.ts`, `tests/integration/review-fixes.test.t
 | L4 | The MAC of a secret row did not cover the dual-secret window | Fixed | `macPayload` covers `previousEnvelope` / `previousUntil`; legacy rows load their current secret only and are re-signed by the re-encryption pass |
 | L5 | `/api/me` prefix match in the gate | Fixed | `isOpenPath`: `/api/me/locale` exactly, other prefixes on segment boundaries |
 | L8 | `refreshNow` could return a load that started before the commit | Fixed | a call arriving while a load runs shares ONE follow-up load that starts after it |
+
+## Admin console branch: verification round (Opus verification, remaining defects)
+
+| Id | Finding | State | Where / test |
+| --- | --- | --- | --- |
+| V1 (high) | State-changing GET tenant routes (Google connect / callback, the demo billing activation) skipped the support write gate (it only ran for non-safe methods): an admin with no grant could attach their calendar to any tenant | Fixed | `authenticate(req, { stateChanging: true })` applies `supportWriteGate` whatever the method; used by `scoped(..., { stateChanging: true })` (connect, callback) and `billing/mock-activate`; all other GET routes swept (read-only proxies left as reads). `tests/integration/stateful-get-gate.test.ts` (no grant, grant for another business, grant for this business, support role, plain owner) |
+| V2 (medium) | `compose.production.yaml` still hard-required `BILLING_ENFORCED` and `STRIPE_WEBHOOK_SECRET` (`:?`), so a console-held deployment could not pass | Fixed | `:-` defaults (the other `:?` are env-only: `POSTGRES_*`, `APP_URL`, `ADMIN_TOKEN`, `DOMAIN`); the app fails closed on both and `deploy.sh` verifies them after `up -d`; checked with `docker compose config` |
+| V3 (medium) | `deploy.sh` conditional checks fired only when the trigger key was in `.env` | Fixed | the post-up verification always runs and requires a ready provider card for every provider whose primary key is set in `.env` or the console. `tests/deploy-verify-pure.test.ts` (stub admin API) |
+| V4 (medium) | The console-held verification ran after the old container was replaced | Fixed | the previous app image is tagged before the build and put back automatically (app service only) on a failed verification or an unhealthy app; printed rollback and dump instructions; `docs/runbook.md` "Deploy verification and automatic rollback". `tests/deploy-verify-pure.test.ts` (fake `docker`) |
+| V5 (low) | `reencryptAll` re-signed rows whose MAC was broken | Fixed | skipped and counted as failed. `tests/integration/admin-settings.test.ts` (L5) |
+| V6 (low) | SMTP trust used `SMTP_HOST \|\| SMTP_URL` regardless of which one supplied the target | Fixed | `email/index.ts`: trust follows the supplying variable. `tests/email-smtp-pin.test.ts` |
+| V7 (low) | NAT64 `64:ff9b::/96` refused wholesale | Fixed | judged by its embedded IPv4 like 6to4. `tests/review-fixes-pure.test.ts` |
+| V8 (low) | `revoke-sessions` let an admin with a grant for A sign a member out everywhere | Fixed | only break-glass credentials act everywhere; an admin user is scoped to the granted business. `tests/integration/stateful-get-gate.test.ts` |
+
+Accepted without change (documented in `docs/design/admin-console-contracts.md` Residuals): the two-form fingerprint display while a legacy fingerprint exists; the `support` role refused on read-only POST routes of the tenant side.

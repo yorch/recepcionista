@@ -262,6 +262,11 @@ export interface AuthenticateOptions {
   verifiedEmail?: boolean;
   /** Let an admin who still has to enrol in 2FA through (2FA / session management endpoints only). */
   allowEnrollment?: boolean;
+  /**
+   * The route changes state (or spends/attaches provider resources) although it answers a safe method (GET): an OAuth connect/callback, a demo activation. An admin USER then goes
+   * through the support write gate exactly as for a POST (open grant for exactly this business; the support role gets `support_scope`).
+   */
+  stateChanging?: boolean;
 }
 
 /**
@@ -290,7 +295,7 @@ export async function authenticate(req: Request, opts: AuthenticateOptions = {})
   if (!hasRole(res.principal, opts.role ?? 'staff')) return deny(403, 'forbidden');
   if (opts.verifiedEmail && !res.principal.email_verified) return deny(403, 'email_not_verified', 'email_not_verified');
   // An admin USER changing a tenant needs an open support write grant (no silent full-write impersonation): see src/lib/admin/support-gate.ts.
-  if (res.principal.kind === 'admin' && res.principal.via === 'user' && !SAFE_METHODS.has(req.method)) {
+  if (res.principal.kind === 'admin' && res.principal.via === 'user' && (opts.stateChanging || !SAFE_METHODS.has(req.method))) {
     const { supportWriteGate } = await import('@/lib/admin/support-gate');
     const gate = await supportWriteGate(req, res.principal);
     if (gate && gate.ok === false) return deny(gate.status, gate.error, gate.code);

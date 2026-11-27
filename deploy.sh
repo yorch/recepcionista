@@ -5,7 +5,8 @@
 #   ./deploy.sh                                   build, back up the DB, migrate, (re)start
 #   ./deploy.sh --logs                            follow the app logs after starting
 #
-# Safe to re-run: migrations are idempotent and `up -d` recreates only what
+# If the post-start verification fails (or the app never becomes healthy) the previous app image is put back automatically (docs/runbook.md "Deploy verification and
+# automatic rollback"). Safe to re-run: migrations are idempotent and `up -d` recreates only what
 # changed. Before `up -d`, if the database container is running, a gzipped
 # pg_dump is written to $BACKUP_DIR (default ./backups). There is no --seed:
 # the demo dataset truncates every table and creates a fake live tenant, so
@@ -249,6 +250,34 @@ fi
 "${COMPOSE[@]}" config >/dev/null || die "compose file is invalid"
 
 # ---- build + backup + start ----------------------------------------------
+# Remember the image the RUNNING app uses before the build re-tags it, so a failed verification can put it back (rollback_app). Empty on a first deploy.
+ROLLBACK_TAG="recepcionista-app:rollback"
+PREV_IMAGE=""
+OLD_APP_ID="$("${COMPOSE[@]}" ps -q app 2>/dev/null || true)"
+if [[ -n "$OLD_APP_ID" ]]; then
+  PREV_IMAGE="$(docker inspect -f '{{.Image}}' "$OLD_APP_ID" 2>/dev/null || true)"
+  if [[ -n "$PREV_IMAGE" ]] && ! docker tag "$PREV_IMAGE" "$ROLLBACK_TAG" 2>/dev/null; then PREV_IMAGE=""; fi
+fi
+BACKUP_FILE=""
+
+# Put the previous app image back (the new one failed its health or settings verification). Migrations are forward-only and are NOT undone: an app-only rollback is the
+# documented case (docs/runbook.md section 4); a release whose migration is incompatible with the old app needs the pre-deploy dump restored instead.
+rollback_app() {
+  echo >&2
+  if [[ -z "$PREV_IMAGE" ]]; then
+    echo "ROLLBACK: there is no previous app image (first deploy): stopping the new app so it takes no traffic." >&2
+    "${COMPOSE[@]}" stop app >&2 || true
+    return 0
+  fi
+  echo "ROLLBACK: putting the previous app image back (${ROLLBACK_TAG}); database migrations already applied are NOT reverted." >&2
+  if APP_IMAGE="$ROLLBACK_TAG" "${COMPOSE[@]}" up -d --no-build --no-deps --force-recreate app >&2; then
+    echo "ROLLBACK: previous app restarted. Fix the cause, then run ./deploy.sh again." >&2
+  else
+    echo "ROLLBACK FAILED: restore by hand: APP_IMAGE=${ROLLBACK_TAG} docker compose -f compose.production.yaml up -d --no-build --no-deps --force-recreate app" >&2
+  fi
+  [[ -z "$BACKUP_FILE" ]] || echo "If the release's migration is incompatible with the old app, restore the pre-deploy dump: $BACKUP_FILE (docs/runbook.md section 4)." >&2
+}
+
 "${COMPOSE[@]}" build
 
 # Back up before `up -d`, because `up -d` runs `migrate`, which is forward-only.
@@ -288,31 +317,35 @@ for _ in $(seq 1 40); do
   fi
   if [[ "$STATUS" == "unhealthy" ]]; then
     "${COMPOSE[@]}" logs --tail=40 app >&2
-    die "app is unhealthy (see logs above)"
+    rollback_app
+    die "app is unhealthy (see logs above); the previous release was restored"
   fi
   sleep 1.5
 done
 
 if [[ "$HEALTHY" != "1" ]]; then
   "${COMPOSE[@]}" logs --tail=40 app >&2
-  die "app did not become healthy within 60s (see logs above)"
+  rollback_app
+  die "app did not become healthy within 60s (see logs above); the previous release was restored"
 fi
 
 # ---- console-held settings the .env no longer carries ---------------------
 # Asks the RUNNING server what it holds (read-only, from inside the container: no DNS or proxy involved; the Bearer ADMIN_TOKEN use is audited and mailed like any other).
-if (( ${#DEFERRED[@]} > 0 )); then
-  echo
-  echo "Verifying ${#DEFERRED[@]} setting(s) that are not in .env are held by the admin console…"
-  VERIFY_JS='
+# ALWAYS runs: a provider whose primary key lives only in the console (so .env has no trigger line for the dependent checks above) must still be complete, so for every
+# provider whose primary key is set ANYWHERE (env or console) its selftest card has to be ready. A failure rolls the previous app image back (rollback_app).
+echo
+echo "Verifying the effective configuration (${#DEFERRED[@]} setting(s) not in .env must be held by the admin console; every configured provider must be complete)…"
+VERIFY_JS='
 const specs = (process.env.RC_SPECS || "").split("\n").filter(Boolean);
-const base = "http://127.0.0.1:" + (process.env.PORT || 3000);
+const base = process.env.RC_BASE || ("http://127.0.0.1:" + (process.env.PORT || 3000));
 const h = { authorization: "Bearer " + process.env.ADMIN_TOKEN };
 const get = async (p) => { const r = await fetch(base + p, { headers: h }); if (!r.ok) throw new Error(p + " answered " + r.status); return (await r.json()).data; };
 (async () => {
   const [self, all] = await Promise.all([get("/api/admin/selftest"), get("/api/admin/settings")]);
   const byKey = new Map(all.settings.map((s) => [s.key, s]));
   const isSet = (k) => { const s = byKey.get(k); return Boolean(s) && (s.kind === "secret" ? Boolean(s.secret && s.secret.set) : s.source !== "default" && s.value !== null && s.value !== ""); };
-  const card = (n) => (self.providers.find((p) => p.provider === n) || {}).ready === true;
+  const cardOf = (n) => self.providers.find((p) => p.provider === n) || {};
+  const card = (n) => cardOf(n).ready === true;
   const enforced = byKey.get("billing.enforced");
   const tokenOk = (t) => {
     if (t === "@llm") return card("llm");
@@ -330,23 +363,36 @@ const get = async (p) => { const r = await fetch(base + p, { headers: h }); if (
     const label = spec.slice(0, i), tokens = spec.slice(i + 1).split(",");
     if (!tokens.every(tokenOk)) { bad++; console.log("MISSING " + label); }
   }
+  // A provider is "in use" when ANY of its trigger keys is set anywhere (env or console): then its whole card must be ready, whichever side holds each value.
+  const TRIGGERS = {
+    elevenlabs: ["elevenlabs.api_key"],
+    twilio: ["twilio.account_sid"],
+    google: ["google.client_id"],
+    stripe: ["stripe.secret_key", "stripe.price_id_annual"],
+  };
+  for (const [name, keys] of Object.entries(TRIGGERS)) {
+    if (!keys.some(isSet)) continue;
+    const c = cardOf(name);
+    const missing = c.ready === true ? [] : (Array.isArray(c.missing) && c.missing.length ? c.missing : ["(provider card not ready)"]);
+    if (missing.length) { bad++; console.log("INCOMPLETE " + name + " is configured but not ready; missing: " + missing.join(", ")); }
+  }
   process.exit(bad ? 3 : 0);
 })().catch((e) => { console.log("UNVERIFIED " + e.message); process.exit(4); });
 '
-  SPECS="$(printf '%s\n' "${DEFERRED[@]}")"
-  set +e
-  VERIFY_OUT="$("${COMPOSE[@]}" exec -T -e RC_SPECS="$SPECS" -e SIGNUP_ALLOW_WITHOUT_CAPTCHA="${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" app node -e "$VERIFY_JS" 2>&1)"
-  VERIFY_RC=$?
-  set -e
-  if [[ "$VERIFY_RC" == "0" ]]; then
-    echo "OK: every setting missing from .env is held by the admin console."
-  else
-    printf '%s\n' "$VERIFY_OUT" >&2
-    if [[ "$VERIFY_RC" == "3" ]]; then
-      die "the stack is up but the settings listed above are in NEITHER .env NOR the admin console (the lines say what each one breaks). Set them in .env and re-run ./deploy.sh, or in the console (Settings, then Providers)."
-    fi
-    die "the stack is up but the console-held settings could not be verified (see above): check /api/admin/selftest by hand before sending traffic."
+SPECS="$(printf '%s\n' "${DEFERRED[@]+"${DEFERRED[@]}"}")"
+set +e
+VERIFY_OUT="$("${COMPOSE[@]}" exec -T -e RC_SPECS="$SPECS" -e SIGNUP_ALLOW_WITHOUT_CAPTCHA="${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" app node -e "$VERIFY_JS" 2>&1)"
+VERIFY_RC=$?
+set -e
+if [[ "$VERIFY_RC" == "0" ]]; then
+  echo "OK: the effective configuration is complete (.env and admin console together)."
+else
+  printf '%s\n' "$VERIFY_OUT" >&2
+  rollback_app
+  if [[ "$VERIFY_RC" == "3" ]]; then
+    die "the new release failed verification: the settings listed above are in NEITHER .env NOR the admin console, or a configured provider is incomplete (the lines say what each one breaks). The previous release was put back. Set them in .env or in the console (Settings, then Providers) and re-run ./deploy.sh."
   fi
+  die "the new release could not be verified (see above); the previous release was put back. Check /api/admin/selftest by hand, then re-run ./deploy.sh."
 fi
 
 "${COMPOSE[@]}" ps

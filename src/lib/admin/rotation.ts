@@ -64,8 +64,11 @@ export async function reencryptAll(opts: { actor: StoreActor; reason: string; cu
         if (!r.secretEnvelope) continue;
         const stale = needsReencrypt(r.secretEnvelope, keys) || (r.previousEnvelope !== null && needsReencrypt(r.previousEnvelope, keys));
         // a row MACed before the dual-secret window was covered (legacy payload) is re-signed here with the full payload; its previous envelope is dropped (the loader ignored it)
-        const legacyMac = r.key !== CANARY_KEY && !verifySettingMac(r.key, macPayload({ secretEnvelope: r.secretEnvelope, previousEnvelope: r.previousEnvelope, previousUntil: r.previousUntil }), r.version, r.integrityMac, keys)
-          && verifySettingMac(r.key, legacyMacPayload({ secretEnvelope: r.secretEnvelope }), r.version, r.integrityMac, keys);
+        const fullMacOk = r.key === CANARY_KEY || verifySettingMac(r.key, macPayload({ secretEnvelope: r.secretEnvelope, previousEnvelope: r.previousEnvelope, previousUntil: r.previousUntil }), r.version, r.integrityMac, keys);
+        const legacyMacOk = r.key !== CANARY_KEY && !fullMacOk && verifySettingMac(r.key, legacyMacPayload({ secretEnvelope: r.secretEnvelope }), r.version, r.integrityMac, keys);
+        // A row whose MAC verifies neither way was tampered with (or corrupted): never re-sign it (that would launder the change); count it as failed and leave it untouched.
+        if (!fullMacOk && !legacyMacOk) { progress.settings.failed++; continue; }
+        const legacyMac = legacyMacOk;
         if (!stale && !legacyMac) continue;
         try {
           const plain = decryptSetting(r.secretEnvelope, r.key, keys);

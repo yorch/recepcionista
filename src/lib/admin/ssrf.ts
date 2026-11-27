@@ -43,7 +43,7 @@ function isPrivateV4(a: number, b: number): boolean {
 /**
  * True for every address a server must not connect to on an admin's say-so: loopback, unspecified, private, link-local, site-local, CGNAT, unique local, multicast, documentation, reserved and
  * cloud-metadata ranges. IPv6 is judged on its PARSED groups, never on its spelling (`::ffff:7f00:1`, `0:0:0:0:0:0:0:1`, `::127.0.0.1`, `fec0::1` and `2002:7f00:1::` are all private): v4-mapped,
- * v4-compatible and SIIT forms are judged by the IPv4 they carry, 6to4 by its embedded IPv4, Teredo and NAT64 are refused, and only global unicast (2000::/3) is ever allowed.
+ * v4-compatible and SIIT forms are judged by the IPv4 they carry, 6to4 by its embedded IPv4, NAT64 64:ff9b::/96 by the IPv4 it translates to, Teredo is refused, and only global unicast (2000::/3) is ever allowed.
  */
 export function isPrivateAddress(ip: string): boolean {
   const v = net.isIP(ip.trim().replace(/^\[|\]$/g, '').replace(/%.*$/, ''));
@@ -54,7 +54,8 @@ export function isPrivateAddress(ip: string): boolean {
   const v4 = (hi: number): boolean => isPrivateV4(hi >> 8, hi & 255);
   if (g.slice(0, 5).every((x) => x === 0) && (g[5] === 0xffff || g[5] === 0)) return g[5] === 0 && g[6] === 0 && g[7] <= 1 ? true : v4(g[6]); // ::, ::1, v4-mapped, v4-compatible
   if (g.slice(0, 4).every((x) => x === 0) && g[4] === 0xffff && g[5] === 0) return v4(g[6]); // SIIT ::ffff:0:a.b.c.d
-  if ((g[0] & 0xe000) !== 0x2000) return true; // everything outside global unicast 2000::/3: ULA, link-local, site-local fec0::/10, multicast, loopback, 64:ff9b NAT64, discard
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return v4(g[6]); // NAT64 64:ff9b::/96 (RFC 6052): judged by the IPv4 it translates to, like 6to4 (the local-use 64:ff9b:1::/48 stays refused below)
+  if ((g[0] & 0xe000) !== 0x2000) return true; // everything outside global unicast 2000::/3: ULA, link-local, site-local fec0::/10, multicast, loopback, local-use NAT64, discard
   if (g[0] === 0x2002) return v4(g[1]); // 6to4: the IPv4 it tunnels to
   if (g[0] === 0x2001 && g[1] < 0x200) return true; // 2001::/23 IETF protocol assignments, incl. Teredo 2001::/32
   if (g[0] === 0x2001 && g[1] === 0x0db8) return true; // documentation

@@ -431,6 +431,12 @@ Owner card: `/dashboard/settings#comfort` (quiet hours, briefing on / off and ho
 * The SMTP send path connects to the one validated address with the name as TLS servername (no second lookup); an operator-pinned `SMTP_HOST` / `SMTP_URL` (environment) is trusted as before and not pinned.
 * `deploy.sh` turns a missing `.env` line for a console-capable setting into a warning and checks the running server afterwards (`/api/admin/selftest`, `/api/admin/settings` with the Bearer token, from inside the app container: one audited and mailed Bearer use per deploy that has deferred settings); it fails the deploy when neither `.env` nor the console holds it.
 
+* State-changing GET routes (Google connect and callback, the demo billing activation) call `authenticate(..., { stateChanging: true })` (`scoped(req, role, { stateChanging: true })`): an admin USER passes the support write gate for them exactly as for a POST (grant for exactly the named business; the support role gets `support_scope`; read_only `forbidden`). A NEW route that changes state or spends provider money on a safe method must pass the same option. Reviewed and left as plain reads: the recording / voicemail audio proxies, the live transcript stream and the voice preview (they read existing data, rate limited and audited where they play).
+* Accepted without change: the secret fingerprint is shown in two forms while a legacy fingerprint exists (the stored legacy value until the next re-encryption recomputes it); the `support` role is refused (403 `support_scope`) on the read-only POST routes of the tenant side, because no tenant route is in its write scope even when it only reads.
+* `reencryptAll` never re-signs a secret row whose MAC verifies neither as the full nor as the legacy payload: it is counted in `settings.failed` and left as found (a tampered row must stay visible to the integrity check until an owner re-enters the value).
+* The SMTP trust decision follows the variable that supplied the target (`SMTP_URL` when present, else `SMTP_HOST`); NAT64 `64:ff9b::/96` is judged by the IPv4 it translates to, the local-use `64:ff9b:1::/48` stays refused.
+* `POST /api/team/users/{id}/revoke-sessions`: an admin USER signs a member out of the granted business only; only the break-glass credentials sign the account out everywhere.
+
 ### D.8 Residuals (agent D)
 * No background provider poller: the health history grows when the console tests providers.
 * The alert notice runs from the hourly cleanup job: with `JOBS=off` only the button sends it.

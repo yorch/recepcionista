@@ -685,6 +685,16 @@ integration('admin console: settings store, loader, secrets (postgres)', () => {
     expect(fixed.previousEnvelope).toBeNull();
   });
 
+  test('L5: re-encryption never re-signs a row whose MAC verifies neither way (tampered): it is counted as failed and left untouched', async () => {
+    await store.setSecret({ key: 'llm.anthropic_api_key', value: 'tampered-row-token-0001', reason: 'tamper test secret', confirm: 'llm.anthropic_api_key', actor: actor() });
+    await prisma.platformSetting.update({ where: { key: 'llm.anthropic_api_key' }, data: { integrityMac: 'AAAA-not-a-valid-mac' } });
+    const p = await rotation.reencryptAll({ actor: actor(), reason: 're-encrypt with a tampered row' });
+    expect(p.settings.failed).toBeGreaterThanOrEqual(1);
+    const after = await prisma.platformSetting.findUniqueOrThrow({ where: { key: 'llm.anthropic_api_key' } });
+    expect(after.integrityMac).toBe('AAAA-not-a-valid-mac');
+    await prisma.platformSetting.deleteMany({ where: { key: 'llm.anthropic_api_key' } });
+  });
+
   test('L8: refreshNow after a commit never returns a load that started before it', async () => {
     const key = `l8-${Math.random().toString(36).slice(2, 8)}`;
     const orig = prisma.platformSetting.findMany.bind(prisma.platformSetting);
