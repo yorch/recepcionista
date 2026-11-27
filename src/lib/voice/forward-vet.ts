@@ -5,6 +5,7 @@
  *  - TWILIO_PHONE_NUMBER (the platform's own number) likewise.
  * Used wherever a forward target is set (verify start/confirm, adopting the owner phone) and again at dial time.
  */
+import { configEnv } from '@/lib/config';
 import { getBusinessByPhone } from '@/lib/db';
 import { defaultPhoneCountry, phoneCountry, toE164 } from '@/lib/phone';
 import { validateForwardNumber, type ForwardNumberCheck } from '@/lib/voice/forward-number';
@@ -14,7 +15,7 @@ export async function vetForwardNumber(business: Pick<Business, 'id' | 'phone_e1
   const country = phoneCountry(business.phone_e164) ?? defaultPhoneCountry();
   const check = validateForwardNumber(raw, country, { ownLines: [business.phone_e164] });
   if (!check.ok) return check;
-  const platformNumber = toE164(process.env.TWILIO_PHONE_NUMBER);
+  const platformNumber = toE164(configEnv().TWILIO_PHONE_NUMBER);
   if (platformNumber && platformNumber === check.e164) return { ok: false, error: 'that is an assistant number: forwarding to it would loop the call' };
   const holder = await getBusinessByPhone(check.e164);
   if (holder) return { ok: false, error: 'that is an assistant number: forwarding to it would loop the call' };

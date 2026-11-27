@@ -1,3 +1,4 @@
+import { configEnv } from '@/lib/config';
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, requireRecentAuth } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
@@ -82,7 +83,7 @@ export async function POST(req: Request) {
     }
     const hooks = numberWebhooks();
     if (!hooks) return fail('no public base URL is configured (PUBLIC_BASE_URL or APP_URL): the webhook addresses are unknown', 503);
-    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE_NUMBER) return fail('Twilio is not configured: there are no numbers to repair', 503);
+    if (!configEnv().TWILIO_ACCOUNT_SID || !configEnv().TWILIO_AUTH_TOKEN || !configEnv().TWILIO_PHONE_NUMBER) return fail('Twilio is not configured: there are no numbers to repair', 503);
 
     const rows = await prisma.business.findMany({
       where: { phone: { not: null }, ...(ids ? { id: { in: ids } } : {}), ...(typeof body.cursor === 'string' ? { id: { gt: body.cursor, ...(ids ? { in: ids } : {}) } } : {}) },

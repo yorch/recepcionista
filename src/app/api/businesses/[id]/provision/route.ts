@@ -1,3 +1,4 @@
+import { configEnv } from '@/lib/config';
 import { NextResponse } from 'next/server';
 import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
@@ -76,7 +77,7 @@ const PROVISION_LEASE_MS = 90_000;
  * (Twilio) is configured. Outside both (local demo, tests) the mock agent is allowed so the demo keeps working. Checked BEFORE the number is
  * bought, so a misconfigured deployment never pays for a number that cannot be answered, and again after the agent step.
  */
-export const realVoiceRequired = (env: NodeJS.ProcessEnv = process.env): boolean => env.NODE_ENV === 'production' || hasTwilio();
+export const realVoiceRequired = (env: NodeJS.ProcessEnv = configEnv()): boolean => env.NODE_ENV === 'production' || hasTwilio();
 
 export async function POST(
   req: Request,

@@ -3,6 +3,7 @@
  * opt-outs and from SMS_ALLOWED_COUNTRY_CODES, so the destination must be a number the owner PROVED they control
  * (owner-phone verification, `businesses.owner_phone_verified_at`). Pure helpers, no I/O.
  */
+import { configEnv } from '@/lib/config';
 import { toE164 } from '@/lib/phone';
 import type { Business } from '@/lib/types';
 
@@ -22,7 +23,7 @@ export const OWNER_PHONE_GRANDFATHER_ACK_VALUE = 'i-understand';
  * Turn it off once owners have verified (docs/runbook.md).
  */
 export const ownerPhoneGrandfathered = (
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = configEnv(),
   business?: { created_at?: string | null },
   now: number = Date.now(),
 ): boolean => {
@@ -40,7 +41,7 @@ export const ownerPhoneGrandfathered = (
 };
 
 /** Startup diagnostics for OWNER_PHONE_GRANDFATHER (null when it is off). */
-export function ownerPhoneGrandfatherProblem(env: Record<string, string | undefined> = process.env): string | null {
+export function ownerPhoneGrandfatherProblem(env: Record<string, string | undefined> = configEnv()): string | null {
   if (env.OWNER_PHONE_GRANDFATHER !== 'true') return null;
   if (env.NODE_ENV === 'production' && env.OWNER_PHONE_GRANDFATHER_ACK !== OWNER_PHONE_GRANDFATHER_ACK_VALUE) {
     return 'OWNER_PHONE_GRANDFATHER=true is IGNORED in production without OWNER_PHONE_GRANDFATHER_ACK=i-understand: unverified owner phones will not receive alerts';
@@ -53,7 +54,7 @@ export type OwnerAlertStatus = 'ok' | 'no_owner_phone' | 'unverified';
 
 export function ownerAlertStatus(
   b: Pick<Business, 'owner_phone' | 'owner_phone_verified_at'> & { created_at?: string | null },
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = configEnv(),
 ): OwnerAlertStatus {
   if (!b.owner_phone) return 'no_owner_phone';
   return b.owner_phone_verified_at || ownerPhoneGrandfathered(env, b) ? 'ok' : 'unverified';

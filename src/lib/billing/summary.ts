@@ -1,6 +1,7 @@
 /**
  * Billing summary for a business (status route + dashboard page). Node runtime only.
  */
+import { configEnv } from '@/lib/config';
 import { billingEnforced, isProvisioningAllowed, callMinutesCapFor, forwardMinutesCapFor, getUsage, pastDueGraceDays, smsCapFor, voicemailMinutesCap } from '@/lib/db';
 import { annualAvailable } from '@/lib/providers/stripe-billing';
 import { usageWarningsFor, type UsageWarningView } from '@/lib/billing/warnings';
@@ -37,7 +38,7 @@ export interface BillingSummary {
   };
 }
 
-export function graceEndsAt(b: Pick<Business, 'billing_status' | 'past_due_since'>, env: NodeJS.ProcessEnv = process.env): string | null {
+export function graceEndsAt(b: Pick<Business, 'billing_status' | 'past_due_since'>, env: NodeJS.ProcessEnv = configEnv()): string | null {
   if (b.billing_status !== 'past_due' || !b.past_due_since) return null;
   return new Date(new Date(b.past_due_since).getTime() + pastDueGraceDays(env) * 86_400_000).toISOString();
 }

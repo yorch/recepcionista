@@ -9,6 +9,7 @@
  */
 import type { Instrumentation } from 'next';
 import { logger, serializeError } from '@/lib/log';
+import { configEnv, configProblems, retiredEnvWarnings } from '@/lib/config';
 import { baseUrlWarnings, configuredBaseUrl } from '@/lib/base-url';
 import { admin2faOptOutIgnored } from '@/lib/admin-2fa';
 import { ownerPhoneGrandfatherProblem } from '@/lib/messaging/owner';
@@ -33,26 +34,27 @@ function dbTarget(): string {
 }
 
 function providerSummary() {
+  const env = configEnv();
   const has = (v?: string) => Boolean(v && v.trim());
-  const elevenLabsLine = has(process.env.ELEVENLABS_PHONE_NUMBER_ID)
-    ? process.env.ELEVENLABS_PHONE_NUMBER_ID?.startsWith('phnum_')
+  const elevenLabsLine = has(env.ELEVENLABS_PHONE_NUMBER_ID)
+    ? env.ELEVENLABS_PHONE_NUMBER_ID?.startsWith('phnum_')
       ? 'voice-line=phnum-id'
       : 'voice-line=WRONG (expected phnum_…)'
     : 'voice-line=unbound';
 
   return {
-    llm: has(process.env.OPENAI_API_KEY)
-      ? `openai:${process.env.LLM_MODEL || 'default'}`
-      : has(process.env.ANTHROPIC_API_KEY)
-        ? `anthropic:${process.env.ANTHROPIC_MODEL || 'default'}`
+    llm: has(env.OPENAI_API_KEY)
+      ? `openai:${env.LLM_MODEL || 'default'}`
+      : has(env.ANTHROPIC_API_KEY)
+        ? `anthropic:${env.ANTHROPIC_MODEL || 'default'}`
         : 'none (templates; REQUIRED in production)',
-    elevenlabs: has(process.env.ELEVENLABS_API_KEY) ? elevenLabsLine : 'off (scripted calls)',
-    twilio: has(process.env.TWILIO_ACCOUNT_SID) &&
-      has(process.env.TWILIO_AUTH_TOKEN) &&
-      has(process.env.TWILIO_PHONE_NUMBER)
+    elevenlabs: has(env.ELEVENLABS_API_KEY) ? elevenLabsLine : 'off (scripted calls)',
+    twilio: has(env.TWILIO_ACCOUNT_SID) &&
+      has(env.TWILIO_AUTH_TOKEN) &&
+      has(env.TWILIO_PHONE_NUMBER)
       ? 'live'
       : 'mock (SID/token/phone incomplete)',
-    stripe: has(process.env.STRIPE_SECRET_KEY) ? 'live' : 'mock (/pay/[id])',
+    stripe: has(env.STRIPE_SECRET_KEY) ? 'live' : 'mock (/pay/[id])',
   };
 }
 
@@ -60,7 +62,7 @@ function providerSummary() {
 function startupWarnings(): void {
   if (process.env.NEXT_PHASE === 'phase-production-build') return;
   if (process.env.NODE_ENV === 'production') {
-    const v = (process.env.BILLING_ENFORCED ?? '').trim();
+    const v = (configEnv().BILLING_ENFORCED ?? '').trim();
     if (v === 'false') {
       boot.warn('billing.not_enforced', { banner: '!!! BILLING_ENFORCED=false: texts and calls are NOT capped and plans are not required for existing tenants. Non-admin provisioning still needs an active plan. Do not run like this with open signup.' });
     } else if (v !== 'true') {
@@ -79,6 +81,10 @@ function startupWarnings(): void {
   if (admin2faOptOutIgnored()) boot.warn('admin_2fa_optout_ignored', { warning: 'REQUIRE_2FA_FOR_ADMINS=false is IGNORED in production: DB admin users must enrol in 2FA (the ADMIN_TOKEN break-glass is unaffected). Remove the variable.' });
   const og = ownerPhoneGrandfatherProblem();
   if (og) boot.warn('owner_phone_grandfather', { warning: og });
+  // D11: retired variables still work for one more release; the banner says so (names only, never values).
+  for (const r of retiredEnvWarnings()) boot.warn('deprecated_env', { name: r.name, warning: r.warning });
+  // A variable the settings registry rejects pins nothing useful: the reader falls back to its own default.
+  for (const p of configProblems().invalid) boot.warn('invalid_env', { name: p.name, setting: p.key, problem: p.error });
 }
 
 export async function register() {
@@ -91,7 +97,7 @@ export async function register() {
   boot.info('start', {
     runtime: process.env.NEXT_RUNTIME || 'nodejs',
     env: process.env.NODE_ENV,
-    log_level: process.env.LOG_LEVEL || `(default ${process.env.NODE_ENV === 'production' ? 'info' : 'debug'})`,
+    log_level: configEnv().LOG_LEVEL || `(default ${process.env.NODE_ENV === 'production' ? 'info' : 'debug'})`,
     app_url: configuredBaseUrl() || 'unset',
     db: dbTarget(),
     ...providerSummary(),
@@ -103,7 +109,7 @@ export async function register() {
   if (process.env.NEXT_PHASE !== 'phase-production-build' && process.env.DATABASE_URL) {
     const { registerGoogleCalendar } = await import('@/lib/integrations/register');
     registerGoogleCalendar();
-    if ((process.env.GOOGLE_OAUTH_MOCK ?? '').trim().toLowerCase() === 'true' && process.env.NODE_ENV === 'production') {
+    if ((configEnv().GOOGLE_OAUTH_MOCK ?? '').trim().toLowerCase() === 'true' && process.env.NODE_ENV === 'production') {
       boot.error('google_mock_in_production', { banner: '!!! GOOGLE_OAUTH_MOCK=true is IGNORED in production (mock Google is never enabled there)' });
     }
   }

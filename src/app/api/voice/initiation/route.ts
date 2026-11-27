@@ -13,6 +13,7 @@
  * Auth: the shared tool secret header (x-recepcionista-tool-secret), the same value and check as the tool webhooks;
  * fails closed in production when ELEVENLABS_TOOL_SECRET is unset.
  */
+import { configEnv } from '@/lib/config';
 import { getBusinessByAgentId, getBusinessByPhone, setCallTrust, setTransferStatus, updateCall, upsertCallForConversation } from '@/lib/db';
 import { firstMessageFor, verifyToolSecret } from '@/lib/voice/elevenlabs';
 import { insecureDevAllowed } from '@/lib/auth';
@@ -179,5 +180,5 @@ export async function POST(req: Request): Promise<Response> {
 
 /** Readiness probe (reveals nothing about tenants): 200 only when the tool secret that authenticates this webhook is set (or the local-dev opt-in is on). */
 export async function GET() {
-  return readiness(Boolean(process.env.ELEVENLABS_TOOL_SECRET) || insecureDevAllowed());
+  return readiness(Boolean(configEnv().ELEVENLABS_TOOL_SECRET) || insecureDevAllowed());
 }

@@ -7,6 +7,7 @@
  * claimTotpStep() (an atomic "only if greater" update) and reject codes whose step is not newer than
  * the last accepted one.
  */
+import { configEnv } from '@/lib/config';
 import crypto from 'node:crypto';
 
 export const TOTP_STEP_SECONDS = 30;
@@ -177,7 +178,7 @@ let warnedDevKey = false;
  * INSECURE key is derived, with a one-time warning, so local development works out of the box.
  * Generate one with: openssl rand -base64 32
  */
-export function appSecretKey(env: NodeJS.ProcessEnv = process.env): Buffer {
+export function appSecretKey(env: NodeJS.ProcessEnv = configEnv()): Buffer {
   const raw = (env.APP_SECRET_KEY ?? '').trim();
   if (raw) {
     const key = Buffer.from(raw, /[-_]/.test(raw) ? 'base64url' : 'base64');

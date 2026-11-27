@@ -1,6 +1,7 @@
 /**
  * Pure Stripe-subscription -> business billing mapping. No I/O.
  */
+import { configEnv } from '@/lib/config';
 import type { BillingStatus } from '@/lib/types';
 
 /**
@@ -40,7 +41,7 @@ export interface StripeSubscriptionLike {
  * interval is 'year' means 'year'; the configured monthly price or a monthly interval means 'month'. Null when the subscription carries no
  * price information at all (an event without items), so a thin payload never flips the stored cadence.
  */
-export function intervalOfSubscription(sub: StripeSubscriptionLike, env: NodeJS.ProcessEnv = process.env): 'month' | 'year' | null {
+export function intervalOfSubscription(sub: StripeSubscriptionLike, env: NodeJS.ProcessEnv = configEnv()): 'month' | 'year' | null {
   const price = sub.items?.data?.[0]?.price;
   if (!price || typeof price !== 'object') return null;
   const id = typeof price.id === 'string' ? price.id : null;

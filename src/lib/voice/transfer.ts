@@ -14,6 +14,7 @@
  * Honest limits (docs/known-limitations.md): the transferred leg's talk time is not visible to this app; a prompt that skips the
  * webhook tool is not stopped by the server beyond the destination being empty / valid.
  */
+import { configEnv } from '@/lib/config';
 import { setTransferStatus } from '@/lib/db';
 import { forwardAllowance } from '@/lib/voice/forward-metering';
 import { forwardTarget, isOpenNow } from '@/lib/voice/call-mode';
@@ -27,10 +28,10 @@ const log = logger('voice/transfer');
 
 export type Env = Record<string, string | undefined>;
 /** The platform CAPABILITY (NATIVE_TRANSFER=on). A business additionally has to opt in: see {@link transferEnabledFor}. */
-export const nativeTransferEnabled = (env: Env = process.env): boolean => (env.NATIVE_TRANSFER ?? '').trim().toLowerCase() === 'on';
+export const nativeTransferEnabled = (env: Env = configEnv()): boolean => (env.NATIVE_TRANSFER ?? '').trim().toLowerCase() === 'on';
 
 /** Live transfer is on for THIS business: the global capability AND the business's own opt-in (businesses.native_transfer_enabled, default off). */
-export const transferEnabledFor = (business: Pick<Business, 'native_transfer_enabled'> | null | undefined, env: Env = process.env): boolean =>
+export const transferEnabledFor = (business: Pick<Business, 'native_transfer_enabled'> | null | undefined, env: Env = configEnv()): boolean =>
   nativeTransferEnabled(env) && business?.native_transfer_enabled === true;
 
 export type TransferWhy =
@@ -43,7 +44,7 @@ export interface TransferContext { callSid?: string | null; from?: string | null
 
 /** Can this business's trusted number be dialled right now at all (no charging)? Used to decide the per-call destination variable. */
 export async function transferTargetNow(business: Business, ctx: TransferContext = {}): Promise<{ ok: true; to: string } | { ok: false; why: TransferWhy; error?: string }> {
-  const env = ctx.env ?? process.env;
+  const env = ctx.env ?? configEnv();
   if (!transferEnabledFor(business, env)) return { ok: false, why: 'disabled' };
   const t = forwardTarget(business);
   if (!t.ok) return { ok: false, why: t.why === 'none' ? 'no_number' : t.why === 'rejected' ? 'rejected' : 'unverified', error: t.error };
@@ -57,7 +58,7 @@ export async function transferTargetNow(business: Business, ctx: TransferContext
 export async function decideTransfer(business: Business, ctx: TransferContext = {}): Promise<TransferDecision> {
   const target = await transferTargetNow(business, ctx);
   if (!target.ok) return target;
-  const a = await forwardAllowance(business.id, (ctx.env ?? process.env) as NodeJS.ProcessEnv, {
+  const a = await forwardAllowance(business.id, (ctx.env ?? configEnv()) as NodeJS.ProcessEnv, {
     business, callSid: ctx.callSid ?? null, from: ctx.from ?? null, stirStatus: ctx.stirStatus ?? null, now: ctx.now,
   });
   if (!a.ok) return { ok: false, why: a.why };

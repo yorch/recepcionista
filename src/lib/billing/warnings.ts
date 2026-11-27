@@ -8,6 +8,7 @@
  * count after a usage write depends on the business-local hour: daytime sends the warning, night defers it. Tests must pin the clock.
  * A new month is a new usage row, so warnings re-arm themselves.
  */
+import { configEnv } from '@/lib/config';
 import {
   billingEnforced, callMinutesCapFor, forwardMinutesCapFor, getBusiness, getUsage, getUsageWarnings, listBusinessUsers, markWarned, smsCapFor,
   unmarkWarned, usagePercent,
@@ -39,7 +40,7 @@ const LABEL: Record<WarnKind, { en: string; unit: 'texts' | 'minutes' }> = {
 /** Current usage as a percent of each cap (pure given the inputs). Caps of 0 yield 100 when anything was used. */
 export function usageLines(
   business: Pick<Business, 'billing_status'> & { sms_cap_override?: number | null; call_minutes_cap_override?: number | null },
-  usage: { sms_count: number; call_seconds: number; forward_seconds: number }, env: NodeJS.ProcessEnv = process.env,
+  usage: { sms_count: number; call_seconds: number; forward_seconds: number }, env: NodeJS.ProcessEnv = configEnv(),
 ): UsageLine[] {
   const sms = smsCapFor(business, env);
   const ai = callMinutesCapFor(business, env) * 60;

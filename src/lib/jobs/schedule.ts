@@ -3,6 +3,7 @@
  * All "what day is it / is it 6 PM" questions are answered in the BUSINESS time zone, never the process zone, so DST
  * transitions and zones far from the server behave.
  */
+import { configEnv } from '@/lib/config';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { addDaysToDateKey, localDateKey, tzOf, zonedTimeToUtc } from '@/lib/time';
 
@@ -25,7 +26,7 @@ const falsy = new Set(['off', 'false', '0', 'no']);
  * JOBS=on|off. Unset (or anything else) => ON in production, OFF in development and test. Returns whether the
  * runner is configured explicitly (`explicit`) so an unset dev run can still honour RETENTION_JOB=on on its own.
  */
-export function jobsSetting(env: NodeJS.ProcessEnv = process.env): { enabled: boolean; explicit: boolean } {
+export function jobsSetting(env: NodeJS.ProcessEnv = configEnv()): { enabled: boolean; explicit: boolean } {
   const v = (env.JOBS ?? '').trim().toLowerCase();
   if (truthy.has(v)) return { enabled: true, explicit: true };
   if (falsy.has(v)) return { enabled: false, explicit: true };
@@ -33,7 +34,7 @@ export function jobsSetting(env: NodeJS.ProcessEnv = process.env): { enabled: bo
 }
 
 /** JOBS_TICK_SECONDS (default 60), clamped to [5, 3600]; garbage falls back to the default. */
-export function tickSeconds(env: NodeJS.ProcessEnv = process.env): number {
+export function tickSeconds(env: NodeJS.ProcessEnv = configEnv()): number {
   const raw = (env.JOBS_TICK_SECONDS ?? '').trim();
   if (!raw) return DEFAULT_TICK_SECONDS;
   const n = Number(raw);

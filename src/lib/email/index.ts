@@ -11,6 +11,7 @@
  * In production an unset provider fails closed with EmailConfigError (callers answer 503) instead of
  * pretending the mail went out. Any send failure throws EmailSendError.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 const log = logger('email');
@@ -52,7 +53,7 @@ const SEND_TIMEOUT_MS = 10_000;
 const ADDRESS = /^[^\s<>@,;"']+@[^\s<>@,;"']+\.[^\s<>@,;"']+$/;
 
 /** Which provider will be used, or throws EmailConfigError. Does not send anything. */
-export function resolveEmailProvider(env: NodeJS.ProcessEnv = process.env): EmailProvider {
+export function resolveEmailProvider(env: NodeJS.ProcessEnv = configEnv()): EmailProvider {
   const production = env.NODE_ENV === 'production';
   const raw = (env.EMAIL_PROVIDER ?? '').trim().toLowerCase();
   if (!raw) {
@@ -75,7 +76,7 @@ export function resolveEmailProvider(env: NodeJS.ProcessEnv = process.env): Emai
 }
 
 /** True when email can be sent (a real provider, or the dev log provider). Never throws. */
-export function emailConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+export function emailConfigured(env: NodeJS.ProcessEnv = configEnv()): boolean {
   try {
     resolveEmailProvider(env);
     return true;
@@ -109,8 +110,8 @@ async function sendResend(msg: EmailMessage): Promise<EmailResult> {
   try {
     res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: process.env.EMAIL_FROM, to: [msg.to], subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) }),
+      headers: { Authorization: `Bearer ${configEnv().RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: configEnv().EMAIL_FROM, to: [msg.to], subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) }),
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     });
   } catch (err) {
@@ -129,18 +130,18 @@ async function sendSmtp(msg: EmailMessage): Promise<EmailResult> {
   try {
     const nodemailer = await import('nodemailer');
     const timeouts = { connectionTimeout: SEND_TIMEOUT_MS, greetingTimeout: SEND_TIMEOUT_MS, socketTimeout: SEND_TIMEOUT_MS * 2 };
-    const url = (process.env.SMTP_URL ?? '').trim();
+    const url = (configEnv().SMTP_URL ?? '').trim();
     const transport = url
       // nodemailer parses a `url` option like a connection string and still honours the timeouts beside it
       ? nodemailer.createTransport({ url, ...timeouts } as unknown as import('nodemailer').TransportOptions)
       : nodemailer.createTransport({
-          host: process.env.SMTP_HOST,
-          port: Number(process.env.SMTP_PORT) || 587,
-          secure: process.env.SMTP_SECURE === 'true',
-          ...(process.env.SMTP_USER ? { auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS ?? '' } } : {}),
+          host: configEnv().SMTP_HOST,
+          port: Number(configEnv().SMTP_PORT) || 587,
+          secure: configEnv().SMTP_SECURE === 'true',
+          ...(configEnv().SMTP_USER ? { auth: { user: configEnv().SMTP_USER, pass: configEnv().SMTP_PASS ?? '' } } : {}),
           ...timeouts,
         });
-    const info = await transport.sendMail({ from: process.env.EMAIL_FROM, to: msg.to, subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) });
+    const info = await transport.sendMail({ from: configEnv().EMAIL_FROM, to: msg.to, subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) });
     transport.close();
     return { provider: 'smtp', id: typeof info.messageId === 'string' ? info.messageId : null };
   } catch (err) {

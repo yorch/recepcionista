@@ -13,6 +13,7 @@
  * Safe with several instances: the purge runs under a DB lease (only one runs at a time) and purgeExpiredData
  * is idempotent, so a second instance running later does nothing new.
  */
+import { configEnv } from '@/lib/config';
 import { previewExpiredData, purgeExpiredData, withLease } from '@/lib/db';
 import type { PurgeCounts } from '@/lib/db';
 import { logger } from '@/lib/log';
@@ -23,7 +24,7 @@ export const RETENTION_LEASE_KEY = 'job:retention-purge';
 const LEASE_TTL_MS = 5 * 60 * 1000;
 
 /** Only the exact value `on` enables the automatic purge (unset, off, 1, true, typos: all stay off). */
-export function retentionJobEnabled(env: string | undefined = process.env.RETENTION_JOB): boolean {
+export function retentionJobEnabled(env: string | undefined = configEnv().RETENTION_JOB): boolean {
   return (env ?? '').trim().toLowerCase() === 'on';
 }
 

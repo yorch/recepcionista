@@ -17,6 +17,7 @@
  *   development/test it is enforced only with BILLING_ENFORCED=true. When enforced, billing_status 'trialing'/'active' is allowed,
  *   'past_due' is allowed for BILLING_PAST_DUE_GRACE_DAYS (default 5) after it became past due, everything else is not.
  */
+import { configEnv } from '@/lib/config';
 import crypto from 'node:crypto';
 import { prisma } from './client';
 import type { Business } from '@/lib/types';
@@ -42,12 +43,12 @@ const isProduction = (env: NodeJS.ProcessEnv): boolean => env.NODE_ENV === 'prod
  * FAIL CLOSED in production: billing is enforced unless BILLING_ENFORCED is exactly 'false' (an explicit, loud opt-out;
  * any other value, including a typo, enforces). Outside production (dev/test) it is enforced only when exactly 'true'.
  */
-export const billingEnforced = (env: NodeJS.ProcessEnv = process.env): boolean => {
+export const billingEnforced = (env: NodeJS.ProcessEnv = configEnv()): boolean => {
   const v = (env.BILLING_ENFORCED ?? '').trim();
   if (isProduction(env)) return v !== 'false';
   return v === 'true';
 };
-export const pastDueGraceDays = (env: NodeJS.ProcessEnv = process.env): number =>
+export const pastDueGraceDays = (env: NodeJS.ProcessEnv = configEnv()): number =>
   nonNegInt(env.BILLING_PAST_DUE_GRACE_DAYS, DEFAULT_PAST_DUE_GRACE_DAYS);
 
 type CapSubject = { billing_status?: Business['billing_status'] | string | null };
@@ -56,24 +57,24 @@ type CapSubject = { billing_status?: Business['billing_status'] | string | null 
  * Effective monthly SMS cap, in SEGMENTS: override (when not null) wins; else while trialing min(TRIAL_SMS_CAP, plan cap);
  * else PLAN_SMS_CAP; else 500.
  */
-export const smsCapFor = (b: CapSubject & { sms_cap_override?: number | null }, env: NodeJS.ProcessEnv = process.env): number => {
+export const smsCapFor = (b: CapSubject & { sms_cap_override?: number | null }, env: NodeJS.ProcessEnv = configEnv()): number => {
   if (b.sms_cap_override != null) return b.sms_cap_override;
   const plan = nonNegInt(env.PLAN_SMS_CAP, DEFAULT_SMS_CAP);
   return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_SMS_CAP, DEFAULT_TRIAL_SMS_CAP)) : plan;
 };
 
 /** Effective monthly call-minutes cap: override wins; else while trialing min(TRIAL_CALL_MINUTES_CAP, plan cap); else PLAN_CALL_MINUTES_CAP; else 300. */
-export const callMinutesCapFor = (b: CapSubject & { call_minutes_cap_override?: number | null }, env: NodeJS.ProcessEnv = process.env): number => {
+export const callMinutesCapFor = (b: CapSubject & { call_minutes_cap_override?: number | null }, env: NodeJS.ProcessEnv = configEnv()): number => {
   if (b.call_minutes_cap_override != null) return b.call_minutes_cap_override;
   const plan = nonNegInt(env.PLAN_CALL_MINUTES_CAP, DEFAULT_CALL_MINUTES_CAP);
   return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_CALL_MINUTES_CAP, DEFAULT_TRIAL_CALL_MINUTES_CAP)) : plan;
 };
 
 /** Monthly cap (minutes) of voicemail recordings: VOICEMAIL_MINUTES_CAP (default 60). Separate from the AI minutes. */
-export const voicemailMinutesCap = (env: NodeJS.ProcessEnv = process.env): number => nonNegInt(env.VOICEMAIL_MINUTES_CAP, DEFAULT_VOICEMAIL_MINUTES_CAP);
+export const voicemailMinutesCap = (env: NodeJS.ProcessEnv = configEnv()): number => nonNegInt(env.VOICEMAIL_MINUTES_CAP, DEFAULT_VOICEMAIL_MINUTES_CAP);
 
 /** Monthly cap (minutes) of forwarded calls: FORWARD_MINUTES_CAP (default 600); while trialing min(that, TRIAL_FORWARD_MINUTES_CAP, default 30). Separate from the AI minutes. */
-export const forwardMinutesCapFor = (b: CapSubject, env: NodeJS.ProcessEnv = process.env): number => {
+export const forwardMinutesCapFor = (b: CapSubject, env: NodeJS.ProcessEnv = configEnv()): number => {
   const plan = nonNegInt(env.FORWARD_MINUTES_CAP, DEFAULT_FORWARD_MINUTES_CAP);
   return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_FORWARD_MINUTES_CAP, DEFAULT_TRIAL_FORWARD_MINUTES_CAP)) : plan;
 };
@@ -85,7 +86,7 @@ export const forwardMinutesCapFor = (b: CapSubject, env: NodeJS.ProcessEnv = pro
 export function billingStateAllows(
   b: Pick<Business, 'billing_status' | 'past_due_since'>,
   now: Date = new Date(),
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = configEnv(),
 ): boolean {
   const status = b.billing_status ?? 'none';
   if (status === 'trialing' || status === 'active') return true;
@@ -104,7 +105,7 @@ export function billingStateAllows(
 export function isProvisioningAllowed(
   b: Pick<Business, 'billing_status' | 'past_due_since'>,
   now: Date = new Date(),
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = configEnv(),
 ): boolean {
   return !(isProduction(env) || billingEnforced(env)) || billingStateAllows(b, now, env);
 }

@@ -11,6 +11,7 @@
  * State is audit-only (no table): `billing.release_notice`, `billing.tenant_released` (existing), `billing.grandfathered`, and a per-run
  * `jobs.tenant_release_report` / `jobs.grandfather_report` row with the counts (what the admin report shows).
  */
+import { configEnv } from '@/lib/config';
 import { recordAudit } from '@/lib/db';
 import { logger } from '@/lib/log';
 import { compBusiness, planGrandfather } from '@/lib/billing/grandfather';
@@ -22,7 +23,7 @@ const log = logger('jobs.tenants');
 export type TenantReleaseSetting = 'off' | 'report' | 'on';
 
 /** TENANT_RELEASE_JOB: exactly "on" acts, exactly "report" reports on the schedule; anything else (including unset) is off. */
-export function tenantReleaseSetting(env: NodeJS.ProcessEnv = process.env): TenantReleaseSetting {
+export function tenantReleaseSetting(env: NodeJS.ProcessEnv = configEnv()): TenantReleaseSetting {
   const v = (env.TENANT_RELEASE_JOB ?? '').trim().toLowerCase();
   return v === 'on' ? 'on' : v === 'report' ? 'report' : 'off';
 }
@@ -53,7 +54,7 @@ async function storeReport(action: string, report: JobReport, extra: Record<stri
 
 export async function runTenantReleaseJob(opts: RunOptions & { graceDays?: number; notifyDays?: number; includeRecent?: boolean } = {}): Promise<JobReport> {
   const now = opts.now ?? new Date();
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   const setting = tenantReleaseSetting(env);
   const wantsApply = opts.dryRun === false;
   const apply = wantsApply && setting === 'on';
@@ -114,7 +115,7 @@ export async function runTenantReleaseJob(opts: RunOptions & { graceDays?: numbe
  */
 export async function runGrandfatherJob(opts: RunOptions & { before?: string; includeUnverifiedPhone?: boolean; includeSelfSignup?: boolean } = {}): Promise<JobReport> {
   const now = opts.now ?? new Date();
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   const wantsApply = opts.dryRun === false;
   const apply = wantsApply && tenantReleaseSetting(env) === 'on';
   const report: JobReport = { job: 'grandfather', dry_run: !apply, at: now.toISOString(), processed: 0, errors: 0, items: [] };

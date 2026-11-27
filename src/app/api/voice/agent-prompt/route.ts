@@ -1,3 +1,4 @@
+import { configEnv } from '@/lib/config';
 import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId } from '@/lib/session';
 import { getBusiness, getKnowledgeBase, listBusinesses } from '@/lib/db';
@@ -56,7 +57,7 @@ export async function GET(req: Request) {
       first_message: firstMessageFor(business),
       language: 'en',
       language_mode: 'auto',
-      voice_id: process.env.ELEVENLABS_VOICE_ID || null,
+      voice_id: configEnv().ELEVENLABS_VOICE_ID || null,
       agent_id: agentIdFor(business) || null,
       elevenlabs: hasElevenLabs(),
       tools: [...TOOL_NAMES],

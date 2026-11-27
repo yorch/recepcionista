@@ -3,6 +3,7 @@
  * VERIFIED owner number (E.164 equality; owner_phone_verified_at set). Caller id can be spoofed, so this alone grants nothing that is
  * not also confirmed by an SMS to the real owner phone (see code.ts / sms.ts). The model never decides this.
  */
+import { configEnv } from '@/lib/config';
 import { phoneCountry, toE164 } from '@/lib/phone';
 import { ownerCallinEnabled } from './config';
 import type { Business } from '@/lib/types';
@@ -14,7 +15,7 @@ export type OwnerDetection =
 export function detectOwnerCaller(
   business: Pick<Business, 'owner_phone_e164' | 'owner_phone_verified_at' | 'phone_e164'>,
   callerId: string | null | undefined,
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = configEnv(),
 ): OwnerDetection {
   if (!ownerCallinEnabled(env)) return { owner: false, reason: 'disabled' };
   const owner = business.owner_phone_e164 ?? null;

@@ -11,6 +11,7 @@
  * Levels: LOG_LEVEL=debug|info|warn|error. Default is `debug` in development
  * (this is a demo app — you want the trail) and `info` in production.
  */
+import { configEnv, redactSecrets } from '@/lib/config';
 export type Level = 'debug' | 'info' | 'warn' | 'error';
 
 export type Fields = Record<string, unknown>;
@@ -30,8 +31,9 @@ const PHONE_VALUE = /(\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?(\
 const EMAIL_VALUE = /\b([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g;
 const CREDENTIAL_VALUE = /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}|\bwhsec_[A-Za-z0-9]{8,}|\bBearer\s+[A-Za-z0-9._~+/=-]{12,}|\bxi-api-key[:=]\s*\S+|\bAC[0-9a-f]{32}\b/g;
 
-export function scrub(text: string, env: Record<string, string | undefined> = process.env): string {
-  let out = text.replace(CREDENTIAL_VALUE, '«redacted»');
+export function scrub(text: string, env: Record<string, string | undefined> = configEnv()): string {
+  // Value-based redaction of every configured secret (environment or console-held), then the credential patterns.
+  let out = redactSecrets(text).replace(CREDENTIAL_VALUE, '«redacted»');
   if (env.LOG_PII === 'true') return out;
   out = out.replace(EMAIL_VALUE, '$1•••@$2');
   out = out.replace(PHONE_VALUE, (m: string) => {
@@ -46,7 +48,7 @@ const MAX_DEPTH = 2;
 const MAX_ITEMS = 12;
 
 function level(): Level {
-  const raw = (process.env.LOG_LEVEL || '').toLowerCase();
+  const raw = (configEnv().LOG_LEVEL || '').toLowerCase();
   if (raw in ORDER) return raw as Level;
   return process.env.NODE_ENV === 'production' ? 'info' : 'debug';
 }

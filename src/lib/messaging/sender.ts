@@ -12,6 +12,7 @@
  * number that left the pool) is matched ONLY by the exact recorded sender: the businesses that actually sent a text FROM that number TO that customer. Never by
  * "whichever business texted this customer last". More than one candidate is never guessed (`resolveInboundRoute`, sms/inbound).
  */
+import { configEnv } from '@/lib/config';
 import { getBusiness, prisma } from '@/lib/db';
 import { smsSenderProblem } from '@/lib/messaging/sender-config';
 import { defaultPhoneCountry, toE164 } from '@/lib/phone';
@@ -19,7 +20,7 @@ import { isMockPoolNumber, isPlatformNumber } from '@/lib/providers/twilio';
 import type { Business } from '@/lib/types';
 
 /** The E.164 to send FROM for this business, or null (use the shared sender): a real, non-mock, non-shared number the business owns. */
-export function tenantSmsSender(business: Pick<Business, 'phone' | 'phone_e164'> | null | undefined, env: NodeJS.ProcessEnv = process.env): string | null {
+export function tenantSmsSender(business: Pick<Business, 'phone' | 'phone_e164'> | null | undefined, env: NodeJS.ProcessEnv = configEnv()): string | null {
   if (!business) return null;
   const e164 = business.phone_e164 ?? toE164(business.phone);
   if (!e164) return null;

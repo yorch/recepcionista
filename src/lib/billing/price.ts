@@ -7,6 +7,7 @@
  * shows is the price Stripe will charge; the free text can only ever be a fallback. Server only (the key never reaches the browser).
  * Caps: the same functions the metering uses (smsCapFor / callMinutesCapFor / ...), so the numbers shown are the numbers enforced.
  */
+import { configEnv } from '@/lib/config';
 import { makeT } from '@/lib/i18n';
 import type { Locale } from '@/lib/i18n/core';
 import { intlTag } from '@/lib/i18n/core';
@@ -69,7 +70,7 @@ async function loadPlanPrice(priceId: string, key: string, now: number, fetchImp
  * background, for at most an hour): a Stripe slowdown never makes every landing-page visit wait 4 seconds.
  */
 export async function fetchPlanPrice(priceId: string | null | undefined, opts: { fetchImpl?: typeof fetch; now?: number; secretKey?: string } = {}): Promise<PlanPriceInfo | null> {
-  const key = (opts.secretKey ?? process.env.STRIPE_SECRET_KEY ?? '').trim();
+  const key = (opts.secretKey ?? configEnv().STRIPE_SECRET_KEY ?? '').trim();
   if (!key || !isId(priceId)) return null;
   const now = opts.now ?? Date.now();
   const hit = cache.get(priceId);
@@ -94,7 +95,7 @@ export function formatPlanPrice(p: PlanPriceInfo, locale: Locale = 'en'): string
 
 export interface PlanPrices { monthly: PlanPriceInfo | null; annual: PlanPriceInfo | null }
 
-export async function planPrices(env: NodeJS.ProcessEnv = process.env, opts: { fetchImpl?: typeof fetch } = {}): Promise<PlanPrices> {
+export async function planPrices(env: NodeJS.ProcessEnv = configEnv(), opts: { fetchImpl?: typeof fetch } = {}): Promise<PlanPrices> {
   const [monthly, annual] = await Promise.all([
     fetchPlanPrice(env.STRIPE_PRICE_ID?.trim(), { ...opts, secretKey: env.STRIPE_SECRET_KEY }),
     fetchPlanPrice(annualPriceId(env), { ...opts, secretKey: env.STRIPE_SECRET_KEY }),
@@ -103,7 +104,7 @@ export async function planPrices(env: NodeJS.ProcessEnv = process.env, opts: { f
 }
 
 /** The text to show for the monthly / annual price: Stripe's real price when it can be read, else the operator's display text (callers pass it). */
-export async function planPriceTexts(locale: Locale, fallback: { monthly: string; annual: string | null }, env: NodeJS.ProcessEnv = process.env): Promise<{ monthly: string; annual: string | null; fromStripe: boolean }> {
+export async function planPriceTexts(locale: Locale, fallback: { monthly: string; annual: string | null }, env: NodeJS.ProcessEnv = configEnv()): Promise<{ monthly: string; annual: string | null; fromStripe: boolean }> {
   const p = await planPrices(env);
   return {
     monthly: p.monthly ? formatPlanPrice(p.monthly, locale) : fallback.monthly,
@@ -118,7 +119,7 @@ export interface PlanCaps {
 }
 
 /** The caps the metering enforces (plan, and while trialing), read from the same functions. */
-export function planCaps(env: NodeJS.ProcessEnv = process.env): PlanCaps {
+export function planCaps(env: NodeJS.ProcessEnv = configEnv()): PlanCaps {
   return {
     sms: smsCapFor({ billing_status: 'active' }, env),
     callMinutes: callMinutesCapFor({ billing_status: 'active' }, env),

@@ -1,3 +1,4 @@
+import { configEnv } from '@/lib/config';
 import Link from 'next/link';
 import { getLocale, getT } from '@/lib/i18n/server';
 import { getUsage, callMinutesCapFor, smsCapFor } from '@/lib/db';
@@ -34,7 +35,7 @@ export async function BillingBanner({ business, canManage }: { business: Busines
       usage = null; // a usage lookup failure must never break the dashboard
     }
   }
-  let banner = bannerFor(business, usage, canManage, new Date(), process.env, locale);
+  let banner = bannerFor(business, usage, canManage, new Date(), configEnv(), locale);
   if (!banner && (status === 'trialing' || status === 'active')) {
     // No billing problem: say when a monthly allowance is nearly or fully used (the owner was also emailed / texted once).
     const warnings = await usageWarningsFor(business.id);

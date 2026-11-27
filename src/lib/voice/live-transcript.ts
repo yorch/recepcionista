@@ -16,6 +16,7 @@
  * (callerDeclinedRecording), the call is marked 'declined' (sticky), the stored events are purged, and the poller stops for good.
  * The post-call transcript is the source of truth: `reconcileFinalTranscript` replaces the interim rows.
  */
+import { configEnv } from '@/lib/config';
 import {
   acquireLease, appendTranscriptEvents, deleteTranscriptEvents, getCall, lastTranscriptSeq, prisma, updateCall,
 } from '@/lib/db';
@@ -29,7 +30,7 @@ const log = logger('voice/live-transcript');
 
 export const POLL_LEASE_MS = 1_800;
 export const DEFAULT_MAX_POLLS = 600;
-const maxPolls = (env: Record<string, string | undefined> = process.env): number => {
+const maxPolls = (env: Record<string, string | undefined> = configEnv()): number => {
   const n = Number((env.LIVE_MAX_POLLS_PER_CALL ?? '').trim());
   return Number.isInteger(n) && n >= 1 && n <= 5000 ? n : DEFAULT_MAX_POLLS;
 };

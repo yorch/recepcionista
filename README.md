@@ -23,6 +23,7 @@ parallel work plan.
 | [docs/billing.md](docs/billing.md) | Stripe subscriptions, trials, plan caps, grandfathering, releasing canceled tenants |
 | [docs/compliance.md](docs/compliance.md) | recording/AI disclosure, SMS consent and opt-out, retention and erasure, operator duties |
 | [docs/env-vars.md](docs/env-vars.md) | every environment variable: required, default, secret |
+| [docs/design/admin-console-architecture.md](docs/design/admin-console-architecture.md) | the platform admin console: owner decisions, the settings registry (`src/lib/config`), precedence env pin > console > default, tiers, the runtime config module, the phase plan |
 | [docs/runbook.md](docs/runbook.md) | pre-deploy checklist, live test call, `verify:deploy`, rollback, provider checklist, release of canceled tenants |
 | [docs/security-headers.md](docs/security-headers.md) | nonce-based CSP, other response headers, rollout switches |
 | [docs/testing.md](docs/testing.md) | what runs where, the scratch database, destructive scripts |

@@ -4,6 +4,7 @@
  * (the authenticated route Phase 2 adds); legacy rows keep their `/audio/<file>` URL. The row cascades with its briefing, so the existing
  * retention purge and customer erasure remove it with no extra code; `pruneBriefingAudio` trims audio earlier than the briefing itself.
  */
+import { configEnv } from '@/lib/config';
 import { prisma, type DbClient } from './client';
 import { logger } from '@/lib/log';
 import { BRIEFING_AUDIO_MAX_BYTES, BRIEFING_AUDIO_TYPES } from '@/lib/business-config';
@@ -93,7 +94,7 @@ export async function deleteBriefingAudio(businessId: ID, briefingId: ID): Promi
 }
 
 /** How long audio is kept in the database (days). BRIEFING_AUDIO_KEEP_DAYS, default 30; 0 or invalid = default; the briefing text follows retention_days regardless. */
-export function briefingAudioKeepDays(env: NodeJS.ProcessEnv = process.env): number {
+export function briefingAudioKeepDays(env: NodeJS.ProcessEnv = configEnv()): number {
   const n = Math.floor(Number(env.BRIEFING_AUDIO_KEEP_DAYS));
   return Number.isFinite(n) && n >= 1 && n <= 3650 ? n : 30;
 }

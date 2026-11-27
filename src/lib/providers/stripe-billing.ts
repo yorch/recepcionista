@@ -5,6 +5,7 @@
  * /api/billing/mock-activate (itself gated by DEMO_MODE=true and the owner's session). In production a missing
  * key / price throws BillingConfigError (routes answer 503). A Stripe API failure throws BillingProviderError.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 import { configuredBaseUrl } from '@/lib/base-url';
 
@@ -18,8 +19,8 @@ export const DEFAULT_TRIAL_DAYS = 7;
 export type BillingIntervalChoice = 'month' | 'year';
 
 /** The optional annual price id (STRIPE_PRICE_ID_ANNUAL). Offered only when set AND billing is configured: real Stripe, or the non-production mock checkout (so the demo can exercise the choice). */
-export const annualPriceId = (env: NodeJS.ProcessEnv = process.env): string | null => env.STRIPE_PRICE_ID_ANNUAL?.trim() || null;
-export const annualAvailable = (env: NodeJS.ProcessEnv = process.env): boolean => Boolean(annualPriceId(env)) && (Boolean(env.STRIPE_SECRET_KEY?.trim()) || !isProd(env));
+export const annualPriceId = (env: NodeJS.ProcessEnv = configEnv()): string | null => env.STRIPE_PRICE_ID_ANNUAL?.trim() || null;
+export const annualAvailable = (env: NodeJS.ProcessEnv = configEnv()): boolean => Boolean(annualPriceId(env)) && (Boolean(env.STRIPE_SECRET_KEY?.trim()) || !isProd(env));
 
 /** Validate a client-supplied interval: only 'month' or 'year' (anything else, or absent, is monthly). */
 export function parseInterval(raw: unknown): BillingIntervalChoice | 'invalid' {
@@ -45,10 +46,10 @@ export class BillingProviderError extends Error {
   }
 }
 
-const isProd = (env: NodeJS.ProcessEnv = process.env) => env.NODE_ENV === 'production';
+const isProd = (env: NodeJS.ProcessEnv = configEnv()) => env.NODE_ENV === 'production';
 
 /** 'live' = real Stripe; 'mock' = local activation (never in production). Throws BillingConfigError otherwise. */
-export function billingMode(env: NodeJS.ProcessEnv = process.env): 'live' | 'mock' {
+export function billingMode(env: NodeJS.ProcessEnv = configEnv()): 'live' | 'mock' {
   if (env.STRIPE_SECRET_KEY?.trim()) {
     if (!env.STRIPE_PRICE_ID?.trim()) throw new BillingConfigError('STRIPE_PRICE_ID is not set');
     return 'live';
@@ -58,7 +59,7 @@ export function billingMode(env: NodeJS.ProcessEnv = process.env): 'live' | 'moc
 }
 
 /** Trial length in days (BILLING_TRIAL_DAYS, default 7, 0..90; invalid values fall back to the default). */
-export function trialDays(env: NodeJS.ProcessEnv = process.env): number {
+export function trialDays(env: NodeJS.ProcessEnv = configEnv()): number {
   const raw = env.BILLING_TRIAL_DAYS?.trim();
   if (!raw) return DEFAULT_TRIAL_DAYS;
   const n = Number(raw);
@@ -66,10 +67,10 @@ export function trialDays(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 /** Plan label stored on the business for Stripe-managed subscriptions. */
-export const planName = (env: NodeJS.ProcessEnv = process.env): string => env.BILLING_PLAN_NAME?.trim() || 'standard';
+export const planName = (env: NodeJS.ProcessEnv = configEnv()): string => env.BILLING_PLAN_NAME?.trim() || 'standard';
 
 /** Public origin for return URLs (the single resolver: APP_URL, else PUBLIC_BASE_URL). Required in production. */
-export function returnBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+export function returnBaseUrl(env: NodeJS.ProcessEnv = configEnv()): string {
   const base = configuredBaseUrl(env);
   if (base) return base;
   if (isProd(env)) throw new BillingConfigError('APP_URL (or PUBLIC_BASE_URL) is required for billing return URLs');
@@ -94,7 +95,7 @@ async function stripe<T>(method: 'GET' | 'POST', path: string, form?: URLSearchP
     res = await fetch(`${API}${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`,
+        authorization: `Bearer ${configEnv().STRIPE_SECRET_KEY}`,
         ...(form ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
       },
       body: form,
@@ -141,7 +142,7 @@ export interface CheckoutInput {
 }
 
 /** Subscription Checkout Session: trial + card collected up front. Returns the hosted URL. */
-export async function createCheckoutSession(input: CheckoutInput, env: NodeJS.ProcessEnv = process.env): Promise<{ url: string; id: string }> {
+export async function createCheckoutSession(input: CheckoutInput, env: NodeJS.ProcessEnv = configEnv()): Promise<{ url: string; id: string }> {
   const yearly = input.interval === 'year';
   const price = yearly ? annualPriceId(env) : env.STRIPE_PRICE_ID?.trim();
   if (!price) throw new BillingConfigError(yearly ? 'STRIPE_PRICE_ID_ANNUAL is not set' : 'STRIPE_PRICE_ID is not set');
@@ -172,7 +173,7 @@ export async function createCheckoutSession(input: CheckoutInput, env: NodeJS.Pr
 }
 
 /** Customer Portal session (manage card, cancel, invoices). */
-export async function createPortalSession(customerId: string, env: NodeJS.ProcessEnv = process.env): Promise<{ url: string }> {
+export async function createPortalSession(customerId: string, env: NodeJS.ProcessEnv = configEnv()): Promise<{ url: string }> {
   const form = new URLSearchParams();
   form.set('customer', customerId);
   form.set('return_url', `${returnBaseUrl(env)}/dashboard/billing`);

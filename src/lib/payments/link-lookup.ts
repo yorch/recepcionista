@@ -6,6 +6,7 @@
  * MAX_LOOKUPS_PER_MINUTE Stripe calls are made per process; over that the answer is "unknown" (the page says the link is unavailable).
  * The URL is only trusted when it is an https `buy.stripe.com` address (a Stripe response can never turn the page into an open redirect).
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 const log = logger('payments.link-lookup');
@@ -34,7 +35,7 @@ export const isStripeBuyUrl = (url: unknown): url is string => {
 };
 
 export async function lookupPaymentLink(linkId: string | null | undefined, opts: { fetchImpl?: typeof fetch; now?: number; secretKey?: string } = {}): Promise<PaymentLinkLookup> {
-  const key = opts.secretKey ?? process.env.STRIPE_SECRET_KEY;
+  const key = opts.secretKey ?? configEnv().STRIPE_SECRET_KEY;
   if (!key || !linkId || !/^plink_[A-Za-z0-9]{6,100}$/.test(linkId)) return { state: 'unknown' };
   const now = opts.now ?? Date.now();
   const hit = cache.get(linkId);

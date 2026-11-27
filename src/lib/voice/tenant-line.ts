@@ -3,6 +3,7 @@
  * voice/elevenlabs-phone.ts (the only module that knows the provider's shapes) with the database (setBusinessLine: UNIQUE ids, never
  * stolen from another business). Idempotent: running it again adopts what exists. Never throws.
  */
+import { configEnv } from '@/lib/config';
 import { getBusiness, getBusinessByAgentId, getBusinessIdByElevenLabsPhoneNumberId, setBusinessLine, recordAudit, withLease } from '@/lib/db';
 import { toE164 } from '@/lib/phone';
 import { forwardingSupported } from '@/lib/voice/line';
@@ -25,7 +26,7 @@ export interface TenantLineDeps extends PhoneDeps {
 }
 
 /** Can this business have an imported line at all (a real Twilio number, not a mock-pool or platform number, and a real agent)? */
-export function lineApplicable(business: Pick<Business, 'phone' | 'agent_id'>, env: NodeJS.ProcessEnv = process.env): { ok: true; e164: string } | { ok: false; why: string } {
+export function lineApplicable(business: Pick<Business, 'phone' | 'agent_id'>, env: NodeJS.ProcessEnv = configEnv()): { ok: true; e164: string } | { ok: false; why: string } {
   const e164 = business.phone ? toE164(business.phone) : null;
   if (!e164) return { ok: false, why: 'the business has no phone number' };
   if (isMockPoolNumber(e164)) return { ok: false, why: 'mock-pool number: nothing exists at Twilio' };
@@ -41,7 +42,7 @@ export function lineApplicable(business: Pick<Business, 'phone' | 'agent_id'>, e
  * native transfer for it) and runs the repair again. A business that already owns an imported line is never blocked (nothing would change). Returns the reason, or null.
  */
 export function lineImportBlockedReason(
-  business: Pick<Business, 'elevenlabs_phone_number_id' | 'call_mode' | 'native_transfer_enabled'> | null | undefined, env: NodeJS.ProcessEnv = process.env,
+  business: Pick<Business, 'elevenlabs_phone_number_id' | 'call_mode' | 'native_transfer_enabled'> | null | undefined, env: NodeJS.ProcessEnv = configEnv(),
 ): string | null {
   if (!business || business.elevenlabs_phone_number_id) return null;
   if (business.call_mode === 'forward' && !forwardingSupported('native', env, business)) {
@@ -66,7 +67,7 @@ export async function ensureTenantLine(business: Business, deps: TenantLineDeps 
 }
 
 async function ensureTenantLineUnlocked(business: Business, deps: TenantLineDeps, signal?: AbortSignal): Promise<TenantLineResult> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const app = lineApplicable(business, env);
   if (!app.ok) return { ok: false, code: 'not_applicable', error: app.why, retryable: false };
   // The call mode is read AGAIN here (the caller's snapshot may be old): a tenant that switched to forwarding meanwhile is never imported.
@@ -135,7 +136,7 @@ async function removeDuplicateImports(e164: string, keepId: string, deps: PhoneD
     if (signal?.aborted) { log.warn('line.duplicate_cleanup_skipped', { reason: 'lease lost' }); return; }
     const list = await listRemoteNumbers(deps);
     if (!list.ok) return;
-    const shared = ((deps.env ?? process.env).ELEVENLABS_PHONE_NUMBER_ID ?? '').trim();
+    const shared = ((deps.env ?? configEnv()).ELEVENLABS_PHONE_NUMBER_ID ?? '').trim();
     for (const n of list.numbers) {
       if (n.phone_number !== e164 || n.phone_number_id === keepId || (shared && n.phone_number_id === shared)) continue;
       if ((await getBusinessIdByElevenLabsPhoneNumberId(n.phone_number_id)) !== null) continue;
@@ -156,7 +157,7 @@ export async function releaseTenantLine(businessId: string, deps: PhoneDeps = {}
   if (!business || !id) return { ok: true, had_line: false };
   const owner = await getBusinessIdByElevenLabsPhoneNumberId(id);
   if (owner !== null && owner !== businessId) return { ok: false, error: 'that line belongs to another business; kept' };
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   // The shared single-line fallback has no owner row: a business that somehow points at it must never delete it (every tenant without a line of its own uses it).
   if ((env.ELEVENLABS_PHONE_NUMBER_ID ?? '').trim() === id) return { ok: false, error: 'that is the shared ELEVENLABS_PHONE_NUMBER_ID fallback line: it was NOT deleted and the reference is kept' };
   if (!(env.ELEVENLABS_API_KEY ?? '').trim()) return { ok: false, error: 'ELEVENLABS_API_KEY is not set: the imported number was NOT deleted and the reference is kept' };

@@ -6,6 +6,7 @@
  * Locale: English and Spanish for every path. Times are always rendered in
  * America/New_York, which is where the demo business lives.
  */
+import { configEnv } from '@/lib/config';
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall, upsertCallForConversation,
@@ -235,7 +236,7 @@ async function resolveCall(
 
 /** Policy knob: text the model-relayed booking phone when NO verified caller number exists. Default: never. */
 function allowUnverifiedBookingSms(): boolean {
-  return process.env.ALLOW_UNVERIFIED_BOOKING_SMS === 'true';
+  return configEnv().ALLOW_UNVERIFIED_BOOKING_SMS === 'true';
 }
 
 export type { OwnerAlert };

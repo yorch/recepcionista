@@ -10,6 +10,7 @@
  *  - the signature counter is NOT checked by the library (we hand it 0): recordPasskeyUse does it atomically in the database, so two
  *    concurrent assertions of one credential cannot both pass, and a regression is reported to the caller as `clone_suspected`.
  */
+import { configEnv } from '@/lib/config';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import {
@@ -38,7 +39,7 @@ function parseOrigin(v: string): URL | null {
  * The relying party. `null` when passkeys are not configured: production needs PUBLIC_BASE_URL/APP_URL (https). Outside production, with
  * neither set, the request's own origin is used (`devOrigin`), so `next dev` and tests work without configuration.
  */
-export function webauthnConfig(env: NodeJS.ProcessEnv = process.env, devOrigin?: string | null): WebauthnConfig | null {
+export function webauthnConfig(env: NodeJS.ProcessEnv = configEnv(), devOrigin?: string | null): WebauthnConfig | null {
   const baseRaw = configuredBaseUrl(env);
   let base = baseRaw ? parseOrigin(baseRaw) : null;
   if (!base && !baseRaw && env.NODE_ENV !== 'production' && devOrigin) base = parseOrigin(devOrigin);
@@ -57,7 +58,7 @@ export function webauthnConfig(env: NodeJS.ProcessEnv = process.env, devOrigin?:
 export function webauthnConfigFor(req: Request): WebauthnConfig | null {
   let dev: string | null = null;
   try { dev = new URL(req.url).origin; } catch { /* ignore */ }
-  return webauthnConfig(process.env, dev);
+  return webauthnConfig(configEnv(), dev);
 }
 
 const challengeUser = (purpose: WebauthnPurpose, userId?: string) => (purpose === 'login' ? undefined : userId);

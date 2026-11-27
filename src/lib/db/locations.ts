@@ -3,6 +3,7 @@
  * Business + owner membership are ONE transaction; the per-account cap is checked under a row lock on the user, so concurrent requests
  * cannot overshoot it. The new business starts like a signup's: billing 'none', nothing provisioned (every business pays and provisions on its own).
  */
+import { configEnv } from '@/lib/config';
 import { createBusiness } from './index';
 import { prisma } from './client';
 import { addMembership } from './memberships';
@@ -12,7 +13,7 @@ export const DEFAULT_MAX_BUSINESSES_PER_USER = 10;
 
 /** MAX_BUSINESSES_PER_USER (1..100, default 10). */
 export function maxBusinessesPerUser(): number {
-  const n = Number.parseInt(process.env.MAX_BUSINESSES_PER_USER ?? '', 10);
+  const n = Number.parseInt(configEnv().MAX_BUSINESSES_PER_USER ?? '', 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(100, n) : DEFAULT_MAX_BUSINESSES_PER_USER;
 }
 

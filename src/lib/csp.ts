@@ -11,6 +11,7 @@
  * a nonce, and inline CSS cannot execute script. Dev adds 'unsafe-eval' (React debugging) and ws: (HMR).
  */
 
+import { configEnv } from '@/lib/config';
 import { configuredBaseUrl } from '@/lib/base-url';
 
 export type CspMode = 'strict' | 'moderate';
@@ -33,7 +34,7 @@ export interface CspOptions {
 export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 
 /** Is the Turnstile widget enabled for this deployment? (site key = public, build time; secret = server.) */
-export function turnstileConfigured(env: Record<string, string | undefined> = process.env): boolean {
+export function turnstileConfigured(env: Record<string, string | undefined> = configEnv()): boolean {
   // The literal process.env.NEXT_PUBLIC_* read lets Next inline the build-time value into the proxy bundle.
   return Boolean((env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY || '').trim());
 }
@@ -44,7 +45,7 @@ export function turnstileConfigured(env: Record<string, string | undefined> = pr
  * CSP_UPGRADE_INSECURE=true|false forces it; unset/auto = on only in production AND when the public origin
  * (src/lib/base-url.ts: APP_URL, else PUBLIC_BASE_URL) is https. Never in development.
  */
-export function upgradeInsecureEnabled(env: Record<string, string | undefined> = process.env): boolean {
+export function upgradeInsecureEnabled(env: Record<string, string | undefined> = configEnv()): boolean {
   if (env.NODE_ENV !== 'production') return false;
   const v = (env.CSP_UPGRADE_INSECURE ?? '').trim().toLowerCase();
   if (v === 'true') return true;
@@ -89,7 +90,7 @@ export interface CspHeaders {
 }
 
 /** Headers for a page response. `reportOnly` (CSP_REPORT_ONLY=true): enforce `moderate`, report violations of `strict`. */
-export function cspHeadersFor(nonce: string, env: NodeJS.ProcessEnv = process.env): CspHeaders {
+export function cspHeadersFor(nonce: string, env: NodeJS.ProcessEnv = configEnv()): CspHeaders {
   const reportUri = env.CSP_REPORT_URI?.trim() || undefined;
   const isDev = env.NODE_ENV !== 'production';
   const turnstile = turnstileConfigured(env);

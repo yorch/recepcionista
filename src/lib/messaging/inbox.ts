@@ -10,6 +10,7 @@
  *      `sendAndLog`, so it obeys the opt-out list, the plan cap and is logged as `inbox_autoreply`).
  * Nothing here throws on a provider failure: the text is already stored, which is the part that must not be lost.
  */
+import { configEnv } from '@/lib/config';
 import {
   claimEvent, countryForBusiness, getInboundMessageBySid, isOptedOut, linkInboundToBooking, markInboundAutoReplied, setInboundStatus, markInboundForwarded, prisma, recordInboundMessage, releaseEvent,
 } from '@/lib/db';
@@ -41,7 +42,7 @@ export const DEFAULT_INBOX_FORWARD_HOURLY_LIMIT = 10;
 export const INBOX_SENDER_FORWARD_HOURLY_LIMIT = 2;
 
 /** INBOX_FORWARD_HOURLY_LIMIT: owner texts about customer messages per business per hour (default 10, at least 1). */
-export function inboxForwardHourlyLimit(env: NodeJS.ProcessEnv = process.env): number {
+export function inboxForwardHourlyLimit(env: NodeJS.ProcessEnv = configEnv()): number {
   const raw = (env.INBOX_FORWARD_HOURLY_LIMIT ?? '').trim();
   const n = Number(raw);
   return raw !== '' && Number.isInteger(n) && n >= 1 ? n : DEFAULT_INBOX_FORWARD_HOURLY_LIMIT;

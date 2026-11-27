@@ -8,6 +8,7 @@
  * in Node, src/lib/session.ts). There is no signed/derived admin cookie any more.
  */
 
+import { configEnv } from '@/lib/config';
 import { baseUrlHost } from '@/lib/base-url';
 
 /** Break-glass admin session cookie: a random opaque token (DB stores only its sha256). */
@@ -96,7 +97,7 @@ export function isPublicPath(pathname: string): boolean {
  * `next dev` instance behind a tunnel must not silently run open.
  */
 export function insecureDevAllowed(): boolean {
-  return process.env.ALLOW_INSECURE_DEV === 'true' && process.env.NODE_ENV !== 'production';
+  return configEnv().ALLOW_INSECURE_DEV === 'true' && process.env.NODE_ENV !== 'production';
 }
 
 let warned = false;
@@ -107,7 +108,7 @@ export type AuthConfig =
   | { mode: 'misconfigured' }; // ADMIN_TOKEN unset without the dev opt-in -> fail closed
 
 export function authConfig(): AuthConfig {
-  const token = process.env.ADMIN_TOKEN?.trim();
+  const token = configEnv().ADMIN_TOKEN?.trim();
   if (token) return { mode: 'enforce', token };
   if (!insecureDevAllowed()) return { mode: 'misconfigured' };
   if (!warned) {
@@ -214,7 +215,7 @@ export function checkSameOrigin(headers: Headers, opts: { requirePresent?: boole
   const hosts = new Set<string>();
   const host = headers.get('host');
   if (host) hosts.add(host.toLowerCase());
-  if (process.env.TRUSTED_PROXY === 'true') {
+  if (configEnv().TRUSTED_PROXY === 'true') {
     const fwd = headers.get('x-forwarded-host')?.split(',')[0]?.trim();
     if (fwd) hosts.add(fwd.toLowerCase());
   }
@@ -225,7 +226,7 @@ export function checkSameOrigin(headers: Headers, opts: { requirePresent?: boole
 
 /** Demo-only routes (reset/simulate/mock-complete) are 404 unless DEMO_MODE=true, and NEVER in production (a leaked flag is inert). */
 export function demoModeEnabled(): boolean {
-  return process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
+  return configEnv().DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 }
 
 /**
@@ -236,12 +237,12 @@ export function demoModeEnabled(): boolean {
  * global per-route cap (see limitRequest).
  */
 export function clientKey(req: Request): string {
-  if (process.env.TRUSTED_PROXY === 'true') {
+  if (configEnv().TRUSTED_PROXY === 'true') {
     const real = req.headers.get('x-real-ip')?.trim();
     const hops = (req.headers.get('x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
     // TRUSTED_PROXY_HOPS = how many proxies append to X-Forwarded-For in front of the app (default 1, e.g. Traefik).
     // Behind a CDN + Traefik set 2, so the client address (not the CDN's) is the key.
-    const n = Math.max(1, Math.min(5, Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '1', 10) || 1));
+    const n = Math.max(1, Math.min(5, Number.parseInt(configEnv().TRUSTED_PROXY_HOPS ?? '1', 10) || 1));
     const ip = hops.length ? hops[Math.max(0, hops.length - n)] : real;
     if (ip) return ip.slice(0, 64);
   }

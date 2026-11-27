@@ -2,6 +2,7 @@
  * Dependency-free SMS sender configuration check. Lives apart from sender.ts (which imports the database layer) so `instrumentation.ts`, which is also traced for the
  * Edge runtime, can import it without pulling node-only modules into that bundle.
  */
+import { configEnv } from '@/lib/config';
 const MESSAGING_SERVICE_RE = /^MG[0-9a-fA-F]{32}$/;
 function messagingServiceSid(env: NodeJS.ProcessEnv): string | null {
   const v = (env.TWILIO_MESSAGING_SERVICE_SID ?? '').trim();
@@ -13,7 +14,7 @@ function messagingServiceSid(env: NodeJS.ProcessEnv): string | null {
  * customer text leaves from the tenant's own number, which US carriers filter unless it is registered to an A2P 10DLC campaign. Twilio still answers 201, so the app
  * cannot tell: delivery failures only surface through the status callback (audit `sms.delivery_failed`) and are never retried.
  */
-export function smsSenderProblem(env: NodeJS.ProcessEnv = process.env): string | null {
+export function smsSenderProblem(env: NodeJS.ProcessEnv = configEnv()): string | null {
   const has = (v?: string) => Boolean(v && v.trim());
   if (!(has(env.TWILIO_ACCOUNT_SID) && has(env.TWILIO_AUTH_TOKEN) && has(env.TWILIO_PHONE_NUMBER))) return null; // mock / not configured: other checks report that
   if (has(env.TWILIO_MESSAGING_SERVICE_SID)) {

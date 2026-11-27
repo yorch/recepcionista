@@ -25,6 +25,7 @@
  * Switches: JOBS=on|off (default on in production, off in development/test), JOBS_TICK_SECONDS (default 60).
  * RETENTION_JOB=on still works on its own (JOBS unset in development) and is off by default. JOBS=off turns everything off.
  */
+import { configEnv } from '@/lib/config';
 import {
   claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, deleteExpiredWebauthnChallenges, WEBAUTHN_CHALLENGE_GRACE_MS, EMAIL_TOKEN_GRACE_MS,
   briefingAudioKeepDays, getBusiness, isProvisioningAllowed, pruneBriefingAudio, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
@@ -467,7 +468,7 @@ export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> 
 }
 
 /** Which jobs this instance's configuration turns on. */
-export function enabledJobs(env: NodeJS.ProcessEnv = process.env): JobName[] {
+export function enabledJobs(env: NodeJS.ProcessEnv = configEnv()): JobName[] {
   const s = jobsSetting(env);
   const retention = retentionJobEnabled(env.RETENTION_JOB);
   const release = tenantReleaseSetting(env) !== 'off'; // `report` (dry-run report) or `on` (acts): see jobs/tenants.ts
@@ -479,7 +480,7 @@ export function enabledJobs(env: NodeJS.ProcessEnv = process.env): JobName[] {
 /** One scheduler pass: the due jobs, in order. Never throws. */
 export async function runJobTick(opts: { now?: Date; env?: NodeJS.ProcessEnv; jobs?: JobName[]; deps?: Partial<JobDeps> } = {}): Promise<JobReport[]> {
   const now = opts.now ?? new Date();
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   const jobs = opts.jobs ?? enabledJobs(env);
   const reports: JobReport[] = [];
   for (const job of jobs) {
@@ -525,7 +526,7 @@ export interface JobStatus {
   note?: string;
 }
 
-export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv = process.env): Promise<{
+export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv = configEnv()): Promise<{
   runner: { jobs_setting: 'on' | 'off'; explicit: boolean; tick_seconds: number; enabled_jobs: JobName[] };
   jobs: JobStatus[];
 }> {
@@ -593,37 +594,87 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
   };
 }
 
-// ---- the process-level runner -----------------------------------------------------------------
+// ---- the process-level runner -----------------------------------------------------------------------------------------------
+//
+// The runner ALWAYS starts (once per process) and decides on EVERY tick, from the live configuration, which jobs are enabled and how often to
+// tick: a console change to JOBS / RETENTION_JOB / TENANT_RELEASE_JOB / JOBS_TICK_SECONDS takes effect on the next pass without a restart.
+// It never holds an env object: `env` is only passed through when a caller (a test) injects one; otherwise `configEnv()` is read per use.
 
 let started = false;
 let ticking = false;
+let timer: ReturnType<typeof setInterval> | null = null;
+let firstTimer: ReturnType<typeof setTimeout> | null = null;
+let armedSeconds = 0;
+let lastSignature = '';
+/** Only a test injects an env; production passes nothing and every pass reads `configEnv()` afresh. */
+let injectedEnv: NodeJS.ProcessEnv | undefined;
 
-/** Start the interval runner once per process. Returns false when nothing is enabled here. */
-export function startJobRunner(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (started) return true;
-  const jobs = enabledJobs(env);
-  if (!retentionJobEnabled(env.RETENTION_JOB)) {
+const runnerEnv = (): NodeJS.ProcessEnv => injectedEnv ?? configEnv();
+
+function armInterval(seconds: number): void {
+  if (timer) clearInterval(timer);
+  armedSeconds = seconds;
+  timer = setInterval(() => { void runnerTick(); }, seconds * 1000);
+  timer.unref?.();
+}
+
+function announce(jobs: JobName[], cur: NodeJS.ProcessEnv): void {
+  if (jobs.length === 0) log.info('disabled', { JOBS: jobsSetting(cur).explicit ? 'off' : 'unset (off outside production)', note: 'set JOBS=on to run the daily briefing, gratitude sweep and cleanup' });
+  else log.info('scheduled', { jobs, tick_seconds: tickSeconds(cur) });
+}
+
+/**
+ * One pass of the process-level runner: re-read the configuration, re-arm the interval when the tick period changed, announce a change of
+ * the enabled set, run the enabled jobs. Exported for tests; the interval calls it.
+ */
+export async function runnerTick(): Promise<void> {
+  if (ticking) return; // a slow pass never overlaps the next one in this process (other processes are fenced by leases)
+  ticking = true;
+  try {
+    const cur = runnerEnv();
+    const secs = tickSeconds(cur);
+    if (secs !== armedSeconds && timer) { log.info('rearmed', { tick_seconds: secs, was: armedSeconds }); armInterval(secs); }
+    const jobs = enabledJobs(cur);
+    const signature = jobs.join(',');
+    if (signature !== lastSignature) { announce(jobs, cur); lastSignature = signature; }
+    if (jobs.length > 0) await runJobTick({ ...(injectedEnv ? { env: injectedEnv } : {}), jobs });
+  } catch (err) {
+    log.error('tick_failed', { err });
+  } finally {
+    ticking = false;
+  }
+}
+
+/**
+ * Start the interval runner once per process. Always schedules the interval (unref'd); a tick with nothing enabled is a no-op.
+ * Returns whether any job is enabled right now (informational: it can change later).
+ */
+export function startJobRunner(env?: NodeJS.ProcessEnv): boolean {
+  if (started) return enabledJobs(runnerEnv()).length > 0;
+  started = true;
+  injectedEnv = env;
+  const first = runnerEnv();
+  if (!retentionJobEnabled(first.RETENTION_JOB)) {
     // Unchanged: while the purge is off, boot logs what it WOULD delete.
     const t = setTimeout(() => { void logRetentionPreview(); }, 15_000);
     t.unref?.();
     log.warn('retention.off_by_default', { hint: 'set RETENTION_JOB=on to delete data past each business\'s retention window; counts that would be purged are logged shortly after boot' });
   }
-  if (jobs.length === 0) {
-    log.info('disabled', { JOBS: jobsSetting(env).explicit ? 'off' : 'unset (off outside production)', note: 'set JOBS=on to run the daily briefing, gratitude sweep and cleanup' });
-    started = true;
-    return false;
-  }
-  started = true;
-  const every = tickSeconds(env) * 1000;
-  const tick = async () => {
-    if (ticking) return; // a slow pass never overlaps the next one in this process (other processes are fenced by leases)
-    ticking = true;
-    try { await runJobTick({ env }); } catch (err) { log.error('tick_failed', { err }); } finally { ticking = false; }
-  };
-  const first = setTimeout(() => { void tick(); }, FIRST_TICK_DELAY_MS);
-  first.unref?.();
-  const timer = setInterval(() => { void tick(); }, every);
-  timer.unref?.();
-  log.info('scheduled', { jobs, tick_seconds: every / 1000 });
-  return true;
+  const initial = enabledJobs(first);
+  lastSignature = initial.join(',');
+  announce(initial, first);
+  firstTimer = setTimeout(() => { void runnerTick(); }, FIRST_TICK_DELAY_MS);
+  firstTimer.unref?.();
+  armInterval(tickSeconds(first));
+  return initial.length > 0;
 }
+
+/** Stop the runner (tests, graceful shutdown). A later `startJobRunner()` starts it again. */
+export function stopJobRunner(): void {
+  if (timer) clearInterval(timer);
+  if (firstTimer) clearTimeout(firstTimer);
+  timer = null; firstTimer = null; started = false; ticking = false; armedSeconds = 0; lastSignature = ''; injectedEnv = undefined;
+}
+
+/** The tick period the runner is armed with (0 = not started). Exposed for tests and the admin diagnostics. */
+export const armedTickSeconds = (): number => armedSeconds;

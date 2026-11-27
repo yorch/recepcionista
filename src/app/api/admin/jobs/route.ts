@@ -1,3 +1,4 @@
+import { configEnv } from '@/lib/config';
 import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
@@ -24,7 +25,7 @@ export async function GET(req: Request) {
     return ok({
       ...(await jobsStatus()),
       diagnostics: {
-        voice_line: { effective: lineKind(), forced: (process.env.VOICE_LINE_KIND ?? '').trim().toLowerCase() || null, mismatch },
+        voice_line: { effective: lineKind(), forced: (configEnv().VOICE_LINE_KIND ?? '').trim().toLowerCase() || null, mismatch },
         recording_deletions: await recordingDeletionStatus(),
         // The newest tenant-release / grandfather run reports (audit rows; counts only, no secrets): what the job would do or did.
         tenant_release: {

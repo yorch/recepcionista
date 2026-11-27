@@ -12,6 +12,7 @@
  * A forward mode whose number is missing or no longer verified never dials anything: the AI answers instead (the
  * safe, honest fallback) and the reason is returned so it can be logged and shown.
  */
+import { configEnv } from '@/lib/config';
 import { openWindow } from '@/lib/availability';
 import { defaultPhoneCountry, phoneCountry } from '@/lib/phone';
 import { localDateKey, tzOf } from '@/lib/time';
@@ -82,7 +83,7 @@ export function resolveCallRoute(b: ModeFields, now: Date = new Date(), line: Li
   const target = forwardTarget(b);
   if (!target.ok) return { action: 'ai', why: target.why === 'rejected' ? 'forward_number_rejected' : 'forward_number_unverified' };
   if (b.forward_during_hours && !isOpenNow(b.hours, tzOf(b.timezone), now, b.closed_dates)) return { action: 'ai', why: 'forward_outside_hours' };
-  if (!forwardingSupported(line, process.env, b)) return { action: 'paused', why: 'forward_unavailable_on_line' };
+  if (!forwardingSupported(line, configEnv(), b)) return { action: 'paused', why: 'forward_unavailable_on_line' };
   return { action: 'forward', to: target.to };
 }
 
@@ -158,7 +159,7 @@ export function callModeView(b: ModeFields & { forward_number?: string | null },
     forward_verified: trusted !== null,
     forward_is_owner_phone: trusted !== null && !b.forward_number_verified_at,
     route_now: resolveCallRoute(b, now, line).action,
-    forward_supported: forwardingSupported(line, process.env, b),
+    forward_supported: forwardingSupported(line, configEnv(), b),
     forward_blocked: !target.ok && target.why === 'rejected' ? (target.error ?? 'this number cannot be used for forwarding') : null,
     label: label.text,
     label_code: callModeLabelCode(b, now, line),

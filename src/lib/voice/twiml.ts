@@ -2,6 +2,7 @@
  * TwiML for the non-AI call modes (paused / forwarded). Pure string builders; every dynamic value is XML-escaped, and
  * nothing here records a call except the explicit voicemail <Record>, which is always preceded by the recording notice.
  */
+import { configEnv } from '@/lib/config';
 import type { Business } from '@/lib/types';
 
 export const xmlEscape = (s: string): string =>
@@ -18,7 +19,7 @@ export const twimlResponse = (xml: string, status = 200): Response => new Respon
  * FORWARD_RING_SECONDS overrides it (10-40).
  */
 export const FORWARD_RING_SECONDS = 20;
-export function forwardRingSeconds(env: Record<string, string | undefined> = process.env): number {
+export function forwardRingSeconds(env: Record<string, string | undefined> = configEnv()): number {
   const raw = (env.FORWARD_RING_SECONDS ?? '').trim();
   const n = Number(raw);
   return raw !== '' && Number.isInteger(n) && n >= 10 && n <= 40 ? n : FORWARD_RING_SECONDS;

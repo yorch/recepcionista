@@ -9,6 +9,7 @@
  * A failure is typed: `definite` = Stripe answered with an error (nothing was refunded: retry with a NEW key is safe), not definite =
  * the outcome is UNKNOWN (timeout / dropped connection): retry with the SAME key, never a new one.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 const log = logger('stripe.refunds');
@@ -32,7 +33,7 @@ export interface ProviderRefund {
 }
 
 const isProd = () => process.env.NODE_ENV === 'production';
-export const stripeConfigured = (): boolean => Boolean(process.env.STRIPE_SECRET_KEY?.trim());
+export const stripeConfigured = (): boolean => Boolean(configEnv().STRIPE_SECRET_KEY?.trim());
 /** True when refunds can run at all (a key, or the non-production mock). */
 export const refundsAvailable = (): boolean => stripeConfigured() || !isProd();
 
@@ -42,7 +43,7 @@ async function call<T>(method: 'GET' | 'POST', path: string, form?: URLSearchPar
     res = await fetchImpl(`${API}${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`,
+        authorization: `Bearer ${configEnv().STRIPE_SECRET_KEY}`,
         ...(form ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
         ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
       },

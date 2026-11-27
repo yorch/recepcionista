@@ -3,6 +3,7 @@
  * Every interpolated value is HTML-escaped in the HTML part; links are built from APP_URL /
  * PUBLIC_BASE_URL and the raw token is URL-encoded. Pure functions (no I/O).
  */
+import { configEnv } from '@/lib/config';
 import { EmailConfigError } from './index';
 import { makeT } from '@/lib/i18n';
 import type { Locale, TFunction } from '@/lib/i18n/core';
@@ -18,7 +19,7 @@ export const escapeHtml = (s: string): string =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 /** Public origin of the app (the single resolver: APP_URL, else PUBLIC_BASE_URL). Required in production; localhost elsewhere. */
-export function appBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+export function appBaseUrl(env: NodeJS.ProcessEnv = configEnv()): string {
   const base = configuredBaseUrl(env);
   if (base) return base;
   if (env.NODE_ENV === 'production') throw new EmailConfigError('APP_URL (or PUBLIC_BASE_URL) is required to build email links');
@@ -26,7 +27,7 @@ export function appBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /** `<base><path>?token=<token>` (path must start with '/'). */
-export function emailLink(path: string, token: string, env: NodeJS.ProcessEnv = process.env): string {
+export function emailLink(path: string, token: string, env: NodeJS.ProcessEnv = configEnv()): string {
   if (!path.startsWith('/')) throw new Error('emailLink: path must start with /');
   return `${appBaseUrl(env)}${path}?token=${encodeURIComponent(token)}`;
 }

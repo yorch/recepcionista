@@ -11,6 +11,7 @@
  * (the conversation's audio AND transcript, `calls.conversation_id`, deleted with DELETE /v1/convai/conversations/{id}). The ElevenLabs entries are
  * only queued when ELEVENLABS_API_KEY is set (without a key there is nothing at the provider to delete). Anything else has nothing to delete.
  */
+import { configEnv } from '@/lib/config';
 import type { Prisma } from '@prisma/client';
 import { prisma } from './client';
 import { forgetCachedRecording, parseRecordingUrl } from '@/lib/voice/voicemail';
@@ -27,7 +28,7 @@ const CONVERSATION_ID = /^[A-Za-z0-9_-]{6,128}$/;
 /** Queue the recordings behind deleted call rows. Idempotent (unique per account + recording). Returns the queue ids covering these recordings. */
 export async function enqueueRecordingDeletions(tx: Tx, rows: RecordingToDelete[]): Promise<string[]> {
   const refs = new Map<string, { accountSid: string; recordingSid: string; provider: string; businessId: string | null }>();
-  const elevenlabs = Boolean((process.env.ELEVENLABS_API_KEY ?? '').trim());
+  const elevenlabs = Boolean((configEnv().ELEVENLABS_API_KEY ?? '').trim());
   for (const r of rows) {
     const ref = parseRecordingUrl(r.url);
     if (ref) {

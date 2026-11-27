@@ -10,6 +10,7 @@
  * Pure (no I/O, no imports): safe in the proxy bundle. Always pass `env` explicitly in tests.
  */
 
+import { configEnv } from '@/lib/config';
 export const DEFAULT_DEV_BASE_URL = 'http://localhost:3000';
 
 type Env = Record<string, string | undefined>;
@@ -17,23 +18,23 @@ type Env = Record<string, string | undefined>;
 const clean = (v: string | undefined): string => (v ?? '').trim().replace(/\/+$/, '');
 
 /** The configured public base URL (`APP_URL || PUBLIC_BASE_URL`), trimmed, without trailing slashes; '' when neither is set. */
-export function configuredBaseUrl(env: Env = process.env): string {
+export function configuredBaseUrl(env: Env = configEnv()): string {
   return clean(env.APP_URL) || clean(env.PUBLIC_BASE_URL);
 }
 
 /** The configured base URL, else `http://localhost:3000` (for callers that must always produce something, e.g. dev links). */
-export function baseUrlOrDev(env: Env = process.env): string {
+export function baseUrlOrDev(env: Env = configEnv()): string {
   return configuredBaseUrl(env) || DEFAULT_DEV_BASE_URL;
 }
 
 /** The configured base URL when it is an http(s) URL, else null (webhook registration needs an absolute address). */
-export function absoluteBaseUrl(env: Env = process.env): string | null {
+export function absoluteBaseUrl(env: Env = configEnv()): string | null {
   const base = configuredBaseUrl(env);
   return /^https?:\/\//i.test(base) ? base : null;
 }
 
 /** The origin (scheme + host + port) of the configured base URL, or null when unset / malformed. */
-export function baseUrlOrigin(env: Env = process.env): string | null {
+export function baseUrlOrigin(env: Env = configEnv()): string | null {
   const base = configuredBaseUrl(env);
   if (!base) return null;
   try {
@@ -44,7 +45,7 @@ export function baseUrlOrigin(env: Env = process.env): string | null {
 }
 
 /** The `host[:port]` of the configured base URL (lower case), or null. Used by the CSRF same-origin allowlist. */
-export function baseUrlHost(env: Env = process.env): string | null {
+export function baseUrlHost(env: Env = configEnv()): string | null {
   const base = configuredBaseUrl(env);
   if (!base) return null;
   try {
@@ -65,7 +66,7 @@ function originOf(v: string | undefined): string | null {
 }
 
 /** Configuration smells about the public origin (empty when fine). Shown once in the startup banner. */
-export function baseUrlWarnings(env: Env = process.env): string[] {
+export function baseUrlWarnings(env: Env = configEnv()): string[] {
   const out: string[] = [];
   const app = originOf(env.APP_URL);
   const pub = originOf(env.PUBLIC_BASE_URL);

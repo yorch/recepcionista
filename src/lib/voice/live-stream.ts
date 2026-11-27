@@ -8,6 +8,7 @@
  * client has not drained the previous frame; a client stalled for `maxStalledTicks` ticks is dropped. Each tick also asks for the shared
  * upstream poll (voice/live-transcript.ts requestPoll), which is deduplicated across all viewers by a lease.
  */
+import { configEnv } from '@/lib/config';
 import type { TranscriptEvent } from '@/lib/types';
 import type { PollOutcome } from '@/lib/voice/live-transcript';
 
@@ -119,13 +120,13 @@ export function createLiveStream(o: LiveStreamOptions): ReadableStream<Uint8Arra
 /** Per-process concurrent-connection limits: per user and per business. (Across several instances each keeps its own count.) */
 const perUser = new Map<string, number>();
 const perBusiness = new Map<string, number>();
-export const liveLimits = (env: Record<string, string | undefined> = process.env): { perUser: number; perBusiness: number } => {
+export const liveLimits = (env: Record<string, string | undefined> = configEnv()): { perUser: number; perBusiness: number } => {
   const n = (raw: string | undefined, d: number) => { const v = Number((raw ?? '').trim()); return Number.isInteger(v) && v >= 1 && v <= 1000 ? v : d; };
   return { perUser: n(env.LIVE_MAX_PER_USER, 3), perBusiness: n(env.LIVE_MAX_PER_BUSINESS, 20) };
 };
 
 /** Take a connection slot; returns the release function, or null when a limit is reached. Idempotent release. */
-export function acquireLiveSlot(userKey: string, businessId: string, env: Record<string, string | undefined> = process.env): (() => void) | null {
+export function acquireLiveSlot(userKey: string, businessId: string, env: Record<string, string | undefined> = configEnv()): (() => void) | null {
   const lim = liveLimits(env);
   if ((perUser.get(userKey) ?? 0) >= lim.perUser || (perBusiness.get(businessId) ?? 0) >= lim.perBusiness) return null;
   perUser.set(userKey, (perUser.get(userKey) ?? 0) + 1);
