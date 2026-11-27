@@ -6,6 +6,7 @@
  * key / price throws BillingConfigError (routes answer 503). A Stripe API failure throws BillingProviderError.
  */
 import { logger } from '@/lib/log';
+import { configuredBaseUrl } from '@/lib/base-url';
 
 const log = logger('stripe.billing');
 
@@ -67,9 +68,9 @@ export function trialDays(env: NodeJS.ProcessEnv = process.env): number {
 /** Plan label stored on the business for Stripe-managed subscriptions. */
 export const planName = (env: NodeJS.ProcessEnv = process.env): string => env.BILLING_PLAN_NAME?.trim() || 'standard';
 
-/** Public origin for return URLs: PUBLIC_BASE_URL, else APP_URL. Required in production. */
+/** Public origin for return URLs (the single resolver: APP_URL, else PUBLIC_BASE_URL). Required in production. */
 export function returnBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
-  const base = (env.PUBLIC_BASE_URL || env.APP_URL || '').trim().replace(/\/+$/, '');
+  const base = configuredBaseUrl(env);
   if (base) return base;
   if (isProd(env)) throw new BillingConfigError('APP_URL (or PUBLIC_BASE_URL) is required for billing return URLs');
   return 'http://localhost:3000';

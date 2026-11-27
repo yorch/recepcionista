@@ -1,15 +1,11 @@
 /** Public-site constants (server side). Nothing here reads tenant data. */
 import { makeT } from '@/lib/i18n';
 import type { Locale } from '@/lib/i18n/core';
+import { baseUrlOrigin, DEFAULT_DEV_BASE_URL } from '@/lib/base-url';
 
 /** Canonical public origin for metadata, sitemap and robots. */
 export function siteUrl(): string {
-  const raw = process.env.PUBLIC_BASE_URL || process.env.APP_URL || 'http://localhost:3000';
-  try {
-    return new URL(raw).origin;
-  } catch {
-    return 'http://localhost:3000';
-  }
+  return baseUrlOrigin() ?? DEFAULT_DEV_BASE_URL;
 }
 
 /** Annual plan price text (NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL[_ES]), e.g. "$1,490/year (2 months free)"; null when unset. */

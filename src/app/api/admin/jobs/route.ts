@@ -1,5 +1,6 @@
 import { ok, fail } from '@/lib/http';
 import { authenticate, authErrorResponse } from '@/lib/session';
+import { limitRequest } from '@/lib/ratelimit';
 import { jobsStatus } from '@/lib/jobs';
 import { lineKind, lineKindMismatch } from '@/lib/voice/line';
 import { prisma, recordingDeletionStatus } from '@/lib/db';
@@ -15,6 +16,8 @@ export const runtime = 'nodejs';
 export async function GET(req: Request) {
   const auth = await authenticate(req, { role: 'admin' });
   if (!auth.ok) return auth.response;
+  const limited = await limitRequest(req, 'admin/jobs', 60);
+  if (limited) return limited;
   try {
     // `diagnostics`: configuration that fails safe but misleads (VOICE_LINE_KIND against the real line) and the recording-deletion queue.
     const mismatch = lineKindMismatch();

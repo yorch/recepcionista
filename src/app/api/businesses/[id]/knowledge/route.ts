@@ -1,3 +1,4 @@
+import { kbListLimitProblem } from '@/lib/kb/limits';
 import { ok, fail, readJson } from '@/lib/http';
 import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
 import { getBusiness, getKnowledgeBase, upsertKnowledgeBase } from '@/lib/db';
@@ -29,8 +30,11 @@ export async function PUT(
 
     const body = await readJson<KnowledgePatch>(req);
 
-    const services = Array.isArray(body.services) ? body.services.slice(0, 20) : existing.services;
-    const faqs = Array.isArray(body.faqs) ? body.faqs.slice(0, 15) : existing.faqs;
+    // Over the limit is an error, never a silent cut (the same KB_LIMITS as the owner-change patches: src/lib/kb/limits.ts).
+    const tooMany = kbListLimitProblem(body);
+    if (tooMany) return fail(tooMany, 422);
+    const services = Array.isArray(body.services) ? body.services : existing.services;
+    const faqs = Array.isArray(body.faqs) ? body.faqs : existing.faqs;
     const pricing_notes = typeof body.pricing_notes === 'string' ? body.pricing_notes : existing.pricing_notes;
     const call_script = typeof body.call_script === 'string' ? body.call_script : existing.call_script;
 

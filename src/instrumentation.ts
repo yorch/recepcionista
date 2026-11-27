@@ -9,6 +9,8 @@
  */
 import type { Instrumentation } from 'next';
 import { logger, serializeError } from '@/lib/log';
+import { baseUrlWarnings, configuredBaseUrl } from '@/lib/base-url';
+import { admin2faOptOutIgnored } from '@/lib/admin-2fa';
 import { ownerPhoneGrandfatherProblem } from '@/lib/messaging/owner';
 import { signupAvailability, signupConfigWarning } from '@/lib/signup-config';
 import { lineKindMismatch } from '@/lib/voice/line';
@@ -73,6 +75,8 @@ function startupWarnings(): void {
   if (lm) boot.error('voice_line_kind_mismatch', { banner: `!!! ${lm}` });
   const ss = smsSenderProblem();
   if (ss) boot.warn('sms_sender_a2p', { banner: `!!! ${ss}` });
+  for (const w of baseUrlWarnings()) boot.warn('base_url', { warning: w });
+  if (admin2faOptOutIgnored()) boot.warn('admin_2fa_optout_ignored', { warning: 'REQUIRE_2FA_FOR_ADMINS=false is IGNORED in production: DB admin users must enrol in 2FA (the ADMIN_TOKEN break-glass is unaffected). Remove the variable.' });
   const og = ownerPhoneGrandfatherProblem();
   if (og) boot.warn('owner_phone_grandfather', { warning: og });
 }
@@ -88,7 +92,7 @@ export async function register() {
     runtime: process.env.NEXT_RUNTIME || 'nodejs',
     env: process.env.NODE_ENV,
     log_level: process.env.LOG_LEVEL || `(default ${process.env.NODE_ENV === 'production' ? 'info' : 'debug'})`,
-    app_url: process.env.APP_URL || 'unset',
+    app_url: configuredBaseUrl() || 'unset',
     db: dbTarget(),
     ...providerSummary(),
   });

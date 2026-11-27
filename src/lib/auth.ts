@@ -8,6 +8,8 @@
  * in Node, src/lib/session.ts). There is no signed/derived admin cookie any more.
  */
 
+import { baseUrlHost } from '@/lib/base-url';
+
 /** Break-glass admin session cookie: a random opaque token (DB stores only its sha256). */
 export const SESSION_COOKIE = 'rc_session';
 export const SESSION_MAX_AGE_S = 60 * 60 * 12;
@@ -216,18 +218,9 @@ export function checkSameOrigin(headers: Headers, opts: { requirePresent?: boole
     const fwd = headers.get('x-forwarded-host')?.split(',')[0]?.trim();
     if (fwd) hosts.add(fwd.toLowerCase());
   }
-  for (const v of [process.env.APP_URL, process.env.PUBLIC_BASE_URL]) {
-    try {
-      if (v) hosts.add(new URL(v).host.toLowerCase());
-    } catch { /* ignore malformed config */ }
-  }
+  const configured = baseUrlHost(); // the single public origin (src/lib/base-url.ts)
+  if (configured) hosts.add(configured);
   return hosts.has(originHost.toLowerCase());
-}
-
-/** Headers for server-to-server calls to this app's own protected /api routes. */
-export function internalAuthHeaders(): Record<string, string> {
-  const token = process.env.ADMIN_TOKEN?.trim();
-  return token ? { authorization: `Bearer ${token}` } : {};
 }
 
 /** Demo-only routes (reset/simulate/mock-complete) are 404 unless DEMO_MODE=true, and NEVER in production (a leaked flag is inert). */

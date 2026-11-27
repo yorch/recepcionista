@@ -19,22 +19,22 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `DOMAIN` | prod | none | compose / Traefik host rule and certificate; deploy.sh checks `APP_URL == https://DOMAIN` | no |
 | `TRAEFIK_NAME` | no | `recepcionista` | Traefik router name (unique per host) | no |
 | `APP_IMAGE`, `TOOLS_IMAGE` | no | local build tags | compose image names | no |
-| `APP_URL` | prod | `http://localhost:3000` | public origin: provider callbacks, Stripe return URLs, same-origin check, email links, sitemap | no |
-| `PUBLIC_BASE_URL` | no | `APP_URL` | overrides the origin used for links and Twilio signature URLs | no |
-| `NEXT_PUBLIC_APP_URL` | no | none | last-resort origin fallback (Stripe deposit links, Twilio) | no |
+| `APP_URL` | prod | `http://localhost:3000` (dev only; production fails closed where an origin is required) | THE public origin, resolved in ONE place (`src/lib/base-url.ts`): Twilio signature URL and number webhooks, ElevenLabs tool / initiation / post-call URLs (the tool secret is sent to it), Stripe return URLs and payment links, email links, Google redirect, sitemap / robots, the CSRF same-origin allowlist, the WebAuthn default, the CSP `upgrade-insecure-requests` decision. **Precedence: `APP_URL`, else `PUBLIC_BASE_URL`** | no |
+| `PUBLIC_BASE_URL` | no | none | fallback for `APP_URL` only (older `.env` files). If both are set and differ in origin, `APP_URL` wins everywhere and a startup warning (`base_url`) says so. Set `APP_URL` | no |
+| `NEXT_PUBLIC_APP_URL` | no | none | **REMOVED, not read.** It used to be a third fallback in some readers and absent in others, so two origins could be live at once. A startup warning fires while it is still set; delete it | no |
 | `ADMIN_TOKEN` | prod | none | break-glass admin: Bearer token and `/login` admin sign-in. Unset = the app fails closed (503) | yes |
 | `ALLOW_INSECURE_DEV` | never in prod | unset | local dev: skip admin auth and webhook / tool-secret checks (Twilio signature, ElevenLabs signature, ElevenLabs tool secret) when the matching secret is unset; the ONLY way to skip them (`NODE_ENV` alone never does). Ignored in production; deploy.sh refuses `true` | no |
 | `TRUSTED_PROXY` | prod (compose sets `true`) | unset (compose: `true`) | trust `X-Forwarded-For` for per-client rate limits and the same-origin check | no |
 | `TRUSTED_PROXY_HOPS` | no | `1` | proxies appending to `X-Forwarded-For` (2 behind a CDN plus Traefik) | no |
 | `APP_SECRET_KEY` | prod | insecure fixed key outside production | AES-256-GCM key for TOTP secrets: 32 random bytes, base64 (`openssl rand -base64 32`). deploy.sh validates the length | yes |
-| `REQUIRE_2FA_FOR_ADMINS` | no | `false` | DB admin users must enrol in 2FA first | no |
-| `WEBAUTHN_RP_ID` | no | host of `PUBLIC_BASE_URL`/`APP_URL` | passkey relying-party id; set to a registrable parent domain to share passkeys across subdomains. Changing it later orphans registered passkeys (docs/auth.md) | no |
-| `WEBAUTHN_ORIGINS` | no | `PUBLIC_BASE_URL`/`APP_URL` origin | extra exact origins allowed to use passkeys, comma separated (staging); `https` only (`http` for localhost), each host must be the rpID or a subdomain. Production without any configured origin answers `503 passkeys_not_configured` | no |
+| `REQUIRE_2FA_FOR_ADMINS` | no | **on in production** (unset or `true`); `false` outside production | DB admin users must enrol in 2FA before anything else (`src/lib/admin-2fa.ts`). In production `false` is IGNORED (startup warning `admin_2fa_optout_ignored`): the opt-out exists only for local/test use. The break-glass `ADMIN_TOKEN` is unaffected (no authenticator) | no |
+| `WEBAUTHN_RP_ID` | no | host of the public origin (`APP_URL`, else `PUBLIC_BASE_URL`) | passkey relying-party id; set to a registrable parent domain to share passkeys across subdomains. Changing it later orphans registered passkeys (docs/auth.md) | no |
+| `WEBAUTHN_ORIGINS` | no | public origin (`APP_URL`, else `PUBLIC_BASE_URL`) | extra exact origins allowed to use passkeys, comma separated (staging); `https` only (`http` for localhost), each host must be the rpID or a subdomain. Production without any configured origin answers `503 passkeys_not_configured` | no |
 | `MAX_BUSINESSES_PER_USER` | no | `10` | most businesses one account may own (owner memberships; "Add another location", `POST /api/businesses/mine`), 1-100 | no |
 | `ALLOWED_DEV_ORIGINS` | no | none | `next dev` behind a tunnel (dev only) | no |
 | `DEMO_MODE` | never in prod | unset | `/api/demo/*`, `/api/pay/mock-complete`, mock Stripe checkout (`/api/billing/mock-activate` and the mock checkout link), the demo console page and nav, and the Stripe-error fallback to a mock deposit link. **Ignored when `NODE_ENV=production`** (`demoModeEnabled()`): a leaked flag is inert. compose forces `false`; deploy.sh refuses `true` | no |
 | `CSP_REPORT_ONLY` | no | unset | `true`: enforce the moderate CSP and only report violations of the strict nonce policy (docs/security-headers.md) | no |
-| `CSP_UPGRADE_INSECURE` | no | unset = automatic: on only in production with an `https://` `APP_URL`/`PUBLIC_BASE_URL` | `true`/`false` forces `upgrade-insecure-requests` (turn it off for a plain-HTTP staging deployment; docs/security-headers.md) | no |
+| `CSP_UPGRADE_INSECURE` | no | unset = automatic: on only in production with an `https://` public origin (`APP_URL`, else `PUBLIC_BASE_URL`) | `true`/`false` forces `upgrade-insecure-requests` (turn it off for a plain-HTTP staging deployment; docs/security-headers.md) | no |
 | `CSP_REPORT_URI` | no | none | adds `report-uri` to the CSP (a collector URL you operate) | no |
 | `LOG_LEVEL` | no | `debug` (dev), `info` (prod) | log verbosity | no |
 | `PRISMA_LOG` | no | unset | `1` logs every query | no |
@@ -58,7 +58,7 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | prod (with the secret) | none | Turnstile widget (build time) | no |
 | `SIGNUP_ALLOW_WITHOUT_CAPTCHA` | no | unset | exactly `true` lets production run open signup with no captcha (startup logs a loud warning, deploy.sh prints a banner). NOT recommended; without it and without the Turnstile pair deploy.sh fails | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | FALLBACK price text on the plan step, Billing page and landing, used only when Stripe's price cannot be read (`STRIPE_PRICE_ID` is read from the Stripe API, cached 10 min, fail-soft; amount, currency and interval shown come from Stripe) (build time) | no |
-| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES` | no | falls back to the English text | Spanish price texts for the landing page, onboarding and billing (build time) | no |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES` | no | falls back to the English text | Spanish price texts for the landing page, onboarding and billing. **Build time**, exactly like the English ones: the Dockerfile declares them as `ARG`/`ENV` and `compose.production.yaml` passes them as `app.build.args`, so `./deploy.sh` (a rebuild) applies a change and a plain restart does not (before this fix they were not build args, so the Docker image always rendered the English text to Spanish visitors; `tests/phase0-hardening-pure.test.ts` keeps the three places in sync). Planned: runtime config from the admin console (docs/review/24e, phase 6) | no |
 | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | no | none | annual plan price text on the Billing page's plan choice (build time; shown only when the annual plan is configured) | no |
 | `CREATE_USER_PASSWORD` | no | none | `scripts/create-user.ts` non-interactive password (the script refuses `--password`) | yes |
 
@@ -129,7 +129,7 @@ There is no `REVIEW_URL` variable any more: the Google review link is the per-bu
 
 ## Scripts only
 
-`scripts/verify-deploy.ts` reads `APP_URL`, `PUBLIC_BASE_URL`, `TWILIO_AUTH_TOKEN`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_BILLING_WEBHOOK_SECRET`,
+`scripts/verify-deploy.ts` reads `APP_URL` (the origin it signs against: the same one the server resolves), `PUBLIC_BASE_URL` (only to warn when it differs), `TWILIO_AUTH_TOKEN`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_BILLING_WEBHOOK_SECRET`,
 `ELEVENLABS_WEBHOOK_SECRET`, `ELEVENLABS_TOOL_SECRET` (each check is skipped when its secret is not given; `--strict` turns skips into failures).
 `scripts/seed.ts`, `db-reset.ts`, `grandfather-existing.ts` read `DATABASE_URL` and refuse non-disposable database names without `--force-i-know`.
 

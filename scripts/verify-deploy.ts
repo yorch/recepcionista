@@ -28,8 +28,8 @@ if (!/^https?:\/\//.test(BASE)) {
   process.exit(2);
 }
 const STRICT = process.argv.includes('--strict');
-// Twilio signs the URL it was configured with; the app uses PUBLIC_BASE_URL (fallback: the request URL).
-const SIGN_BASE = (process.env.PUBLIC_BASE_URL || BASE).trim().replace(/\/+$/, '');
+// Twilio signs the URL it was configured with; the app resolves ONE public origin (src/lib/base-url.ts: APP_URL, else PUBLIC_BASE_URL).
+const SIGN_BASE = BASE;
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const STRIPE_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const EL_SECRET = process.env.ELEVENLABS_WEBHOOK_SECRET;
@@ -359,8 +359,9 @@ async function main() {
     });
     await check('Webhook base URL matches APP_URL', async () => {
       const sb = new URL(SIGN_BASE);
-      expect(sb.protocol === 'https:', `PUBLIC_BASE_URL is ${sb.protocol} but Twilio signs the https URL`);
-      expect(sb.host === u.host, `PUBLIC_BASE_URL host (${sb.host}) differs from APP_URL host (${u.host})`);
+      expect(sb.protocol === 'https:', `APP_URL is ${sb.protocol} but Twilio signs the https URL`);
+      const pub = (process.env.PUBLIC_BASE_URL || '').trim();
+      if (pub) expect(new URL(pub).host === u.host, `PUBLIC_BASE_URL host (${new URL(pub).host}) differs from APP_URL host (${u.host}); APP_URL wins on the server`);
       return sb.host;
     });
   } else {

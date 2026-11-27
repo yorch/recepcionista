@@ -494,3 +494,19 @@ Migrations: `20261209120000` lost its sms_log index and its GiST rebuild; `20261
 | A8 legacy forward erasure | the forward text is reproduced exactly (link mask, quote swap, GSM-7 clamp) to match emoji / non-Latin / link openings and the "Possible opt-out" prefix; the rest is documented |
 | A9 line lease | the lease was already renewed (ttl/3, `withLease`); the duplicate-import cleanup now stops when the lease signal is aborted (checked before each delete) |
 | CI time of day | review 19 bookings use business-local slots; `TEST_CLOCK_SHIFT_HOURS` shifts the clock for the whole suite |
+
+
+## Phase 0: hardening independent of the admin console (`docs/review/24e-adversarial-and-recommendation.md` section 7)
+
+No schema change. Evidence: `tests/phase0-hardening-pure.test.ts`, `tests/db/phase0-admin.test.ts`.
+
+| Item | Change |
+| --- | --- |
+| Base URL | one resolver `src/lib/base-url.ts` (`APP_URL`, else `PUBLIC_BASE_URL`; `NEXT_PUBLIC_APP_URL` dropped, startup warning `base_url` when it is set or when the two real variables differ) used by Twilio signature / webhooks / status callback, ElevenLabs tool and initiation URLs, Stripe return URLs and payment links, email links, Google redirect, sitemap, the CSRF same-origin allowlist, the WebAuthn default and the CSP upgrade decision. Behaviour change: where both variables were set to different origins the order was inconsistent; now `APP_URL` wins everywhere, and only that one host is accepted by the same-origin check. **Upgrade note**: a deployment that set `PUBLIC_BASE_URL` to a different host than `APP_URL` now signs Twilio URLs, builds emails / return URLs and derives the passkey rpID from `APP_URL`; if passkeys were registered under the old host, pin `WEBAUTHN_RP_ID` to it (or align the two variables) before deploying |
+| Admin step-up | `requireRecentAuth` on every admin write for cookie sessions (billing, users always; `jobs/run`, `release-tenant`, `repair-numbers`, `resync-agents`, `retention` when not a dry run); Bearer `ADMIN_TOKEN` unchanged (a later phase restricts it, D8) |
+| Admin audit and limits | `admin/retention` audited (`admin.retention_run`) and rate limited (6/min); `admin/jobs` GET (60/min) and `jobs/run` (12/min) rate limited; `billing.admin_override` meta carries the before/after of status, plan, both dates and both caps in a sanitized fixed shape |
+| Dead code | `internalAuthHeaders` (break-glass token on outbound calls, no caller) removed |
+| KB limits | `src/lib/kb/limits.ts` is the single source: `KB_LIMITS` 200/200 for saved lists (dashboard PUT now answers 422 instead of silently cutting to 20/15), `EXTRACTION_LIMITS` 20/15 for the extraction draft |
+| Price copy build vars | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `_ANNUAL_ES` added to the Dockerfile `ARG`/`ENV` and `compose.production.yaml` build args (they were not passed, so the image rendered English to Spanish visitors) and to `.env.example`; a test keeps Dockerfile, compose and docs in step. Still build time; phase 6 of the console plan removes build-time config |
+| Admin 2FA | `REQUIRE_2FA_FOR_ADMINS` is always on in production (`false` ignored, startup warning `admin_2fa_optout_ignored`); opt-in elsewhere. The break-glass token is unaffected |
+| Env docs | `.env.example` gained `TWILIO_MESSAGING_SERVICE_SID`, `TWILIO_MESSAGING_SERVICE_PIN_SENDER`, `OWNER_REPLY_ENABLED`, `OWNER_REPLY_DAILY_LIMIT`, `OWNER_REPLY_REQUIRE_ATTESTATION`, `REFUND_RECONCILE_AFTER_HOURS`, the two `_ES` price vars and `PRISMA_QUERY_EVENTS` (test only); `NEXT_PUBLIC_APP_URL` is documented as removed. `docs/env-vars.md` already listed all of them (24a mis-stated nothing there); its APP_URL, PUBLIC_BASE_URL, 2FA and `_ES` rows were rewritten |

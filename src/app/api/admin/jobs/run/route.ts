@@ -1,6 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, authErrorResponse } from '@/lib/session';
+import { authenticate, authErrorResponse, requireRecentAuth } from '@/lib/session';
 import { getBusiness, recordAudit } from '@/lib/db';
+import { limitRequest } from '@/lib/ratelimit';
 import { isJobName, JOB_NAMES, runJob } from '@/lib/jobs';
 
 export const dynamic = 'force-dynamic';
@@ -16,6 +17,8 @@ export const maxDuration = 300;
 export async function POST(req: Request) {
   const auth = await authenticate(req, { role: 'admin' });
   if (!auth.ok) return auth.response;
+  const limited = await limitRequest(req, 'admin/jobs-run', 12);
+  if (limited) return limited;
   try {
     const body = await readJson<{ job?: unknown; business_id?: unknown; dry_run?: unknown; before?: unknown }>(req).catch(() => ({} as { job?: unknown; business_id?: unknown; dry_run?: unknown; before?: unknown }));
     if (!isJobName(body.job)) return fail(`job must be one of: ${JOB_NAMES.join(', ')}`, 422);
@@ -24,6 +27,10 @@ export async function POST(req: Request) {
     if (body.business_id !== undefined && body.job !== 'daily_briefing' && body.job !== 'gratitude_sweep' && body.job !== 'tenant_release') return fail('business_id only applies to daily_briefing, gratitude_sweep and tenant_release', 422);
     if (body.before !== undefined && (body.job !== 'grandfather' || typeof body.before !== 'string' || Number.isNaN(new Date(body.before).getTime()))) return fail('before (an ISO date-time) only applies to grandfather', 422);
     const dryRun = body.dry_run !== false;
+    if (!dryRun) { // a real run sends texts / deletes data: step-up for a cookie session (a dry run changes nothing)
+      const stale = requireRecentAuth(auth);
+      if (stale) return stale;
+    }
     const businessId = body.business_id as string | undefined;
     if (businessId && !(await getBusiness(businessId))) return fail('business not found', 404);
 

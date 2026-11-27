@@ -5,9 +5,10 @@ import { webauthnConfig } from '../src/lib/webauthn';
 const env = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
 
 describe('webauthnConfig (relying party)', () => {
-  test('rpID and origin come from PUBLIC_BASE_URL, else APP_URL', () => {
+  test('rpID and origin come from APP_URL, else PUBLIC_BASE_URL', () => {
     expect(webauthnConfig(env({ APP_URL: 'https://app.example.com' }))).toEqual({ rpID: 'app.example.com', origins: ['https://app.example.com'] });
-    expect(webauthnConfig(env({ APP_URL: 'https://a.example.com', PUBLIC_BASE_URL: 'https://b.example.com/x' }))).toEqual({ rpID: 'b.example.com', origins: ['https://b.example.com'] });
+    expect(webauthnConfig(env({ APP_URL: 'https://a.example.com', PUBLIC_BASE_URL: 'https://b.example.com/x' }))).toEqual({ rpID: 'a.example.com', origins: ['https://a.example.com'] });
+    expect(webauthnConfig(env({ PUBLIC_BASE_URL: 'https://b.example.com/x' }))).toEqual({ rpID: 'b.example.com', origins: ['https://b.example.com'] });
   });
   test('production without a configured origin: not configured (never the request host)', () => {
     expect(webauthnConfig(env({ NODE_ENV: 'production' }), 'https://evil.example')).toBeNull();

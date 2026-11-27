@@ -1,5 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate } from '@/lib/session';
+import { authenticate, requireRecentAuth } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
 import { prisma, recordAudit, getBusiness } from '@/lib/db';
 import { ensureTenantLine, lineApplicable, lineImportBlockedReason } from '@/lib/voice/tenant-line';
@@ -61,6 +61,10 @@ export async function POST(req: Request) {
     for (const k of Object.keys(body)) if (!['dry_run', 'business_ids', 'limit', 'cursor', 'refresh_credentials'].includes(k)) return fail(`unknown field "${k}"`, 422);
     if (body.dry_run !== undefined && typeof body.dry_run !== 'boolean') return fail('dry_run must be true or false', 422);
     const dryRun = body.dry_run !== false;
+    if (!dryRun) { // writes to Twilio / ElevenLabs: step-up for a cookie session (a dry run only reads)
+      const stale = requireRecentAuth(auth);
+      if (stale) return stale;
+    }
     if (body.refresh_credentials !== undefined && typeof body.refresh_credentials !== 'boolean') return fail('refresh_credentials must be true or false', 422);
     const refreshCredentials = body.refresh_credentials === true;
     let limit = REPAIR_DEFAULT_BATCH;

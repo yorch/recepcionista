@@ -8,6 +8,7 @@
  */
 import crypto from 'node:crypto';
 import { appSecretKey } from '@/lib/totp';
+import { baseUrlOrDev } from '@/lib/base-url';
 
 export const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 export const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -37,7 +38,7 @@ export function googleConfigured(env: NodeJS.ProcessEnv = process.env): boolean 
 }
 
 export function appBase(env: NodeJS.ProcessEnv = process.env): string {
-  return (env.APP_URL || env.PUBLIC_BASE_URL || 'http://localhost:3000').trim().replace(/\/+$/, '');
+  return baseUrlOrDev(env);
 }
 
 export function redirectUri(env: NodeJS.ProcessEnv = process.env): string {

@@ -3,6 +3,7 @@
  * UI units: prices in DOLLARS (strings), durations in minutes (strings), hours as per-day open/from/to.
  * Stored units follow src/lib/types.ts: Service.base_price is whole dollars, Hours are "HH:MM" 24h or null.
  */
+import { KB_LIMITS } from '@/lib/kb/limits';
 import type { Business, ExtractionResult, FAQ, Hours, KnowledgeBase, Service, Vertical } from '@/lib/types';
 import { packFaqs, packOf, packPricingNotes, packServices } from '@/lib/verticals';
 
@@ -17,7 +18,8 @@ export const DAYS = [
 ] as const;
 export type DayKey = (typeof DAYS)[number]['key'];
 
-export const LIMITS = { services: 20, faqs: 15, name: 200, serviceName: 120, description: 300, question: 300, answer: 1000, notes: 1000, area: 100, areas: 100 } as const;
+/** Counts and name / area sizes come from KB_LIMITS (src/lib/kb/limits.ts: the server's saved-list limits); the text bounds below are the editor's own, stricter. */
+export const LIMITS = { services: KB_LIMITS.services, faqs: KB_LIMITS.faqs, name: KB_LIMITS.name, serviceName: 120, description: 300, question: 300, answer: 1000, notes: 1000, area: KB_LIMITS.area, areas: KB_LIMITS.areas } as const;
 
 export interface ServiceDraft { uid: number; name: string; description: string; price: string; duration: string }
 export interface FaqDraft { uid: number; question: string; answer: string }

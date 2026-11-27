@@ -61,9 +61,10 @@ describe('sendEmail', () => {
 });
 
 describe('templates', () => {
-  test('links come from PUBLIC_BASE_URL then APP_URL; token is encoded', () => {
+  test('links come from APP_URL then PUBLIC_BASE_URL; token is encoded', () => {
     expect(emailLink('/verify-email', 'a+b/c', env({ APP_URL: 'https://app.x.com/' }))).toBe('https://app.x.com/verify-email?token=a%2Bb%2Fc');
-    expect(appBaseUrl(env({ PUBLIC_BASE_URL: 'https://pub.x.com', APP_URL: 'https://app.x.com' }))).toBe('https://pub.x.com');
+    expect(appBaseUrl(env({ PUBLIC_BASE_URL: 'https://pub.x.com', APP_URL: 'https://app.x.com' }))).toBe('https://app.x.com');
+    expect(appBaseUrl(env({ PUBLIC_BASE_URL: 'https://pub.x.com' }))).toBe('https://pub.x.com');
     expect(() => appBaseUrl(env({ NODE_ENV: 'production' }))).toThrow(EmailConfigError);
     expect(appBaseUrl(env({}))).toBe('http://localhost:3000');
   });

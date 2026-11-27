@@ -5,6 +5,7 @@
 import type { PaymentLink } from '@/lib/types';
 import { demoModeEnabled } from '@/lib/auth';
 import { logger } from '@/lib/log';
+import { baseUrlOrDev } from '@/lib/base-url';
 
 const log = logger('stripe');
 
@@ -154,6 +155,7 @@ export async function findActivePaymentLinksForBooking(bookingId: string, opts: 
   return { ids: found, complete: true }; // reaching the page / time budget without an error is final (the documented bound); `complete: false` is an error
 }
 
+/** Public origin for payment links and agent webhook URLs: the single resolver (src/lib/base-url.ts). */
 export function appUrl(): string {
-  return process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  return baseUrlOrDev();
 }

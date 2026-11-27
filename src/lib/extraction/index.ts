@@ -10,6 +10,7 @@
 // SERVER ONLY: pulls in node:* modules via safe-fetch. Client components must import './url' instead.
 // (The `server-only` package is not installed; do not import this module from a 'use client' file.)
 import * as cheerio from 'cheerio';
+import { EXTRACTION_LIMITS } from '@/lib/kb/limits';
 import { logger } from '@/lib/log';
 import { generateJson, hasLlm } from '@/lib/providers/llm';
 import { safeFetchText, UnsafeUrlError } from '@/lib/net/safe-fetch';
@@ -196,7 +197,7 @@ function sanitize(raw: unknown, businessName: string, source: ExtractionResult['
   const name = typeof r.name === 'string' && r.name.trim() ? r.name.trim() : businessName;
 
   const rawServices = Array.isArray(r.services) ? r.services : [];
-  const services: Service[] = rawServices.slice(0, 20).flatMap((s) => {
+  const services: Service[] = rawServices.slice(0, EXTRACTION_LIMITS.services).flatMap((s) => {
     const o = (s ?? {}) as Record<string, unknown>;
     const nm = typeof o.name === 'string' ? o.name.trim() : '';
     if (!nm) return [];
@@ -215,9 +216,9 @@ function sanitize(raw: unknown, businessName: string, source: ExtractionResult['
   const service_area = (Array.isArray(r.service_area) ? r.service_area : [])
     .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
     .map((s) => s.trim())
-    .slice(0, 15);
+    .slice(0, EXTRACTION_LIMITS.areas);
 
-  const faqs: FAQ[] = (Array.isArray(r.faqs) ? r.faqs : []).slice(0, 15).flatMap((f) => {
+  const faqs: FAQ[] = (Array.isArray(r.faqs) ? r.faqs : []).slice(0, EXTRACTION_LIMITS.faqs).flatMap((f) => {
     const o = (f ?? {}) as Record<string, unknown>;
     const q = typeof o.question === 'string' ? o.question.trim() : '';
     const a = typeof o.answer === 'string' ? o.answer.trim() : '';

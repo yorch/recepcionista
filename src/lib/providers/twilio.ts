@@ -9,6 +9,7 @@ import { validateRecipient } from '@/lib/messaging/recipient';
 import { toE164 } from '@/lib/phone';
 import { lineKind } from '@/lib/voice/line';
 import { logger } from '@/lib/log';
+import { absoluteBaseUrl, configuredBaseUrl } from '@/lib/base-url';
 
 export interface SendSmsResult {
   id: string;
@@ -32,11 +33,11 @@ const MOCK_DELAY_MS = 60;
 const TWILIO_TIMEOUT_MS = 15_000;
 
 /**
- * Public origin Twilio signed. Prefer PUBLIC_BASE_URL (behind a proxy the
- * request's own host can differ), then APP_URL, then the request URL.
+ * Public origin Twilio signed: the single resolver (src/lib/base-url.ts: APP_URL, else PUBLIC_BASE_URL). Behind a proxy the
+ * request's own host can differ, so the configured origin wins; '' falls back to the request URL.
  */
 function publicBase(): string {
-  return (process.env.PUBLIC_BASE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/+$/, '');
+  return configuredBaseUrl();
 }
 
 /**
@@ -101,8 +102,8 @@ const E164_RE = /^\+[1-9]\d{7,14}$/;
 
 /** Where Twilio posts the delivery status of every text we send (null without a public base URL). */
 export function smsStatusCallbackUrl(env: NodeJS.ProcessEnv = process.env): string | null {
-  const base = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
-  return /^https?:\/\//i.test(base) ? `${base}/api/sms/status` : null;
+  const base = absoluteBaseUrl(env);
+  return base ? `${base}/api/sms/status` : null;
 }
 
 export interface SendSmsOptions {
@@ -223,8 +224,8 @@ async function postMessage(to: string, sender: SendFields, body: string, env: No
  * imported into ElevenLabs, which owns the Voice URL, so it is never touched. `null` when no public base URL is configured.
  */
 export function numberWebhooks(env: NodeJS.ProcessEnv = process.env): { SmsUrl: string; SmsMethod: 'POST'; VoiceUrl?: string; VoiceMethod?: 'POST' } | null {
-  const base = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
-  if (!/^https?:\/\//i.test(base)) return null;
+  const base = absoluteBaseUrl(env);
+  if (!base) return null;
   const hooks: { SmsUrl: string; SmsMethod: 'POST'; VoiceUrl?: string; VoiceMethod?: 'POST' } = { SmsUrl: `${base}/api/sms/inbound`, SmsMethod: 'POST' };
   if (lineKind(env) === 'webhook') { hooks.VoiceUrl = `${base}/api/voice/incoming`; hooks.VoiceMethod = 'POST'; }
   return hooks;

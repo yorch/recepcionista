@@ -1,5 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, authErrorResponse } from '@/lib/session';
+import { authenticate, authErrorResponse, requireRecentAuth } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
 import { createUser, EmailTakenError, getBusiness, recordAudit } from '@/lib/db';
 import { auditIp } from '@/lib/account-flows';
@@ -16,6 +16,8 @@ export async function POST(req: Request) {
   if (!auth.ok) return auth.response;
   const limited = await limitRequest(req, 'admin/users', 20);
   if (limited) return limited;
+  const stale = requireRecentAuth(auth);
+  if (stale) return stale;
   try {
     const body = await readJson<{ email?: unknown; password?: unknown; role?: unknown; business_id?: unknown }>(req);
     const bad = validateEmail(body.email) ?? validateNewPassword(body.password);

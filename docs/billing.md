@@ -94,7 +94,7 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 | `TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP` | lower caps while `billing_status='trialing'` (defaults 50 segments, 30 minutes); never above the plan cap, per-business overrides win |
 | `BILLING_PLAN_NAME` | label stored on subscribed businesses, default `standard` |
 | `BILLING_ALLOW_PROMO_CODES` | `true` shows the promotion code box in Checkout |
-| `APP_URL` / `PUBLIC_BASE_URL` | return URLs; required in production |
+| `APP_URL` (else `PUBLIC_BASE_URL`) | return URLs: the one public-origin resolver (`src/lib/base-url.ts`); required in production |
 
 `deploy.sh` refuses to deploy when `BILLING_ENFORCED` is unset/invalid, and with `BILLING_ENFORCED=true` unless `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
 `STRIPE_BILLING_WEBHOOK_SECRET` are set. In production a missing key or price makes checkout answer 503; the local mock never runs there.

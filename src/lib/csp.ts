@@ -11,6 +11,8 @@
  * a nonce, and inline CSS cannot execute script. Dev adds 'unsafe-eval' (React debugging) and ws: (HMR).
  */
 
+import { configuredBaseUrl } from '@/lib/base-url';
+
 export type CspMode = 'strict' | 'moderate';
 
 export interface CspOptions {
@@ -40,15 +42,14 @@ export function turnstileConfigured(env: Record<string, string | undefined> = pr
  * Should the policy carry `upgrade-insecure-requests`? It makes the browser rewrite every http:// subresource to https://,
  * which BREAKS a plain-HTTP deployment (a staging box on `http://host:3000` logs ERR_SSL_PROTOCOL_ERROR for every asset).
  * CSP_UPGRADE_INSECURE=true|false forces it; unset/auto = on only in production AND when the public origin
- * (PUBLIC_BASE_URL / APP_URL / NEXT_PUBLIC_APP_URL) is https. Never in development.
+ * (src/lib/base-url.ts: APP_URL, else PUBLIC_BASE_URL) is https. Never in development.
  */
 export function upgradeInsecureEnabled(env: Record<string, string | undefined> = process.env): boolean {
   if (env.NODE_ENV !== 'production') return false;
   const v = (env.CSP_UPGRADE_INSECURE ?? '').trim().toLowerCase();
   if (v === 'true') return true;
   if (v === 'false') return false;
-  const origin = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().toLowerCase();
-  return origin.startsWith('https://');
+  return configuredBaseUrl(env).toLowerCase().startsWith('https://');
 }
 
 export function buildCsp(o: CspOptions): string {

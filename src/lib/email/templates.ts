@@ -6,6 +6,7 @@
 import { EmailConfigError } from './index';
 import { makeT } from '@/lib/i18n';
 import type { Locale, TFunction } from '@/lib/i18n/core';
+import { configuredBaseUrl } from '@/lib/base-url';
 
 export interface RenderedEmail {
   subject: string;
@@ -16,9 +17,9 @@ export interface RenderedEmail {
 export const escapeHtml = (s: string): string =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-/** Public origin of the app: PUBLIC_BASE_URL, else APP_URL. Required in production; localhost elsewhere. */
+/** Public origin of the app (the single resolver: APP_URL, else PUBLIC_BASE_URL). Required in production; localhost elsewhere. */
 export function appBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
-  const base = (env.PUBLIC_BASE_URL || env.APP_URL || '').trim().replace(/\/+$/, '');
+  const base = configuredBaseUrl(env);
   if (base) return base;
   if (env.NODE_ENV === 'production') throw new EmailConfigError('APP_URL (or PUBLIC_BASE_URL) is required to build email links');
   return 'http://localhost:3000';

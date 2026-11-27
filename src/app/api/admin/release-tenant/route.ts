@@ -1,5 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate } from '@/lib/session';
+import { authenticate, requireRecentAuth } from '@/lib/session';
 import { limitRequest } from '@/lib/ratelimit';
 import { DEFAULT_GRACE_DAYS, DEFAULT_NOTIFY_DAYS, processBusiness } from '@/lib/billing/release';
 
@@ -32,6 +32,10 @@ export async function POST(req: Request) {
     const notifyDays = int(body.notify_days, DEFAULT_NOTIFY_DAYS);
     if (graceDays === null || notifyDays === null) return fail('grace_days and notify_days must be integers between 0 and 3650', 422);
     const dryRun = body.dry_run !== false;
+    if (!dryRun) { // a real release (irreversible) needs a recent proof of identity from a cookie session; a dry run is read-only
+      const stale = requireRecentAuth(auth);
+      if (stale) return stale;
+    }
     const user = auth.principal.kind === 'admin' ? auth.principal.user : null;
     const report = await processBusiness(body.business_id, {
       apply: !dryRun, graceDays, notifyDays, includeRecent: body.include_recent === true, skipNotice: body.skip_notice === true,

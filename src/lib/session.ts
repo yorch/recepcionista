@@ -22,6 +22,7 @@ import { NextResponse } from 'next/server';
 import {
   adminSessionTokenFrom, authConfig, checkSameOrigin, hasBearer, SAFE_METHODS, tokensMatch, userSessionTokenFrom,
 } from '@/lib/auth';
+import { require2faForAdmins } from '@/lib/admin-2fa';
 import { listMembershipsForUser } from '@/lib/db/memberships';
 import { resolveSessionByToken } from '@/lib/db/users';
 import type { MembershipWithBusiness, User, UserSession } from '@/lib/types';
@@ -137,8 +138,7 @@ export function pickActiveMembership(
     ?? list[0];
 }
 
-/** Should REQUIRE_2FA_FOR_ADMINS force DB admin users to enrol? Default off. */
-export const require2faForAdmins = (): boolean => process.env.REQUIRE_2FA_FOR_ADMINS === 'true';
+export { require2faForAdmins };
 
 /** A user whose password was accepted but whose second factor is outstanding (the only session state /api/auth/mfa accepts). */
 export interface PendingMfa { user: User; session: UserSession }

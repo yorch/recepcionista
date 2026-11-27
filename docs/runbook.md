@@ -69,6 +69,10 @@ If the number was bought but the voice agent / post-call webhook step failed, th
 the business is still `onboarding`, `GET /api/businesses/:id/onboarding-status` shows `provision_partial`, and the next provision call reuses that number (never buys a second one) and resumes at the agent step. The mock-pool number
 (`+1<area>555xxxx`) is issued only outside production with no Twilio credentials at all.
 
+### Admin API writes: step-up and limits (phase 0 hardening)
+
+There is no admin UI yet; the admin API is driven with `curl`. With the Bearer `ADMIN_TOKEN` header (the documented way, every example in this runbook) nothing changed. A COOKIE session (a DB admin user, or the break-glass `/login` session) must have re-authenticated in the last 5 minutes for every admin WRITE: `POST /api/auth/reauth` first, otherwise the answer is `403 {"code":"reauth_required"}`. Dry runs (`dry_run` true, the default of `jobs/run`, `release-tenant`, `repair-numbers`, `resync-agents`, `retention`) do not need it; `admin/billing` and `admin/users` always do. Rate limits per client: `admin/jobs` GET 60/min, `jobs/run` 12/min, `retention` 6/min. DB admin users must enrol in 2FA in production (`REQUIRE_2FA_FOR_ADMINS` is always on there; the Bearer token is exempt). Price copy (`NEXT_PUBLIC_PLAN_PRICE_DISPLAY*`, including the `_ES` texts) and the Turnstile site key are build-time: change them in `.env` and run `./deploy.sh` (a restart is not enough).
+
 ## 2. Manual live test-call protocol
 
 Do this from a phone that is NOT the owner's number, against the real number, after steps 1-8. Keep the dashboard
@@ -99,8 +103,8 @@ STRIPE_BILLING_WEBHOOK_SECRET=... ELEVENLABS_WEBHOOK_SECRET=... ELEVENLABS_TOOL_
 Run it from an operator machine with the same secrets as the server. It is read-only: forged requests use benign
 event shapes (ignored Stripe type, `post_call_audio`, an SMS to a number no business owns) and never write rows.
 A secret that is not exported is SKIPped (`--strict` turns skips into failures). Failures of the form "ACCEPTS
-correctly signed" mean the secret you hold differs from the server's, or `PUBLIC_BASE_URL`/scheme differs from the
-URL Twilio signs. It also checks `POST /api/voice/initiation` (401 without the tool secret; with it, 200 and a well-formed body for an unknown agent), `/api/billing/webhook` (unsigned/badly signed rejected, a signed synthetic event acknowledged), that `/login`, `/signup`, `/robots.txt` and `/sitemap.xml` are public, and that every mutating `/api/auth/*` endpoint refuses a cross-site cookie POST. It prints a PASS/FAIL table and never prints secrets. Security-header checks require headers
+correctly signed" mean the secret you hold differs from the server's, or `APP_URL`/scheme differs from the
+URL Twilio signs (the server signs against ONE origin: `APP_URL`, else `PUBLIC_BASE_URL`; if both are set and differ the boot log warns `base_url`). It also checks `POST /api/voice/initiation` (401 without the tool secret; with it, 200 and a well-formed body for an unknown agent), `/api/billing/webhook` (unsigned/badly signed rejected, a signed synthetic event acknowledged), that `/login`, `/signup`, `/robots.txt` and `/sitemap.xml` are public, and that every mutating `/api/auth/*` endpoint refuses a cross-site cookie POST. It prints a PASS/FAIL table and never prints secrets. Security-header checks require headers
 (CSP, X-Content-Type-Options, X-Frame-Options/frame-ancestors, Referrer-Policy, Permissions-Policy, HSTS on https)
 on `/login` and `/pay/*`; fix the deployment (app or Traefik middleware) if they fail.
 
