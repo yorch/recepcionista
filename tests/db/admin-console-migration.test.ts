@@ -87,13 +87,13 @@ suite('migration admin_console_schema (postgres)', () => {
       const plans = Object.fromEntries((await d.$queryRawUnsafe(`SELECT id, plan FROM businesses`)).map((r: any) => [r.id, r.plan]));
       expect(plans).toEqual({ b_std: 'standard', b_comp: 'comp', b_x: 'x', b_cap: 'Plan', b_legacy: 'legacy', b_null: null, b_demo: 'demo' });
       // the unknown strings are registered exactly as the trigger does: hidden, NOT comped, NULL caps (inherit the platform), never the comped 'legacy'
-      expect(await d.$queryRawUnsafe(`SELECT key, public, is_comped, sms_cap, call_minutes_cap, voicemail_minutes_cap, forward_minutes_cap, sort FROM plans WHERE key IN ('comp','x','Plan') ORDER BY key`)).toEqual([
+      expect(await d.$queryRawUnsafe(`SELECT key, public, is_comped, sms_cap, call_minutes_cap, voicemail_minutes_cap, forward_minutes_cap, sort FROM plans WHERE key IN ('comp','x','Plan') ORDER BY key COLLATE "C"`)).toEqual([
         { key: 'Plan', public: false, is_comped: false, sms_cap: null, call_minutes_cap: null, voicemail_minutes_cap: null, forward_minutes_cap: null, sort: 1000 },
         { key: 'comp', public: false, is_comped: false, sms_cap: null, call_minutes_cap: null, voicemail_minutes_cap: null, forward_minutes_cap: null, sort: 1000 },
         { key: 'x', public: false, is_comped: false, sms_cap: null, call_minutes_cap: null, voicemail_minutes_cap: null, forward_minutes_cap: null, sort: 1000 },
       ]);
       expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE action='plans.migrated'`)).toEqual([{ n: 0 }]);
-      expect(await d.$queryRawUnsafe(`SELECT meta->>'plan' AS p, (meta->>'businesses')::int AS n FROM audit_events WHERE action='plans.registered' ORDER BY 1`)).toEqual([{ p: 'Plan', n: 1 }, { p: 'comp', n: 1 }, { p: 'x', n: 1 }]);
+      expect(await d.$queryRawUnsafe(`SELECT meta->>'plan' AS p, (meta->>'businesses')::int AS n FROM audit_events WHERE action='plans.registered' ORDER BY (meta->>'plan') COLLATE "C"`)).toEqual([{ p: 'Plan', n: 1 }, { p: 'comp', n: 1 }, { p: 'x', n: 1 }]);
       // seeds
       expect(await d.$queryRawUnsafe(`SELECT key, is_comped, public, sms_cap, call_minutes_cap, voicemail_minutes_cap, forward_minutes_cap FROM plans WHERE key IN ('standard','legacy','grandfathered','demo') ORDER BY sort`)).toEqual([
         { key: 'standard', is_comped: false, public: true, sms_cap: 500, call_minutes_cap: 300, voicemail_minutes_cap: 60, forward_minutes_cap: 600 },
