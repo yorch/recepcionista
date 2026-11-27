@@ -21,7 +21,15 @@ export interface AuditInput {
   ip?: string | null;
   meta?: Record<string, unknown>;
   at?: Date;
+  /**
+   * The caller already redacted `meta` BY KIND (settings.change rows: secrets as fingerprints, other values plain). Skips the key-name scrubbing of
+   * sanitizeAuditMeta, which would mangle values (and, worse, leave a secret under an innocent key name in clear). Only the size cap (MAX_TRUSTED_META_BYTES)
+   * still applies. Only src/lib/admin/** sets this.
+   */
+  meta_trusted?: boolean;
 }
+
+export const MAX_TRUSTED_META_BYTES = 30_000;
 
 /** Drop secret-looking keys (top level and one level down) and cap the size; defence in depth, not a licence. */
 export function sanitizeAuditMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> {
@@ -42,20 +50,27 @@ export function sanitizeAuditMeta(meta: Record<string, unknown> | undefined): Re
  * logged at error level. Returns whether the row was written. Await it for security events so the row
  * exists before the response, or `void` it on hot paths.
  */
+/** The row a recordAudit call writes (also used by callers that must write the audit row inside their own transaction). */
+export function auditRowData(input: AuditInput) {
+  const trusted = input.meta_trusted === true;
+  const meta = trusted
+    ? (JSON.stringify(input.meta ?? {}).length > MAX_TRUSTED_META_BYTES ? { truncated: true, keys: (input.meta as { keys?: unknown } | undefined)?.keys ? 'see revisions' : undefined } : (input.meta ?? {}))
+    : sanitizeAuditMeta(input.meta);
+  return {
+    at: input.at ?? new Date(),
+    actorKind: input.actor_kind,
+    actorUserId: input.actor_user_id ?? null,
+    businessId: input.business_id ?? null,
+    action: input.action.slice(0, 120),
+    target: (input.target ?? '').slice(0, 200),
+    ip: input.ip ? input.ip.slice(0, 64) : null,
+    meta: meta as object,
+  };
+}
+
 export async function recordAudit(input: AuditInput): Promise<boolean> {
   try {
-    await prisma.auditEvent.create({
-      data: {
-        at: input.at ?? new Date(),
-        actorKind: input.actor_kind,
-        actorUserId: input.actor_user_id ?? null,
-        businessId: input.business_id ?? null,
-        action: input.action.slice(0, 120),
-        target: (input.target ?? '').slice(0, 200),
-        ip: input.ip ? input.ip.slice(0, 64) : null,
-        meta: sanitizeAuditMeta(input.meta) as object,
-      },
-    });
+    await prisma.auditEvent.create({ data: auditRowData(input) });
     return true;
   } catch (err) {
     log.error('audit.write_failed', { action: input.action, error: (err as Error).message });

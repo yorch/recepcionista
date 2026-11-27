@@ -2,7 +2,7 @@
  * SMS adapter. Real Twilio when credentials exist; otherwise logs to the local
  * sms_log so the dashboard and demo still show a message being "sent".
  */
-import { configEnv } from '@/lib/config';
+import { configEnv, verifierSecrets } from '@/lib/config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { insecureDevAllowed } from '@/lib/auth';
 import { mockSmsAllowed, SMS_PROVIDER_NOT_CONFIGURED } from '@/lib/messaging/delivery';
@@ -73,9 +73,11 @@ export function verifyTwilioSignature(
 
   const data = Object.keys(params).sort().reduce((acc, k) => acc + k + params[k], '');
   const given = Buffer.from(header);
-  for (const url of urls) {
-    const expected = Buffer.from(createHmac('sha1', token).update(url + data, 'utf8').digest('base64'));
-    if (expected.length === given.length && timingSafeEqual(expected, given)) return { ok: true };
+  for (const candidate of verifierSecrets('twilio.auth_token', token)) { // the current token, and the previous one for 15 minutes after a console rotation
+    for (const url of urls) {
+      const expected = Buffer.from(createHmac('sha1', candidate).update(url + data, 'utf8').digest('base64'));
+      if (expected.length === given.length && timingSafeEqual(expected, given)) return { ok: true };
+    }
   }
   return { ok: false, error: 'invalid signature' };
 }

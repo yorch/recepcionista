@@ -2,7 +2,7 @@
  * WS3 — ElevenLabs ConvAI client. Everything here degrades to `{mock:true}`:
  * a missing key or a failed API call must never break the phone line.
  */
-import { configEnv } from '@/lib/config';
+import { configEnv, verifierSecrets } from '@/lib/config';
 import { appUrl } from '@/lib/providers/stripe';
 import { insecureDevAllowed } from '@/lib/auth';
 import { buildSystemPrompt, complianceRules, COMPLIANCE_MARKER } from '@/lib/kb';
@@ -74,8 +74,11 @@ export function verifyElevenLabsSignature(rawBody: string, header: string | null
   const ts = Number(t);
   if (!t || !Number.isFinite(ts) || sigs.length === 0) return { ok: false, error: 'malformed signature' };
   if (Math.abs(Date.now() / 1000 - ts) > SIGNATURE_TOLERANCE_SECS) return { ok: false, error: 'timestamp outside tolerance' };
-  const expected = createHmac('sha256', secret).update(`${t}.${rawBody}`, 'utf8').digest('hex');
-  return sigs.some((s) => safeEq(expected, s)) ? { ok: true } : { ok: false, error: 'invalid signature' };
+  for (const candidate of verifierSecrets('elevenlabs.webhook_secret', secret)) { // current, then the previous value during the 15 minute rotation window
+    const expected = createHmac('sha256', candidate).update(`${t}.${rawBody}`, 'utf8').digest('hex');
+    if (sigs.some((s) => safeEq(expected, s))) return { ok: true };
+  }
+  return { ok: false, error: 'invalid signature' };
 }
 
 /** Header the tool webhooks carry; the value is ELEVENLABS_TOOL_SECRET. */
@@ -93,7 +96,7 @@ export function verifyToolSecret(req: Request): AuthVerdict {
     return { ok: true, skipped: true };
   }
   const given = req.headers.get(TOOL_SECRET_HEADER) ?? '';
-  return given && safeEq(given, secret) ? { ok: true } : { ok: false, error: 'invalid tool secret' };
+  return given && verifierSecrets('elevenlabs.tool_secret', secret).some((c) => safeEq(given, c)) ? { ok: true } : { ok: false, error: 'invalid tool secret' };
 }
 
 function apiKey(): string {

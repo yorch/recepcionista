@@ -107,6 +107,8 @@ export function toBusiness(row: BusinessRow): Business {
     owner_phone_verified_at: row.ownerPhoneVerifiedAt ? row.ownerPhoneVerifiedAt.toISOString() : null,
     billing_status: (row.billingStatus ?? 'none') as Business['billing_status'],
     plan: row.plan ?? null,
+    suspended_at: row.suspendedAt ? row.suspendedAt.toISOString() : null,
+    suspended_reason: row.suspendedReason ?? null,
     stripe_customer_id: row.stripeCustomerId ?? null,
     stripe_subscription_id: row.stripeSubscriptionId ?? null,
     trial_ends_at: row.trialEndsAt ? row.trialEndsAt.toISOString() : null,

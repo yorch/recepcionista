@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, authErrorResponse, requireRecentAuth } from '@/lib/session';
-import { limitRequest } from '@/lib/ratelimit';
+import { requireRecentAuth } from '@/lib/session';
+import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
 import { recordAudit } from '@/lib/db';
 import { auditIp } from '@/lib/account-flows';
 import { runRetentionNow, retentionJobEnabled } from '@/lib/retention-job';
@@ -14,10 +14,9 @@ export const runtime = 'nodejs';
  * Works whether or not RETENTION_JOB=on. Rate limited (6/min per client); audited as `admin.retention_run` (dry_run flag and counts only).
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/retention', 6);
-  if (limited) return limited;
+  const g = await guardAdminRoute(req, { permission: 'retention.run', rate: { name: 'retention', max: 6 } }); // permission retention.run
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const body = await readJson<{ dry_run?: unknown }>(req).catch(() => ({} as { dry_run?: unknown }));
     if (body.dry_run !== undefined && typeof body.dry_run !== 'boolean') return fail('dry_run must be true or false', 422);
@@ -35,6 +34,6 @@ export async function POST(req: Request) {
     });
     return ok({ dry_run: dryRun, automatic_job: retentionJobEnabled() ? 'on' : 'off', counts: res.counts });
   } catch (err) {
-    return authErrorResponse(err) ?? fail(err, 500);
+    return adminFail(err);
   }
 }

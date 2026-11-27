@@ -13,7 +13,7 @@ export const ENV_ONLY: readonly EnvOnlyEntry[] = [
   { name: 'POSTGRES_PASSWORD', reason: 'deploy_tooling', note: 'compose db service.', secret: true },
   { name: 'POSTGRES_DB', reason: 'deploy_tooling', note: 'compose db service.' },
   { name: 'APP_SECRET_KEY', reason: 'master_secret', note: 'Key of every encrypted secret (TOTP now, provider credentials from Phase 4). Never in the database.', secret: true },
-  { name: 'APP_SECRET_KEY_PREVIOUS', reason: 'master_secret', note: 'Decrypt-only previous key during a rotation (envelope v2, Phase 4).', secret: true },
+  { name: 'APP_SECRET_KEY_PREVIOUS', reason: 'master_secret', note: 'Decrypt-only previous key during an APP_SECRET_KEY rotation (envelope v2 `kid`, TOTP and calendar tokens); remove it once "re-encrypt all" reports nothing left.', secret: true },
   { name: 'ADMIN_TOKEN', reason: 'bootstrap', note: 'Break-glass and recovery only (D8): never the routine operator credential.', secret: true },
   { name: 'NODE_ENV', reason: 'infrastructure', note: 'Gates every dev-only bypass; inlined by Next.' },
   { name: 'NEXT_RUNTIME', reason: 'infrastructure', note: 'Set by Next; never by hand.' },
@@ -41,6 +41,7 @@ export const ENV_ONLY: readonly EnvOnlyEntry[] = [
   // new platform controls
   { name: 'SETTINGS_FREEZE', reason: 'platform_control', note: 'true: the whole console is read-only (incident switch).' },
   { name: 'ADMIN_TOKEN_ALLOW_SETTINGS', reason: 'platform_control', note: 'true: the Bearer ADMIN_TOKEN may also write secrets and critical settings (default: recovery only, D8).' },
+  { name: 'BUILD_SHA', reason: 'infrastructure', note: 'Optional build id shown next to each instance on the System page (instance heartbeat); informational only.' },
   { name: 'ALERT_EMAIL', reason: 'platform_control', note: 'Out-of-band recipient of critical-change and Bearer-use notifications; does not depend on database-held email settings.' },
   // dev-only escape hatches: never exposed
   { name: 'ALLOW_INSECURE_DEV', reason: 'dev_only', note: 'Requires NODE_ENV != production; deploy.sh refuses it.' },

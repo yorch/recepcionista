@@ -234,3 +234,17 @@ buffer is kept clear in code (and around Google blocks), crews are assigned per 
 - **`PUT /api/businesses/:id/knowledge`**: more than `KB_LIMITS.services` / `KB_LIMITS.faqs` (200 / 200, `src/lib/kb/limits.ts`) is `422` (it used to cut silently to 20 / 15). Website extraction keeps `EXTRACTION_LIMITS` (20 services / 15 FAQs) when it builds the first draft.
 - **`require2faForAdmins()`** (`src/lib/admin-2fa.ts`): true in production always; outside production only with `REQUIRE_2FA_FOR_ADMINS=true`.
 - `internalAuthHeaders()` was removed (it had no caller).
+
+
+## Phase 2/4/5/7/8 contracts (admin console backend)
+
+Full list in `docs/design/admin-console-contracts.md`. The ones other code depends on:
+
+- **Settings store**: only `src/lib/admin/settings-store.ts` writes `platform_settings`; every write is a change set (`applyChanges`) with revisions, a `settings.change` audit row (redacted BY KIND, `recordAudit({ meta_trusted: true })`) and a `settings_state.global_version` bump. Readers never query the tables: they call `setting()` / `configEnv()` (the snapshot).
+- **Snapshot**: `src/lib/admin/loader.ts` is the only `setSnapshotSource` implementation; `bootSettings()` runs in `instrumentation.ts` before the banner and the job runner; `/api/health` gates on it. Secrets never leave `ConfigSnapshot.secrets` (non-enumerable).
+- **Verifiers** accept `verifierSecrets(key, primary)` (current + previous for 15 minutes): Twilio signature, Stripe deposit and billing webhooks, ElevenLabs post-call HMAC, tool secret.
+- **Caps**: `smsCapFor(b)`, `callMinutesCapFor(b)`, `forwardMinutesCapFor(b)`, `voicemailMinutesCap(env, plan)` take the business's `plan`; business override > env pin > plan row > platform setting. `isCompedPlan(plan, COMP_PLANS)` replaces the direct `COMP_PLANS.includes`.
+- **Suspension**: `businesses.suspended_at` makes `checkCallAllowed` / `checkSmsAllowed` / `checkForwardAllowed` / `checkVoicemailAllowed` / `reserveSms` answer `{ ok: false, reason: 'no_plan', suspended: true }` and `isProvisioningAllowed` false, even when billing is not enforced.
+- **Admin routes**: every `/api/admin/*` handler uses `guardAdminRoute(req, { permission, write?, rate? })`; permissions live in `src/lib/admin/permissions.ts` (`can(principal, permission)`); `Principal` admin variants carry `user.platform_role`.
+- **Job history**: `runJob()` records every run in `job_runs` (`opts.actor`, `opts.trigger`); call `runJob`, not the `runX` functions, from anything that should appear in the history.
+- **Plans**: `businesses.plan` references `plans.key`; a trigger registers unknown strings as hidden plans; `createUser({ role: 'admin' })` defaults `platform_role` to `owner`.

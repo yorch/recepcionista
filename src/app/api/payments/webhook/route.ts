@@ -1,4 +1,4 @@
-import { configEnv } from '@/lib/config';
+import { configEnv, verifierSecrets } from '@/lib/config';
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import { ok, fail } from '@/lib/http';
 import { insecureDevAllowed } from '@/lib/auth';
@@ -39,7 +39,8 @@ export async function POST(req: Request) {
   const allowUnsigned = configEnv().STRIPE_ALLOW_UNSIGNED === 'true' && insecureDevAllowed();
 
   if (secret) {
-    const verdict = await verifySignature(raw, signature, secret);
+    let verdict = await verifySignature(raw, signature, secret);
+    for (const prev of verifierSecrets('stripe.webhook_secret', secret).slice(1)) if (!verdict.ok) verdict = await verifySignature(raw, signature, prev); // the previous secret, 15 minutes after a console rotation
     if (!verdict.ok) {
       log.warn('signature.rejected', { error: verdict.error });
       return fail('invalid signature', 400);

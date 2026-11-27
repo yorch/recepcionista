@@ -314,7 +314,7 @@ suite('release canceled tenants (postgres)', () => {
       expect(body.dry_run).toBe(true);
       expect(body.decision.action).toBe('notify');
       expect(body.applied).toBe(false);
-      expect(mail.mails).toHaveLength(0);
+      expect(mail.mails.filter((m) => !m.subject.includes('break-glass'))).toHaveLength(0); // (the Bearer use itself is mailed to the admins: that is not a tenant mail)
       expect((await fresh(b.id)).phone).toBe(b.phone);
       expect((await call({ business_id: b.id, dry_run: 'no' })).status).toBe(422);
       expect((await call({ business_id: b.id, grace_days: -1 })).status).toBe(422);

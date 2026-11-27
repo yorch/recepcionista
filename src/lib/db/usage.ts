@@ -17,7 +17,8 @@
  *   development/test it is enforced only with BILLING_ENFORCED=true. When enforced, billing_status 'trialing'/'active' is allowed,
  *   'past_due' is allowed for BILLING_PAST_DUE_GRACE_DAYS (default 5) after it became past due, everything else is not.
  */
-import { configEnv } from '@/lib/config';
+import { configEnv, pinnedByEnv } from '@/lib/config';
+import { planRow } from '@/lib/admin/plan-catalog';
 import crypto from 'node:crypto';
 import { prisma } from './client';
 import type { Business } from '@/lib/types';
@@ -51,7 +52,16 @@ export const billingEnforced = (env: NodeJS.ProcessEnv = configEnv()): boolean =
 export const pastDueGraceDays = (env: NodeJS.ProcessEnv = configEnv()): number =>
   nonNegInt(env.BILLING_PAST_DUE_GRACE_DAYS, DEFAULT_PAST_DUE_GRACE_DAYS);
 
-type CapSubject = { billing_status?: Business['billing_status'] | string | null };
+type CapSubject = { billing_status?: Business['billing_status'] | string | null; plan?: string | null };
+
+/**
+ * The plan allowance of a cap: an environment pin of the platform variable wins (D1), else the business's plan row (plans table, when the console catalog is
+ * loaded and the plan sets that cap), else the platform setting / default. `undefined` from here means "use the platform value".
+ */
+function planAllowance(plan: string | null | undefined, field: 'sms_cap' | 'call_minutes_cap' | 'voicemail_minutes_cap' | 'forward_minutes_cap', envName: string, env: NodeJS.ProcessEnv): number | undefined {
+  if (pinnedByEnv(envName, env)) return undefined;
+  return planRow(plan)?.[field] ?? undefined;
+}
 
 /**
  * Effective monthly SMS cap, in SEGMENTS: override (when not null) wins; else while trialing min(TRIAL_SMS_CAP, plan cap);
@@ -59,23 +69,24 @@ type CapSubject = { billing_status?: Business['billing_status'] | string | null 
  */
 export const smsCapFor = (b: CapSubject & { sms_cap_override?: number | null }, env: NodeJS.ProcessEnv = configEnv()): number => {
   if (b.sms_cap_override != null) return b.sms_cap_override;
-  const plan = nonNegInt(env.PLAN_SMS_CAP, DEFAULT_SMS_CAP);
+  const plan = planAllowance(b.plan, 'sms_cap', 'PLAN_SMS_CAP', env) ?? nonNegInt(env.PLAN_SMS_CAP, DEFAULT_SMS_CAP);
   return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_SMS_CAP, DEFAULT_TRIAL_SMS_CAP)) : plan;
 };
 
 /** Effective monthly call-minutes cap: override wins; else while trialing min(TRIAL_CALL_MINUTES_CAP, plan cap); else PLAN_CALL_MINUTES_CAP; else 300. */
 export const callMinutesCapFor = (b: CapSubject & { call_minutes_cap_override?: number | null }, env: NodeJS.ProcessEnv = configEnv()): number => {
   if (b.call_minutes_cap_override != null) return b.call_minutes_cap_override;
-  const plan = nonNegInt(env.PLAN_CALL_MINUTES_CAP, DEFAULT_CALL_MINUTES_CAP);
+  const plan = planAllowance(b.plan, 'call_minutes_cap', 'PLAN_CALL_MINUTES_CAP', env) ?? nonNegInt(env.PLAN_CALL_MINUTES_CAP, DEFAULT_CALL_MINUTES_CAP);
   return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_CALL_MINUTES_CAP, DEFAULT_TRIAL_CALL_MINUTES_CAP)) : plan;
 };
 
 /** Monthly cap (minutes) of voicemail recordings: VOICEMAIL_MINUTES_CAP (default 60). Separate from the AI minutes. */
-export const voicemailMinutesCap = (env: NodeJS.ProcessEnv = configEnv()): number => nonNegInt(env.VOICEMAIL_MINUTES_CAP, DEFAULT_VOICEMAIL_MINUTES_CAP);
+export const voicemailMinutesCap = (env: NodeJS.ProcessEnv = configEnv(), plan?: string | null): number =>
+  planAllowance(plan, 'voicemail_minutes_cap', 'VOICEMAIL_MINUTES_CAP', env) ?? nonNegInt(env.VOICEMAIL_MINUTES_CAP, DEFAULT_VOICEMAIL_MINUTES_CAP);
 
 /** Monthly cap (minutes) of forwarded calls: FORWARD_MINUTES_CAP (default 600); while trialing min(that, TRIAL_FORWARD_MINUTES_CAP, default 30). Separate from the AI minutes. */
 export const forwardMinutesCapFor = (b: CapSubject, env: NodeJS.ProcessEnv = configEnv()): number => {
-  const plan = nonNegInt(env.FORWARD_MINUTES_CAP, DEFAULT_FORWARD_MINUTES_CAP);
+  const plan = planAllowance(b.plan, 'forward_minutes_cap', 'FORWARD_MINUTES_CAP', env) ?? nonNegInt(env.FORWARD_MINUTES_CAP, DEFAULT_FORWARD_MINUTES_CAP);
   return b.billing_status === 'trialing' ? Math.min(plan, nonNegInt(env.TRIAL_FORWARD_MINUTES_CAP, DEFAULT_TRIAL_FORWARD_MINUTES_CAP)) : plan;
 };
 
@@ -103,10 +114,11 @@ export function billingStateAllows(
  * signed up never get free paid resources). Outside production: only when enforcement is on.
  */
 export function isProvisioningAllowed(
-  b: Pick<Business, 'billing_status' | 'past_due_since'>,
+  b: Pick<Business, 'billing_status' | 'past_due_since'> & { suspended_at?: string | null },
   now: Date = new Date(),
   env: NodeJS.ProcessEnv = configEnv(),
 ): boolean {
+  if (b.suspended_at) return false; // a suspended tenant gets nothing new
   return !(isProduction(env) || billingEnforced(env)) || billingStateAllows(b, now, env);
 }
 
@@ -125,6 +137,8 @@ export interface UsageSummary {
 export interface AllowResult {
   ok: boolean;
   reason?: 'no_plan' | 'cap_reached';
+  /** The refusal is a platform suspension (reported as `no_plan` so every existing out-of-service path applies). */
+  suspended?: boolean;
   /** SMS: SEGMENTS this period. Calls: SECONDS this period. */
   used: number;
   /** SMS: segments. Calls: SECONDS (the minutes cap x 60). */
@@ -200,7 +214,7 @@ export async function getUsage(businessId: string, now: Date = new Date()): Prom
 async function billingRow(businessId: string) {
   return prisma.business.findUnique({
     where: { id: businessId },
-    select: { billingStatus: true, pastDueSince: true, smsCapOverride: true, callMinutesCapOverride: true },
+    select: { billingStatus: true, pastDueSince: true, smsCapOverride: true, callMinutesCapOverride: true, plan: true, suspendedAt: true },
   });
 }
 
@@ -209,12 +223,13 @@ type DecideKind = 'sms' | 'call' | 'forward' | 'voicemail';
 async function decide(businessId: string, kind: DecideKind, now: Date, units = 1): Promise<AllowResult> {
   const [b, usage] = await Promise.all([billingRow(businessId), getUsage(businessId, now)]);
   if (!b || !usage) return { ok: false, reason: 'no_plan', used: 0, cap: 0 };
+  if (b.suspendedAt) return { ok: false, reason: 'no_plan', used: 0, cap: 0, suspended: true }; // a suspended tenant is out of service: no calls, no texts (even when billing is not enforced)
   const used = kind === 'sms' ? usage.sms_count : kind === 'forward' ? usage.forward_seconds : kind === 'voicemail' ? usage.voicemail_seconds : usage.call_seconds;
   const cap = kind === 'sms'
-    ? smsCapFor({ sms_cap_override: b.smsCapOverride, billing_status: b.billingStatus })
-    : kind === 'forward' ? forwardMinutesCapFor({ billing_status: b.billingStatus }) * 60
-      : kind === 'voicemail' ? voicemailMinutesCap() * 60
-        : callMinutesCapFor({ call_minutes_cap_override: b.callMinutesCapOverride, billing_status: b.billingStatus }) * 60;
+    ? smsCapFor({ sms_cap_override: b.smsCapOverride, billing_status: b.billingStatus, plan: b.plan })
+    : kind === 'forward' ? forwardMinutesCapFor({ billing_status: b.billingStatus, plan: b.plan }) * 60
+      : kind === 'voicemail' ? voicemailMinutesCap(undefined, b.plan) * 60
+        : callMinutesCapFor({ call_minutes_cap_override: b.callMinutesCapOverride, billing_status: b.billingStatus, plan: b.plan }) * 60;
   if (!billingEnforced()) return { ok: true, used, cap };
   const plan = billingStateAllows({ billing_status: b.billingStatus as Business['billing_status'], past_due_since: b.pastDueSince ? b.pastDueSince.toISOString() : null }, now);
   if (!plan) return { ok: false, reason: 'no_plan', used, cap };
@@ -242,7 +257,8 @@ export async function reserveSms(businessId: string, segments = 1, now: Date = n
   const n = Math.max(1, positiveInt(segments, 'reserveSms segments'));
   const b = await billingRow(businessId);
   if (!b) return { ok: false, reason: 'no_plan', used: 0, cap: 0 };
-  const cap = smsCapFor({ sms_cap_override: b.smsCapOverride, billing_status: b.billingStatus });
+  if (b.suspendedAt) return { ok: false, reason: 'no_plan', used: 0, cap: 0, suspended: true }; // suspended: cannot send
+  const cap = smsCapFor({ sms_cap_override: b.smsCapOverride, billing_status: b.billingStatus, plan: b.plan });
   const enforced = billingEnforced();
   if (enforced) {
     const plan = billingStateAllows({ billing_status: b.billingStatus as Business['billing_status'], past_due_since: b.pastDueSince ? b.pastDueSince.toISOString() : null }, now);

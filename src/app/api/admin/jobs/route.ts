@@ -1,7 +1,6 @@
 import { configEnv } from '@/lib/config';
-import { ok, fail } from '@/lib/http';
-import { authenticate, authErrorResponse } from '@/lib/session';
-import { limitRequest } from '@/lib/ratelimit';
+import { ok } from '@/lib/http';
+import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
 import { jobsStatus } from '@/lib/jobs';
 import { lineKind, lineKindMismatch } from '@/lib/voice/line';
 import { prisma, recordingDeletionStatus } from '@/lib/db';
@@ -15,10 +14,8 @@ export const runtime = 'nodejs';
  * when each last did work (and its newest recorded result), and when each is next due.
  */
 export async function GET(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/jobs', 60);
-  if (limited) return limited;
+  const g = await guardAdminRoute(req, { permission: 'jobs.read', rate: { name: 'jobs', max: 60 } }); // permission jobs.read
+  if (!g.ok) return g.response;
   try {
     // `diagnostics`: configuration that fails safe but misleads (VOICE_LINE_KIND against the real line) and the recording-deletion queue.
     const mismatch = lineKindMismatch();
@@ -36,6 +33,6 @@ export async function GET(req: Request) {
       },
     });
   } catch (err) {
-    return authErrorResponse(err) ?? fail(err, 500);
+    return adminFail(err);
   }
 }

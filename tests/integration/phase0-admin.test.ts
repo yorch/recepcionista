@@ -18,7 +18,10 @@ integration('phase 0: admin step-up, limits and audit (postgres)', () => {
   const userIds: string[] = [];
   const auditCutoff = new Date(Date.now() - 1000);
 
+  // Every Bearer ADMIN_TOKEN use now mails the admins (docs/design/admin-console-contracts.md 4.7): through the `log` provider here, so this file still reaches no provider.
+  const savedProvider = process.env.EMAIL_PROVIDER;
   beforeAll(async () => {
+    process.env.EMAIL_PROVIDER = 'log';
     db = await loadDb();
     prisma = await loadPrisma();
     users = await import('@/lib/db/users');
@@ -35,6 +38,7 @@ integration('phase 0: admin step-up, limits and audit (postgres)', () => {
   });
   afterEach(async () => { await prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'admin/' } } }); });
   afterAll(async () => {
+    if (savedProvider === undefined) delete process.env.EMAIL_PROVIDER; else process.env.EMAIL_PROVIDER = savedProvider;
     expect(outboundCalls).toEqual([]); // no test here may reach a provider
     await prisma.auditEvent.deleteMany({ where: { OR: [{ actorUserId: { in: userIds } }, { action: 'admin.retention_run', at: { gte: auditCutoff } }] } });
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

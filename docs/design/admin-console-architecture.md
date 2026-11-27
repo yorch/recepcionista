@@ -1,6 +1,6 @@
 # Platform admin console: the agreed architecture
 
-Status: **Phase 1 implemented** (registry, runtime config module, job-runner refactor, CI boundary rule; no database, no UI). Phases 2 to 8 are the plan.
+Status: **Phase 1 implemented** (registry, runtime config module, job-runner refactor, CI boundary rule). **Phases 2, 4, 5, 7 and 8 are implemented as BACKEND** (schema, store, loader, secrets, plans, tenants, roles, job runs, audit search, JSON APIs, tests): see `docs/design/admin-console-contracts.md`. **Phase 3 (the `/admin` UI) and Phase 6 (build-time config) are not built.**
 Sources: `docs/review/24a-env-inventory.md`, `24b-admin-surface-today.md`, `24c-tenant-config-gaps.md`, `24e-adversarial-and-recommendation.md`. This file records the OWNER DECISIONS that settled
 24e section 8 and how the code realises them.
 
@@ -116,13 +116,13 @@ Precedence for a tenant: `clamp(tenant_override ?? platform_effective, platform_
 | --- | --- | --- |
 | 0 | single base-URL resolver, admin step-up, audit and rate limits, 2FA default, build args | done |
 | 1 | registry, `configEnv()` shim, boundary rule, job runner refactor, deprecation warnings | **done** (this document) |
-| 2 | tables (`platform_settings`, revisions, change sets, `settings_state`, heartbeats), loader plugged into `setSnapshotSource`, 10 s version poll, boot await and health gate, MAC check, admin API (`/api/admin/settings`, preview, apply, rollback, export/import) | next |
+| 2 | tables (`platform_settings`, revisions, change sets, `settings_state`, heartbeats), loader plugged into `setSnapshotSource`, 10 s version poll, boot await and health gate, MAC check, admin API (`/api/admin/settings`, preview, apply, rollback, export/import) | **done (backend)** |
 | 3 | `/admin` shell, non-secret pages generated from the registry, change history, system page, "move to console" wizard | |
-| 4 | secrets: envelope v2 + HKDF + kid, canary, write-only fields, test-connection under SSRF rules, paired atomic changes, dual-secret windows, critical notifications, Bearer restrictions | |
-| 5 | plans table, tenant overrides, tenant directory and detail, suspend, read-only support view | |
+| 4 | secrets: envelope v2 + HKDF + kid, canary, write-only fields, test-connection under SSRF rules, paired atomic changes, dual-secret windows, critical notifications, Bearer restrictions | **done (backend)**; real test-connection calls still open (`verifySecret` hook, SMTP SSRF guard done) |
+| 5 | plans table, tenant overrides, tenant directory and detail, suspend, read-only support view | **done (backend)**; consumers of the overrides and plan features are per-feature work |
 | 6 | remove build-time config (`NEXT_PUBLIC_*` price copy and Turnstile site key) | |
-| 7 | jobs history, audit search, delivery failures, brand, legal URLs and the markdown page editor with versions | |
-| 8 | platform roles owner / ops / support / read-only | |
+| 7 | jobs history, audit search, delivery failures, brand, legal URLs and the markdown page editor with versions | **done (backend)**: `job_runs`, audit search + export, legal page versions, heartbeats; delivery-failure view and public legal pages open |
+| 8 | platform roles owner / ops / support / read-only | **done (backend)** |
 
 ## 5. Rules for code review
 

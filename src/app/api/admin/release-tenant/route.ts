@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, requireRecentAuth } from '@/lib/session';
-import { limitRequest } from '@/lib/ratelimit';
+import { requireRecentAuth } from '@/lib/session';
+import { guardAdminRoute } from '@/lib/admin/guard';
 import { DEFAULT_GRACE_DAYS, DEFAULT_NOTIFY_DAYS, processBusiness } from '@/lib/billing/release';
 
 export const dynamic = 'force-dynamic';
@@ -18,10 +18,9 @@ const int = (v: unknown, dflt: number): number | null => (v === undefined ? dflt
  * override of the heads-up wait (audited). Audited as billing.release_notice / billing.tenant_released.
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/release-tenant', 20);
-  if (limited) return limited;
+  const g = await guardAdminRoute(req, { permission: 'tenants.release', rate: { name: 'release-tenant', max: 20 } }); // permission tenants.release
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const body = await readJson<Record<string, unknown>>(req).catch(() => null);
     if (!body || typeof body !== 'object') return fail('invalid body', 422);

@@ -1,6 +1,5 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, authErrorResponse, requireRecentAuth } from '@/lib/session';
-import { limitRequest } from '@/lib/ratelimit';
+import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
 import { createUser, EmailTakenError, getBusiness, recordAudit } from '@/lib/db';
 import { auditIp } from '@/lib/account-flows';
 import { hashPassword } from '@/lib/password';
@@ -12,12 +11,9 @@ export const runtime = 'nodejs';
 
 /** Admin-only: create an owner or staff login for a business. (Admin accounts are created with scripts/create-user.ts.) */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/users', 20);
-  if (limited) return limited;
-  const stale = requireRecentAuth(auth);
-  if (stale) return stale;
+  const g = await guardAdminRoute(req, { permission: 'tenants.users.create', write: true, rate: { name: 'users', max: 20 } }); // permission tenants.users.create
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const body = await readJson<{ email?: unknown; password?: unknown; role?: unknown; business_id?: unknown }>(req);
     const bad = validateEmail(body.email) ?? validateNewPassword(body.password);
@@ -41,6 +37,6 @@ export async function POST(req: Request) {
     return ok<User>(user, 201); // User has no password_hash
   } catch (err) {
     if (err instanceof EmailTakenError) return fail('email already registered', 409);
-    return authErrorResponse(err) ?? fail(err, 500);
+    return adminFail(err);
   }
 }

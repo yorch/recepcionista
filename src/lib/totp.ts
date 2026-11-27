@@ -204,12 +204,42 @@ export function encryptSecret(plain: string, aad?: string, key: Buffer = appSecr
   return [ENVELOPE_PREFIX, iv.toString('base64url'), cipher.getAuthTag().toString('base64url'), ct.toString('base64url')].join('.');
 }
 
-/** Inverse of encryptSecret. Throws on a wrong key, a different `aad`, or any tampering. */
-export function decryptSecret(envelope: string, aad?: string, key: Buffer = appSecretKey()): string {
+/**
+ * The decrypt-only PREVIOUS master key during an APP_SECRET_KEY rotation (APP_SECRET_KEY_PREVIOUS), or null. It is never used to encrypt. Remove the variable
+ * once "re-encrypt all" (POST /api/admin/secrets/reencrypt) reports nothing left under the old key.
+ */
+export function previousSecretKey(env: NodeJS.ProcessEnv = configEnv()): Buffer | null {
+  const raw = (env.APP_SECRET_KEY_PREVIOUS ?? '').trim();
+  if (!raw) return null;
+  const key = Buffer.from(raw, /[-_]/.test(raw) ? 'base64url' : 'base64');
+  return key.length === 32 ? key : null;
+}
+
+function decryptWith(envelope: string, aad: string | undefined, key: Buffer): string {
   const parts = String(envelope ?? '').split('.');
   if (parts.length !== 4 || parts[0] !== ENVELOPE_PREFIX) throw new Error('invalid secret envelope');
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(parts[1], 'base64url'));
   decipher.setAuthTag(Buffer.from(parts[2], 'base64url'));
   if (aad) decipher.setAAD(Buffer.from(aad));
   return Buffer.concat([decipher.update(Buffer.from(parts[3], 'base64url')), decipher.final()]).toString('utf8');
+}
+
+/**
+ * Inverse of encryptSecret. Throws on a wrong key, a different `aad`, or any tampering. With no explicit `key` it tries the current key and then, during a
+ * rotation, APP_SECRET_KEY_PREVIOUS (so TOTP secrets and calendar tokens keep working until they are re-encrypted).
+ */
+export function decryptSecret(envelope: string, aad?: string, key?: Buffer): string {
+  if (key) return decryptWith(envelope, aad, key);
+  try {
+    return decryptWith(envelope, aad, appSecretKey());
+  } catch (err) {
+    const prev = previousSecretKey();
+    if (!prev) throw err;
+    return decryptWith(envelope, aad, prev);
+  }
+}
+
+/** Does this v1 envelope decrypt under the CURRENT key (false: it still needs "re-encrypt all" before the previous key can be removed)? */
+export function isUnderCurrentKey(envelope: string, aad?: string): boolean {
+  try { decryptWith(envelope, aad, appSecretKey()); return true; } catch { return false; }
 }

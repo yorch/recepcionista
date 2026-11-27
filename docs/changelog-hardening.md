@@ -523,3 +523,27 @@ No schema change, no UI, behaviour identical to the environment-only configurati
 | Job runner | always starts, reads `enabledJobs(configEnv())` on every tick and re-arms the interval when `JOBS_TICK_SECONDS` changes (before: returned early with nothing enabled at boot, captured `env` once). `runnerTick`, `stopJobRunner`, `armedTickSeconds` exported for tests |
 | Deprecations (D11) | startup warnings `deprecated_env` for `OWNER_PHONE_GRANDFATHER*` and `ELEVENLABS_AGENT_ID` (still honoured for one release) and for the already-ignored `NEXT_PUBLIC_APP_URL`; `invalid_env` names a pinned value the registry rejects |
 | CI rules | no `process.env` outside `src/lib/config/**` except the reviewed allowlist; every alias documented in `docs/env-vars.md`; defaults and bounds valid; registry defaults equal what the readers apply (including 38 promoted constants parsed from their source); per-entry schema tests generated from the registry |
+
+
+## Phases 2, 4, 5, 7, 8: the admin console backend (`docs/design/admin-console-contracts.md`)
+
+Migration `20261211120000_admin_console_schema` (hand written, re-runnable, zero drift; populated old-schema upgrade in `tests/db/admin-console-migration.test.ts`): console tables, `plans` (seeded from today's `PLAN_*` / `COMP_PLANS` defaults) with `businesses.plan` referencing it (unknown strings mapped to `legacy` and recorded; a trigger registers new free strings as hidden plans), `job_runs`, legal pages with versions, `support_grants`, `businesses.suspended_*`, `users.platform_role` (existing admins became `owner`).
+
+| Item (24e) | Status | Evidence |
+| --- | --- | --- |
+| T1 hijacked admin: step-up on every admin write, 2FA forced while the console runs, critical tier (reason, typed confirmation, mail to every admin + `ALERT_EMAIL`), role matrix | Fixed (backend) | `src/lib/admin/guard.ts`, `settings-store.ts`; `tests/integration/admin-routes.test.ts` (HIJACKED ADMIN, role matrix) |
+| T4 secrets never returned, logged or audited; audit redacted by kind | Fixed | `settings-store.ts` `auditValue`, `db/audit.ts` `meta_trusted`; `admin-settings.test.ts` SECRETS |
+| T5 envelope v2 + HKDF + AAD + kid | Fixed | `src/lib/admin/crypto.ts`; `admin-console-pure.test.ts` envelope v2 |
+| T6 MAC on rows, bad row ignored and alerted | Fixed | `loader.ts`; `admin-settings.test.ts` MAC |
+| T9 break-glass token narrowed, every use audited and mailed | Fixed | `permissions.ts`, `guard.ts`; `admin-routes.test.ts` BREAK-GLASS |
+| T10 key rotation (`APP_SECRET_KEY_PREVIOUS`, re-encrypt all incl. TOTP and calendar tokens, canary fails health) | Fixed | `rotation.ts`, `totp.ts decryptSecret`; `admin-settings.test.ts` key rotation, CANARY |
+| T11 version poll every 10 s, heartbeats, "applied on N/N" | Fixed | `loader.ts`; `admin-settings.test.ts` multi-instance |
+| T12 boot awaits the first load, health gate, last known good | Fixed | `instrumentation.ts`, `api/health/route.ts`; `admin-settings.test.ts` boot / health |
+| T3 SMTP relay SSRF (save + connect) | Fixed | `ssrf.ts`, `email/index.ts`; pure + store tests |
+| T7 owner escalation: tenant overrides validated, clamped (write and read), owner comfort knobs only | Fixed | `tenant-overrides.ts`; `admin-routes.test.ts` tenant overrides |
+| T8 support: read only, 30 minute audited write mode | Fixed | `support.ts`; `admin-routes.test.ts` SUPPORT MODE |
+| T14 secret rollback inside 7 days; nulled by the cleanup job | Fixed (the test-connection before restore is the open `verifySecret` hook) | `settings-store.ts rollbackChangeSet`, `cleanup.ts` |
+| T15 test-before-save for credentials | Open | hook only (`ApplyOptions.verifySecret`); Phase 4 real tests |
+| Plans table, entitlements | Partly | caps and comp wired; feature gates, `max_locations`, per-plan Stripe prices are data only |
+| Per-tenant overrides read by their consumers | Open | `tenantEffective()` exists; each reader still uses the platform value |
+| `/admin` UI, public legal pages, maintenance banner | Open (Phase 3) | contracts doc section 7 |

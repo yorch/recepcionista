@@ -67,7 +67,7 @@ export async function billingSummary(b: Business, now: Date = new Date()): Promi
       sms: { used: usage?.sms_count ?? 0, cap: smsCapFor(b) },
       call_minutes: { used: Math.floor(seconds / 60), used_seconds: seconds, cap: callMinutesCapFor(b) },
       forward_minutes: { used: Math.floor(forward / 60), used_seconds: forward, cap: forwardMinutesCapFor(b) },
-      voicemail_minutes: { used: Math.floor(voicemail / 60), used_seconds: voicemail, cap: voicemailMinutesCap() },
+      voicemail_minutes: { used: Math.floor(voicemail / 60), used_seconds: voicemail, cap: voicemailMinutesCap(undefined, b.plan) },
     },
   };
 }

@@ -153,8 +153,9 @@ describe('admin routes: step-up, rate limit, audit (source-level guard; behaviou
     const rel = f.slice(ROOT.length + 1);
     const src = readFileSync(f, 'utf8');
     test(`${rel}: rate limited${/export async function (POST|PUT|PATCH|DELETE)/.test(src) ? ' and step-up protected' : ''}`, () => {
-      expect(src).toContain('limitRequest(');
-      if (/export async function (POST|PUT|PATCH|DELETE)/.test(src)) expect(src).toContain('requireRecentAuth(');
+      // The console routes go through guardAdminRoute (src/lib/admin/guard.ts: authenticate, permission, rate limit, step-up); the older ones call the pieces directly.
+      expect(/limitRequest\(|\brate: /.test(src)).toBe(true);
+      if (/export async function (POST|PUT|PATCH|DELETE)/.test(src)) expect(/requireRecentAuth\(|write: true|read-only POST/.test(src)).toBe(true);
     });
   }
   test('internalAuthHeaders (dead, would put the break-glass token on outbound calls) is gone', () => {

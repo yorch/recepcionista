@@ -32,6 +32,8 @@ import {
   checkSmsAllowed, recordingDeletionStatus, withLease,
 } from '@/lib/db';
 import { appBaseUrl } from '@/lib/email/templates';
+import { withJobRun, type JobTrigger } from '@/lib/admin/job-runs';
+import { cleanupConsoleTables } from '@/lib/admin/cleanup';
 import { generateBriefing } from '@/lib/briefing';
 import { findGratitudeCandidates, runGratitudeSweep } from '@/lib/gratitude';
 import { logger } from '@/lib/log';
@@ -134,6 +136,9 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   /** Test seam: how often the per-business job lease is renewed (default ttl/3). */
   leaseRenewMs?: number;
+  /** History (job_runs): who started the run ('system' for the scheduler, a user id, 'admin_token') and how. Default: system / schedule. */
+  actor?: string;
+  trigger?: JobTrigger;
 }
 
 // ---- state ------------------------------------------------------------------------------------
@@ -366,6 +371,7 @@ export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
       sessions: await deleteExpiredSessions(now),
       email_tokens: await deleteExpiredEmailTokens(now),
       processed_events: await cleanupProcessedEvents(now, true),
+      ...(await cleanupConsoleTables(now)), // job_runs history, instance heartbeats, previous secret envelopes (7 days), expired support grants
       rate_limit_buckets: await cleanupRateLimitBuckets(now),
       webauthn_challenges: await deleteExpiredWebauthnChallenges(now), // expired passkey challenges (kept a day for forensics); no longer a random 2% side effect of issuing one
       briefing_audio: (await pruneBriefingAudio({ now })).removed, // stored briefing clips older than BRIEFING_AUDIO_KEEP_DAYS (default 30); the briefing text stays
@@ -451,8 +457,12 @@ export async function runGoogleCalendarJob(opts: RunOptions = {}): Promise<JobRe
 
 // ---- dispatch, tick, runner -------------------------------------------------------------------
 
-/** Run one job by name now (admin endpoint and tests). */
+/** Run one job by name now (admin endpoint, the scheduler and tests). EVERY run is recorded in job_runs (dry runs and runs without work too). */
 export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> {
+  return withJobRun(job, { actor: opts.actor, trigger: opts.trigger ?? (opts.force ? 'manual' : 'schedule'), dryRun: opts.dryRun === true }, () => runJobUnrecorded(job, opts));
+}
+
+function runJobUnrecorded(job: JobName, opts: RunOptions): Promise<JobReport> {
   switch (job) {
     case 'daily_briefing': return runDailyBriefings(opts);
     case 'gratitude_sweep': return runGratitudeJob(opts);

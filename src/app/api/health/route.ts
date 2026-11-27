@@ -20,6 +20,7 @@ import { prisma } from '@/lib/db/client';
 import { logger } from '@/lib/log';
 import { llmRequiredProblem } from '@/lib/providers/llm-required';
 import { smsSenderProblem } from '@/lib/messaging/sender-config';
+import { loaderStatus, settingsHealth } from '@/lib/admin/loader';
 
 const log = logger('health');
 
@@ -42,6 +43,13 @@ export async function GET() {
   const startedAt = Date.now();
   try {
     await ping();
+    // Console settings (24e T12): 503 until the first load succeeded (when console rows exist) and while the secret canary cannot be decrypted. Nothing else is revealed.
+    const loaded = loaderStatus();
+    const sh = loaded.loaded ? loaded : settingsHealth((await prisma.platformSetting.count({ where: { key: { not: '_canary' } } })) > 0);
+    if (!sh.ok) {
+      log.error(sh.error ?? 'settings_not_ready', { loaded: sh.loaded, canary: sh.canary, last_error: sh.last_error });
+      return NextResponse.json({ ok: false, db: 'up', error: sh.error, detail: sh.detail }, { status: 503, headers: { 'cache-control': 'no-store' } });
+    }
     const llm = llmRequiredProblem();
     if (llm) {
       log.error('llm_not_configured', { note: llm });

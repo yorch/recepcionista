@@ -94,6 +94,19 @@ export async function register() {
   if (booted) return;
   booted = true;
 
+  // Admin console settings (D9, T12): create the canary, await the FIRST load (10 s timeout) and start the 10 s version poll BEFORE the banner and the job runner, so
+  // both see the console values. Not during `next build`, not without a database. A failed or late load never blocks the boot: /api/health stays 503 while rows exist.
+  if (process.env.NEXT_PHASE !== 'phase-production-build' && process.env.DATABASE_URL) {
+    try {
+      const { bootSettings, loaderStatus } = await import('@/lib/admin/loader');
+      const res = await bootSettings();
+      const st = loaderStatus();
+      boot.info('settings', { loaded: st.loaded, version: st.version, ignored_rows: st.ignored_rows, canary: st.canary, ...(res.ok ? {} : { problem: 'timeout' in res ? 'first load timed out' : 'first load failed' }) });
+    } catch (err) {
+      boot.error('settings_boot_failed', { ...serializeError(err) });
+    }
+  }
+
   boot.info('start', {
     runtime: process.env.NEXT_RUNTIME || 'nodejs',
     env: process.env.NODE_ENV,

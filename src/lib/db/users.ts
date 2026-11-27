@@ -29,7 +29,7 @@ export const hashSessionToken = (token: string): string => crypto.createHash('sh
 
 type UserRow = {
   id: string; email: string; passwordHash: string; businessId: string | null; role: string; createdAt: Date; disabledAt: Date | null;
-  emailVerifiedAt: Date | null; phone: string | null; totpEnabledAt: Date | null; locale?: string;
+  emailVerifiedAt: Date | null; phone: string | null; totpEnabledAt: Date | null; locale?: string; platformRole?: string | null;
 };
 type SessionRow = {
   id: string; userId: string | null; kind: string; expiresAt: Date; createdAt: Date; lastUsedAt: Date;
@@ -49,6 +49,7 @@ function toUser(row: UserRow): User {
     phone: row.phone ?? null,
     totp_enabled: row.totpEnabledAt !== null && row.totpEnabledAt !== undefined,
     locale: row.locale === 'es' ? 'es' : 'en',
+    ...(row.role === 'admin' ? { platform_role: (['owner', 'ops', 'support', 'read_only'] as const).find((r) => r === row.platformRole) ?? null } : {}),
   };
 }
 const toSession = (r: SessionRow): UserSession => ({
@@ -81,6 +82,8 @@ export async function createUser(input: {
   phone?: string | null;
   /** UI / text language of the user (default 'en'). */
   locale?: Locale;
+  /** Admin users only: the platform role (default 'owner', so every admin created by a script or a test keeps full access). */
+  platform_role?: 'owner' | 'ops' | 'support' | 'read_only';
 }, db: DbClient = prisma): Promise<User> {
   const email = normalizeEmail(input.email);
   if (!email || !email.includes('@')) throw new Error('createUser: invalid email');
@@ -96,6 +99,7 @@ export async function createUser(input: {
         emailVerifiedAt: input.email_verified ? new Date() : null,
         phone: input.phone ?? null,
         ...(input.locale && LOCALES.includes(input.locale) ? { locale: input.locale } : {}),
+        ...(input.role === 'admin' ? { platformRole: input.platform_role ?? 'owner' } : {}),
       },
     });
     return toUser(row);

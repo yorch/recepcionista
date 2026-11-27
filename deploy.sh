@@ -78,6 +78,12 @@ if [[ -z "${APP_SECRET_KEY:-}" ]]; then
 fi
 [[ "$(printf '%s' "$APP_SECRET_KEY" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" == "32" ]] \
   || die "APP_SECRET_KEY must be 32 random bytes, base64 encoded (openssl rand -base64 32)"
+# Rotation (docs/runbook.md "Admin console operations"): the decrypt-only previous master key must be a valid key too, and a different one.
+if [[ -n "${APP_SECRET_KEY_PREVIOUS:-}" ]]; then
+  [[ "$(printf '%s' "$APP_SECRET_KEY_PREVIOUS" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" == "32" ]] \
+    || die "APP_SECRET_KEY_PREVIOUS must be 32 random bytes, base64 encoded (the key you are rotating AWAY from)"
+  [[ "$APP_SECRET_KEY_PREVIOUS" != "$APP_SECRET_KEY" ]] || die "APP_SECRET_KEY_PREVIOUS equals APP_SECRET_KEY: remove it (no rotation in progress)"
+fi
 case "${EMAIL_PROVIDER:-}" in
   resend)
     [[ -n "${RESEND_API_KEY:-}" ]] || die "EMAIL_PROVIDER=resend but RESEND_API_KEY is unset in .env" ;;

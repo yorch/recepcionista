@@ -1,7 +1,7 @@
 import { configEnv } from '@/lib/config';
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, requireRecentAuth } from '@/lib/session';
-import { limitRequest } from '@/lib/ratelimit';
+import { requireRecentAuth } from '@/lib/session';
+import { guardAdminRoute } from '@/lib/admin/guard';
 import { prisma, recordAudit, getBusiness } from '@/lib/db';
 import { ensureTenantLine, lineApplicable, lineImportBlockedReason } from '@/lib/voice/tenant-line';
 import { lineKindFor } from '@/lib/voice/line';
@@ -51,10 +51,9 @@ export interface RepairResult {
  *  - Never touches TWILIO_PHONE_NUMBER (the platform sender) or mock-pool numbers. Audited as `admin.repair_numbers` (counts + business ids).
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/repair-numbers', 6);
-  if (limited) return limited;
+  const g = await guardAdminRoute(req, { permission: 'providers.repair', rate: { name: 'repair-numbers', max: 6 } }); // permission providers.repair
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const raw = await readJson<unknown>(req).catch(() => ({}));
     if (raw !== null && raw !== undefined && (typeof raw !== 'object' || Array.isArray(raw))) return fail('invalid body', 422);

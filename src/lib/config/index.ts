@@ -29,6 +29,8 @@ export interface SnapshotInit {
   values?: Record<string, unknown>;
   /** Decrypted secret values by registry key. Held in a non-enumerable map; never serialised. */
   secrets?: Record<string, string>;
+  /** Dual-secret acceptance window: the PREVIOUS value of a rotated secret and the epoch-ms until which a verifier may still accept it. */
+  previousSecrets?: Record<string, { value: string; until: number }>;
   loadedAt?: number;
 }
 
@@ -41,12 +43,20 @@ export class ConfigSnapshot {
   readonly loadedAt: number;
   readonly values: Readonly<Record<string, unknown>>;
   declare readonly secrets: ReadonlyMap<string, string>;
+  declare readonly previousSecrets: ReadonlyMap<string, { value: string; until: number }>;
 
   constructor(init: SnapshotInit) {
     this.version = init.version;
     this.loadedAt = init.loadedAt ?? Date.now();
     this.values = Object.freeze({ ...(init.values ?? {}) });
     Object.defineProperty(this, 'secrets', { value: new Map(Object.entries(init.secrets ?? {})), enumerable: false, writable: false });
+    Object.defineProperty(this, 'previousSecrets', { value: new Map(Object.entries(init.previousSecrets ?? {})), enumerable: false, writable: false });
+  }
+
+  /** The previous value of a rotated secret while its acceptance window is open (`now` < until), else undefined. Verifiers only: never log or return it. */
+  previousSecret(key: string, now: number = Date.now()): string | undefined {
+    const p = this.previousSecrets.get(key);
+    return p && now < p.until ? p.value : undefined;
   }
 
   /** The decrypted secret of a key, or undefined. Callers must never log or return it. */
@@ -115,6 +125,15 @@ export interface Resolved<T = unknown> {
 
 /** An environment variable pins a key when it is set to a non-empty value. */
 export const isPinned = (env: Record<string, string | undefined>, name: string | undefined): boolean => Boolean(name) && (env[name as string] ?? '').trim() !== '';
+
+/**
+ * Is `name` PINNED by the real environment? With no explicit `env` (or with the console view returned by configEnv()) this looks at the raw process
+ * environment, never at console-held values (the view would answer true for them). A test may inject its own env object.
+ */
+export function pinnedByEnv(name: string, env?: NodeJS.ProcessEnv): boolean {
+  const e = env === undefined || env === configEnv() ? rawEnv() : env;
+  return isPinned(e, name);
+}
 
 /** Pure resolution (env pin > console > default) over explicit inputs: the single definition used by `setting()`, the console and the tests. */
 export function resolveSetting<T = unknown>(
@@ -212,6 +231,41 @@ export function configEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** The env-shaped view of an explicit snapshot (the NOT-yet-applied or the previous one): the Bearer/critical notifications send through the transport that was configured BEFORE a change. */
+export function envFromSnapshot(snapshot: ConfigSnapshot | null): NodeJS.ProcessEnv {
+  return snapshot && snapshot.size > 0 ? buildView(snapshot) : rawEnv();
+}
+
+/**
+ * The secrets a verifier (Twilio signature, Stripe / ElevenLabs webhook HMAC, tool secret) must accept right now: the current value, plus the
+ * PREVIOUS one for 15 minutes after a console rotation (dual-secret window). An environment pin has no window (the operator rotates it by hand).
+ * Order: current first. Never log the result.
+ */
+export function acceptedSecrets(key: SettingKey, now: number = Date.now()): string[] {
+  const def = settingDef(key);
+  if (!def) throw new Error(`unknown setting ${key}`);
+  const env = rawEnv();
+  const snap = currentSnapshot();
+  const out: string[] = [];
+  const cur = resolveSetting(def, env, snap).value;
+  if (typeof cur === 'string' && cur) out.push(cur);
+  if (snap && !(def.env && isPinned(env, def.env))) {
+    const prev = snap.previousSecret(key, now);
+    if (prev && !out.includes(prev)) out.push(prev);
+  }
+  return out;
+}
+
+/**
+ * The secrets a webhook / signature verifier tries, in order: `primary` (what the legacy reader already resolved: env or console) then the PREVIOUS console value while its
+ * 15 minute window is open. A verifier accepts a request signed with any of them; senders always use `primary`.
+ */
+export function verifierSecrets(key: SettingKey, primary: string | undefined | null): string[] {
+  const out: string[] = primary ? [primary] : [];
+  for (const v of acceptedSecrets(key)) if (!out.includes(v)) out.push(v);
+  return out;
+}
+
 export interface RuntimeConfig {
   /** Settings version of the applied snapshot (0 = nothing loaded: the environment and the defaults only). */
   readonly version: number;
@@ -280,7 +334,10 @@ export function redactSecrets(text: string): string {
     if (v && v.length >= MIN_REDACT_LENGTH && out.includes(v)) out = out.split(v).join('«redacted»');
   }
   const snap = currentSnapshot();
-  if (snap) for (const v of snap.secrets.values()) if (v.length >= MIN_REDACT_LENGTH && out.includes(v)) out = out.split(v).join('«redacted»');
+  if (snap) {
+    for (const v of snap.secrets.values()) if (v.length >= MIN_REDACT_LENGTH && out.includes(v)) out = out.split(v).join('«redacted»');
+    for (const p of snap.previousSecrets.values()) if (p.value.length >= MIN_REDACT_LENGTH && out.includes(p.value)) out = out.split(p.value).join('«redacted»');
+  }
   return out;
 }
 

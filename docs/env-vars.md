@@ -14,12 +14,12 @@ Every platform setting is declared once in `src/lib/config/registry*.ts` (172 en
 The effective value of a setting is **environment pin > console value > registry default** (docs/design/admin-console-architecture.md):
 
 * A variable that is set to a non-empty value **pins** its setting: it always wins and the console shows the setting as "locked by environment". An empty value does not pin.
-* Until the console exists (Phase 3) there are no console values, so everything below behaves exactly as before: the environment, then the code default.
+* The console tables (migration `20261211120000_admin_console_schema`) hold the console values; the loader (`src/lib/admin/loader.ts`) serves them to every reader through the snapshot. With no console rows everything below behaves exactly as before: the environment, then the code default.
 * **Env-only** names (the list in `src/lib/config/env-only.ts`: database, master key, `ADMIN_TOKEN`, public origin, proxy, WebAuthn, CSP, logging, dev switches, deploy tooling and the platform controls `SETTINGS_FREEZE`, `ADMIN_TOKEN_ALLOW_SETTINGS`, `ALERT_EMAIL`) are never stored in the database and never writable from the console.
 * A pinned value the registry rejects (wrong type, out of range) is reported at boot as `invalid_env` (name and setting only, never the value); the reader then applies its own fallback, as it always did.
 * Retired names (D11) still work for one more release and warn at boot as `deprecated_env`: `OWNER_PHONE_GRANDFATHER*`, `ELEVENLABS_AGENT_ID`, `NEXT_PUBLIC_APP_URL`.
 * The security-loosening toggles `SIGNUP_ALLOW_WITHOUT_CAPTCHA`, `REQUIRE_2FA_FOR_ADMINS` (off) and `LOG_PII` are **env-only ratchets**: the console may tighten, only the environment may loosen.
-* Provider secrets may live either here or (Phase 4) in the console, per secret, write-only and encrypted at rest; a secret set here pins and locks it.
+* Provider secrets may live either here or in the console, per secret, write-only and encrypted at rest (AES-256-GCM envelope `v2.<kid>.<iv>.<tag>.<ct>`, key = HKDF-SHA256 of `APP_SECRET_KEY`); a secret set here pins and locks it.
 
 ## Core, auth and networking
 
@@ -56,10 +56,11 @@ The effective value of a setting is **environment pin > console value > registry
 | `JOBS_TICK_SECONDS` | no | `60` | seconds between scheduler passes (clamped to 5-3600). Work is claimed per business in Postgres, so any tick rate and any number of app instances are safe | no |
 | `NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE` | set by Next / the image | | runtime mode flags; never set by hand | no |
 | `PORT`, `HOSTNAME` | set by the image / compose | `3000`, `0.0.0.0` | container listen port and bind address (env-only) | no |
-| `APP_SECRET_KEY_PREVIOUS` | no (reserved, Phase 4) | none | decrypt-only previous master key during a rotation; not read yet (env-only) | yes |
-| `SETTINGS_FREEZE` | no (reserved, Phase 2) | unset | `true` makes the whole admin console read-only: an incident switch (env-only). Not read yet | no |
-| `ADMIN_TOKEN_ALLOW_SETTINGS` | no (reserved, Phase 4) | unset | `true` lets the Bearer `ADMIN_TOKEN` also write secrets and critical settings; by default the token is recovery only (env-only). Not read yet | no |
-| `ALERT_EMAIL` | no (reserved, Phase 4) | none | out-of-band recipient of critical-change and Bearer-use notifications; independent of console-held email settings (env-only). Not read yet | no |
+| `APP_SECRET_KEY_PREVIOUS` | no (during a rotation only) | none | decrypt-only previous master key: set it together with the NEW `APP_SECRET_KEY`, restart, run "re-encrypt all" (`POST /api/admin/secrets/reencrypt`), then remove it. Console secrets (envelope `kid`), their MACs, TOTP secrets and calendar tokens still under the old key keep working meanwhile (env-only, docs/runbook.md "Rotating APP_SECRET_KEY") | yes |
+| `SETTINGS_FREEZE` | no | unset | `true` makes EVERY console write answer 403 `settings_frozen` (settings, secrets, plans, legal pages, tenant overrides, imports, rollbacks); reads work. No API can lift it: remove it and restart (env-only). The break-glass token can additionally freeze through `POST /api/admin/settings/freeze` (a database flag) | no |
+| `ADMIN_TOKEN_ALLOW_SETTINGS` | no | unset | `true` lets the Bearer `ADMIN_TOKEN` (and its cookie session) also write settings, secrets and imports; by default the token is RECOVERY ONLY: read, create / re-enable an admin, revoke sessions, freeze, roll back, and the operator actions that predate the console (env-only). Every Bearer use is audited and mailed to the admins | no |
+| `ALERT_EMAIL` | no | none | out-of-band recipient (comma separated) of critical-change, freeze, integrity-failure and Bearer-use notifications, in addition to every enabled admin. Critical-change mails are sent through the e-mail transport that was active BEFORE the change, never the one being changed (env-only) | no |
+| `BUILD_SHA` | no | none | informational build id stored in the instance heartbeat and shown on the System page (env-only) | no |
 | `BACKUP_DIR`, `COMPOSE`, `FOLLOW_LOGS` | no | `./backups`, compose command, off | `deploy.sh` tooling (env-only) | no |
 | `ENV_FILE` | no | none | `scripts/check-elevenlabs-key.sh` dev helper (env-only) | no |
 

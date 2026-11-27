@@ -11,7 +11,8 @@
  * In production an unset provider fails closed with EmailConfigError (callers answer 503) instead of
  * pretending the mail went out. Any send failure throws EmailSendError.
  */
-import { configEnv } from '@/lib/config';
+import { configEnv, pinnedByEnv } from '@/lib/config';
+import { assertPublicSmtpTarget, smtpTargetOfUrl } from '@/lib/admin/ssrf';
 import { logger } from '@/lib/log';
 
 const log = logger('email');
@@ -91,12 +92,16 @@ function validate(msg: EmailMessage): void {
   if (!msg.text.trim()) throw new EmailSendError('empty body');
 }
 
-export async function sendEmail(msg: EmailMessage): Promise<EmailResult> {
-  const provider = resolveEmailProvider(); // throws EmailConfigError first: config problems beat input problems
+/**
+ * `env`: the transport configuration to send through (default: the live configuration). The admin console's notifications pass the configuration that was
+ * active BEFORE a change (or the raw environment), so a notification about an email-provider change never travels over the provider being changed.
+ */
+export async function sendEmail(msg: EmailMessage, env: NodeJS.ProcessEnv = configEnv()): Promise<EmailResult> {
+  const provider = resolveEmailProvider(env); // throws EmailConfigError first: config problems beat input problems
   validate(msg);
   if (provider === 'log') return sendLog(msg);
-  if (provider === 'resend') return sendResend(msg);
-  return sendSmtp(msg);
+  if (provider === 'resend') return sendResend(msg, env);
+  return sendSmtp(msg, env);
 }
 
 function sendLog(msg: EmailMessage): EmailResult {
@@ -105,13 +110,13 @@ function sendLog(msg: EmailMessage): EmailResult {
   return { provider: 'log', id: null };
 }
 
-async function sendResend(msg: EmailMessage): Promise<EmailResult> {
+async function sendResend(msg: EmailMessage, env: NodeJS.ProcessEnv): Promise<EmailResult> {
   let res: Response;
   try {
     res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${configEnv().RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: configEnv().EMAIL_FROM, to: [msg.to], subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) }),
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: env.EMAIL_FROM, to: [msg.to], subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) }),
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     });
   } catch (err) {
@@ -126,22 +131,30 @@ async function sendResend(msg: EmailMessage): Promise<EmailResult> {
   return { provider: 'resend', id: typeof body.id === 'string' ? body.id : null };
 }
 
-async function sendSmtp(msg: EmailMessage): Promise<EmailResult> {
+async function sendSmtp(msg: EmailMessage, env: NodeJS.ProcessEnv): Promise<EmailResult> {
   try {
+    // SSRF (24e T3): a relay set from the CONSOLE must be a public address on an SMTP port, re-checked at every connect (DNS may have changed since it was saved).
+    // An operator's own SMTP_HOST / SMTP_URL (environment pin, e.g. a local relay) is trusted as before.
+    if (!pinnedByEnv('SMTP_HOST') && !pinnedByEnv('SMTP_URL')) {
+      const rawUrl = (env.SMTP_URL ?? '').trim();
+      const target = rawUrl ? smtpTargetOfUrl(rawUrl) : { host: env.SMTP_HOST ?? '', port: Number(env.SMTP_PORT) || 587 };
+      if (!target) throw new Error('smtp target refused');
+      await assertPublicSmtpTarget(target.host, target.port);
+    }
     const nodemailer = await import('nodemailer');
     const timeouts = { connectionTimeout: SEND_TIMEOUT_MS, greetingTimeout: SEND_TIMEOUT_MS, socketTimeout: SEND_TIMEOUT_MS * 2 };
-    const url = (configEnv().SMTP_URL ?? '').trim();
+    const url = (env.SMTP_URL ?? '').trim();
     const transport = url
       // nodemailer parses a `url` option like a connection string and still honours the timeouts beside it
       ? nodemailer.createTransport({ url, ...timeouts } as unknown as import('nodemailer').TransportOptions)
       : nodemailer.createTransport({
-          host: configEnv().SMTP_HOST,
-          port: Number(configEnv().SMTP_PORT) || 587,
-          secure: configEnv().SMTP_SECURE === 'true',
-          ...(configEnv().SMTP_USER ? { auth: { user: configEnv().SMTP_USER, pass: configEnv().SMTP_PASS ?? '' } } : {}),
+          host: env.SMTP_HOST,
+          port: Number(env.SMTP_PORT) || 587,
+          secure: env.SMTP_SECURE === 'true',
+          ...(env.SMTP_USER ? { auth: { user: env.SMTP_USER, pass: env.SMTP_PASS ?? '' } } : {}),
           ...timeouts,
         });
-    const info = await transport.sendMail({ from: configEnv().EMAIL_FROM, to: msg.to, subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) });
+    const info = await transport.sendMail({ from: env.EMAIL_FROM, to: msg.to, subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) });
     transport.close();
     return { provider: 'smtp', id: typeof info.messageId === 'string' ? info.messageId : null };
   } catch (err) {

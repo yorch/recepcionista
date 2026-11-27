@@ -16,6 +16,16 @@ const SURVIVORS: Record<string, string> = {
   user_sessions: 'admin sessions only (checked below)',
   recovery_codes: 'admin accounts only (checked below)',
   passkey_credentials: 'admin accounts only (checked below)',
+  // admin console: platform configuration and operational history, not tenant data (tenant_setting_overrides and support_grants cascade away with their business)
+  platform_settings: 'console configuration',
+  platform_setting_revisions: 'console change history',
+  setting_change_sets: 'console change history',
+  settings_state: 'the single settings-version row',
+  instance_heartbeats: 'running instances',
+  plans: 'the plan catalog (businesses reference it)',
+  job_runs: 'job run history',
+  legal_pages: 'legal pages',
+  legal_page_versions: 'legal page versions',
 };
 
 suite('clearAll (postgres)', () => {
@@ -67,6 +77,19 @@ suite('clearAll (postgres)', () => {
     await p.webauthnChallenge.create({ data: { purpose: 'login', challengeHash: `w1_${run}`, expiresAt: new Date(Date.now() + 60_000) } });
     await p.webauthnChallenge.create({ data: { purpose: 'register', userId: owner.id, challengeHash: `w2_${run}`, expiresAt: new Date(Date.now() + 60_000) } });
 
+    // admin console tables (kept: configuration / history; the per-tenant ones cascade with the business)
+    await p.platformSetting.create({ data: { key: `t.${run}`, value: 1, integrityMac: 'm' } });
+    const cs = await p.settingChangeSet.create({ data: { id: `cs_${run}` } });
+    await p.platformSettingRevision.create({ data: { changeSetId: cs.id, key: `t.${run}` } });
+    await p.tenantSettingOverride.create({ data: { businessId: biz.id, key: 'jobs.briefing_hour', value: 19 } });
+    await p.settingsState.upsert({ where: { id: 1 }, create: { id: 1 }, update: {} });
+    await p.instanceHeartbeat.create({ data: { instanceId: `i_${run}` } });
+    await p.plan.upsert({ where: { key: 'standard' }, create: { key: 'standard', name: 'Standard' }, update: {} });
+    await p.jobRun.create({ data: { job: 'cleanup', startedAt: new Date() } });
+    await p.legalPage.upsert({ where: { slug_locale: { slug: 'terms', locale: 'en' } }, create: { slug: 'terms', locale: 'en' }, update: {} });
+    await p.legalPageVersion.create({ data: { slug: 'terms', locale: 'en', version: 900_000 + Math.floor(Math.random() * 90_000), body: 'wipe test' } });
+    await p.supportGrant.create({ data: { userId: admin.id, businessId: biz.id, reason: 'wipe test grant', expiresAt: new Date(Date.now() + 60_000) } });
+
     // the fixture really has a row in every table of the schema
     const tables: string[] = (await p.$queryRawUnsafe(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`)).map((r: any) => r.table_name);
     const count = async (t: string): Promise<number> => Number(((await p.$queryRawUnsafe(`SELECT count(*)::int AS n FROM "${t}"`)) as any[])[0].n);
@@ -83,6 +106,12 @@ suite('clearAll (postgres)', () => {
     expect(await p.user.count({ where: { id: admin.id } })).toBe(1);
     expect(await p.user.count({ where: { id: owner.id } })).toBe(0);
     expect(await p.userSession.count({ where: { userId: admin.id } })).toBe(1);
+    expect(await p.platformSetting.count({ where: { key: `t.${run}` } })).toBe(1); // console configuration survives a demo reset
+    await p.platformSettingRevision.deleteMany({ where: { changeSetId: cs.id } });
+    await p.settingChangeSet.deleteMany({ where: { id: cs.id } });
+    await p.platformSetting.deleteMany({ where: { key: `t.${run}` } });
+    await p.instanceHeartbeat.deleteMany({ where: { instanceId: `i_${run}` } });
+    await p.legalPageVersion.deleteMany({ where: { body: 'wipe test' } });
     expect(await p.userSession.count({ where: { tokenHash: `t3_${run}` } })).toBe(1); // the break-glass admin session of whoever pressed reset
     expect(await p.userSession.count({ where: { tokenHash: `t1_${run}` } })).toBe(0);
     expect(await p.recoveryCode.count({ where: { userId: admin.id } })).toBe(1);

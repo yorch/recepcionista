@@ -236,9 +236,17 @@ printf '%s' "$PW" | bun scripts/create-user.ts --email staff@acme.com --role sta
 
 Passwords must be 12-256 characters. Users created by the script or by `POST /api/admin/users` are created **email-verified** (the operator vouches for the address). In a deployed container run the script the same way as `db:seed` (the `tools` image). Normal customers sign up themselves at `/signup`; owners invite their staff from `/dashboard/team`.
 
+## Platform roles of the admin console (`src/lib/admin/permissions.ts`)
+
+A user with `role = 'admin'` also has a **platform role** (`users.platform_role`): `owner` (everything), `ops`, `support` (read only, plus a 30 minute write mode in ONE tenant with a reason), `read_only`. Every pre-existing admin became `owner`;
+an admin row without a platform role is `read_only`. `can(principal, permission)` is the one check; every `/api/admin/*` route names a permission (matrix and per-route list in `docs/design/admin-console-contracts.md`). Rules that matter:
+only owners change roles, manage admins, write secrets / critical settings, import, publish legal pages, unfreeze; nobody changes their own role or disables themselves; the last enabled owner can never be disabled or demoted; a disable, a role change and a 2FA
+reset revoke the person's sessions; **while the console runs, 2FA is forced for every admin** (`REQUIRE_2FA_FOR_ADMINS` can only force it ON); every admin write needs a recent sign-in (step-up, 5 minutes) and is audited with the role.
+A tenant owner or staff never reaches `/api/admin/*` (403); an owner changes only their own comfort knobs through `/api/businesses/:id/settings-overrides` (owners only, clamped, no admin through that route).
+
 ## Break-glass admin token
 
-`ADMIN_TOKEN` stays the superadmin credential: `Authorization: Bearer ...` for scripts and the "Use admin token" link on `/login` (which now creates a revocable 12 h server-side session). Keep it out of daily use. If it leaks: rotate it **and** call `POST /api/auth/revoke-admin-sessions` (existing admin sessions survive a rotation). Anyone holding it can act on every tenant.
+**Since the admin console the token is RECOVERY ONLY (D8)**: it may read, create or re-enable an admin, revoke sessions, freeze settings, roll back, and use the operator routes that existed before (billing override, users, release, repair, resync, jobs, retention); it may NOT write settings, secrets, plans, legal pages or roles unless `ADMIN_TOKEN_ALLOW_SETTINGS=true` (settings, secrets and imports only). EVERY use writes an `admin.bearer_use` audit row and mails every admin (once a minute per route). `ADMIN_TOKEN` stays the superadmin credential for those: `Authorization: Bearer ...` for scripts and the "Use admin token" link on `/login` (which now creates a revocable 12 h server-side session). Keep it out of daily use. If it leaks: rotate it **and** call `POST /api/auth/revoke-admin-sessions` (existing admin sessions survive a rotation). Anyone holding it can act on every tenant.
 
 ## Threat notes and limits
 

@@ -24,6 +24,7 @@ parallel work plan.
 | [docs/compliance.md](docs/compliance.md) | recording/AI disclosure, SMS consent and opt-out, retention and erasure, operator duties |
 | [docs/env-vars.md](docs/env-vars.md) | every environment variable: required, default, secret |
 | [docs/design/admin-console-architecture.md](docs/design/admin-console-architecture.md) | the platform admin console: owner decisions, the settings registry (`src/lib/config`), precedence env pin > console > default, tiers, the runtime config module, the phase plan |
+| [docs/design/admin-console-contracts.md](docs/design/admin-console-contracts.md) | the admin console backend (Phases 2, 4, 5, 7, 8): tables, helpers, every `/api/admin/*` route with its permission, role matrix, semantic rules (tiers, secrets, rotation, freeze, break-glass), error codes, what the Phase 3 UI can rely on, residuals |
 | [docs/runbook.md](docs/runbook.md) | pre-deploy checklist, live test call, `verify:deploy`, rollback, provider checklist, release of canceled tenants |
 | [docs/security-headers.md](docs/security-headers.md) | nonce-based CSP, other response headers, rollout switches |
 | [docs/testing.md](docs/testing.md) | what runs where, the scratch database, destructive scripts |

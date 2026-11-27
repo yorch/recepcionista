@@ -1,8 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate, requireRecentAuth } from '@/lib/session';
+import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
 import { adminBillingValues } from '@/lib/billing/admin-audit';
 import { getBusiness, recordAudit, setBillingState, type BillingPatch } from '@/lib/db';
-import { limitRequest } from '@/lib/ratelimit';
 import { billingErrorResponse } from '@/lib/billing/http';
 import { billingSummary } from '@/lib/billing/summary';
 import type { BillingStatus } from '@/lib/types';
@@ -32,12 +31,10 @@ function capField(v: unknown): number | null | undefined {
  * can overwrite the status again, so comp accounts should have no subscription. Audited (meta.from / meta.to carry the values). Step-up (`requireRecentAuth`) for cookie sessions.
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/billing', 30);
-  if (limited) return limited;
-  const stale = requireRecentAuth(auth); // step-up (5 min) for the cookie session; the Bearer ADMIN_TOKEN passes
-  if (stale) return stale;
+  // Permission tenants.billing (owner, ops, the break-glass token); step-up (5 min) for a cookie session, the Bearer ADMIN_TOKEN passes.
+  const g = await guardAdminRoute(req, { permission: 'tenants.billing', write: true, rate: { name: 'billing', max: 30 } });
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const body = await readJson<Record<string, unknown>>(req);
     if (!body || typeof body !== 'object') return fail('invalid body', 422);
@@ -85,6 +82,6 @@ export async function POST(req: Request) {
     });
     return ok(await billingSummary(updated));
   } catch (err) {
-    return billingErrorResponse(err);
+    return billingErrorResponse(err) ?? adminFail(err);
   }
 }
