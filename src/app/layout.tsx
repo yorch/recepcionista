@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from 'next/font/google';
 import { connection } from 'next/server';
 import { Toaster } from 'sonner';
 import { SkipLink } from '@/components/ui/skip-link';
+import { PlatformBanner } from '@/components/platform-banner';
 import { siteUrl } from '@/app/site-config';
 import { I18nProvider } from '@/lib/i18n/client';
 import { getLocale, getMessages } from '@/lib/i18n/server';
@@ -44,6 +45,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body className="min-h-screen">
         <I18nProvider locale={locale} messages={messages}>
           <SkipLink />
+          <PlatformBanner />
           {children}
           {/* sonner renders an aria-live="polite" region labelled "Notifications" (localized). */}
           <Toaster theme="dark" position="bottom-right" closeButton containerAriaLabel={makeT(locale)('toast.notifications')} />

@@ -4,6 +4,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import crypto from 'node:crypto';
 import { ADMIN_TOKEN, PASSWORD, TEST_URL, captureMail, clearLimiter, cookieFrom, loadAuthModules, req, rid } from '../helpers/auth-harness';
 
 const suite = TEST_URL ? describe : describe.skip;
@@ -259,9 +260,12 @@ suite('team management (postgres)', () => {
     }
   });
 
-  test('an admin user (DB role) can manage any business; the business switcher is just business_id', async () => {
+  test('an admin user (DB role) can READ any business; WRITING needs an open support write grant (no silent impersonation); the business switcher is just business_id', async () => {
     const r = await team.GET(req(`/api/team?business_id=${A}`, asUser('root')));
     expect(r.status).toBe(200);
+    const refused = await patch('root', ids.staffA, { role: 'staff' }, `?business_id=${A}`);
+    expect([refused.status, (await refused.json()).code]).toEqual([403, 'support_write_required']);
+    await db.prisma.supportGrant.create({ data: { id: crypto.randomUUID(), userId: ids.root, businessId: A, reason: 'test support write grant', startedAt: new Date(), expiresAt: new Date(Date.now() + 600_000) } });
     expect((await patch('root', ids.staffA, { role: 'staff' }, `?business_id=${A}`)).status).toBe(200);
   });
 });

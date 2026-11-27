@@ -13,6 +13,7 @@
  * Never touched: admin-comped, trialing/active/past_due/none businesses, ones with REAL calls in the last 7 days (unless
  * includeRecent; out-of-service/blocked calls, hang-ups and calls with no transcript, booking or RECENT_CALL_MIN_SECONDS do not count), a number or agent that another business also uses, and the platform's own TWILIO_PHONE_NUMBER.
  */
+import { isCompedPlan } from '@/lib/admin/plan-catalog';
 import { prisma } from '@/lib/db/client';
 import { clearBusinessProviderResources, recordAudit, withLease } from '@/lib/db';
 import { notifyOwners } from '@/lib/billing/emails';
@@ -91,7 +92,7 @@ export function decideRelease(f: ReleaseFacts, o: ReleaseOptions = {}): ReleaseD
   const notifyDays = o.notifyDays ?? DEFAULT_NOTIFY_DAYS;
   const skip = (reason: string): ReleaseDecision => ({ action: 'skip', reason });
   if (f.billing_status !== 'canceled' && f.billing_status !== 'unpaid') return skip(`billing status is ${f.billing_status} (only canceled/unpaid are released)`);
-  if (f.plan && COMP_PLANS.includes(f.plan)) return skip(`admin-comped plan "${f.plan}"`);
+  if (f.plan && isCompedPlan(f.plan, COMP_PLANS)) return skip(`admin-comped plan "${f.plan}"`);
   if (!f.phone && !f.agent_id) return skip('nothing to release (no number or agent)');
   const R = releaseDate(f, graceDays);
   if (!R) return skip('no current_period_end/trial_ends_at recorded: cannot date the cancellation (set it with POST /api/admin/billing first)');

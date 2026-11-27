@@ -2,6 +2,7 @@
  * LLM adapter. Uses OpenAI if OPENAI_API_KEY is set, Anthropic if only that is,
  * otherwise returns deterministic mock content so the app still runs end-to-end.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 const log = logger('llm');
@@ -16,7 +17,7 @@ export interface LlmJsonOptions<T> {
 }
 
 export const hasLlm = () =>
-  Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY);
+  Boolean(configEnv().OPENAI_API_KEY || configEnv().ANTHROPIC_API_KEY);
 
 /** The first balanced JSON value in `text` starting at `from`, parsed, or null. Respects strings and escapes. */
 function balancedJsonAt(text: string, from: number): unknown | null {
@@ -100,7 +101,7 @@ async function callOpenAi(messages: ChatMessage[], temperature: number): Promise
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        authorization: `Bearer ${configEnv().OPENAI_API_KEY}`,
       },
       body: JSON.stringify(body),
     }, () => AbortSignal.timeout(LLM_TIMEOUT_MS));
@@ -121,7 +122,7 @@ async function callOpenAi(messages: ChatMessage[], temperature: number): Promise
   let attempt = 0;
   while (attempt++ < 4) {
     const body: Record<string, unknown> = {
-      model: process.env.LLM_MODEL || 'gpt-4o-mini',
+      model: configEnv().LLM_MODEL || 'gpt-4o-mini',
       messages,
     };
     if (!unsupportedParams.has('temperature')) body.temperature = temperature;
@@ -139,11 +140,11 @@ async function callAnthropic(messages: ChatMessage[], temperature: number): Prom
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY as string,
+      'x-api-key': configEnv().ANTHROPIC_API_KEY as string,
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
+      model: configEnv().ANTHROPIC_MODEL || 'claude-sonnet-4-5',
       max_tokens: 2000,
       temperature,
       system,
@@ -159,9 +160,9 @@ export async function generateText(
   messages: ChatMessage[],
   temperature = 0.4,
 ): Promise<string> {
-  const provider = process.env.OPENAI_API_KEY
+  const provider = configEnv().OPENAI_API_KEY
     ? 'openai'
-    : process.env.ANTHROPIC_API_KEY
+    : configEnv().ANTHROPIC_API_KEY
       ? 'anthropic'
       : null;
   if (!provider) {
@@ -173,7 +174,7 @@ export async function generateText(
     () => (provider === 'openai' ? callOpenAi(messages, temperature) : callAnthropic(messages, temperature)),
     {
       provider,
-      model: (provider === 'openai' ? process.env.LLM_MODEL : process.env.ANTHROPIC_MODEL) || 'default',
+      model: (provider === 'openai' ? configEnv().LLM_MODEL : configEnv().ANTHROPIC_MODEL) || 'default',
       messages: messages.length,
       chars: messages.reduce((n, m) => n + m.content.length, 0),
     },

@@ -118,11 +118,6 @@ services:
     build:
       context: .
       target: runner
-      # Inlined at build time (see Dockerfile); changing them in .env needs `./deploy.sh` (it rebuilds).
-      args:
-        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}
-        NEXT_PUBLIC_PLAN_PRICE_DISPLAY: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY:-}
-        NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL: ${NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL:-}
     image: ${APP_IMAGE:-recepcionista-app:local}
     restart: unless-stopped
     init: true
@@ -151,11 +146,12 @@ services:
       # Fail closed: without these, the owner dashboard/API is unauthenticated
       # and Stripe webhooks can be forged. deploy.sh also checks both.
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env (openssl rand -hex 32)}
-      # Fail closed on billing (docs/billing.md): the app enforces plans in production unless this is the literal
-      # `false`, and compose refuses to start without an explicit decision, so a forgotten variable can never open
-      # free provisioning, texts and calls to every self-signup. deploy.sh checks it too (and prints a banner for false).
-      BILLING_ENFORCED: "${BILLING_ENFORCED:?Set BILLING_ENFORCED in .env - true (recommended) or, deliberately, false (docs/billing.md)}"
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?Set STRIPE_WEBHOOK_SECRET in .env}
+      # Billing (docs/billing.md) FAILS CLOSED in the app, not here: in production the app enforces plans unless this is the literal `false`, and
+      # STRIPE_WEBHOOK_SECRET empty rejects every Stripe webhook. Both can live in the admin console (the .env line is deleted on purpose), so compose must not
+      # demand them (`:?` would block the deploy that moves them): deploy.sh checks .env, then, AFTER `up -d`, what the console holds (deploy.sh "console-held settings"),
+      # and fails the deploy when they are in neither.
+      BILLING_ENFORCED: "${BILLING_ENFORCED:-}"
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       # Required in production (the app fails closed without them). Empty
       # defaults keep a no-voice deployment possible; deploy.sh enforces them
       # whenever ELEVENLABS_API_KEY is set.

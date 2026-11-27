@@ -4,6 +4,7 @@
  * { role: 'user'|'agent', message?: string|null, time_in_call_secs: int }; metadata.call_duration_secs. UNVERIFIED (docs silent): that
  * `transcript` is populated while status is 'in-progress' (the live view relies on it; docs/runbook.md section 6 has the live check).
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 const log = logger('voice/conversations');
@@ -46,7 +47,7 @@ export function parseConversation(json: unknown): ConversationSnapshot {
 export interface FetchDeps { fetchImpl?: typeof fetch; env?: Record<string, string | undefined>; timeoutMs?: number }
 
 export async function fetchConversation(conversationId: string, deps: FetchDeps = {}): Promise<ConversationFetch> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const key = (env.ELEVENLABS_API_KEY ?? '').trim();
   if (!key) return { ok: false, status: 0, notFound: false, error: 'no ELEVENLABS_API_KEY' };
   try {
@@ -68,7 +69,7 @@ export type ConversationDeleteResult = { ok: true } | { ok: false; error: string
  * else is a failure with a short, credential-free reason, for the durable retry queue (voice/recording-deletion.ts). Never throws.
  */
 export async function deleteConversation(conversationId: string, deps: FetchDeps = {}): Promise<ConversationDeleteResult> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const key = (env.ELEVENLABS_API_KEY ?? '').trim();
   if (!key) return { ok: false, error: 'no ELEVENLABS_API_KEY' };
   try {

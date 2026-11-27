@@ -2,13 +2,15 @@
  * Stripe payment links. Mock mode returns a local /pay/[id] page that renders a
  * convincing test checkout, so the demo works before keys are wired.
  */
+import { configEnv } from '@/lib/config';
 import type { PaymentLink } from '@/lib/types';
 import { demoModeEnabled } from '@/lib/auth';
 import { logger } from '@/lib/log';
+import { baseUrlOrDev } from '@/lib/base-url';
 
 const log = logger('stripe');
 
-export const hasStripe = () => Boolean(process.env.STRIPE_SECRET_KEY);
+export const hasStripe = () => Boolean(configEnv().STRIPE_SECRET_KEY);
 
 export interface PaymentLinkOptions {
   /** Stored as Stripe metadata so the webhook can confirm the right booking. */
@@ -70,7 +72,7 @@ export async function createPaymentLink(
     const res = await fetch('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`,
+        authorization: `Bearer ${configEnv().STRIPE_SECRET_KEY}`,
         'content-type': 'application/x-www-form-urlencoded',
       },
       body: form,
@@ -106,7 +108,7 @@ export async function deactivatePaymentLink(linkId: string, fetchImpl: typeof fe
   try {
     const res = await fetchImpl(`https://api.stripe.com/v1/payment_links/${encodeURIComponent(linkId)}`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, 'content-type': 'application/x-www-form-urlencoded' },
+      headers: { authorization: `Bearer ${configEnv().STRIPE_SECRET_KEY}`, 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ active: 'false' }),
       signal: AbortSignal.timeout(Math.max(500, Math.min(timeoutMs, STRIPE_TIMEOUT_MS))),
     });
@@ -136,7 +138,7 @@ export async function findActivePaymentLinksForBooking(bookingId: string, opts: 
       const qs = new URLSearchParams({ active: 'true', limit: '100' });
       if (after) qs.set('starting_after', after);
       const res = await fetchImpl(`https://api.stripe.com/v1/payment_links?${qs}`, {
-        headers: { authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` }, signal: AbortSignal.timeout(Math.min(STRIPE_TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
+        headers: { authorization: `Bearer ${configEnv().STRIPE_SECRET_KEY}` }, signal: AbortSignal.timeout(Math.min(STRIPE_TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
       });
       if (!res.ok) { log.warn('link.lookup_failed', { status: res.status }); return { ids: found, complete: false }; }
       const json = (await res.json()) as { data?: { id?: string; metadata?: Record<string, string> | null }[]; has_more?: boolean };
@@ -154,6 +156,7 @@ export async function findActivePaymentLinksForBooking(bookingId: string, opts: 
   return { ids: found, complete: true }; // reaching the page / time budget without an error is final (the documented bound); `complete: false` is an error
 }
 
+/** Public origin for payment links and agent webhook URLs: the single resolver (src/lib/base-url.ts). */
 export function appUrl(): string {
-  return process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  return baseUrlOrDev();
 }

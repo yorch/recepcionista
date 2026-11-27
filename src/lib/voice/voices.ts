@@ -6,6 +6,7 @@
  * Provider shape used (ElevenLabs GET /v1/voices -> { voices: [{ voice_id, name, category, preview_url, labels }] }); UNVERIFIED: the
  * exact `category` values and `preview_url` hosts, so the preview is fetched server-side with a size/time cap and only over https.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 const log = logger('voice/voices');
@@ -38,7 +39,7 @@ const labelText = (labels: unknown): string | null => {
 };
 
 /** The selectable voices ([] when no provider key). Cached ten minutes. Never throws. */
-export async function listAllowedVoices(env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = fetch): Promise<VoiceOption[]> {
+export async function listAllowedVoices(env: NodeJS.ProcessEnv = configEnv(), fetchImpl: typeof fetch = fetch): Promise<VoiceOption[]> {
   if (!env.ELEVENLABS_API_KEY) return [];
   const allow = parseAllowlist(env.ELEVENLABS_VOICE_ALLOWLIST);
   const key = allow.map((a) => a.id).join(',');
@@ -70,7 +71,7 @@ export async function listAllowedVoices(env: NodeJS.ProcessEnv = process.env, fe
 }
 
 /** The option for `voiceId`, or null when it is not in the safe set. */
-export async function findAllowedVoice(voiceId: unknown, env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = fetch): Promise<VoiceOption | null> {
+export async function findAllowedVoice(voiceId: unknown, env: NodeJS.ProcessEnv = configEnv(), fetchImpl: typeof fetch = fetch): Promise<VoiceOption | null> {
   if (typeof voiceId !== 'string' || !VOICE_ID_RE.test(voiceId)) return null;
   return (await listAllowedVoices(env, fetchImpl)).find((v) => v.voice_id === voiceId) ?? null;
 }

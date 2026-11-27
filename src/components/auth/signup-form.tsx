@@ -1,11 +1,12 @@
 'use client';
 import { useCallback, useState } from 'react';
 import { LocaleSwitcher } from '@/components/ui/locale-switcher';
+import { LegalConsentLine } from '@/components/legal/consent-line';
 import { useT } from '@/lib/i18n/client';
 import { AuthLink, AuthShell, Field, FormError, SubmitButton, friendly, go, sendJson } from './auth-ui';
 import { Turnstile } from './turnstile';
 
-export function SignupForm({ turnstileSiteKey, disabled = false }: { turnstileSiteKey: string | null; disabled?: boolean }) {
+export function SignupForm({ turnstileSiteKey, disabled = false, legal }: { turnstileSiteKey: string | null; disabled?: boolean; legal?: { terms: string | null; privacy: string | null } }) {
   const t = useT();
   const [businessName, setBusinessName] = useState('');
   const [email, setEmail] = useState('');
@@ -67,6 +68,7 @@ export function SignupForm({ turnstileSiteKey, disabled = false }: { turnstileSi
         <FormError message={error} />
         <SubmitButton busy={busy} disabled={Boolean(turnstileSiteKey) && !captcha}>{busy ? t('auth.signup.submitting') : t('auth.signup.submit')}</SubmitButton>
         <p className="mt-3 text-center text-[12px] text-[#6b7b91]">{t('auth.signup.noCharge')}</p>
+        {legal ? <LegalConsentLine terms={legal.terms} privacy={legal.privacy} /> : null}
       </form>
     </AuthShell>
   );

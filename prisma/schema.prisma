@@ -44,6 +44,7 @@ model Business {
   ownerPhoneE164         String?   @map("owner_phone_e164")
   /// Billing (Stripe). 'none' | 'trialing' | 'active' | 'past_due' | 'canceled' | 'unpaid' (CHECK in the migration).
   billingStatus          String    @default("none") @map("billing_status")
+  /// References plans.key (Phase 2 admin console). Unknown strings are auto-registered as hidden plans by a trigger (see the migration).
   plan                   String?
   stripeCustomerId       String?   @map("stripe_customer_id")
   stripeSubscriptionId   String?   @map("stripe_subscription_id")
@@ -87,33 +88,42 @@ model Business {
   // ---- mock-replacement configuration (migration 20261208120000; see docs/design/mock-replacement-contracts.md) ----
   /// This tenant's own AI line: the ElevenLabs phone-number id (phnum_...) and the Twilio phone sid (PN...). The shared env
   /// ELEVENLABS_PHONE_NUMBER_ID is only a fallback for tenants without their own. Both unique: one number belongs to one business.
-  elevenlabsPhoneNumberId String? @unique @map("elevenlabs_phone_number_id")
-  twilioPhoneSid          String? @unique @map("twilio_phone_sid")
+  elevenlabsPhoneNumberId String?   @unique @map("elevenlabs_phone_number_id")
+  twilioPhoneSid          String?   @unique @map("twilio_phone_sid")
   /// Google review link texted after a job. https only, <= 300 chars (CHECK).
-  reviewUrl               String? @map("review_url")
+  reviewUrl               String?   @map("review_url")
   /// What the assistant calls itself on calls / texts. 1-40 chars (CHECK); NULL = the platform default.
-  assistantName           String? @map("assistant_name")
+  assistantName           String?   @map("assistant_name")
   /// Deposit policy. enabled=false means "no policy": the legacy behaviour (the deposit amount is whatever the agent / owner asks for).
-  depositEnabled          Boolean @default(false) @map("deposit_enabled")
+  depositEnabled          Boolean   @default(false) @map("deposit_enabled")
   /// 'fixed' | 'percent' (CHECK). fixed uses deposit_fixed_cents; percent uses deposit_percent of the price estimate, clamped to min/max cents.
-  depositMode             String  @default("fixed") @map("deposit_mode")
-  depositFixedCents       Int?    @map("deposit_fixed_cents")
-  depositPercent          Int?    @map("deposit_percent")
-  depositMinCents         Int?    @map("deposit_min_cents")
-  depositMaxCents         Int?    @map("deposit_max_cents")
+  depositMode             String    @default("fixed") @map("deposit_mode")
+  depositFixedCents       Int?      @map("deposit_fixed_cents")
+  depositPercent          Int?      @map("deposit_percent")
+  depositMinCents         Int?      @map("deposit_min_cents")
+  depositMaxCents         Int?      @map("deposit_max_cents")
   /// Scheduling grid and rules (defaults reproduce the previous hard-coded behaviour): slot step in minutes (15 | 30 | 60), minimum lead time
   /// before a slot is offered, how many days ahead are offered, a buffer kept free around every booking, and the number of parallel crews.
-  slotMinutes             Int     @default(60) @map("slot_minutes")
-  minLeadMinutes          Int     @default(60) @map("min_lead_minutes")
-  horizonDays             Int     @default(14) @map("horizon_days")
-  bufferMinutes           Int     @default(0) @map("buffer_minutes")
-  crews                   Int     @default(1) @db.SmallInt
+  slotMinutes             Int       @default(60) @map("slot_minutes")
+  minLeadMinutes          Int       @default(60) @map("min_lead_minutes")
+  horizonDays             Int       @default(14) @map("horizon_days")
+  bufferMinutes           Int       @default(0) @map("buffer_minutes")
+  crews                   Int       @default(1) @db.SmallInt
   /// Go-live confirmation of the template content: when the owner confirmed it, and the fingerprint of the content they confirmed
   /// (services / prices / service area). A changed fingerprint means the confirmation is stale (see src/lib/db/content-confirmation.ts).
   contentConfirmedAt      DateTime? @map("content_confirmed_at") @db.Timestamptz(6)
   contentConfirmedHash    String?   @map("content_confirmed_hash")
   /// Opt-in to the provider's native call transfer to the owner (instead of the Twilio dial leg). Default off.
   nativeTransferEnabled   Boolean   @default(false) @map("native_transfer_enabled")
+
+  /// Platform suspension (admin console). A suspended business answers "out of service" and cannot send texts, whatever its billing state.
+  suspendedAt     DateTime? @map("suspended_at") @db.Timestamptz(6)
+  suspendedReason String?   @map("suspended_reason")
+  suspendedBy     String?   @map("suspended_by")
+
+  planRef          Plan?                   @relation(fields: [plan], references: [key], onUpdate: Cascade, onDelete: Restrict)
+  settingOverrides TenantSettingOverride[]
+  supportGrants    SupportGrant[]
 
   knowledgeBase KnowledgeBase?
   calls         Call[]
@@ -471,7 +481,10 @@ model User {
   totpLastUsedStep Int?      @map("totp_last_used_step")
   /// UI/text language of this user: 'en' | 'es' (CHECK in the migration).
   locale           String    @default("en")
+  /// Platform role of an admin user: 'owner' | 'ops' | 'support' | 'read_only' (CHECK; only for role 'admin'). See src/lib/admin/permissions.ts.
+  platformRole     String?   @map("platform_role")
 
+  supportGrants      SupportGrant[]
   business           Business?            @relation(fields: [businessId], references: [id], onDelete: Cascade)
   sessions           UserSession[]
   recoveryCodes      RecoveryCode[]
@@ -919,4 +932,233 @@ model Membership {
   @@unique([userId, businessId])
   @@index([businessId])
   @@map("memberships")
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Platform admin console (migration 20261211120000_admin_console_schema; docs/design/admin-console-contracts.md)
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/// One console-held platform setting (registry key). Exactly one of `value` (plain, jsonb) and `secret_envelope` (AES-256-GCM envelope v2) is set (CHECK).
+/// `integrity_mac` = HMAC over key|value-or-envelope|version with a key derived from APP_SECRET_KEY: a row that fails it is ignored and alerted.
+model PlatformSetting {
+  key               String    @id
+  value             Json?
+  secretEnvelope    String?   @map("secret_envelope")
+  /// sha256(plaintext) hex [0..8]; never the value.
+  secretFingerprint String?   @map("secret_fingerprint")
+  /// Last 4 characters of a long secret (null for short ones).
+  secretLast4       String?   @map("secret_last4")
+  /// Dual-secret acceptance window: the previous envelope stays acceptable to verifiers until `previous_until` (15 minutes after a replacement).
+  previousEnvelope  String?   @map("previous_envelope")
+  previousUntil     DateTime? @map("previous_until") @db.Timestamptz(6)
+  /// The global settings version this row was written at.
+  version           BigInt    @default(0)
+  integrityMac      String    @map("integrity_mac")
+  updatedBy         String?   @map("updated_by")
+  /// 'console' | 'import' | 'rollback' | 'api' | 'bearer' | 'system'
+  updatedVia        String    @default("console") @map("updated_via")
+  updatedAt         DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("platform_settings")
+}
+
+/// A group of setting changes applied atomically (one global version). status: applied | rolled_back | pending_approval | scheduled (the last two are reserved for approval flows).
+model SettingChangeSet {
+  id          String    @id @default(uuid())
+  status      String    @default("applied")
+  /// scheduled: when it should apply (unused today).
+  applyAt     DateTime? @map("apply_at") @db.Timestamptz(6)
+  createdBy   String?   @map("created_by")
+  /// 'user' | 'admin_token' | 'system'
+  createdKind String    @default("user") @map("created_kind")
+  /// 'console' | 'import' | 'rollback' | 'api' | 'bearer'
+  via         String    @default("console")
+  approvedBy  String?   @map("approved_by")
+  reason      String?
+  /// 'normal' | 'sensitive' | 'critical' (the highest tier among the keys)
+  tier        String    @default("normal")
+  /// The global version this change set produced.
+  version     BigInt    @default(0)
+  /// The change set this one reverted (rollbacks).
+  rollbackOf  String?   @map("rollback_of")
+  summary     Json      @default("{}")
+  at          DateTime  @default(now()) @db.Timestamptz(6)
+
+  revisions PlatformSettingRevision[]
+
+  @@index([at])
+  @@index([version])
+  @@map("setting_change_sets")
+}
+
+/// One key of one change set: the before/after values (secrets: fingerprints only, plus the previous envelope for 7 days so a rollback is possible).
+model PlatformSettingRevision {
+  id             String   @id @default(uuid())
+  changeSetId    String   @map("change_set_id")
+  key            String
+  /// 'set' | 'remove'
+  op             String   @default("set")
+  oldPresent     Boolean  @default(false) @map("old_present")
+  oldValue       Json?    @map("old_value")
+  newValue       Json?    @map("new_value")
+  oldFingerprint String?  @map("old_fingerprint")
+  newFingerprint String?  @map("new_fingerprint")
+  /// The envelope that was replaced; nulled by the cleanup job after 7 days (D13).
+  prevEnvelope   String?  @map("prev_envelope")
+  actorUserId    String?  @map("actor_user_id")
+  actorKind      String   @default("user") @map("actor_kind")
+  reason         String?
+  ip             String?
+  at             DateTime @default(now()) @db.Timestamptz(6)
+
+  changeSet SettingChangeSet @relation(fields: [changeSetId], references: [id], onDelete: Cascade)
+
+  @@index([changeSetId])
+  @@index([key, at])
+  @@index([at])
+  @@map("platform_setting_revisions")
+}
+
+/// Per-tenant override of a platform+tenant registry key (D6). Validated by the registry, clamped to the platform bounds on write AND on read.
+model TenantSettingOverride {
+  businessId String   @map("business_id")
+  key        String
+  value      Json
+  updatedBy  String?  @map("updated_by")
+  updatedAt  DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@id([businessId, key])
+  @@index([key])
+  @@map("tenant_setting_overrides")
+}
+
+/// Single row (id = 1): the global settings version every instance polls, and the incident freeze flag.
+model SettingsState {
+  id            Int       @id @default(1)
+  globalVersion BigInt    @default(0) @map("global_version")
+  frozenAt      DateTime? @map("frozen_at") @db.Timestamptz(6)
+  frozenBy      String?   @map("frozen_by")
+  frozenReason  String?   @map("frozen_reason")
+  updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("settings_state")
+}
+
+/// One row per running app instance: which settings version it applied (the console's "applied on N/N instances").
+model InstanceHeartbeat {
+  instanceId      String   @id @map("instance_id")
+  settingsVersion BigInt   @default(0) @map("settings_version")
+  buildSha        String?  @map("build_sha")
+  /// 'ok' | 'failed' | 'none' (no canary row yet)
+  canary          String   @default("none")
+  /// Rows ignored by the last load (bad MAC / decrypt / validation).
+  ignoredRows     Int      @default(0) @map("ignored_rows")
+  startedAt       DateTime @default(now()) @map("started_at") @db.Timestamptz(6)
+  seenAt          DateTime @default(now()) @map("seen_at") @db.Timestamptz(6)
+
+  @@index([seenAt])
+  @@map("instance_heartbeats")
+}
+
+/// Plans (D: businesses.plan references plans.key). A NULL cap means "inherit the platform setting"; features is {feature: boolean}.
+model Plan {
+  key                 String    @id
+  name                String
+  public              Boolean   @default(false)
+  isComped            Boolean   @default(false) @map("is_comped")
+  stripePriceId       String?   @map("stripe_price_id")
+  stripePriceIdAnnual String?   @map("stripe_price_id_annual")
+  trialDays           Int?      @map("trial_days")
+  smsCap              Int?      @map("sms_cap")
+  callMinutesCap      Int?      @map("call_minutes_cap")
+  voicemailMinutesCap Int?      @map("voicemail_minutes_cap")
+  forwardMinutesCap   Int?      @map("forward_minutes_cap")
+  maxLocations        Int?      @map("max_locations")
+  features            Json      @default("{}")
+  sort                Int       @default(100)
+  archivedAt          DateTime? @map("archived_at") @db.Timestamptz(6)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  updatedBy           String?   @map("updated_by")
+
+  businesses Business[]
+
+  @@map("plans")
+}
+
+/// One run of a background job (every run: scheduled, manual, dry-run, zero-work).
+model JobRun {
+  id          String    @id @default(uuid())
+  job         String
+  startedAt   DateTime  @map("started_at") @db.Timestamptz(6)
+  finishedAt  DateTime? @map("finished_at") @db.Timestamptz(6)
+  dryRun      Boolean   @default(false) @map("dry_run")
+  /// 'ok' | 'error' | 'skipped'
+  status      String    @default("ok")
+  counts      Json      @default("{}")
+  processed   Int       @default(0)
+  errors      Int       @default(0)
+  errorSample String?   @map("error_sample")
+  /// 'system' | a user id | 'admin_token'
+  actor       String    @default("system")
+  /// 'schedule' | 'manual' | 'api'
+  trigger     String    @default("schedule")
+
+  @@index([job, startedAt(sort: Desc)])
+  @@index([startedAt])
+  @@map("job_runs")
+}
+
+/// A legal page (terms | privacy | sms_terms) per locale; the published text is one of its versions.
+model LegalPage {
+  slug             String
+  locale           String
+  publishedVersion Int?     @map("published_version")
+  updatedAt        DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  versions LegalPageVersion[]
+
+  @@id([slug, locale])
+  @@map("legal_pages")
+}
+
+/// A version of a legal page: markdown body (<= 200000 chars, CHECK). `draft` rows are editable; publishing freezes one.
+model LegalPageVersion {
+  id          String    @id @default(uuid())
+  slug        String
+  locale      String
+  version     Int
+  body        String
+  draft       Boolean   @default(true)
+  note        String?
+  createdBy   String?   @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  publishedAt DateTime? @map("published_at") @db.Timestamptz(6)
+  publishedBy String?   @map("published_by")
+
+  page LegalPage @relation(fields: [slug, locale], references: [slug, locale], onDelete: Cascade)
+
+  @@unique([slug, locale, version])
+  @@map("legal_page_versions")
+}
+
+/// A support user's time-boxed WRITE mode inside one tenant (30 minutes, with a reason). Read-only support view needs no grant.
+model SupportGrant {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  businessId String    @map("business_id")
+  reason     String
+  startedAt  DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  endedAt    DateTime? @map("ended_at") @db.Timestamptz(6)
+  ip         String?
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([businessId])
+  @@map("support_grants")
 }

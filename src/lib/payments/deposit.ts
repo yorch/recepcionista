@@ -8,6 +8,7 @@
  *    policy); with no amount, the stored deposit_amount (a resend keeps what was agreed) or the computed one is used.
  */
 import { computeDepositCents, DEPOSIT_MAX_CENTS, DEPOSIT_MIN_CENTS, type DepositPolicy } from '@/lib/business-config';
+import { planAllows } from '@/lib/admin/plan-catalog';
 
 /** The call script's own cap for AI-requested deposits ($500). The owner policy limit is $1000 (DEPOSIT_MAX_CENTS). */
 export const AI_DEPOSIT_CAP_CENTS = 50_000;
@@ -33,10 +34,13 @@ export interface ResolveDepositInput {
   /** The deposit already stored on the booking (a resend keeps it unless the owner asks for another amount). */
   storedCents?: number | null;
   actor: 'ai' | 'owner';
+  /** The business's plan: a plan without the `deposits` entitlement refuses (`disabled`). Absent: not checked. */
+  plan?: string | null;
 }
 
 export function resolveDepositAmount(input: ResolveDepositInput): DepositDecision {
   const { policy } = input;
+  if (input.plan !== undefined && !planAllows(input.plan, 'deposits')) return { ok: false, reason: 'disabled', error: 'deposits are not included in this business plan' };
   if (input.actor === 'ai') {
     const computed = computeDepositCents(policy, input.priceEstimateCents);
     if (!policy.enabled) return { ok: false, reason: 'disabled', error: 'deposits are not enabled for this business' };

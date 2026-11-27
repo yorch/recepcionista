@@ -5,8 +5,21 @@ Every variable the app, the scripts and the deploy tooling read (found with `gre
 refuses to deploy when a "prod: required" variable is missing or inconsistent.
 
 Legend. **Required**: `prod` = needed for a production deploy (deploy.sh enforces it unless noted), `cond` = needed only with the
-feature named, `no` = optional. **Secret**: yes = never commit, log or share. Variables prefixed `NEXT_PUBLIC_` are inlined into the
-bundle at **build** time (compose passes them as build args), so they must be public values and a change needs a rebuild (`./deploy.sh`).
+feature named, `no` = optional. **Secret**: yes = never commit, log or share. Variables prefixed `NEXT_PUBLIC_` (the Turnstile site key and the plan price copy) are **runtime** settings since Phase 6: they are read from
+the config snapshot at request time and are no longer inlined at build time or passed as build args, so they must still be public values, but a change needs no rebuild.
+
+## Precedence and the settings registry (admin console)
+
+Every platform setting is declared once in `src/lib/config/registry*.ts` (172 entries: 145 plain settings, 15 secrets, 12 provider ids; 100 of them have an environment variable below as their **alias**).
+The effective value of a setting is **environment pin > console value > registry default** (docs/design/admin-console-architecture.md):
+
+* A variable that is set to a non-empty value **pins** its setting: it always wins and the console shows the setting as "locked by environment". An empty value does not pin.
+* The console tables (migration `20261211120000_admin_console_schema`) hold the console values; the loader (`src/lib/admin/loader.ts`) serves them to every reader through the snapshot. With no console rows everything below behaves exactly as before: the environment, then the code default.
+* **Env-only** names (the list in `src/lib/config/env-only.ts`: database, master key, `ADMIN_TOKEN`, public origin, proxy, WebAuthn, CSP, logging, dev switches, deploy tooling and the platform controls `SETTINGS_FREEZE`, `ADMIN_TOKEN_ALLOW_SETTINGS`, `ALERT_EMAIL`) are never stored in the database and never writable from the console.
+* A pinned value the registry rejects (wrong type, out of range) is reported at boot as `invalid_env` (name and setting only, never the value); the reader then applies its own fallback, as it always did.
+* Retired names (D11) still work for one more release and warn at boot as `deprecated_env`: `OWNER_PHONE_GRANDFATHER*`, `ELEVENLABS_AGENT_ID`, `NEXT_PUBLIC_APP_URL`.
+* The security-loosening toggles `SIGNUP_ALLOW_WITHOUT_CAPTCHA`, `REQUIRE_2FA_FOR_ADMINS` (off) and `LOG_PII` are **env-only ratchets**: the console may tighten, only the environment may loosen.
+* Provider secrets may live either here or in the console, per secret, write-only and encrypted at rest (AES-256-GCM envelope `v2.<kid>.<iv>.<tag>.<ct>`, key = HKDF-SHA256 of `APP_SECRET_KEY`); a secret set here pins and locks it.
 
 ## Core, auth and networking
 
@@ -19,22 +32,22 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `DOMAIN` | prod | none | compose / Traefik host rule and certificate; deploy.sh checks `APP_URL == https://DOMAIN` | no |
 | `TRAEFIK_NAME` | no | `recepcionista` | Traefik router name (unique per host) | no |
 | `APP_IMAGE`, `TOOLS_IMAGE` | no | local build tags | compose image names | no |
-| `APP_URL` | prod | `http://localhost:3000` | public origin: provider callbacks, Stripe return URLs, same-origin check, email links, sitemap | no |
-| `PUBLIC_BASE_URL` | no | `APP_URL` | overrides the origin used for links and Twilio signature URLs | no |
-| `NEXT_PUBLIC_APP_URL` | no | none | last-resort origin fallback (Stripe deposit links, Twilio) | no |
+| `APP_URL` | prod | `http://localhost:3000` (dev only; production fails closed where an origin is required) | THE public origin, resolved in ONE place (`src/lib/base-url.ts`): Twilio signature URL and number webhooks, ElevenLabs tool / initiation / post-call URLs (the tool secret is sent to it), Stripe return URLs and payment links, email links, Google redirect, sitemap / robots, the CSRF same-origin allowlist, the WebAuthn default, the CSP `upgrade-insecure-requests` decision. **Precedence: `APP_URL`, else `PUBLIC_BASE_URL`** | no |
+| `PUBLIC_BASE_URL` | no | none | fallback for `APP_URL` only (older `.env` files). If both are set and differ in origin, `APP_URL` wins everywhere and a startup warning (`base_url`) says so. Set `APP_URL` | no |
+| `NEXT_PUBLIC_APP_URL` | no | none | **REMOVED, not read.** (Retired, D11.) It used to be a third fallback in some readers and absent in others, so two origins could be live at once. A startup warning fires while it is still set; delete it | no |
 | `ADMIN_TOKEN` | prod | none | break-glass admin: Bearer token and `/login` admin sign-in. Unset = the app fails closed (503) | yes |
 | `ALLOW_INSECURE_DEV` | never in prod | unset | local dev: skip admin auth and webhook / tool-secret checks (Twilio signature, ElevenLabs signature, ElevenLabs tool secret) when the matching secret is unset; the ONLY way to skip them (`NODE_ENV` alone never does). Ignored in production; deploy.sh refuses `true` | no |
 | `TRUSTED_PROXY` | prod (compose sets `true`) | unset (compose: `true`) | trust `X-Forwarded-For` for per-client rate limits and the same-origin check | no |
 | `TRUSTED_PROXY_HOPS` | no | `1` | proxies appending to `X-Forwarded-For` (2 behind a CDN plus Traefik) | no |
 | `APP_SECRET_KEY` | prod | insecure fixed key outside production | AES-256-GCM key for TOTP secrets: 32 random bytes, base64 (`openssl rand -base64 32`). deploy.sh validates the length | yes |
-| `REQUIRE_2FA_FOR_ADMINS` | no | `false` | DB admin users must enrol in 2FA first | no |
-| `WEBAUTHN_RP_ID` | no | host of `PUBLIC_BASE_URL`/`APP_URL` | passkey relying-party id; set to a registrable parent domain to share passkeys across subdomains. Changing it later orphans registered passkeys (docs/auth.md) | no |
-| `WEBAUTHN_ORIGINS` | no | `PUBLIC_BASE_URL`/`APP_URL` origin | extra exact origins allowed to use passkeys, comma separated (staging); `https` only (`http` for localhost), each host must be the rpID or a subdomain. Production without any configured origin answers `503 passkeys_not_configured` | no |
+| `REQUIRE_2FA_FOR_ADMINS` | no | **on in production** (unset or `true`); `false` outside production | DB admin users must enrol in 2FA before anything else (`src/lib/admin-2fa.ts`). In production `false` is IGNORED (startup warning `admin_2fa_optout_ignored`): the opt-out exists only for local/test use. The break-glass `ADMIN_TOKEN` is unaffected (no authenticator) | no |
+| `WEBAUTHN_RP_ID` | no | host of the public origin (`APP_URL`, else `PUBLIC_BASE_URL`) | passkey relying-party id; set to a registrable parent domain to share passkeys across subdomains. Changing it later orphans registered passkeys (docs/auth.md) | no |
+| `WEBAUTHN_ORIGINS` | no | public origin (`APP_URL`, else `PUBLIC_BASE_URL`) | extra exact origins allowed to use passkeys, comma separated (staging); `https` only (`http` for localhost), each host must be the rpID or a subdomain. Production without any configured origin answers `503 passkeys_not_configured` | no |
 | `MAX_BUSINESSES_PER_USER` | no | `10` | most businesses one account may own (owner memberships; "Add another location", `POST /api/businesses/mine`), 1-100 | no |
 | `ALLOWED_DEV_ORIGINS` | no | none | `next dev` behind a tunnel (dev only) | no |
 | `DEMO_MODE` | never in prod | unset | `/api/demo/*`, `/api/pay/mock-complete`, mock Stripe checkout (`/api/billing/mock-activate` and the mock checkout link), the demo console page and nav, and the Stripe-error fallback to a mock deposit link. **Ignored when `NODE_ENV=production`** (`demoModeEnabled()`): a leaked flag is inert. compose forces `false`; deploy.sh refuses `true` | no |
 | `CSP_REPORT_ONLY` | no | unset | `true`: enforce the moderate CSP and only report violations of the strict nonce policy (docs/security-headers.md) | no |
-| `CSP_UPGRADE_INSECURE` | no | unset = automatic: on only in production with an `https://` `APP_URL`/`PUBLIC_BASE_URL` | `true`/`false` forces `upgrade-insecure-requests` (turn it off for a plain-HTTP staging deployment; docs/security-headers.md) | no |
+| `CSP_UPGRADE_INSECURE` | no | unset = automatic: on only in production with an `https://` public origin (`APP_URL`, else `PUBLIC_BASE_URL`) | `true`/`false` forces `upgrade-insecure-requests` (turn it off for a plain-HTTP staging deployment; docs/security-headers.md) | no |
 | `CSP_REPORT_URI` | no | none | adds `report-uri` to the CSP (a collector URL you operate) | no |
 | `LOG_LEVEL` | no | `debug` (dev), `info` (prod) | log verbosity | no |
 | `PRISMA_LOG` | no | unset | `1` logs every query | no |
@@ -42,6 +55,14 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `JOBS` | no | `on` in production, `off` in development and test | `on`/`off` (also `true`/`false`, `1`/`0`, `yes`/`no`, any case): the background job runner (6 PM daily briefing per business time zone, hourly gratitude sweep, hourly cleanup of expired sessions/tokens/events/rate-limit rows; the retention purge when `RETENTION_JOB=on`). `off` disables ALL of them, the retention purge included. deploy.sh accepts the same values as the app, refuses anything else and warns on an off value. Unset in development still lets `RETENTION_JOB=on` run on its own | no |
 | `JOBS_TICK_SECONDS` | no | `60` | seconds between scheduler passes (clamped to 5-3600). Work is claimed per business in Postgres, so any tick rate and any number of app instances are safe | no |
 | `NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE` | set by Next / the image | | runtime mode flags; never set by hand | no |
+| `PORT`, `HOSTNAME` | set by the image / compose | `3000`, `0.0.0.0` | container listen port and bind address (env-only) | no |
+| `APP_SECRET_KEY_PREVIOUS` | no (during a rotation only) | none | decrypt-only previous master key: set it together with the NEW `APP_SECRET_KEY`, restart, run "re-encrypt all" (`POST /api/admin/secrets/reencrypt`), then remove it. Console secrets (envelope `kid`), their MACs, TOTP secrets and calendar tokens still under the old key keep working meanwhile (env-only, docs/runbook.md "Rotating APP_SECRET_KEY") | yes |
+| `SETTINGS_FREEZE` | no | unset | `true` makes EVERY console write answer 403 `settings_frozen` (settings, secrets, plans, legal pages, tenant overrides, imports, rollbacks); reads work. No API can lift it: remove it and restart (env-only). The break-glass token can additionally freeze through `POST /api/admin/settings/freeze` (a database flag) | no |
+| `ADMIN_TOKEN_ALLOW_SETTINGS` | no | unset | `true` lets the Bearer `ADMIN_TOKEN` (and its cookie session) also write settings, secrets and imports; by default the token is RECOVERY ONLY: read, create / re-enable an admin, revoke sessions, freeze, roll back, and the operator actions that predate the console (env-only). Every Bearer use is audited and mailed to the admins | no |
+| `ALERT_EMAIL` | no | none | out-of-band recipient (comma separated) of critical-change, freeze, integrity-failure, Bearer-use and platform alert notifications (Operations > Alerts: stuck deletions, SMS delivery failures, failing jobs, drift), in addition to every enabled admin. Critical-change mails are sent through the e-mail transport that was active BEFORE the change, never the one being changed (env-only) | no |
+| `BUILD_SHA` | no | none | informational build id stored in the instance heartbeat and shown on the System page and the Operations > Instances page, where differing builds across live instances are flagged (env-only) | no |
+| `BACKUP_DIR`, `COMPOSE`, `FOLLOW_LOGS` | no | `./backups`, compose command, off | `deploy.sh` tooling (env-only) | no |
+| `ENV_FILE` | no | none | `scripts/check-elevenlabs-key.sh` dev helper (env-only) | no |
 
 ## Accounts, signup and email
 
@@ -55,11 +76,11 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `SMTP_PASS` | cond (`smtp` without `SMTP_URL`) | none | SMTP password | yes |
 | `SIGNUP_MAX_PER_HOUR` | no | `60` | platform-wide cap on accounts CREATED per hour (existing-address/honeypot requests do not count). One client may use 20% (50% for the shared `untrusted` key); at 70% signup degrades (one account per client, Turnstile mandatory when configured, warning logged); only at 100% signup stops for everyone (`signup.global_cap_reached` error log) | no |
 | `TURNSTILE_SECRET_KEY` | prod (with the site key) unless `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` | off | Cloudflare Turnstile on signup; server verification fails closed and is demanded ONLY when the site key is set too (no widget without it, so a secret left over next to `SIGNUP_ALLOW_WITHOUT_CAPTCHA=true` no longer makes every signup fail `captcha_failed`). Needs the site key too (deploy.sh checks the pair). In production, open signup is REFUSED (503 `signup_disabled`, `/signup` invite-only) without the pair or the opt-out below | yes |
-| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | prod (with the secret) | none | Turnstile widget (build time) | no |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | prod (with the secret) | none | Turnstile widget site key. **Runtime since Phase 6**: the signup page and the CSP read it from the config snapshot (env pin or console value), so it needs no build argument and no rebuild; the name keeps its legacy prefix only so existing `.env` files keep working | no |
 | `SIGNUP_ALLOW_WITHOUT_CAPTCHA` | no | unset | exactly `true` lets production run open signup with no captcha (startup logs a loud warning, deploy.sh prints a banner). NOT recommended; without it and without the Turnstile pair deploy.sh fails | no |
-| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | FALLBACK price text on the plan step, Billing page and landing, used only when Stripe's price cannot be read (`STRIPE_PRICE_ID` is read from the Stripe API, cached 10 min, fail-soft; amount, currency and interval shown come from Stripe) (build time) | no |
-| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES` | no | falls back to the English text | Spanish price texts for the landing page, onboarding and billing (build time) | no |
-| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | no | none | annual plan price text on the Billing page's plan choice (build time; shown only when the annual plan is configured) | no |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY` | no | "Simple monthly pricing, with a free trial" | FALLBACK price text on the plan step, Billing page and landing, used only when Stripe's price cannot be read (`STRIPE_PRICE_ID` is read from the Stripe API, cached 10 min, fail-soft; amount, currency and interval shown come from Stripe). Runtime since Phase 6 (console or env) | no |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL_ES` | no | falls back to the English text | Spanish price texts for the landing page, onboarding and billing. **Runtime since Phase 6**: read from the config snapshot at request time, no Docker build argument any more (the Dockerfile and `compose.production.yaml` carry none); a console change applies within ~10 s | no |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | no | none | annual plan price text on the Billing page's plan choice (runtime; shown only when the annual plan is configured) | no |
 | `CREATE_USER_PASSWORD` | no | none | `scripts/create-user.ts` non-interactive password (the script refuses `--password`) | yes |
 
 ## Billing and plan limits (docs/billing.md)
@@ -103,16 +124,16 @@ bundle at **build** time (compose passes them as build args), so they must be pu
 | `TWILIO_AREA_CODE` | no | `305` | default US/Canada area code for newly bought tenant numbers (3 digits, first 2-9; an invalid value falls back to 305; deploy.sh rejects it). A business is bought a number in the area code of ITS OWN owner phone when that is a valid US/Canada code, so this only applies to tenants without one | no |
 | `SMS_ALLOWED_COUNTRY_CODES` | no | `1` | destination countries for outbound texts. Also applied to `owner_phone` (PATCH) and to verification texts, so an owner alert destination is always in an enabled country | no |
 | `DEFAULT_PHONE_COUNTRY` | no | `US` | ISO country assumed for numbers typed without `+` | no |
-| `OWNER_PHONE_GRANDFATHER` | no | `false` | `true` treats existing unverified owner phones as verified until the owner re-verifies (rollout switch; docs/runbook.md section 6). DANGEROUS: bypasses opt-outs and the country allow-list. In production it is ignored without `OWNER_PHONE_GRANDFATHER_ACK`; startup logs a warning | no |
-| `OWNER_PHONE_GRANDFATHER_ACK` | with the switch, prod | none | must be exactly `i-understand` for the switch to work in production (deploy.sh refuses `true` without it) | no |
-| `OWNER_PHONE_GRANDFATHER_BEFORE`, `OWNER_PHONE_GRANDFATHER_UNTIL` | no | none | ISO instants: only businesses created before `_BEFORE` benefit; the switch expires at `_UNTIL` (unparseable = off) | no |
+| `OWNER_PHONE_GRANDFATHER` | no | `false` | **DEPRECATED (retired after release 0.3; startup warning `deprecated_env`).** `true` treats existing unverified owner phones as verified until the owner re-verifies (rollout switch; docs/runbook.md section 6). DANGEROUS: bypasses opt-outs and the country allow-list. In production it is ignored without `OWNER_PHONE_GRANDFATHER_ACK`; startup logs a warning | no |
+| `OWNER_PHONE_GRANDFATHER_ACK` | with the switch, prod | none | **DEPRECATED** (retired with the switch). Must be exactly `i-understand` for the switch to work in production (deploy.sh refuses `true` without it) | no |
+| `OWNER_PHONE_GRANDFATHER_BEFORE`, `OWNER_PHONE_GRANDFATHER_UNTIL` | no | none | **DEPRECATED** (retired with the switch). ISO instants: only businesses created before `_BEFORE` benefit; the switch expires at `_UNTIL` (unparseable = off) | no |
 | `OWNER_VERIFY_GLOBAL_PER_HOUR`, `OWNER_VERIFY_GLOBAL_PER_DAY` | no | `300`, `2000` | platform-wide caps on owner-phone verification texts (on top of per-user, per-IP, per-number and per-business limits) | no |
 | `ALLOW_UNVERIFIED_BOOKING_SMS` | no | off | text a model-relayed booking phone when the call has no verified caller id | no |
 | `ELEVENLABS_API_KEY` | cond (live voice agent) | unset: no voice agent. Outside production a mock agent id and the `DEMO_MODE` scripted replay; in production nothing speaks a disclosure, so a call is NOT marked `consent_status='disclosed'` and provisioning does not create a real agent | ElevenLabs agent and briefing TTS | yes |
 | `ELEVENLABS_TOOL_SECRET` | prod when `ELEVENLABS_API_KEY` is set | none | shared secret on the agent tools and `/api/voice/initiation` (`x-recepcionista-tool-secret`) | yes |
 | `ELEVENLABS_TOOL_SECRET_ID` | no | none | id of an ElevenLabs workspace secret holding the same value (tool header by reference) | no |
 | `ELEVENLABS_WEBHOOK_SECRET` | prod when `ELEVENLABS_API_KEY` is set | none | HMAC for the post-call webhook; shown once by provisioning | yes |
-| `ELEVENLABS_AGENT_ID` | no | none | bootstrap for a single-business install only | no |
+| `ELEVENLABS_AGENT_ID` | no | none | **DEPRECATED (retired after release 0.3; startup warning `deprecated_env`).** Bootstrap for a single-business install only; only honoured while exactly one business exists | no |
 | `ELEVENLABS_PHONE_NUMBER_ID` | no | none | `phnum_...` of ONE shared number. FALLBACK for a single-line install only: every purchased number is imported into ElevenLabs and bound to ITS tenant's agent (`businesses.elevenlabs_phone_number_id`, which always wins). The shared id is only ever bound while exactly one business exists and is never moved between tenants (`bindPhoneNumber`) | no |
 | `ELEVENLABS_TENANT_LINES` | no | on | UPGRADE NOTE (review 19 F3): with the key set the deployment-wide TARGET is `native`, but a business whose number is NOT imported yet still answers on our Voice URL (the webhook line) and keeps forwarding until `repair-numbers` imports it; the dashboard follows what answers THAT business (`effectiveLineKindFor`). `repair-numbers` skips (`would_change_behaviour`) a tenant in `call_mode=forward` while the native line cannot forward (`NATIVE_TRANSFER` off or not enabled for it). `off` stops provisioning from importing purchased numbers into ElevenLabs (and the unforced line kind falls back to `webhook` unless `ELEVENLABS_PHONE_NUMBER_ID` is set). With the key set and this on, the line kind is `native` and `POST /api/businesses/:id/provision` imports the number (`POST /v1/convai/phone-numbers`, provider twilio, using the Twilio credentials) and binds it to the tenant's agent. UNVERIFIED provider shapes: `src/lib/voice/elevenlabs-phone.ts`, runbook section 8 | no |
 | `ELEVENLABS_REGISTER_CALL` | no | on | `off`: a signed Twilio call on a WEBHOOK line (`VOICE_LINE_KIND=webhook`) is never connected to the AI through ElevenLabs' register-call TwiML (`POST /v1/convai/twilio/register-call`, UNVERIFIED shape); it takes an honest voicemail instead | no |
@@ -129,7 +150,7 @@ There is no `REVIEW_URL` variable any more: the Google review link is the per-bu
 
 ## Scripts only
 
-`scripts/verify-deploy.ts` reads `APP_URL`, `PUBLIC_BASE_URL`, `TWILIO_AUTH_TOKEN`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_BILLING_WEBHOOK_SECRET`,
+`scripts/verify-deploy.ts` reads `APP_URL` (the origin it signs against: the same one the server resolves), `PUBLIC_BASE_URL` (only to warn when it differs), `TWILIO_AUTH_TOKEN`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_BILLING_WEBHOOK_SECRET`,
 `ELEVENLABS_WEBHOOK_SECRET`, `ELEVENLABS_TOOL_SECRET` (each check is skipped when its secret is not given; `--strict` turns skips into failures).
 `scripts/seed.ts`, `db-reset.ts`, `grandfather-existing.ts` read `DATABASE_URL` and refuse non-disposable database names without `--force-i-know`.
 

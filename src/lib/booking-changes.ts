@@ -23,6 +23,7 @@ import { bookingRefundEligibility, type Eligibility } from '@/lib/refunds';
 import { tzOf } from '@/lib/time';
 import { logger } from '@/lib/log';
 import type { AuditActorKind, Booking, Business, SmsLog } from '@/lib/types';
+import { quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 const log = logger('booking-changes');
 
@@ -61,7 +62,7 @@ async function sendChangeText(
   if (!(await claimEvent('booking_change_sms', claim, 60_000))) return { status: 'duplicate', delivered: false };
   let delivered = false;
   try {
-    if (initiator === 'owner' && isQuietHour(now, tzOf(business))) {
+    if (initiator === 'owner' && isQuietHour(now, tzOf(business), await quietWindowFor(business.id))) {
       await logSms({
         business_id: business.id, to_phone: booking.customer_phone, body, kind: 'other', booking_id: booking.id, provider_id: null,
         status: 'blocked_quiet_hours', consent_basis: 'transactional_booking',
@@ -183,7 +184,7 @@ export async function notifyRefund(bookingId: string, amountCents: number, now: 
     let delivered = false;
     try {
       const body = refundSms({ business, amount_cents: amountCents, language: await customerLanguage(booking, business) });
-      if (isQuietHour(now, tzOf(business))) {
+      if (isQuietHour(now, tzOf(business), await quietWindowFor(business.id))) {
         await logSms({
           business_id: business.id, to_phone: booking.customer_phone, body, kind: 'other', booking_id: booking.id, provider_id: null,
           status: 'blocked_quiet_hours', consent_basis: 'transactional_booking',

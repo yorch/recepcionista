@@ -5,11 +5,12 @@
  * The legacy `phoneKey()` (last 10 digits, src/lib/format.ts) conflates numbers from different
  * countries; E.164 does not. New code should compare E.164 values.
  */
+import { configEnv } from '@/lib/config';
 import { parsePhoneNumberFromString, type CountryCode } from 'libphonenumber-js/min';
 
 /** Country assumed for numbers written without a '+' prefix. Override with DEFAULT_PHONE_COUNTRY (ISO 3166-1 alpha-2). */
 export function defaultPhoneCountry(): CountryCode {
-  const c = (process.env.DEFAULT_PHONE_COUNTRY || '').trim().toUpperCase();
+  const c = (configEnv().DEFAULT_PHONE_COUNTRY || '').trim().toUpperCase();
   return (/^[A-Z]{2}$/.test(c) ? c : 'US') as CountryCode;
 }
 
@@ -77,7 +78,7 @@ export function areaCodeOf(raw: string | null | undefined, defaultCountry?: stri
 }
 
 /** TWILIO_AREA_CODE when it is a valid area code, else DEFAULT_AREA_CODE (305). */
-export function configuredAreaCode(env: NodeJS.ProcessEnv = process.env): string {
+export function configuredAreaCode(env: NodeJS.ProcessEnv = configEnv()): string {
   const v = (env.TWILIO_AREA_CODE ?? '').trim();
   return isValidAreaCode(v) ? v : DEFAULT_AREA_CODE;
 }
@@ -85,7 +86,7 @@ export function configuredAreaCode(env: NodeJS.ProcessEnv = process.env): string
 /** Area code to buy a business's number in: the area code of its OWN phone (the owner's) when valid, else the platform default. */
 export function areaCodeForBusiness(
   b: { owner_phone?: string | null } | null | undefined,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = configEnv(),
 ): string {
   return areaCodeOf(b?.owner_phone ?? null) ?? configuredAreaCode(env);
 }

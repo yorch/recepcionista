@@ -2,6 +2,7 @@
  * WS3 — ElevenLabs ConvAI client. Everything here degrades to `{mock:true}`:
  * a missing key or a failed API call must never break the phone line.
  */
+import { configEnv, verifierSecrets } from '@/lib/config';
 import { appUrl } from '@/lib/providers/stripe';
 import { insecureDevAllowed } from '@/lib/auth';
 import { buildSystemPrompt, complianceRules, COMPLIANCE_MARKER } from '@/lib/kb';
@@ -27,7 +28,7 @@ const log = logger('elevenlabs');
 const API = 'https://api.elevenlabs.io/v1';
 export const DEFAULT_VOICE_ID = 'cgSgspJ2msm6clMCkdW9'; // ElevenLabs "Jessica" — warm front-desk read
 
-export const hasElevenLabs = () => Boolean(process.env.ELEVENLABS_API_KEY);
+export const hasElevenLabs = () => Boolean(configEnv().ELEVENLABS_API_KEY);
 
 // ------------------------------------------------------------ webhook auth
 
@@ -50,7 +51,7 @@ export type AuthVerdict = { ok: true; skipped?: boolean } | { ok: false; error: 
  * whenever the secret is unset, unless ALLOW_INSECURE_DEV=true outside production (then skipped with a warning).
  */
 export function verifyElevenLabsSignature(rawBody: string, header: string | null): AuthVerdict {
-  const secret = process.env.ELEVENLABS_WEBHOOK_SECRET;
+  const secret = configEnv().ELEVENLABS_WEBHOOK_SECRET;
   if (!secret) {
     if (authStrict()) {
       log.error('signature.no_secret', { reason: 'ELEVENLABS_WEBHOOK_SECRET unset (set it, or ALLOW_INSECURE_DEV=true for local dev)' });
@@ -73,8 +74,11 @@ export function verifyElevenLabsSignature(rawBody: string, header: string | null
   const ts = Number(t);
   if (!t || !Number.isFinite(ts) || sigs.length === 0) return { ok: false, error: 'malformed signature' };
   if (Math.abs(Date.now() / 1000 - ts) > SIGNATURE_TOLERANCE_SECS) return { ok: false, error: 'timestamp outside tolerance' };
-  const expected = createHmac('sha256', secret).update(`${t}.${rawBody}`, 'utf8').digest('hex');
-  return sigs.some((s) => safeEq(expected, s)) ? { ok: true } : { ok: false, error: 'invalid signature' };
+  for (const candidate of verifierSecrets('elevenlabs.webhook_secret', secret)) { // current, then the previous value during the 15 minute rotation window
+    const expected = createHmac('sha256', candidate).update(`${t}.${rawBody}`, 'utf8').digest('hex');
+    if (sigs.some((s) => safeEq(expected, s))) return { ok: true };
+  }
+  return { ok: false, error: 'invalid signature' };
 }
 
 /** Header the tool webhooks carry; the value is ELEVENLABS_TOOL_SECRET. */
@@ -82,7 +86,7 @@ export const TOOL_SECRET_HEADER = 'x-recepcionista-tool-secret';
 
 /** Check the shared secret that provisioning puts on every tool. Fails closed when unset, unless ALLOW_INSECURE_DEV=true outside production. */
 export function verifyToolSecret(req: Request): AuthVerdict {
-  const secret = process.env.ELEVENLABS_TOOL_SECRET;
+  const secret = configEnv().ELEVENLABS_TOOL_SECRET;
   if (!secret) {
     if (authStrict()) {
       log.error('tool_secret.missing', { reason: 'ELEVENLABS_TOOL_SECRET unset (set it, or ALLOW_INSECURE_DEV=true for local dev)' });
@@ -92,11 +96,11 @@ export function verifyToolSecret(req: Request): AuthVerdict {
     return { ok: true, skipped: true };
   }
   const given = req.headers.get(TOOL_SECRET_HEADER) ?? '';
-  return given && safeEq(given, secret) ? { ok: true } : { ok: false, error: 'invalid tool secret' };
+  return given && verifierSecrets('elevenlabs.tool_secret', secret).some((c) => safeEq(given, c)) ? { ok: true } : { ok: false, error: 'invalid tool secret' };
 }
 
 function apiKey(): string {
-  return process.env.ELEVENLABS_API_KEY as string;
+  return configEnv().ELEVENLABS_API_KEY as string;
 }
 
 function headers(): Record<string, string> {
@@ -119,7 +123,7 @@ export function agentIdFor(business: Business): string {
  */
 export async function resolveAgentIdFor(business: Business): Promise<string> {
   if (business.agent_id) return business.agent_id;
-  const envAgent = (process.env.ELEVENLABS_AGENT_ID || '').trim();
+  const envAgent = (configEnv().ELEVENLABS_AGENT_ID || '').trim();
   if (!envAgent) return '';
   const owners = await listBusinessesByAgentId(envAgent);
   if (owners.some((b) => b.id !== business.id)) return '';
@@ -258,8 +262,8 @@ async function findToolByName(wireName: string, url: string): Promise<string | n
  */
 export function toolRequestHeaders(): Record<string, string | { secret_id: string }> {
   const out: Record<string, string | { secret_id: string }> = { 'content-type': 'application/json' };
-  const secret = process.env.ELEVENLABS_TOOL_SECRET;
-  const secretId = (process.env.ELEVENLABS_TOOL_SECRET_ID || '').trim();
+  const secret = configEnv().ELEVENLABS_TOOL_SECRET;
+  const secretId = (configEnv().ELEVENLABS_TOOL_SECRET_ID || '').trim();
   if (secret && secretId) out[TOOL_SECRET_HEADER] = { secret_id: secretId };
   else if (secret) out[TOOL_SECRET_HEADER] = secret;
   else log.warn('tool.no_secret', { reason: 'ELEVENLABS_TOOL_SECRET unset; tools will be unauthenticated outside production' });
@@ -380,7 +384,7 @@ async function ensureToolIds(opts: { fresh?: boolean; skip?: (ToolName | OwnerTo
 }
 
 /** Language detection (en/es switching): `LANGUAGE_DETECTION=off` disables it (default on). */
-export const languageDetectionEnabled = (env: Record<string, string | undefined> = process.env): boolean => (env.LANGUAGE_DETECTION ?? '').trim().toLowerCase() !== 'off';
+export const languageDetectionEnabled = (env: Record<string, string | undefined> = configEnv()): boolean => (env.LANGUAGE_DETECTION ?? '').trim().toLowerCase() !== 'off';
 
 /**
  * The transfer-to-number system tool (docs: ElevenLabs "Transfer to human", `transfer_rules` form). The destination is the dynamic variable
@@ -465,7 +469,7 @@ async function agentBody(business: Business, kb: KnowledgeBase | null, opts: { f
       // Languages the agent may switch to (docs: language_presets). The first message already carries the disclosure in BOTH languages.
       ...(languageDetectionEnabled() && !opts.noLanguage ? { language_presets: { es: { overrides: { agent: { first_message: firstMessageFor(business) } } } } } : {}),
       tts: {
-        voice_id: business.voice_id || process.env.ELEVENLABS_VOICE_ID || DEFAULT_VOICE_ID,
+        voice_id: business.voice_id || configEnv().ELEVENLABS_VOICE_ID || DEFAULT_VOICE_ID,
         // Turbo v2 (not v2_5): ConvAI rejects v2_5 for English agents at 8kHz telephony.
         model_id: 'eleven_turbo_v2',
         agent_output_audio_format: 'ulaw_8000',
@@ -518,7 +522,7 @@ export function initiationRequestHeaders(): Record<string, string | { secret_id:
 export async function ensureInitiationWebhook(agentId: string): Promise<{ ok: boolean; skipped?: string; error?: string }> {
   if (!initiationAutoConfig()) return { ok: false, skipped: 'ELEVENLABS_INITIATION_WEBHOOK=off' };
   if (!hasElevenLabs() || !agentId || agentId.startsWith('mock_')) return { ok: false, skipped: 'no API key or agent' };
-  if (!process.env.ELEVENLABS_TOOL_SECRET) {
+  if (!configEnv().ELEVENLABS_TOOL_SECRET) {
     log.warn('initiation.no_secret', { reason: 'ELEVENLABS_TOOL_SECRET unset: not configuring an unauthenticated initiation webhook' });
     return { ok: false, skipped: 'no tool secret' };
   }
@@ -788,7 +792,7 @@ export interface ReleaseAgentResult {
  * a number can keep an agent alive. The caller must have checked that no other business uses the agent.
  */
 export async function deleteAgent(agentId: string, deps: ReleaseCallDeps = {}): Promise<ReleaseAgentResult> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const doFetch = deps.fetchImpl ?? fetch;
   const id = (agentId || '').trim();
   if (!id) return { ok: true, already_deleted: true };
@@ -843,7 +847,7 @@ export interface ReleaseToolsResult { ok: boolean; mock?: boolean; deleted: numb
  * success), mock-safe, never throws; also clears the in-process tool-id cache.
  */
 export async function deleteAgentTools(deps: ReleaseCallDeps = {}): Promise<ReleaseToolsResult> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const doFetch = deps.fetchImpl ?? fetch;
   toolIdCache.clear();
   if (!env.ELEVENLABS_API_KEY) return { ok: true, mock: true, deleted: 0, already_deleted: 0 };

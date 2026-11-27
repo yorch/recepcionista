@@ -494,3 +494,141 @@ Migrations: `20261209120000` lost its sms_log index and its GiST rebuild; `20261
 | A8 legacy forward erasure | the forward text is reproduced exactly (link mask, quote swap, GSM-7 clamp) to match emoji / non-Latin / link openings and the "Possible opt-out" prefix; the rest is documented |
 | A9 line lease | the lease was already renewed (ttl/3, `withLease`); the duplicate-import cleanup now stops when the lease signal is aborted (checked before each delete) |
 | CI time of day | review 19 bookings use business-local slots; `TEST_CLOCK_SHIFT_HOURS` shifts the clock for the whole suite |
+
+
+## Phase 0: hardening independent of the admin console (`docs/review/24e-adversarial-and-recommendation.md` section 7)
+
+No schema change. Evidence: `tests/phase0-hardening-pure.test.ts`, `tests/db/phase0-admin.test.ts`.
+
+| Item | Change |
+| --- | --- |
+| Base URL | one resolver `src/lib/base-url.ts` (`APP_URL`, else `PUBLIC_BASE_URL`; `NEXT_PUBLIC_APP_URL` dropped, startup warning `base_url` when it is set or when the two real variables differ) used by Twilio signature / webhooks / status callback, ElevenLabs tool and initiation URLs, Stripe return URLs and payment links, email links, Google redirect, sitemap, the CSRF same-origin allowlist, the WebAuthn default and the CSP upgrade decision. Behaviour change: where both variables were set to different origins the order was inconsistent; now `APP_URL` wins everywhere, and only that one host is accepted by the same-origin check. **Upgrade note**: a deployment that set `PUBLIC_BASE_URL` to a different host than `APP_URL` now signs Twilio URLs, builds emails / return URLs and derives the passkey rpID from `APP_URL`; if passkeys were registered under the old host, pin `WEBAUTHN_RP_ID` to it (or align the two variables) before deploying |
+| Admin step-up | `requireRecentAuth` on every admin write for cookie sessions (billing, users always; `jobs/run`, `release-tenant`, `repair-numbers`, `resync-agents`, `retention` when not a dry run); Bearer `ADMIN_TOKEN` unchanged (a later phase restricts it, D8) |
+| Admin audit and limits | `admin/retention` audited (`admin.retention_run`) and rate limited (6/min); `admin/jobs` GET (60/min) and `jobs/run` (12/min) rate limited; `billing.admin_override` meta carries the before/after of status, plan, both dates and both caps in a sanitized fixed shape |
+| Dead code | `internalAuthHeaders` (break-glass token on outbound calls, no caller) removed |
+| KB limits | `src/lib/kb/limits.ts` is the single source: `KB_LIMITS` 200/200 for saved lists (dashboard PUT now answers 422 instead of silently cutting to 20/15), `EXTRACTION_LIMITS` 20/15 for the extraction draft |
+| Price copy build vars | `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ES` / `_ANNUAL_ES` added to the Dockerfile `ARG`/`ENV` and `compose.production.yaml` build args (they were not passed, so the image rendered English to Spanish visitors) and to `.env.example`; a test keeps Dockerfile, compose and docs in step. Still build time; phase 6 of the console plan removes build-time config |
+| Admin 2FA | `REQUIRE_2FA_FOR_ADMINS` is always on in production (`false` ignored, startup warning `admin_2fa_optout_ignored`); opt-in elsewhere. The break-glass token is unaffected |
+| Env docs | `.env.example` gained `TWILIO_MESSAGING_SERVICE_SID`, `TWILIO_MESSAGING_SERVICE_PIN_SENDER`, `OWNER_REPLY_ENABLED`, `OWNER_REPLY_DAILY_LIMIT`, `OWNER_REPLY_REQUIRE_ATTESTATION`, `REFUND_RECONCILE_AFTER_HOURS`, the two `_ES` price vars and `PRISMA_QUERY_EVENTS` (test only); `NEXT_PUBLIC_APP_URL` is documented as removed. `docs/env-vars.md` already listed all of them (24a mis-stated nothing there); its APP_URL, PUBLIC_BASE_URL, 2FA and `_ES` rows were rewritten |
+
+## Phase 1: configuration module without a database (`docs/review/24e-adversarial-and-recommendation.md` sections 5.1, 5.3, 7; `docs/design/admin-console-architecture.md`)
+
+No schema change, no UI, behaviour identical to the environment-only configuration. Evidence: `tests/config-registry.test.ts`, `tests/config-runtime.test.ts`, `tests/config-boundary.test.ts`.
+
+| Item | Change |
+| --- | --- |
+| Registry | `src/lib/config/registry*.ts`: 172 settings (145 plain, 15 secrets, 12 provider ids), 100 with an environment alias, 56 constants promoted from code (24c), 16 new settings (brand, support contact, legal URLs, maintenance mode, signup mode, locales, alert recipients); key, group, label and help, kind, zod-free schema, NODE_ENV dependent default, scope and tenant rules, tier, ratchet, applies, follow-up, pairing. `ENV_ONLY` (45 names), `BUILD_TIME_ENV` and `RETIRED_ENV` are separate lists |
+| Runtime | `src/lib/config/index.ts`: `configEnv()` (env pin > console > default merged view, `process.env` itself while no snapshot source is installed), `setting(key)`, `runtimeConfig()`, `setSnapshotSource()` for the Phase 2 loader, state on `globalThis[Symbol.for('rc.config')]`, secrets in a non-enumerable map without `toJSON`, `redactSecrets()` wired into the logger's `scrub` |
+| Migration | the 78 injectable helpers now default to `configEnv()` and every direct `process.env.X` read in 86 files goes through the config module; injected-env tests are unchanged. Only `NODE_ENV`, `NEXT_RUNTIME`, `NEXT_PHASE`, the five build-time `NEXT_PUBLIC_*` names and the boot reads of `db/client.ts` and `instrumentation.ts` stay direct |
+| Job runner | always starts, reads `enabledJobs(configEnv())` on every tick and re-arms the interval when `JOBS_TICK_SECONDS` changes (before: returned early with nothing enabled at boot, captured `env` once). `runnerTick`, `stopJobRunner`, `armedTickSeconds` exported for tests |
+| Deprecations (D11) | startup warnings `deprecated_env` for `OWNER_PHONE_GRANDFATHER*` and `ELEVENLABS_AGENT_ID` (still honoured for one release) and for the already-ignored `NEXT_PUBLIC_APP_URL`; `invalid_env` names a pinned value the registry rejects |
+| CI rules | no `process.env` outside `src/lib/config/**` except the reviewed allowlist; every alias documented in `docs/env-vars.md`; defaults and bounds valid; registry defaults equal what the readers apply (including 38 promoted constants parsed from their source); per-entry schema tests generated from the registry |
+
+
+## Phases 2, 4, 5, 7, 8: the admin console backend (`docs/design/admin-console-contracts.md`)
+
+Migration `20261211120000_admin_console_schema` (hand written, re-runnable, zero drift; populated old-schema upgrade in `tests/db/admin-console-migration.test.ts`): console tables, `plans` (seeded from today's `PLAN_*` / `COMP_PLANS` defaults) with `businesses.plan` referencing it (unknown strings mapped to `legacy` and recorded; a trigger registers new free strings as hidden plans), `job_runs`, legal pages with versions, `support_grants`, `businesses.suspended_*`, `users.platform_role` (existing admins became `owner`).
+
+| Item (24e) | Status | Evidence |
+| --- | --- | --- |
+| T1 hijacked admin: step-up on every admin write, 2FA forced while the console runs, critical tier (reason, typed confirmation, mail to every admin + `ALERT_EMAIL`), role matrix | Fixed (backend) | `src/lib/admin/guard.ts`, `settings-store.ts`; `tests/integration/admin-routes.test.ts` (HIJACKED ADMIN, role matrix) |
+| T4 secrets never returned, logged or audited; audit redacted by kind | Fixed | `settings-store.ts` `auditValue`, `db/audit.ts` `meta_trusted`; `admin-settings.test.ts` SECRETS |
+| T5 envelope v2 + HKDF + AAD + kid | Fixed | `src/lib/admin/crypto.ts`; `admin-console-pure.test.ts` envelope v2 |
+| T6 MAC on rows, bad row ignored and alerted | Fixed | `loader.ts`; `admin-settings.test.ts` MAC |
+| T9 break-glass token narrowed, every use audited and mailed | Fixed | `permissions.ts`, `guard.ts`; `admin-routes.test.ts` BREAK-GLASS |
+| T10 key rotation (`APP_SECRET_KEY_PREVIOUS`, re-encrypt all incl. TOTP and calendar tokens, canary fails health) | Fixed | `rotation.ts`, `totp.ts decryptSecret`; `admin-settings.test.ts` key rotation, CANARY |
+| T11 version poll every 10 s, heartbeats, "applied on N/N" | Fixed | `loader.ts`; `admin-settings.test.ts` multi-instance |
+| T12 boot awaits the first load, health gate, last known good | Fixed | `instrumentation.ts`, `api/health/route.ts`; `admin-settings.test.ts` boot / health |
+| T3 SMTP relay SSRF (save + connect) | Fixed | `ssrf.ts`, `email/index.ts`; pure + store tests |
+| T7 owner escalation: tenant overrides validated, clamped (write and read), owner comfort knobs only | Fixed | `tenant-overrides.ts`; `admin-routes.test.ts` tenant overrides |
+| T8 support: read only, 30 minute audited write mode | Fixed | `support.ts`; `admin-routes.test.ts` SUPPORT MODE |
+| T14 secret rollback inside 7 days; nulled by the cleanup job | Fixed (the test-connection before restore is the open `verifySecret` hook) | `settings-store.ts rollbackChangeSet`, `cleanup.ts` |
+| T15 test-before-save for credentials | Fixed (agent B) | `provider-tests.ts` (`secretVerifier`, `providerWriteChecks`) wired into `PUT /secrets/{key}` and `POST /settings/apply`; Stripe orphan acknowledgement; `admin-providers-pure.test.ts`, `integration/admin-providers.test.ts` |
+| Provisioning showed the ElevenLabs webhook secret once and stored nothing | Fixed (agent B) | `provider-provision.ts`: an owner admin's provision stores it encrypted (critical, audited, admins mailed); a Bearer token, an env pin or a frozen console keep the one-time display |
+| Provider readiness without a real check | Fixed (agent B) | `GET /api/admin/selftest?live=1` (coarse real tests, cached 5 minutes); `POST /api/admin/providers/{provider}/test` (6 per minute) |
+| Plans table, entitlements | Partly | caps and comp wired; feature gates, `max_locations`, per-plan Stripe prices are data only |
+| Per-tenant overrides read by their consumers | Open | `tenantEffective()` exists; each reader still uses the platform value |
+| `/admin` UI, public legal pages, maintenance banner | Fixed in part (agent A: shell, settings pages, history, system, overview, move wizard, legal editor and public pages, banners; providers page: agent B; tenants / plans / audit / admins pages: see their sections) | contracts doc section 7 and the Agent A section |
+
+## Phase 3 UI, part 1: console shell, settings pages, history, system, legal pages, maintenance (agent A)
+
+| Item | State | Where |
+| --- | --- | --- |
+| `/admin` route tree with its own chrome, nav by permission, role badge, editing / read-only banner, locale switcher, step-up and 2FA state, freeze and maintenance banners | Fixed | `src/app/admin/layout.tsx`, `src/components/admin/{shell,provider,nav}` |
+| Server gate (admin only, 404 for tenants, 2FA invariant), `/admin` and `/api/admin` never public | Fixed | `src/lib/admin-ui/server.ts`, `src/proxy.ts`, `tests/admin-console-ui.test.tsx` |
+| Nine settings pages generated from the registry (widget by kind, shared validators, source badges, applies notes, reset, typed confirmation + reason, step-up retry) | Fixed | `src/lib/admin-ui/model.ts`, `src/components/admin/{settings-form,change-review}.tsx` |
+| Change history with diffs, rollback, export / import with dry-run diff | Fixed | `src/components/admin/{history,import-export}.tsx` |
+| System page (locked keys, instances and applied version, key ids, canary, freeze) and Overview (providers, jobs, alerts, critical changes) | Fixed | `system-page.tsx`, `overview.tsx`, `src/lib/admin-ui/overview.ts` |
+| "Move to console" (needed `adopt` on preview / apply: a pinned non-secret key accepts a console value equal to the pin) | Fixed | `move-wizard.tsx`, `src/lib/admin/settings-store.ts`, `tests/integration/admin-console-ui.test.tsx` |
+| Legal editor (markdown, safe live preview, drafts, versions, diff, publish with typed phrase) and public `/terms` `/privacy` `/sms-terms` (EN / ES, versioned, sitemap, robots) | Fixed | `legal-editor.tsx`, `src/lib/markdown.ts`, `src/components/legal/*`, `src/app/{terms,privacy,sms-terms}` |
+| Footer / signup / account e-mail / SMS HELP links to the legal pages (URL setting, else the built-in page) | Fixed | `src/lib/{legal-links,legal-footer}.ts` |
+| Maintenance banner, announcement banner, read-only tenant writes while maintenance is on | Fixed | `src/components/platform-banner.tsx`, `src/lib/maintenance.ts`, `src/proxy.ts` |
+| Soft 404 of an unpublished legal page, brand fields not consumed, no impact preview counts | Open | `docs/known-limitations.md` |
+
+## Phase 3 UI, part 3: tenants, plans, administrators, support mode, entitlements, tenant knobs (agent C)
+
+| Item | State | Where |
+| --- | --- | --- |
+| Tenant directory and detail (billing / comp, suspension with typed phrase and admin notice, clean-ups, per-business release / repair / resync with preview) | Fixed | `src/components/admin/tenant-*`, `POST /api/admin/tenants/{id}/actions`, `support-view` |
+| Silent full-write impersonation by admins in the tenant dashboard | Fixed | `src/lib/admin/support-gate.ts` in `authenticate()`: admin users need an open support grant to write a tenant; the switcher goes through `support-view` (audited); banner + read logging |
+| Plans editor with live Stripe prices; plan features, `max_locations`, per-plan Stripe prices wired | Fixed | `plans-page.tsx`, `GET /api/admin/plans/prices`, `plan-catalog.ts` (`planAllows`, `planAllowsLocation`, `planPriceId`), call sites in the contracts doc |
+| Tenant overrides not read by any code | Fixed | `src/lib/admin/tenant-knobs.ts` + readers (quiet hours, briefing, thank-you, ring seconds, owner reply and alert limits, call budgets) |
+| Owner comfort knobs UI | Fixed | `src/components/dashboard/comfort-settings.tsx` (Settings) |
+| Administrator management UI | Fixed | `/admin/admins` |
+
+## Operations views, impact previews and Phase 6 (agent D; `docs/design/admin-console-contracts.md` "Agent D")
+
+No migration. `tests/admin-ops-pure.test.tsx`, `tests/integration/admin-ops.test.ts`, and the updated Phase 6 tests.
+
+| Item | State | Where |
+| --- | --- | --- |
+| Operations pages: alerts, jobs (mandatory dry-run preview then Apply, history, tenant release and grandfather reports), audit log (filters, diff view, audited export), SMS delivery failures, webhook / event claims, provider health history, instances, usage and revenue | Fixed | `src/app/admin/operations/**`, `src/components/admin/ops-*.tsx`, `src/lib/admin/{alerts,deliveries,provider-health,usage-overview,instances,ops-model,audit-enrich}.ts`, routes `/api/admin/{alerts,alerts/ack,alerts/notify,deliveries/sms,deliveries/events,provider-health,usage,instances}` |
+| Alert notification routing to the admins / `ALERT_EMAIL` / `platform.alert_recipients` (critical, once per 6 h per alert) | Fixed | `dispatchAlertNotices` from the hourly cleanup job and "send notice now" |
+| Critical job runs from the console: reason + typed phrase + notification | Fixed | `POST /api/admin/jobs/run` (`CRITICAL_JOBS`), page phrase `run <job>` |
+| Tenant release / grandfather reports as tables | Fixed | audit `jobs.*_report` meta now carries `items` |
+| Impact previews (tenants over a lowered cap, owner phones invalid after narrowing countries, retention purge per tenant, billing enforcement, past-due grace, release queue) | Fixed | `src/lib/admin/impact.ts`, `POST /api/admin/settings/preview` `impacts[]`, `ImpactPanel` |
+| Maintenance: signups refused, webhooks never dropped, helper for the banner | Fixed | `src/lib/admin/maintenance.ts`, `POST /api/auth/signup` |
+| Phase 6: Turnstile site key and price copy read at request time, CSP from the snapshot, no Docker build args, `BUILD_TIME_ENV` empty | Fixed | `site-config.ts`, `signup/page.tsx`, `csp.ts`, `Dockerfile`, `compose.production.yaml`, `deploy.sh`, `env-only.ts` |
+| `verify-deploy` / `smoke` consult the server's selftest (secrets held in the console) | Fixed | `scripts/verify-deploy.ts`, `scripts/smoke.ts` |
+
+## Adversarial review of the admin console branch (two Opus reviews, all reproduced, all fixed)
+
+Tests: `tests/review-fixes-pure.test.ts`, `tests/integration/review-fixes.test.ts`, plus cases added to `tests/integration/admin-settings.test.ts`, `tests/db/admin-console-migration.test.ts`, `tests/admin-console-pure.test.ts`. Behaviour is documented in `docs/design/admin-console-contracts.md` (3, 4.9, Agent C "Support mode", Residuals).
+
+| Id | Finding | State | Where |
+| --- | --- | --- | --- |
+| H1 | A support write grant for tenant A authorised writes to any tenant B (the tenant came only from the URL / cookie; body- and resource-supplied ids were unchecked, and with none found ANY grant passed) | Fixed | `authenticate()` puts the admin's open grants on the principal (`writeGrants`); `requireBusinessAccess` / `scopeBusinessId` / `authenticateTeam` require a grant for EXACTLY the resolved business; the gate no longer reads the `rc_business` cookie; a write naming no business is refused |
+| H2 | Support write mode was full owner write | Fixed | the `support` role may write only `SUPPORT_WRITE_SCOPE`; every tenant route is `403 support_scope` for it (`SUPPORT_WRITE_ROUTES`, empty); owner and ops unchanged |
+| H3 | read_only and support could create tenants and provision (buys a number, creates an agent) | Fixed | `PLATFORM_WRITE_ROUTES`: `tenants.users.create` / `providers.repair`; provisioning by an admin also needs a fresh sign-in |
+| M1 | An SMTP candidate test with a typed host used the STORED password | Fixed | a candidate naming url / host / port never inherits the stored login; candidate tests need a recent sign-in (`provider-tests.ts`, the test route) |
+| M2 | The Bearer token could mint an owner | Fixed | only when no enabled owner exists or `ADMIN_TOKEN_ALLOW_SETTINGS=true` (`403 owner_requires_owner`) |
+| M3 | SSRF classifier bypassed by non-canonical IPv6; send path resolved twice | Fixed | `ssrf.ts` judges parsed groups (mapped, compatible, SIIT, 6to4, Teredo, NAT64, site-local, ULA, link-local, loopback, unspecified, multicast, documentation); `email/index.ts` connects to the one validated address with the name as TLS servername |
+| M4 | Legal publish published whatever draft existed | Fixed | publish carries the draft `version` + content `hash`; `409 draft_changed`; the editor sends them |
+| M5 | Quadratic markdown (`'*a '.repeat(40000)` 23 s) on the public legal pages | Fixed | one stack pass for brackets, a memo for emphasis marks that found no closer, scanned heading / rule detection; milliseconds, timing-bounded tests |
+| M6 | Suspended tenants were not stopped by the job runner | Fixed | `listLiveBusinessesForJobs` selects `suspended_at`; briefings, gratitude and counts skip them (`skipped_suspended`) |
+| M7 | Tenant overrides of the caps and of `limits.max_businesses_per_user` were stored but never enforced | Fixed | `db/usage.ts` (`tenant_overrides`), `db/locations.ts` (`maxBusinessesFor`); precedence column > tenant override > plan > platform |
+| M8 | An owner could switch ON what the platform turned off (briefing, thank-you) | Fixed | `tenant-effective.ts`: `platform && override`; the write is `422 not_stricter` |
+| M9 | The migration remapped every unknown plan string to the comped `legacy` | Fixed | `20261211120000_admin_console_schema` registers them as the trigger does (hidden, non-comped, NULL caps); pre-migration-data test; zero drift re-proved |
+| M10 | Plan features `voicemail` and `call_forwarding` did nothing | Fixed | `voicemailAllowance`, `forwardAllowance`, `resolveCallRoute` (`forward_not_in_plan`) |
+| M11 | `deploy.sh` died when the env lacked console-capable settings; stale build-time claim in the runbook | Fixed | warnings plus a post-up check of what the server holds; `docs/runbook.md`, `docs/billing.md` |
+| L1 | Typed phrase / reason enforced only by the UI | Fixed | `src/lib/admin/confirm.ts`: suspend, release, 2FA reset by e-mail, critical job runs, legal publish |
+| L2 | Unkeyed sha256 secret fingerprints, visible to ops | Fixed | HMAC under an HKDF-derived key, recomputed on write and on re-encryption; owner only |
+| L3 | Ops could create a tenant login with an admin-chosen password | Fixed | owner administrator or the token only (`403 owner_required`), audited |
+| L4 | The MAC of a secret row did not cover the dual-secret window | Fixed | `macPayload` covers `previousEnvelope` / `previousUntil`; legacy rows load their current secret only and are re-signed by the re-encryption pass |
+| L5 | `/api/me` prefix match in the gate | Fixed | `isOpenPath`: `/api/me/locale` exactly, other prefixes on segment boundaries |
+| L8 | `refreshNow` could return a load that started before the commit | Fixed | a call arriving while a load runs shares ONE follow-up load that starts after it |
+
+## Admin console branch: verification round (Opus verification, remaining defects)
+
+| Id | Finding | State | Where / test |
+| --- | --- | --- | --- |
+| V1 (high) | State-changing GET tenant routes (Google connect / callback, the demo billing activation) skipped the support write gate (it only ran for non-safe methods): an admin with no grant could attach their calendar to any tenant | Fixed | `authenticate(req, { stateChanging: true })` applies `supportWriteGate` whatever the method; used by `scoped(..., { stateChanging: true })` (connect, callback) and `billing/mock-activate`; all other GET routes swept (read-only proxies left as reads). `tests/integration/stateful-get-gate.test.ts` (no grant, grant for another business, grant for this business, support role, plain owner) |
+| V2 (medium) | `compose.production.yaml` still hard-required `BILLING_ENFORCED` and `STRIPE_WEBHOOK_SECRET` (`:?`), so a console-held deployment could not pass | Fixed | `:-` defaults (the other `:?` are env-only: `POSTGRES_*`, `APP_URL`, `ADMIN_TOKEN`, `DOMAIN`); the app fails closed on both and `deploy.sh` verifies them after `up -d`; checked with `docker compose config` |
+| V3 (medium) | `deploy.sh` conditional checks fired only when the trigger key was in `.env` | Fixed | the post-up verification always runs and requires a ready provider card for every provider whose primary key is set in `.env` or the console. `tests/deploy-verify-pure.test.ts` (stub admin API) |
+| V4 (medium) | The console-held verification ran after the old container was replaced | Fixed | the previous app image is tagged before the build and put back automatically (app service only) on a failed verification or an unhealthy app; printed rollback and dump instructions; `docs/runbook.md` "Deploy verification and automatic rollback". `tests/deploy-verify-pure.test.ts` (fake `docker`) |
+| V5 (low) | `reencryptAll` re-signed rows whose MAC was broken | Fixed | skipped and counted as failed. `tests/integration/admin-settings.test.ts` (L5) |
+| V6 (low) | SMTP trust used `SMTP_HOST \|\| SMTP_URL` regardless of which one supplied the target | Fixed | `email/index.ts`: trust follows the supplying variable. `tests/email-smtp-pin.test.ts` |
+| V7 (low) | NAT64 `64:ff9b::/96` refused wholesale | Fixed | judged by its embedded IPv4 like 6to4. `tests/review-fixes-pure.test.ts` |
+| V8 (low) | `revoke-sessions` let an admin with a grant for A sign a member out everywhere | Fixed | only break-glass credentials act everywhere; an admin user is scoped to the granted business. `tests/integration/stateful-get-gate.test.ts` |
+
+Accepted without change (documented in `docs/design/admin-console-contracts.md` Residuals): the two-form fingerprint display while a legacy fingerprint exists; the `support` role refused on read-only POST routes of the tenant side.

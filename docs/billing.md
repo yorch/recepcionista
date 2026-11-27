@@ -85,23 +85,23 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 | `STRIPE_SECRET_KEY` | `sk_test_...` until you have gone live. Shared with deposit links. |
 | `STRIPE_PRICE_ID` | recurring monthly price |
 | `STRIPE_PRICE_ID_ANNUAL` | optional recurring annual price (see "Annual plan") |
-| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | text for the annual choice, e.g. `$1,490/year (2 months free)` (build time) |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | text for the annual choice, e.g. `$1,490/year (2 months free)` (runtime setting: console or `.env` + restart, no rebuild) |
 | `STRIPE_BILLING_WEBHOOK_SECRET` | billing endpoint signing secret |
 | `BILLING_TRIAL_DAYS` | 0-90, default 7 |
-| `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh and compose. Outside production only `true` enforces |
+| `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh (an unset value is accepted only when the admin console holds it: checked after the stack is up; compose no longer demands it). Outside production only `true` enforces |
 | `BILLING_PAST_DUE_GRACE_DAYS` | default 5 |
 | `PLAN_SMS_CAP`, `PLAN_CALL_MINUTES_CAP` | default monthly caps (500 SMS segments, 300 minutes); per-business overrides win |
 | `TRIAL_SMS_CAP`, `TRIAL_CALL_MINUTES_CAP` | lower caps while `billing_status='trialing'` (defaults 50 segments, 30 minutes); never above the plan cap, per-business overrides win |
 | `BILLING_PLAN_NAME` | label stored on subscribed businesses, default `standard` |
 | `BILLING_ALLOW_PROMO_CODES` | `true` shows the promotion code box in Checkout |
-| `APP_URL` / `PUBLIC_BASE_URL` | return URLs; required in production |
+| `APP_URL` (else `PUBLIC_BASE_URL`) | return URLs: the one public-origin resolver (`src/lib/base-url.ts`); required in production |
 
 `deploy.sh` refuses to deploy when `BILLING_ENFORCED` is unset/invalid, and with `BILLING_ENFORCED=true` unless `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID` and
 `STRIPE_BILLING_WEBHOOK_SECRET` are set. In production a missing key or price makes checkout answer 503; the local mock never runs there.
 
 #### Annual plan (optional)
 
-Create a second recurring price (yearly) on the same product and put its id in `STRIPE_PRICE_ID_ANNUAL` (+ `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL`, rebuild).
+Create a second recurring price (yearly) on the same product and put its id in `STRIPE_PRICE_ID_ANNUAL` (+ `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL`; a runtime setting, no rebuild).
 When it is set (and `STRIPE_SECRET_KEY` is), the Billing page's "Start free trial" offers Monthly / Annual and `POST /api/billing/checkout` accepts
 `interval: 'month' | 'year'` (anything else is 422; `year` without the env is 422). The trial, the one-trial-per-card rule and the caps are the same for both.
 The cadence is stored in `businesses.billing_interval` by the subscription webhook, from the subscription's price (the annual price id, else the price's

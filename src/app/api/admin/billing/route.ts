@@ -1,7 +1,7 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate } from '@/lib/session';
+import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
+import { adminBillingValues } from '@/lib/billing/admin-audit';
 import { getBusiness, recordAudit, setBillingState, type BillingPatch } from '@/lib/db';
-import { limitRequest } from '@/lib/ratelimit';
 import { billingErrorResponse } from '@/lib/billing/http';
 import { billingSummary } from '@/lib/billing/summary';
 import type { BillingStatus } from '@/lib/types';
@@ -28,13 +28,13 @@ function capField(v: unknown): number | null | undefined {
  * Admin-only: comp or adjust an account without Stripe (grandfathering existing tenants, support).
  * Body: `{ business_id, billing_status?, plan?, trial_ends_at?, current_period_end?, sms_cap_override?, call_minutes_cap_override?, note? }`.
  * `null` clears plan / dates / caps. Does not touch Stripe ids; a later Stripe event for a linked customer
- * can overwrite the status again, so comp accounts should have no subscription. Audited.
+ * can overwrite the status again, so comp accounts should have no subscription. Audited (meta.from / meta.to carry the values). Step-up (`requireRecentAuth`) for cookie sessions.
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/billing', 30);
-  if (limited) return limited;
+  // Permission tenants.billing (owner, ops, the break-glass token); step-up (5 min) for a cookie session, the Bearer ADMIN_TOKEN passes.
+  const g = await guardAdminRoute(req, { permission: 'tenants.billing', write: true, rate: { name: 'billing', max: 30 } });
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const body = await readJson<Record<string, unknown>>(req);
     if (!body || typeof body !== 'object') return fail('invalid body', 422);
@@ -74,13 +74,14 @@ export async function POST(req: Request) {
       business_id: business.id, action: 'billing.admin_override', target: `business:${business.id}`,
       meta: {
         changed: Object.keys(patch),
-        from: { billing_status: business.billing_status ?? 'none', plan: business.plan ?? null },
-        to: { billing_status: updated.billing_status ?? 'none', plan: updated.plan ?? null },
+        // Every changeable field before and after (status, plan, dates, caps), sanitized: the audit row says WHAT the new caps / dates are.
+        from: adminBillingValues(business),
+        to: adminBillingValues(updated),
         ...(note ? { note } : {}),
       },
     });
     return ok(await billingSummary(updated));
   } catch (err) {
-    return billingErrorResponse(err);
+    return billingErrorResponse(err) ?? adminFail(err);
   }
 }

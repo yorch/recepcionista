@@ -3,6 +3,7 @@
  */
 import { DAY_KEYS } from '@/lib/availability';
 import { normalizeClosedDates } from '@/lib/closures';
+import { KB_LIMITS } from '@/lib/kb/limits';
 import type { FAQ, Hours, KbPatch, KnowledgeBase, Service } from '@/lib/types';
 
 export const KB_PATCH_KEYS = ['services', 'faqs', 'pricing_notes', 'system_prompt', 'call_script'] as const;
@@ -15,7 +16,7 @@ export const hasBusinessFields = (patch: object): boolean => BUSINESS_PATCH_KEYS
 /** Current values a patch is compared against / captured from: the KB columns plus the business fields. */
 export type PatchValues = Record<string, unknown>;
 
-export const KB_LIMITS = { services: 200, faqs: 200, text: 20_000, name: 200, short: 2_000, areas: 100, area: 100 } as const;
+export { KB_LIMITS };
 
 /** JSON with object keys sorted, so two structurally equal values compare equal (jsonb does not keep key order). */
 export function canonicalJson(value: unknown): string {
@@ -84,13 +85,13 @@ export function validateKbPatch(raw: unknown): KbPatchResult {
   if (unknown.length) return { ok: false, error: `unknown field(s): ${unknown.join(', ')}` };
   const patch: KbPatch = {};
   if (raw.services !== undefined) {
-    if (!Array.isArray(raw.services) || raw.services.length > KB_LIMITS.services) return { ok: false, error: 'services must be a list of at most 200' };
+    if (!Array.isArray(raw.services) || raw.services.length > KB_LIMITS.services) return { ok: false, error: `services must be a list of at most ${KB_LIMITS.services}` };
     const list = raw.services.map(cleanService);
     if (list.some((x) => x === null)) return { ok: false, error: 'a service is malformed' };
     patch.services = list as Service[];
   }
   if (raw.faqs !== undefined) {
-    if (!Array.isArray(raw.faqs) || raw.faqs.length > KB_LIMITS.faqs) return { ok: false, error: 'faqs must be a list of at most 200' };
+    if (!Array.isArray(raw.faqs) || raw.faqs.length > KB_LIMITS.faqs) return { ok: false, error: `faqs must be a list of at most ${KB_LIMITS.faqs}` };
     const list = raw.faqs.map(cleanFaq);
     if (list.some((x) => x === null)) return { ok: false, error: 'a faq is malformed' };
     patch.faqs = list as FAQ[];
@@ -112,7 +113,7 @@ export function validateKbPatch(raw: unknown): KbPatchResult {
   }
   for (const k of ['pricing_notes', 'system_prompt', 'call_script'] as const) {
     if (raw[k] === undefined) continue;
-    if (typeof raw[k] !== 'string' || (raw[k] as string).length > KB_LIMITS.text) return { ok: false, error: `${k} must be text of at most 20000 characters` };
+    if (typeof raw[k] !== 'string' || (raw[k] as string).length > KB_LIMITS.text) return { ok: false, error: `${k} must be text of at most ${KB_LIMITS.text} characters` };
     patch[k] = raw[k] as string;
   }
   if (Object.keys(patch).length === 0) return { ok: false, error: 'patch changes nothing' };

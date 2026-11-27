@@ -22,11 +22,14 @@ import { NextResponse } from 'next/server';
 import {
   adminSessionTokenFrom, authConfig, checkSameOrigin, hasBearer, SAFE_METHODS, tokensMatch, userSessionTokenFrom,
 } from '@/lib/auth';
+import { require2faForAdmins } from '@/lib/admin-2fa';
 import { listMembershipsForUser } from '@/lib/db/memberships';
 import { resolveSessionByToken } from '@/lib/db/users';
 import type { MembershipWithBusiness, User, UserSession } from '@/lib/types';
 
 export type Role = 'staff' | 'owner' | 'admin';
+
+const SUPPORT_WRITE_MESSAGE = 'enter support write mode for this business first (console: Tenants > Support, with a reason)';
 
 export type Principal =
   /**
@@ -34,7 +37,15 @@ export type Principal =
    * user = a DB user with role admin, dev = ALLOW_INSECURE_DEV. `email_verified` is always true for the
    * break-glass paths (they are not tied to a mailbox).
    */
-  | { kind: 'admin'; via: 'token' | 'cookie' | 'user' | 'dev'; user?: User; email_verified: boolean; needs_2fa_enrollment?: boolean }
+  | {
+    kind: 'admin'; via: 'token' | 'cookie' | 'user' | 'dev'; user?: User; email_verified: boolean; needs_2fa_enrollment?: boolean;
+    /**
+     * Set by `authenticate` for an admin USER on a state-changing request to a tenant route: the business ids the admin holds an OPEN support write grant for.
+     * requireBusinessAccess / scopeBusinessId then refuse (403 `support_write_required`) any business that is not in it, wherever the business id came from
+     * (path, query, body or the resource itself). Absent on reads, on the Bearer / cookie / dev credentials and on console (/api/admin) routes.
+     */
+    writeGrants?: ReadonlySet<string>;
+  }
   /**
    * `business_id` / `role`: the ACTIVE business of this session and the account's role IN THAT business (from its membership; the
    * legacy `user.role` is only the role in the primary business and must not be used for authorization). `memberships` are all the
@@ -67,16 +78,16 @@ export function hasRole(p: Principal, min: Role): boolean {
 }
 
 export class AuthError extends Error {
-  constructor(public status: 401 | 403 | 404 | 503, message: string) {
+  constructor(public status: 401 | 403 | 404 | 503, message: string, public code?: string) {
     super(message);
     this.name = 'AuthError';
   }
 }
 
 /** Response for an AuthError (or null for any other error, so callers can fall through to their own handling). */
-export function authErrorResponse(err: unknown): NextResponse<{ ok: false; error: string }> | null {
+export function authErrorResponse(err: unknown): NextResponse<{ ok: false; error: string; code?: string }> | null {
   if (!(err instanceof AuthError)) return null;
-  return NextResponse.json({ ok: false as const, error: err.message }, { status: err.status });
+  return NextResponse.json({ ok: false as const, error: err.message, ...(err.code ? { code: err.code } : {}) }, { status: err.status });
 }
 
 /**
@@ -98,8 +109,13 @@ export function requireRole(principal: Principal, min: Role): void {
  * is always one with an enabled membership): the role the route checked belongs to that business, so a business the account also
  * belongs to but has not switched to is a 404 until POST /api/auth/switch-business.
  */
-export function requireBusinessAccess(principal: Principal, businessId: string | null | undefined): void {
-  if (principal.kind === 'admin') return;
+export function requireBusinessAccess(principal: Principal, businessId: string | null | undefined, opts: { platformAction?: boolean } = {}): void {
+  if (principal.kind === 'admin') {
+    // An admin USER writing a tenant needs an open support write grant for EXACTLY this business (principal.writeGrants, loaded by authenticate).
+    // `platformAction`: the route is an operator action on the providers that checks its own platform permission (business provisioning).
+    if (principal.writeGrants && !opts.platformAction && !(businessId && principal.writeGrants.has(businessId))) throw new AuthError(403, SUPPORT_WRITE_MESSAGE, 'support_write_required');
+    return;
+  }
   if (!businessId || businessId !== principal.business_id) throw new AuthError(404, 'business not found');
 }
 
@@ -110,7 +126,11 @@ export function requireBusinessAccess(principal: Principal, businessId: string |
 export function scopeBusinessId(principal: Extract<Principal, { kind: 'user' }>, requested?: string | null): string;
 export function scopeBusinessId(principal: Principal, requested?: string | null): string | null;
 export function scopeBusinessId(principal: Principal, requested?: string | null): string | null {
-  if (principal.kind === 'admin') return requested || null;
+  if (principal.kind === 'admin') {
+    if (requested) requireBusinessAccess(principal, requested);
+    else if (principal.writeGrants) throw new AuthError(403, SUPPORT_WRITE_MESSAGE, 'support_write_required'); // a write that names no business is not a tenant write an admin user may make
+    return requested || null;
+  }
   if (requested) requireBusinessAccess(principal, requested);
   return principal.business_id;
 }
@@ -137,8 +157,7 @@ export function pickActiveMembership(
     ?? list[0];
 }
 
-/** Should REQUIRE_2FA_FOR_ADMINS force DB admin users to enrol? Default off. */
-export const require2faForAdmins = (): boolean => process.env.REQUIRE_2FA_FOR_ADMINS === 'true';
+export { require2faForAdmins };
 
 /** A user whose password was accepted but whose second factor is outstanding (the only session state /api/auth/mfa accepts). */
 export interface PendingMfa { user: User; session: UserSession }
@@ -243,6 +262,11 @@ export interface AuthenticateOptions {
   verifiedEmail?: boolean;
   /** Let an admin who still has to enrol in 2FA through (2FA / session management endpoints only). */
   allowEnrollment?: boolean;
+  /**
+   * The route changes state (or spends/attaches provider resources) although it answers a safe method (GET): an OAuth connect/callback, a demo activation. An admin USER then goes
+   * through the support write gate exactly as for a POST (open grant for exactly this business; the support role gets `support_scope`).
+   */
+  stateChanging?: boolean;
 }
 
 /**
@@ -270,6 +294,13 @@ export async function authenticate(req: Request, opts: AuthenticateOptions = {})
   }
   if (!hasRole(res.principal, opts.role ?? 'staff')) return deny(403, 'forbidden');
   if (opts.verifiedEmail && !res.principal.email_verified) return deny(403, 'email_not_verified', 'email_not_verified');
+  // An admin USER changing a tenant needs an open support write grant (no silent full-write impersonation): see src/lib/admin/support-gate.ts.
+  if (res.principal.kind === 'admin' && res.principal.via === 'user' && (opts.stateChanging || !SAFE_METHODS.has(req.method))) {
+    const { supportWriteGate } = await import('@/lib/admin/support-gate');
+    const gate = await supportWriteGate(req, res.principal);
+    if (gate && gate.ok === false) return deny(gate.status, gate.error, gate.code);
+    if (gate && gate.ok === true) return { ok: true, principal: { ...res.principal, writeGrants: gate.grants }, sessionId: res.sessionId, sudoAt: res.sudoAt ?? null };
+  }
   return { ok: true, principal: res.principal, sessionId: res.sessionId, sudoAt: res.sudoAt ?? null };
 }
 

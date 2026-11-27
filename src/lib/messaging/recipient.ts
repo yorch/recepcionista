@@ -2,10 +2,11 @@
  * Outbound SMS recipient policy, enforced in the one place every text passes
  * through (providers/twilio sendSms). Pure: no I/O, easy to unit test.
  */
+import { configEnv } from '@/lib/config';
 export const E164 = /^\+[1-9]\d{6,14}$/;
 
 /** Env SMS_ALLOWED_COUNTRY_CODES, comma separated calling codes (default "1"). */
-export function allowedCountryCodes(env: string | undefined = process.env.SMS_ALLOWED_COUNTRY_CODES): string[] {
+export function allowedCountryCodes(env: string | undefined = configEnv().SMS_ALLOWED_COUNTRY_CODES): string[] {
   return (env ?? '1').split(',').map((c) => c.trim().replace(/^\+/, '').replace(/\D/g, '')).filter(Boolean);
 }
 

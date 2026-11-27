@@ -63,7 +63,7 @@ Rollback in an incident is `CSP_REPORT_ONLY=true` plus a restart: pages keep wor
 
 ## Cloudflare Turnstile
 
-When `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (build time) or `TURNSTILE_SECRET_KEY` is set, the policy additionally allows exactly
+When the Turnstile site key (`signup.turnstile_site_key`, env alias `NEXT_PUBLIC_TURNSTILE_SITE_KEY`: read at request time from the config snapshot, env pin or console value, since Phase 6) or `TURNSTILE_SECRET_KEY` is set, the policy additionally allows exactly
 `https://challenges.cloudflare.com` in `script-src` (the widget's `api.js`; under `'strict-dynamic'` it is loaded by the nonced app script and the
 host entry only serves browsers without strict-dynamic support), in `connect-src`, and as the only `frame-src` (the challenge is an iframe). The same
 holds for the moderate policy used by `CSP_REPORT_ONLY=true`. With Turnstile off none of this is added. A test covers both modes (`tests/csp.test.ts`) and the
@@ -78,5 +78,5 @@ Load them from a nonced script (`<Script nonce=...>` gets the nonce automaticall
 ## Known limits
 
 - Dev (`next dev`) adds `'unsafe-eval'` for React's debugging; production never does.
-- `upgrade-insecure-requests` is emitted only in production AND when the public origin (`PUBLIC_BASE_URL`/`APP_URL`) is `https://`. It rewrites every `http://` subresource to `https://`, which breaks a plain-HTTP staging box (`ERR_SSL_PROTOCOL_ERROR` on each asset). `CSP_UPGRADE_INSECURE=true|false` forces it on/off (default: unset = automatic as above; production deploys through deploy.sh always have an https `APP_URL`, so it stays on there). Never in development.
+- `upgrade-insecure-requests` is emitted only in production AND when the public origin (`APP_URL`, else `PUBLIC_BASE_URL`: `src/lib/base-url.ts`) is `https://`. It rewrites every `http://` subresource to `https://`, which breaks a plain-HTTP staging box (`ERR_SSL_PROTOCOL_ERROR` on each asset). `CSP_UPGRADE_INSECURE=true|false` forces it on/off (default: unset = automatic as above; production deploys through deploy.sh always have an https `APP_URL`, so it stays on there). Never in development.
 - Responses produced by the proxy itself (the 401/403/503 JSON, the login redirect) do not carry the page CSP; they contain no HTML.

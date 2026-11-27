@@ -7,6 +7,8 @@ import { meterSms } from '@/lib/messaging';
 import { smsSegments } from '@/lib/messaging/policy';
 import { consentReply, helpReply, isPositiveKeyword, mentionsStopWord, parseKeyword, startReply, stopReply, twiml } from '@/lib/messaging/keywords';
 import { logger } from '@/lib/log';
+import { baseUrlOrDev } from '@/lib/base-url';
+import { absoluteLegalUrl, legalLinks } from '@/lib/legal-links';
 import type { Business } from '@/lib/types';
 
 const log = logger('sms/inbound');
@@ -38,7 +40,7 @@ export async function applyInboundKeyword(business: Business, from: string, body
     return twiml(reply);
   }
   if (keyword === 'help') {
-    const reply = helpReply(business.name, business.phone);
+    const reply = helpReply(business.name, business.phone, absoluteLegalUrl((await legalLinks().catch(() => null))?.sms_terms ?? null, baseUrlOrDev()));
     await meterSms(business.id, smsSegments(reply));
     return twiml(reply);
   }

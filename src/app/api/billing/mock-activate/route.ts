@@ -1,3 +1,4 @@
+import { configEnv } from '@/lib/config';
 import { NextResponse } from 'next/server';
 import { fail } from '@/lib/http';
 import { demoModeEnabled } from '@/lib/auth';
@@ -15,10 +16,10 @@ export const runtime = 'nodejs';
  * Anywhere else it answers 404 so the route does not exist as far as a prober can tell.
  */
 export async function GET(req: Request) {
-  if (process.env.NODE_ENV === 'production' || process.env.STRIPE_SECRET_KEY?.trim() || !demoModeEnabled()) return fail('not found', 404);
+  if (process.env.NODE_ENV === 'production' || configEnv().STRIPE_SECRET_KEY?.trim() || !demoModeEnabled()) return fail('not found', 404);
   // A state change on GET: refuse anything a third-party site could trigger.
   if (req.headers.get('sec-fetch-site') === 'cross-site') return fail('cross-site request refused', 403);
-  const auth = await authenticate(req, { role: 'owner' });
+  const auth = await authenticate(req, { role: 'owner', stateChanging: true });
   if (!auth.ok) return auth.response;
   try {
     const requested = new URL(req.url).searchParams.get('business_id');

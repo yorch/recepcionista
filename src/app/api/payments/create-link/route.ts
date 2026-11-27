@@ -44,7 +44,7 @@ export async function POST(req: Request) {
     // without an amount the stored / computed one is used.
     const decision = resolveDepositAmount({
       policy: depositPolicyOf(business), priceEstimateCents: found?.price_estimate ?? null, requestedCents: body.amount_cents,
-      storedCents: found?.deposit_amount ?? null, actor: 'owner',
+      storedCents: found?.deposit_amount ?? null, actor: 'owner', plan: business.plan ?? null,
     });
     if (!decision.ok) return fail(decision.error, 422);
     const cents = decision.cents;

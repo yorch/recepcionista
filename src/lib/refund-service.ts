@@ -11,6 +11,7 @@
  *     and a retry reuses the SAME key.
  *  5. The result is recorded with recordRefund / markRefundFailed, audited, the booking hook fires, and the customer is texted.
  */
+import { configEnv } from '@/lib/config';
 import { claimEvent, getBooking, getBusiness, markRefundFailed, prisma, recordAudit, recordRefund, releaseEvent } from '@/lib/db';
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import { notifyRefund, type ChangeActor, type NoticeResult } from '@/lib/booking-changes';
@@ -145,7 +146,7 @@ export { maxRefundable };
 /** A pending refund is only treated as "never reached Stripe" once it is this old (an in-flight request has long finished by then). */
 export const REFUND_CHECK_MIN_AGE_MS = 30 * 60_000;
 /** The reconcile job looks at pending refunds older than this (hours, env REFUND_RECONCILE_AFTER_HOURS, default 6, 1..720). */
-export const refundReconcileAfterMs = (env: Record<string, string | undefined> = process.env): number => {
+export const refundReconcileAfterMs = (env: Record<string, string | undefined> = configEnv()): number => {
   const n = Number((env.REFUND_RECONCILE_AFTER_HOURS ?? '').trim());
   return (Number.isInteger(n) && n >= 1 && n <= 720 ? n : 6) * 3_600_000;
 };
@@ -276,7 +277,7 @@ export async function reconcileStuckRefunds(opts: { now?: Date; dryRun?: boolean
   const now = opts.now ?? new Date();
   const out: StuckRefundReport = { considered: 0, resolved: 0, items: [] };
   try {
-    if (!process.env.STRIPE_SECRET_KEY?.trim() && !opts.fetchImpl) return out; // mock / dev: nothing at Stripe to compare with
+    if (!configEnv().STRIPE_SECRET_KEY?.trim() && !opts.fetchImpl) return out; // mock / dev: nothing at Stripe to compare with
     const cutoff = new Date(now.getTime() - refundReconcileAfterMs(opts.env));
     // Least recently looked-at first, and rows looked at within the last hour are left out IN SQL (not after the LIMIT): refunds Stripe keeps
     // processing come back unchanged and must not fill the window for good while newer stuck refunds starve.

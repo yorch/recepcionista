@@ -15,6 +15,7 @@
  * budgets without spending them again. The numbers are hashed in the bucket keys (no phone numbers in rate_limit_buckets).
  * When a business budget passes 80% a loud log line and one rate-limited owner notice say so.
  */
+import { configEnv } from '@/lib/config';
 import crypto from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { claimEvent, completeEvent, releaseEvent } from '@/lib/db';
@@ -26,6 +27,7 @@ import { ownerLocaleFor } from '@/lib/i18n/owner-locale';
 import { logger } from '@/lib/log';
 import { attestationLevel, type Attestation } from '@/lib/stir';
 import type { Business } from '@/lib/types';
+import { knobOr } from '@/lib/admin/tenant-knobs';
 
 const log = logger('voice/caller-limits');
 
@@ -46,11 +48,11 @@ const intEnv = (raw: string | undefined, fallback: number, min: number, max = 1_
   return t !== '' && Number.isInteger(n) && n >= min && n <= max ? n : fallback;
 };
 
-export const perCallerPerHour = (kind: BudgetKind, env: Env = process.env): number =>
+export const perCallerPerHour = (kind: BudgetKind, env: Env = configEnv()): number =>
   kind === 'forward' ? intEnv(env.FORWARD_PER_CALLER_PER_HOUR, 3, 1) : intEnv(env.VOICEMAIL_PER_CALLER_PER_HOUR, 2, 1);
-export const withheldPerHour = (kind: BudgetKind, env: Env = process.env): number =>
+export const withheldPerHour = (kind: BudgetKind, env: Env = configEnv()): number =>
   kind === 'forward' ? intEnv(env.FORWARD_WITHHELD_PER_HOUR, 5, 1) : intEnv(env.VOICEMAIL_WITHHELD_PER_HOUR, 3, 1);
-export const unknownSharePct = (env: Env = process.env): number => intEnv(env.CALLER_UNKNOWN_SHARE_PCT, DEFAULT_UNKNOWN_SHARE_PCT, 1, 100);
+export const unknownSharePct = (env: Env = configEnv()): number => intEnv(env.CALLER_UNKNOWN_SHARE_PCT, DEFAULT_UNKNOWN_SHARE_PCT, 1, 100);
 
 /** Numbers Twilio / carriers send instead of a caller id. */
 const WITHHELD = new Set(['', 'anonymous', 'restricted', 'unavailable', 'unknown', 'private', 'blocked', '+266696687', '+86282452253', '+7378742883', '+2562533', '+8656696', '+464']);
@@ -63,13 +65,13 @@ const WITHHELD = new Set(['', 'anonymous', 'restricted', 'unavailable', 'unknown
  * `STIR_TRUST=off` (a deployment whose callers are mostly outside the US/Canada, where no verstat exists) restores caller-id identity.
  */
 export type TrustClass = 'verified' | 'unverified' | 'failed';
-export const stirTrustEnabled = (env: Env = process.env): boolean => (env.STIR_TRUST ?? '').trim().toLowerCase() !== 'off';
-export function trustClassOf(stirStatus: string | null | undefined, env: Env = process.env): TrustClass {
+export const stirTrustEnabled = (env: Env = configEnv()): boolean => (env.STIR_TRUST ?? '').trim().toLowerCase() !== 'off';
+export function trustClassOf(stirStatus: string | null | undefined, env: Env = configEnv()): TrustClass {
   if (!stirTrustEnabled(env)) return 'verified';
   const a: Attestation = attestationLevel(stirStatus);
   return a === 'A' ? 'verified' : a === 'failed' ? 'failed' : 'unverified';
 }
-export const failedPerHour = (kind: BudgetKind, env: Env = process.env): number => Math.max(1, Math.floor(withheldPerHour(kind, env) / 2));
+export const failedPerHour = (kind: BudgetKind, env: Env = configEnv()): number => Math.max(1, Math.floor(withheldPerHour(kind, env) / 2));
 
 export interface CallerKey {
   /** Valid E.164, or null when the caller withheld the number. */
@@ -131,14 +133,14 @@ export type BudgetDenial = 'caller_limited' | 'unknown_reserved' | 'business_bud
 export type BudgetDecision = { ok: true; known: boolean } | { ok: false; why: BudgetDenial; known: boolean };
 
 /** Per-business budget (calls per hour) of a kind, before the reservation split. */
-export const businessBudget = (kind: BudgetKind, env: Env = process.env): number =>
+export const businessBudget = (kind: BudgetKind, env: Env = configEnv()): number =>
   kind === 'forward' ? intEnv(env.FORWARD_CALLS_PER_HOUR, 60, 1) : intEnv(env.VOICEMAIL_PER_HOUR, 60, 1);
 
 /**
  * Charge a call against the caller's budget, the stranger share and the business budget (see the module comment). Never throws: a failing
  * store fails CLOSED ('check_failed'; the caller is sent to the cheap path).
  */
-export async function chargeCallBudget(kind: BudgetKind, ctx: BudgetContext, env: Env = process.env): Promise<BudgetDecision> {
+export async function chargeCallBudget(kind: BudgetKind, ctx: BudgetContext, env: Env = configEnv()): Promise<BudgetDecision> {
   const businessId = ctx.business.id;
   let claimed = false;
   const source = kind === 'forward' ? 'voice-forward-budget' : 'voice-voicemail-budget';
@@ -160,7 +162,7 @@ export async function chargeCallBudget(kind: BudgetKind, ctx: BudgetContext, env
       return { ok: false, why: 'caller_limited', known };
     }
 
-    const total = businessBudget(kind, env);
+    const total = await knobOr(businessId, kind === 'forward' ? 'forward.calls_per_hour' : 'voicemail.calls_per_hour', businessBudget(kind, env));
     if (!known) {
       const share = Math.max(1, Math.floor((total * unknownSharePct(env)) / 100));
       const strangers = await spend(`voice/${kind}:unknown:${businessId}`, share, first);
@@ -189,7 +191,7 @@ export async function chargeCallBudget(kind: BudgetKind, ctx: BudgetContext, env
  * hour per kind (it never names a number). Never throws.
  */
 export async function reportPressure(
-  business: Business, kind: BudgetKind, estimate: number, limit: number, strangersOnly: boolean, env: Env = process.env,
+  business: Business, kind: BudgetKind, estimate: number, limit: number, strangersOnly: boolean, env: Env = configEnv(),
 ): Promise<boolean> {
   try {
     const gate = await rateLimit(`voice/pressure:${kind}:${business.id}`, 1, HOUR, { failClosed: true });

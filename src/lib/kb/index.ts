@@ -3,6 +3,7 @@
  * Deterministic: no LLM calls, so provisioning stays fast.
  */
 import type { Business, ExtractionResult, FAQ, KnowledgeBase, Service } from '@/lib/types';
+import { EXTRACTION_LIMITS } from './limits';
 import { localDateKey, tzOf } from '@/lib/time';
 import { packOf, packPricingNotes, tx, type VerticalPack } from '@/lib/verticals';
 
@@ -95,7 +96,7 @@ function fmtHours(business: Business | null, kbHoursFallback?: string[]): string
 
 /** Upcoming holiday closures (business.closed_dates), at most 20, only today or later in the business zone. Empty string when none. */
 function fmtClosures(business: Business | null): string {
-  const dates = (business?.closed_dates ?? []).filter((d) => d >= localDateKey(new Date(), tzOf(business?.timezone))).slice(0, 20);
+  const dates = (business?.closed_dates ?? []).filter((d) => d >= localDateKey(new Date(), tzOf(business?.timezone))).slice(0, EXTRACTION_LIMITS.promptClosedDates);
   return dates.length ? `\n- Closed on these dates (no appointments, whatever the weekly hours say): ${dates.join(', ')}` : '';
 }
 
@@ -260,10 +261,10 @@ export function generateKnowledgeBase(
 ): Pick<KnowledgeBase, 'services' | 'faqs' | 'pricing_notes' | 'system_prompt' | 'call_script'> {
   const pack = packOf(business);
   const services: Service[] = extraction.services.length > 0
-    ? extraction.services.slice(0, 20)
+    ? extraction.services.slice(0, EXTRACTION_LIMITS.services)
     : [{ name: pack.pricing.fallbackService.name.en, description: pack.pricing.fallbackService.description.en, base_price: null, duration_minutes: 90 }];
 
-  const faqs: FAQ[] = extraction.faqs.slice(0, 15);
+  const faqs: FAQ[] = extraction.faqs.slice(0, EXTRACTION_LIMITS.faqs);
 
   const pricing_notes = extraction.pricing_notes?.trim() || packPricingNotes(pack);
 

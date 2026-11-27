@@ -6,8 +6,8 @@ import { authenticate, authErrorResponse, requireBusinessAccess, scopeBusinessId
 export interface Scope { principal: Principal; businessId: string; sessionId: string | null; ip: string; actor: { kind: 'user' | 'admin_token'; user_id: string | null; ip: string } }
 
 /** Authenticate (CSRF for cookies is inside `authenticate`), enforce the role, and pin the request to ONE business (admins pass ?business_id=). */
-export async function scoped(req: Request, role: Role): Promise<{ ok: true; s: Scope } | { ok: false; response: NextResponse }> {
-  const auth = await authenticate(req, { role });
+export async function scoped(req: Request, role: Role, opts: { stateChanging?: boolean } = {}): Promise<{ ok: true; s: Scope } | { ok: false; response: NextResponse }> {
+  const auth = await authenticate(req, { role, stateChanging: opts.stateChanging });
   if (!auth.ok) return { ok: false, response: auth.response as NextResponse };
   try {
     const businessId = scopeBusinessId(auth.principal, new URL(req.url).searchParams.get('business_id'));

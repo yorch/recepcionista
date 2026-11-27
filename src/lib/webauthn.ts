@@ -1,8 +1,8 @@
 /**
  * WebAuthn (passkeys) ceremonies on top of @simplewebauthn/server. Node runtime only.
  *
- *  - rpID / origins come from configuration, never from the request in production: the relying party is the host of PUBLIC_BASE_URL
- *    (else APP_URL); WEBAUTHN_RP_ID overrides it (a registrable parent domain) and WEBAUTHN_ORIGINS adds exact extra origins (staging).
+ *  - rpID / origins come from configuration, never from the request in production: the relying party is the host of APP_URL
+ *    (else PUBLIC_BASE_URL: src/lib/base-url.ts); WEBAUTHN_RP_ID overrides it (a registrable parent domain) and WEBAUTHN_ORIGINS adds exact extra origins (staging).
  *    The browser-reported origin must equal one of them EXACTLY (scheme, host, port), and its host must be the rpID or a subdomain.
  *  - challenges are single use, short lived (5 min) and bound to their purpose (and to the user for register/reauth): stored through
  *    createWebauthnChallenge and consumed atomically INSIDE verification, before the signature is checked.
@@ -10,12 +10,14 @@
  *  - the signature counter is NOT checked by the library (we hand it 0): recordPasskeyUse does it atomically in the database, so two
  *    concurrent assertions of one credential cannot both pass, and a regression is reported to the caller as `clone_suspected`.
  */
+import { configEnv } from '@/lib/config';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import type { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import {
   consumeWebauthnChallenge, createWebauthnChallenge, getPasskeyByCredentialId, listPasskeys, recordPasskeyUse,
 } from '@/lib/db/passkeys';
 import type { PasskeySummary, WebauthnPurpose } from '@/lib/types';
+import { configuredBaseUrl } from '@/lib/base-url';
 
 export const RP_NAME = 'Recepcionista';
 
@@ -37,8 +39,8 @@ function parseOrigin(v: string): URL | null {
  * The relying party. `null` when passkeys are not configured: production needs PUBLIC_BASE_URL/APP_URL (https). Outside production, with
  * neither set, the request's own origin is used (`devOrigin`), so `next dev` and tests work without configuration.
  */
-export function webauthnConfig(env: NodeJS.ProcessEnv = process.env, devOrigin?: string | null): WebauthnConfig | null {
-  const baseRaw = (env.PUBLIC_BASE_URL || env.APP_URL || '').trim();
+export function webauthnConfig(env: NodeJS.ProcessEnv = configEnv(), devOrigin?: string | null): WebauthnConfig | null {
+  const baseRaw = configuredBaseUrl(env);
   let base = baseRaw ? parseOrigin(baseRaw) : null;
   if (!base && !baseRaw && env.NODE_ENV !== 'production' && devOrigin) base = parseOrigin(devOrigin);
   const extra = (env.WEBAUTHN_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean).map(parseOrigin).filter((u): u is URL => u !== null);
@@ -56,7 +58,7 @@ export function webauthnConfig(env: NodeJS.ProcessEnv = process.env, devOrigin?:
 export function webauthnConfigFor(req: Request): WebauthnConfig | null {
   let dev: string | null = null;
   try { dev = new URL(req.url).origin; } catch { /* ignore */ }
-  return webauthnConfig(process.env, dev);
+  return webauthnConfig(configEnv(), dev);
 }
 
 const challengeUser = (purpose: WebauthnPurpose, userId?: string) => (purpose === 'login' ? undefined : userId);

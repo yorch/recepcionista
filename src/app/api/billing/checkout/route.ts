@@ -26,13 +26,13 @@ export async function POST(req: Request) {
     const body = await readJson<{ business_id?: unknown; return_path?: unknown; interval?: unknown }>(req).catch(() => ({} as { business_id?: unknown; return_path?: unknown; interval?: unknown }));
     const interval = parseInterval(body.interval);
     if (interval === 'invalid') return fail('interval must be "month" or "year"', 422);
-    if (interval === 'year' && !annualAvailable()) return fail('the annual plan is not available', 422);
     const requested = typeof body.business_id === 'string' && body.business_id ? body.business_id : null;
     const returnPath = checkoutReturnPath(body.return_path);
     const businessId = scopeBusinessId(principal, requested);
     if (!businessId) return fail('business_id is required', 422);
     const business = await getBusiness(businessId);
     if (!business) return fail('business not found', 404);
+    if (interval === 'year' && !annualAvailable(undefined, business.plan)) return fail('the annual plan is not available', 422);
     requireVerifiedEmail(principal);
 
     const status = business.billing_status ?? 'none';

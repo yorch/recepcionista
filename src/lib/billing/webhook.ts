@@ -6,6 +6,7 @@
  * alone: a business that already has a different stripe_customer_id refuses the event, and a customer id that
  * belongs to one business cannot be claimed by another through metadata.
  */
+import { configEnv } from '@/lib/config';
 import { getBusiness, getBusinessByStripeCustomer, recordAudit, setBillingState, updateBusiness } from '@/lib/db';
 import { endTrialNow, planName, retrieveCardFingerprint, retrieveSubscription, type RetrievedSubscription } from '@/lib/providers/stripe-billing';
 import { cardFingerprint, claimTrial } from './trial';
@@ -138,7 +139,7 @@ async function onCheckoutCompleted(event: StripeEvent, session: Record<string, u
 
   // Link first (so later subscription.* events resolve by customer), then take the authoritative state from Stripe.
   let sub: RetrievedSubscription | null = null;
-  if (process.env.STRIPE_SECRET_KEY) {
+  if (configEnv().STRIPE_SECRET_KEY) {
     try { sub = await retrieveSubscription(subId); } catch (err) {
       log.warn('subscription.retrieve_failed', { sub: subId, error: (err as Error).name }); // subscription.* events will follow
     }

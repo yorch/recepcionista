@@ -19,6 +19,11 @@
  * /api/voice/incoming is checked for rejection only: a validly signed call would create a call row.
  * Secrets are never printed. Exit code 1 if any check fails; secrets that are not set are SKIPped (counted as
  * a failure with --strict).
+ *
+ * Secrets held in the admin console (database) instead of the environment: this script cannot forge a signed request without the plaintext, and the console never returns it.
+ * With ADMIN_TOKEN set (the break-glass Bearer, read-only use) it asks `GET /api/admin/selftest` which providers and secrets the SERVER holds and from where
+ * (env | console | default), so a console-held secret is reported as "held in the console" instead of "not set", and a provider the server says is not ready FAILS the
+ * run. The local env secrets above stay the fallback (and the only way to run the "ACCEPTS correctly signed" checks).
  */
 import { createHmac } from 'node:crypto';
 
@@ -28,13 +33,29 @@ if (!/^https?:\/\//.test(BASE)) {
   process.exit(2);
 }
 const STRICT = process.argv.includes('--strict');
-// Twilio signs the URL it was configured with; the app uses PUBLIC_BASE_URL (fallback: the request URL).
-const SIGN_BASE = (process.env.PUBLIC_BASE_URL || BASE).trim().replace(/\/+$/, '');
+// Twilio signs the URL it was configured with; the app resolves ONE public origin (src/lib/base-url.ts: APP_URL, else PUBLIC_BASE_URL).
+const SIGN_BASE = BASE;
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const STRIPE_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const EL_SECRET = process.env.ELEVENLABS_WEBHOOK_SECRET;
 const BILLING_SECRET = process.env.STRIPE_BILLING_WEBHOOK_SECRET;
 const TOOL_SECRET = process.env.ELEVENLABS_TOOL_SECRET;
+const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+
+/** What `GET /api/admin/selftest` says the server holds (no value ever travels): null when ADMIN_TOKEN is unset or the call failed. */
+interface Card { provider: string; ready: boolean; missing: string[]; fields: Record<string, { set: boolean; source: 'env' | 'console' | 'default' }> }
+let selftestCards: Card[] | null = null;
+const heldByServer = (key: string): 'env' | 'console' | 'default' | null => {
+  for (const c of selftestCards ?? []) { const f = c.fields[key]; if (f?.set) return f.source; }
+  return null;
+};
+/** Why a secret-based check is skipped: not set anywhere, or held by the server (console / its own environment) where this script cannot read it. */
+function skipSecret(envName: string, key: string): { skip: string } {
+  const src = heldByServer(key);
+  if (src === 'console') return { skip: `${envName} is held in the admin console (database); the server has it, this script cannot read it. Set ${envName} here to run this check` };
+  if (src === 'env') return { skip: `${envName} is set on the server but not here; set it here to run this check` };
+  return { skip: selftestCards ? `${envName} is not set here and the server reports ${key} as not configured` : `${envName} not set here` };
+}
 
 type Status = 'PASS' | 'FAIL' | 'SKIP';
 const rows: { name: string; status: Status; detail: string }[] = [];
@@ -81,11 +102,29 @@ async function main() {
     return `200 db=${j.db}`;
   });
 
+  // 1b. provider readiness as the SERVER sees it (works when the secrets live in the database): GET /api/admin/selftest with the break-glass Bearer (read-only use)
+  const REQUIRED_PROVIDERS = ['twilio', 'elevenlabs', 'stripe', 'llm', 'email'];
+  await check('Provider readiness: GET /api/admin/selftest (ADMIN_TOKEN, no secret returned)', async () => {
+    if (!ADMIN_TOKEN) return { skip: 'ADMIN_TOKEN not set here: the selftest (which providers the server holds, and from where) is not consulted' };
+    const r = await http('/api/admin/selftest', { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } });
+    expect(r.status === 200, `status ${r.status} (ADMIN_TOKEN differs from the server's, or the server runs an older build)`);
+    const j = (await r.json()) as { ok?: boolean; data?: { providers?: Card[] } };
+    expect(j.ok === true && Array.isArray(j.data?.providers), 'unexpected selftest body');
+    selftestCards = j.data!.providers!;
+    const notReady = selftestCards.filter((c) => !c.ready);
+    const blocking = notReady.filter((c) => REQUIRED_PROVIDERS.includes(c.provider));
+    const where = (c: Card) => [...new Set(Object.values(c.fields).filter((f) => f.set).map((f) => f.source))].join('+') || 'unset';
+    const line = selftestCards.map((c) => `${c.provider}:${c.ready ? 'ready' : 'NOT READY'}(${where(c)})`).join(' ');
+    expect(blocking.length === 0, `not ready: ${blocking.map((c) => `${c.provider} (missing ${c.missing.join(', ') || 'configuration'})`).join('; ')}`);
+    return line;
+  });
+
   // 2. unauthenticated access is blocked
   const protectedPaths: [string, string][] = [
     ['GET', '/dashboard'], ['GET', '/dashboard/calls'], ['GET', '/onboarding'],
     ['GET', '/api/businesses'], ['GET', '/api/admin/retention'], ['POST', '/api/admin/retention'],
     ['GET', '/api/briefings/audio/x.mp3'], ['GET', '/audio/x.mp3'], ['POST', '/api/extract'],
+    ['GET', '/api/admin/selftest'], ['GET', '/api/admin/settings'], ['GET', '/api/admin/alerts'], ['GET', '/admin'], ['GET', '/admin/operations/jobs'],
     ['GET', '/api/voice/agent-prompt'],
     // tricky variants: encoding, dot segments, trailing slash, double slash, case, fake extension
     ['GET', '/dashboard/'], ['GET', '//dashboard'], ['GET', '/%64ashboard'], ['GET', '/api/businesses/'],
@@ -151,7 +190,7 @@ async function main() {
     return '403';
   });
   await check('Twilio /api/sms/inbound ACCEPTS correctly signed synthetic request', async () => {
-    if (!TWILIO_TOKEN) return { skip: 'TWILIO_AUTH_TOKEN not set here' };
+    if (!TWILIO_TOKEN) return skipSecret('TWILIO_AUTH_TOKEN', 'twilio.auth_token');
     const r = await twilioPost('/api/sms/inbound', smsParams, twilioSign(`${SIGN_BASE}/api/sms/inbound`, smsParams, TWILIO_TOKEN));
     expect(r.status === 200, `status ${r.status} (token or PUBLIC_BASE_URL differs from the server's, or Twilio URL scheme/host mismatch)`);
     return '200';
@@ -175,7 +214,7 @@ async function main() {
     return '401';
   });
   await check('ElevenLabs post-call ACCEPTS correctly signed synthetic event (post_call_audio, ignored)', async () => {
-    if (!EL_SECRET) return { skip: 'ELEVENLABS_WEBHOOK_SECRET not set here' };
+    if (!EL_SECRET) return skipSecret('ELEVENLABS_WEBHOOK_SECRET', 'elevenlabs.webhook_secret');
     const r = await elPost(elBody, elSign(EL_SECRET, elBody));
     expect(r.status === 200, `status ${r.status} (secret differs from the one the server holds / the one ElevenLabs signs with)`);
     return '200';
@@ -192,7 +231,7 @@ async function main() {
     return `${a.status}/${b.status}`;
   });
   await check('Stripe webhook ACCEPTS correctly signed synthetic event (ignored type)', async () => {
-    if (!STRIPE_SECRET) return { skip: 'STRIPE_WEBHOOK_SECRET not set here' };
+    if (!STRIPE_SECRET) return skipSecret('STRIPE_WEBHOOK_SECRET', 'stripe.webhook_secret');
     const r = await stPost(stripeSign(STRIPE_SECRET, stBody));
     expect(r.status === 200, `status ${r.status}`);
     return '200';
@@ -214,7 +253,7 @@ async function main() {
     return `${a.status}/${b.status}`;
   });
   await check('Tool route accepts the configured tool secret (unknown synthetic agent -> ok:false, no write)', async () => {
-    if (!TOOL_SECRET) return { skip: 'ELEVENLABS_TOOL_SECRET not set here' };
+    if (!TOOL_SECRET) return skipSecret('ELEVENLABS_TOOL_SECRET', 'elevenlabs.tool_secret');
     const r = await toolPost(TOOL_SECRET);
     expect(r.status === 200, `status ${r.status} (tool secret differs from the server's)`);
     const j = (await r.json()) as { ok?: boolean };
@@ -237,7 +276,7 @@ async function main() {
     return '401/401';
   });
   await check('Initiation webhook accepts the tool secret (unknown agent -> 200, well-formed, no tenant)', async () => {
-    if (!TOOL_SECRET) return { skip: 'ELEVENLABS_TOOL_SECRET not set here' };
+    if (!TOOL_SECRET) return skipSecret('ELEVENLABS_TOOL_SECRET', 'elevenlabs.tool_secret');
     const r = await initPost(TOOL_SECRET);
     expect(r.status === 200, `status ${r.status} (tool secret differs from the server's)`);
     const j = (await r.json()) as { type?: string; dynamic_variables?: { business_id?: string }; conversation_config_override?: unknown };
@@ -249,7 +288,7 @@ async function main() {
 
   // Phase 2 telephony: transfer configuration, call screening, live transcript. Non-destructive (rejections and empty tenants only).
   await check('Transfer config: an unknown tenant gets NO transfer destination (the per-call variable stays empty)', async () => {
-    if (!TOOL_SECRET) return { skip: 'ELEVENLABS_TOOL_SECRET not set here' };
+    if (!TOOL_SECRET) return skipSecret('ELEVENLABS_TOOL_SECRET', 'elevenlabs.tool_secret');
     const j = (await (await initPost(TOOL_SECRET)).json()) as { dynamic_variables?: Record<string, string> };
     const d = j.dynamic_variables ?? {};
     expect((d.transfer_destination ?? '') === '', 'a synthetic tenant received a transfer destination');
@@ -287,7 +326,7 @@ async function main() {
     return `${a.status}/${b.status}`;
   });
   await check('Billing webhook ACCEPTS correctly signed synthetic event (ignored type)', async () => {
-    if (!BILLING_SECRET) return { skip: 'STRIPE_BILLING_WEBHOOK_SECRET not set here' };
+    if (!BILLING_SECRET) return skipSecret('STRIPE_BILLING_WEBHOOK_SECRET', 'stripe.billing_webhook_secret');
     const r = await bbPost(stripeSign(BILLING_SECRET, bbBody));
     expect(r.status === 200, `status ${r.status} (secret differs from the billing endpoint's signing secret)`);
     return '200';
@@ -359,8 +398,9 @@ async function main() {
     });
     await check('Webhook base URL matches APP_URL', async () => {
       const sb = new URL(SIGN_BASE);
-      expect(sb.protocol === 'https:', `PUBLIC_BASE_URL is ${sb.protocol} but Twilio signs the https URL`);
-      expect(sb.host === u.host, `PUBLIC_BASE_URL host (${sb.host}) differs from APP_URL host (${u.host})`);
+      expect(sb.protocol === 'https:', `APP_URL is ${sb.protocol} but Twilio signs the https URL`);
+      const pub = (process.env.PUBLIC_BASE_URL || '').trim();
+      if (pub) expect(new URL(pub).host === u.host, `PUBLIC_BASE_URL host (${new URL(pub).host}) differs from APP_URL host (${u.host}); APP_URL wins on the server`);
       return sb.host;
     });
   } else {

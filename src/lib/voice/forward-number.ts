@@ -10,6 +10,7 @@
  * It must additionally be VERIFIED (SMS code, or the verified owner phone) before a call is ever dialled
  * (see call-mode.ts `trustedForwardNumber`).
  */
+import { configEnv } from '@/lib/config';
 import { parsePhoneNumberFromString } from 'libphonenumber-js/max';
 import { toE164 } from '@/lib/phone';
 import { allowedCountryCodes, countryAllowed } from '@/lib/messaging/recipient';
@@ -29,7 +30,7 @@ export const DEFAULT_DENY_AREA_CODES: readonly string[] = [
 ];
 
 /** The effective NANP area-code denylist: the defaults plus FORWARD_DENY_AREA_CODES. Malformed entries are ignored. */
-export function forwardDenyAreaCodes(env: Record<string, string | undefined> = process.env): Set<string> {
+export function forwardDenyAreaCodes(env: Record<string, string | undefined> = configEnv()): Set<string> {
   const extra = (env.FORWARD_DENY_AREA_CODES ?? '').split(',').map((c) => c.replace(/\D/g, '')).map((c) => (c.length === 4 && c.startsWith('1') ? c.slice(1) : c)).filter((c) => /^[2-9]\d{2}$/.test(c));
   return new Set([...DEFAULT_DENY_AREA_CODES, ...extra]);
 }
@@ -38,7 +39,7 @@ export function forwardDenyAreaCodes(env: Record<string, string | undefined> = p
  * A NANP (+1) number in a premium, toll-free or international-rate area code (Caribbean, Pacific territories) or a 976 exchange: where a text or a
  * call costs far more than in the US and revenue-share pumping lives. Texts the platform did not ask for (inbox auto-reply) are never sent there.
  */
-export function highRateNanpDestination(e164: string, env: Record<string, string | undefined> = process.env): boolean {
+export function highRateNanpDestination(e164: string, env: Record<string, string | undefined> = configEnv()): boolean {
   if (!e164.startsWith('+1') || e164.length !== 12) return false;
   return forwardDenyAreaCodes(env).has(e164.slice(2, 5)) || e164.slice(5, 8) === '976';
 }
@@ -58,7 +59,7 @@ const BLOCKED_PREFIXES = [
 export type ForwardNumberCheck = { ok: true; e164: string } | { ok: false; error: string };
 
 /** The configured allow-list for forward destinations (FORWARD_ALLOWED_COUNTRY_CODES, else the SMS list). */
-export function forwardAllowedCountryCodes(env: Record<string, string | undefined> = process.env): string[] {
+export function forwardAllowedCountryCodes(env: Record<string, string | undefined> = configEnv()): string[] {
   const own = env.FORWARD_ALLOWED_COUNTRY_CODES;
   return own && own.trim() ? allowedCountryCodes(own) : allowedCountryCodes(env.SMS_ALLOWED_COUNTRY_CODES);
 }

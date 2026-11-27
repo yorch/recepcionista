@@ -12,6 +12,8 @@
  * A forward mode whose number is missing or no longer verified never dials anything: the AI answers instead (the
  * safe, honest fallback) and the reason is returned so it can be logged and shown.
  */
+import { configEnv } from '@/lib/config';
+import { planAllows } from '@/lib/admin/plan-catalog';
 import { openWindow } from '@/lib/availability';
 import { defaultPhoneCountry, phoneCountry } from '@/lib/phone';
 import { localDateKey, tzOf } from '@/lib/time';
@@ -23,7 +25,7 @@ export const CALL_MODES: readonly CallMode[] = ['ai', 'paused', 'forward'];
 export const isCallMode = (v: unknown): v is CallMode => typeof v === 'string' && (CALL_MODES as readonly string[]).includes(v);
 
 type ModeFields = Pick<Business, 'call_mode' | 'forward_number_e164' | 'forward_number_verified_at' | 'forward_during_hours' | 'owner_phone_e164' | 'owner_phone_verified_at' | 'hours' | 'timezone' | 'closed_dates'>
-  & { phone_e164?: string | null; native_transfer_enabled?: boolean | null; elevenlabs_phone_number_id?: string | null };
+  & { phone_e164?: string | null; native_transfer_enabled?: boolean | null; elevenlabs_phone_number_id?: string | null; plan?: string | null };
 
 type TrustFields = Pick<ModeFields, 'forward_number_e164' | 'forward_number_verified_at' | 'owner_phone_e164' | 'owner_phone_verified_at' | 'phone_e164'>;
 
@@ -66,7 +68,7 @@ export function isOpenNow(hours: Hours | undefined | null, tz: string, now: Date
 }
 
 export type CallRoute =
-  | { action: 'ai'; why: 'mode_ai' | 'forward_outside_hours' | 'forward_number_unverified' | 'forward_number_rejected' }
+  | { action: 'ai'; why: 'mode_ai' | 'forward_outside_hours' | 'forward_number_unverified' | 'forward_number_rejected' | 'forward_not_in_plan' }
   | { action: 'paused'; why?: 'forward_unavailable_on_line' }
   | { action: 'forward'; to: string };
 
@@ -79,15 +81,16 @@ export function resolveCallRoute(b: ModeFields, now: Date = new Date(), line: Li
   const mode = b.call_mode ?? 'ai';
   if (mode === 'paused') return { action: 'paused' };
   if (mode !== 'forward') return { action: 'ai', why: 'mode_ai' };
+  if (!planAllows(b.plan, 'call_forwarding')) return { action: 'ai', why: 'forward_not_in_plan' }; // the plan does not include call forwarding (admin console plan feature): the AI answers
   const target = forwardTarget(b);
   if (!target.ok) return { action: 'ai', why: target.why === 'rejected' ? 'forward_number_rejected' : 'forward_number_unverified' };
   if (b.forward_during_hours && !isOpenNow(b.hours, tzOf(b.timezone), now, b.closed_dates)) return { action: 'ai', why: 'forward_outside_hours' };
-  if (!forwardingSupported(line, process.env, b)) return { action: 'paused', why: 'forward_unavailable_on_line' };
+  if (!forwardingSupported(line, configEnv(), b)) return { action: 'paused', why: 'forward_unavailable_on_line' };
   return { action: 'forward', to: target.to };
 }
 
 /** Short status line for the dashboard toggle, e.g. "AI is answering calls". */
-export type CallModeLabelCode = 'forward_unavailable' | 'paused' | 'forwarding' | 'ai_after_hours' | 'ai_rejected' | 'ai_unverified' | 'ai';
+export type CallModeLabelCode = 'forward_unavailable' | 'paused' | 'forwarding' | 'ai_after_hours' | 'ai_rejected' | 'ai_unverified' | 'ai_plan' | 'ai';
 
 /** Same decision as callModeLabel, as a code the dashboard localizes (`callmode.label.<code>`). */
 export function callModeLabelCode(b: ModeFields, now: Date = new Date(), line: LineKind = effectiveLineKindFor(b)): CallModeLabelCode {
@@ -97,6 +100,7 @@ export function callModeLabelCode(b: ModeFields, now: Date = new Date(), line: L
   if ((b.call_mode ?? 'ai') === 'forward') {
     if (r.why === 'forward_outside_hours') return 'ai_after_hours';
     if (r.why === 'forward_number_rejected') return 'ai_rejected';
+    if (r.why === 'forward_not_in_plan') return 'ai_plan';
     return 'ai_unverified';
   }
   return 'ai';
@@ -114,6 +118,7 @@ export function callModeLabel(b: ModeFields, now: Date = new Date(), line: LineK
   if ((b.call_mode ?? 'ai') === 'forward') {
     if (r.why === 'forward_outside_hours') return { text: 'AI is answering calls (after hours; forwarding resumes when you open)', tone: 'ok' };
     if (r.why === 'forward_number_rejected') return { text: 'AI is answering calls (the forward number is not allowed)', tone: 'warn' };
+    if (r.why === 'forward_not_in_plan') return { text: 'AI is answering calls (call forwarding is not included in this plan)', tone: 'warn' };
     return { text: 'AI is answering calls (forward number is not verified)', tone: 'warn' };
   }
   return { text: 'AI is answering calls', tone: 'ok' };
@@ -158,7 +163,7 @@ export function callModeView(b: ModeFields & { forward_number?: string | null },
     forward_verified: trusted !== null,
     forward_is_owner_phone: trusted !== null && !b.forward_number_verified_at,
     route_now: resolveCallRoute(b, now, line).action,
-    forward_supported: forwardingSupported(line, process.env, b),
+    forward_supported: forwardingSupported(line, configEnv(), b),
     forward_blocked: !target.ok && target.why === 'rejected' ? (target.error ?? 'this number cannot be used for forwarding') : null,
     label: label.text,
     label_code: callModeLabelCode(b, now, line),

@@ -1,6 +1,7 @@
+import { configEnv } from '@/lib/config';
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate } from '@/lib/session';
-import { limitRequest } from '@/lib/ratelimit';
+import { requireRecentAuth } from '@/lib/session';
+import { guardAdminRoute } from '@/lib/admin/guard';
 import { prisma, recordAudit, getBusiness } from '@/lib/db';
 import { ensureTenantLine, lineApplicable, lineImportBlockedReason } from '@/lib/voice/tenant-line';
 import { lineKindFor } from '@/lib/voice/line';
@@ -50,10 +51,9 @@ export interface RepairResult {
  *  - Never touches TWILIO_PHONE_NUMBER (the platform sender) or mock-pool numbers. Audited as `admin.repair_numbers` (counts + business ids).
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/repair-numbers', 6);
-  if (limited) return limited;
+  const g = await guardAdminRoute(req, { permission: 'providers.repair', rate: { name: 'repair-numbers', max: 6 } }); // permission providers.repair
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const raw = await readJson<unknown>(req).catch(() => ({}));
     if (raw !== null && raw !== undefined && (typeof raw !== 'object' || Array.isArray(raw))) return fail('invalid body', 422);
@@ -61,6 +61,10 @@ export async function POST(req: Request) {
     for (const k of Object.keys(body)) if (!['dry_run', 'business_ids', 'limit', 'cursor', 'refresh_credentials'].includes(k)) return fail(`unknown field "${k}"`, 422);
     if (body.dry_run !== undefined && typeof body.dry_run !== 'boolean') return fail('dry_run must be true or false', 422);
     const dryRun = body.dry_run !== false;
+    if (!dryRun) { // writes to Twilio / ElevenLabs: step-up for a cookie session (a dry run only reads)
+      const stale = requireRecentAuth(auth);
+      if (stale) return stale;
+    }
     if (body.refresh_credentials !== undefined && typeof body.refresh_credentials !== 'boolean') return fail('refresh_credentials must be true or false', 422);
     const refreshCredentials = body.refresh_credentials === true;
     let limit = REPAIR_DEFAULT_BATCH;
@@ -78,7 +82,7 @@ export async function POST(req: Request) {
     }
     const hooks = numberWebhooks();
     if (!hooks) return fail('no public base URL is configured (PUBLIC_BASE_URL or APP_URL): the webhook addresses are unknown', 503);
-    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE_NUMBER) return fail('Twilio is not configured: there are no numbers to repair', 503);
+    if (!configEnv().TWILIO_ACCOUNT_SID || !configEnv().TWILIO_AUTH_TOKEN || !configEnv().TWILIO_PHONE_NUMBER) return fail('Twilio is not configured: there are no numbers to repair', 503);
 
     const rows = await prisma.business.findMany({
       where: { phone: { not: null }, ...(ids ? { id: { in: ids } } : {}), ...(typeof body.cursor === 'string' ? { id: { gt: body.cursor, ...(ids ? { in: ids } : {}) } } : {}) },

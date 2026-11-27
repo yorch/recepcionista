@@ -28,6 +28,8 @@ import { ownerReplyDailyLimit, ownerReplyEnabled, OWNER_REPLY_LEAD_WINDOW_MS, OW
 import { customerReplyText } from '@/lib/voice/owner/reply-text';
 import type { Business } from '@/lib/types';
 import type { OwnerReply } from '@prisma/client';
+import { knobOr, quietWindowFor } from '@/lib/admin/tenant-knobs';
+import { planAllows } from '@/lib/admin/plan-catalog';
 
 const log = logger('owner-reply');
 
@@ -78,6 +80,7 @@ type ClaimResult = { kind: 'claimed' } | { kind: 'refused'; reason: ReplyRefusal
  * drafts see each other's 'sending' rows, so the cap cannot be overrun. A refusal is written in the same transaction.
  */
 async function claimReply(business: Business, replyId: string, now: Date): Promise<ClaimResult> {
+  const dailyLimit = await knobOr(business.id, 'owner.reply_daily_limit', ownerReplyDailyLimit());
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`owner-reply-send:${business.id}`}))`;
     const row = await tx.ownerReply.findFirst({ where: { id: replyId, businessId: business.id, status: 'proposed', expiresAt: { gt: now } } });
@@ -85,10 +88,10 @@ async function claimReply(business: Business, replyId: string, now: Date): Promi
     const day = new Date(now.getTime() - 24 * 3600_000);
     const sentToday = await tx.ownerReply.count({ where: { businessId: business.id, status: { in: [...SENT_LIKE] }, decidedAt: { gte: day } } });
     const hourAgo = new Date(now.getTime() - 3600_000);
-    const dup = sentToday >= ownerReplyDailyLimit() ? 0 : await tx.ownerReply.count({
+    const dup = sentToday >= dailyLimit ? 0 : await tx.ownerReply.count({
       where: { businessId: business.id, toE164: row.toE164, body: row.body, id: { not: row.id }, status: { in: [...SENT_LIKE] }, decidedAt: { gte: hourAgo } },
     });
-    const refuse = sentToday >= ownerReplyDailyLimit() ? 'daily_limit' : dup > 0 ? 'duplicate' : null;
+    const refuse = sentToday >= dailyLimit ? 'daily_limit' : dup > 0 ? 'duplicate' : null;
     if (refuse) {
       await tx.ownerReply.update({ where: { id: row.id }, data: { status: 'refused', refuseReason: refuse, decidedAt: now } });
       return { kind: 'refused', reason: refuse } as const;
@@ -137,13 +140,13 @@ export async function confirmOwnerReply(business: Business, replyId: string, now
     await auditReply('sent', business.id, reply, { sms: smsId, segments });
   };
   try {
-    if (!ownerReplyEnabled()) return await refuse('disabled');
+    if (!ownerReplyEnabled() || !planAllows(business.plan, 'owner_reply')) return await refuse('disabled');
     if (!(await leadStillValid(reply, now))) return await refuse('lead_gone');
     if (reply.toE164 === business.owner_phone_e164 || (business.phone_e164 && reply.toE164 === business.phone_e164)) return await refuse('self');
     const country = countryForBusiness(business);
     // The opt-out list always wins (sendAndLog checks it again; checked here to say so honestly and to burn no budget).
     if (await isOptedOut(business.id, reply.toE164, country)) return await refuse('opted_out');
-    if (isQuietHour(now, tzOf(business))) return await refuse('quiet_hours');
+    if (isQuietHour(now, tzOf(business), await quietWindowFor(business.id))) return await refuse('quiet_hours');
     const text = customerReplyText(business.name, reply.body);
     if (!text.ok) return await refuse('too_long');
     segments = text.segments;

@@ -11,6 +11,9 @@
  * a nonce, and inline CSS cannot execute script. Dev adds 'unsafe-eval' (React debugging) and ws: (HMR).
  */
 
+import { configEnv } from '@/lib/config';
+import { configuredBaseUrl } from '@/lib/base-url';
+
 export type CspMode = 'strict' | 'moderate';
 
 export interface CspOptions {
@@ -30,25 +33,23 @@ export interface CspOptions {
 
 export const TURNSTILE_ORIGIN = 'https://challenges.cloudflare.com';
 
-/** Is the Turnstile widget enabled for this deployment? (site key = public, build time; secret = server.) */
-export function turnstileConfigured(env: Record<string, string | undefined> = process.env): boolean {
-  // The literal process.env.NEXT_PUBLIC_* read lets Next inline the build-time value into the proxy bundle.
-  return Boolean((env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY || '').trim());
+/** Is the Turnstile widget enabled for this deployment? (site key = public, secret = server; both come from the config snapshot at request time since Phase 6.) */
+export function turnstileConfigured(env: Record<string, string | undefined> = configEnv()): boolean {
+  return Boolean((env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || env.TURNSTILE_SECRET_KEY || '').trim());
 }
 
 /**
  * Should the policy carry `upgrade-insecure-requests`? It makes the browser rewrite every http:// subresource to https://,
  * which BREAKS a plain-HTTP deployment (a staging box on `http://host:3000` logs ERR_SSL_PROTOCOL_ERROR for every asset).
  * CSP_UPGRADE_INSECURE=true|false forces it; unset/auto = on only in production AND when the public origin
- * (PUBLIC_BASE_URL / APP_URL / NEXT_PUBLIC_APP_URL) is https. Never in development.
+ * (src/lib/base-url.ts: APP_URL, else PUBLIC_BASE_URL) is https. Never in development.
  */
-export function upgradeInsecureEnabled(env: Record<string, string | undefined> = process.env): boolean {
+export function upgradeInsecureEnabled(env: Record<string, string | undefined> = configEnv()): boolean {
   if (env.NODE_ENV !== 'production') return false;
   const v = (env.CSP_UPGRADE_INSECURE ?? '').trim().toLowerCase();
   if (v === 'true') return true;
   if (v === 'false') return false;
-  const origin = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().toLowerCase();
-  return origin.startsWith('https://');
+  return configuredBaseUrl(env).toLowerCase().startsWith('https://');
 }
 
 export function buildCsp(o: CspOptions): string {
@@ -88,7 +89,7 @@ export interface CspHeaders {
 }
 
 /** Headers for a page response. `reportOnly` (CSP_REPORT_ONLY=true): enforce `moderate`, report violations of `strict`. */
-export function cspHeadersFor(nonce: string, env: NodeJS.ProcessEnv = process.env): CspHeaders {
+export function cspHeadersFor(nonce: string, env: NodeJS.ProcessEnv = configEnv()): CspHeaders {
   const reportUri = env.CSP_REPORT_URI?.trim() || undefined;
   const isDev = env.NODE_ENV !== 'production';
   const turnstile = turnstileConfigured(env);

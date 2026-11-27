@@ -5,6 +5,7 @@
  * webhook (voice/postcall.ts), so a late webhook and this job can never both add the minutes. Only AI seconds are recorded (never forward / voicemail seconds). Retries back off exponentially
  * (attempt n waits 2^n x 10 min after the base delay); after RECONCILE_MAX_ATTEMPTS the job gives up with an audit row and an error log.
  */
+import { configEnv } from '@/lib/config';
 import {
   bumpReconcileAttempt, claimCallMetering, getCall, getCallDialSeconds, listCallsNeedingReconcile, listPendingForwards, setForwardPending, prisma, recordAudit, recordCallSeconds, releaseCallMetering, updateCall,
 } from '@/lib/db';
@@ -19,8 +20,8 @@ const intEnv = (raw: string | undefined, d: number, min: number, max: number): n
   const n = Number((raw ?? '').trim());
   return (raw ?? '').trim() !== '' && Number.isInteger(n) && n >= min && n <= max ? n : d;
 };
-export const reconcileAfterMinutes = (env: Record<string, string | undefined> = process.env): number => intEnv(env.RECONCILE_AFTER_MINUTES, 20, 2, 24 * 60);
-export const reconcileMaxAttempts = (env: Record<string, string | undefined> = process.env): number => intEnv(env.RECONCILE_MAX_ATTEMPTS, 5, 1, 20);
+export const reconcileAfterMinutes = (env: Record<string, string | undefined> = configEnv()): number => intEnv(env.RECONCILE_AFTER_MINUTES, 20, 2, 24 * 60);
+export const reconcileMaxAttempts = (env: Record<string, string | undefined> = configEnv()): number => intEnv(env.RECONCILE_MAX_ATTEMPTS, 5, 1, 20);
 /** Minutes to wait (after the base delay) before try number `attempts + 1`. */
 export const reconcileBackoffMinutes = (attempts: number): number => (attempts <= 0 ? 0 : Math.min(6 * 60, 10 * 2 ** (attempts - 1)));
 
@@ -36,7 +37,7 @@ export interface ReconcileDeps extends FetchDeps {
 }
 
 export async function reconcileUnmeteredCalls(deps: ReconcileDeps = {}): Promise<ReconcileReport> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const now = deps.now ?? new Date();
   const maxAttempts = reconcileMaxAttempts(env);
   // Without a provider key there is nothing to fetch (dev / demo): do not burn the attempts.

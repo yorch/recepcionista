@@ -25,12 +25,16 @@
  * Switches: JOBS=on|off (default on in production, off in development/test), JOBS_TICK_SECONDS (default 60).
  * RETENTION_JOB=on still works on its own (JOBS unset in development) and is off by default. JOBS=off turns everything off.
  */
+import { configEnv } from '@/lib/config';
 import {
   claimEvent, cleanupProcessedEvents, completeEvent, deleteExpiredEmailTokens, deleteExpiredSessions, deleteExpiredWebauthnChallenges, WEBAUTHN_CHALLENGE_GRACE_MS, EMAIL_TOKEN_GRACE_MS,
   briefingAudioKeepDays, getBusiness, isProvisioningAllowed, pruneBriefingAudio, listLiveBusinessesForJobs, prisma, PROCESSED_EVENTS_RETENTION_MS, recordAudit, releaseEvent,
   checkSmsAllowed, recordingDeletionStatus, withLease,
 } from '@/lib/db';
 import { appBaseUrl } from '@/lib/email/templates';
+import { withJobRun, type JobTrigger } from '@/lib/admin/job-runs';
+import { cleanupConsoleTables } from '@/lib/admin/cleanup';
+import { dispatchAlertNotices } from '@/lib/admin/alerts';
 import { generateBriefing } from '@/lib/briefing';
 import { findGratitudeCandidates, runGratitudeSweep } from '@/lib/gratitude';
 import { logger } from '@/lib/log';
@@ -50,6 +54,7 @@ import type { JobBusiness } from '@/lib/db';
 import {
   briefingSlot, hourBucket, inQuietHours, JOB_NAMES, jobsSetting, nextBriefingAt, tickSeconds, type JobName,
 } from './schedule';
+import { knobFrom, loadTenantOverridesMany, quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 export { JOB_NAMES, isJobName, jobsSetting, tickSeconds, briefingSlot, nextBriefingAt, hourBucket } from './schedule';
 export type { JobName } from './schedule';
@@ -133,6 +138,9 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   /** Test seam: how often the per-business job lease is renewed (default ttl/3). */
   leaseRenewMs?: number;
+  /** History (job_runs): who started the run ('system' for the scheduler, a user id, 'admin_token') and how. Default: system / schedule. */
+  actor?: string;
+  trigger?: JobTrigger;
 }
 
 // ---- state ------------------------------------------------------------------------------------
@@ -166,6 +174,9 @@ async function auditRun(report: JobReport): Promise<void> {
   });
 }
 
+/** The quiet window from already loaded overrides. */
+const quietFrom = (o: Record<string, unknown>) => ({ start: knobFrom<number>('messaging.quiet_start_hour', o), end: knobFrom<number>('messaging.quiet_end_hour', o) });
+
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err)).slice(0, 200);
 
 /**
@@ -195,7 +206,7 @@ export async function notifyOwnerOfBriefing(business: Business, briefing: Briefi
     const status = ownerAlertStatus(business);
     if (status === 'no_owner_phone') return 'skipped_no_owner_phone';
     if (status === 'unverified') return 'skipped_owner_unverified';
-    if (inQuietHours(now, business.timezone)) return 'skipped_quiet_hours';
+    if (inQuietHours(now, business.timezone, await quietWindowFor(business.id))) return 'skipped_quiet_hours';
     const body = makeT(await ownerLocaleFor(business))('alert.briefing', { date: briefing.date, url: `${appBaseUrl()}/dashboard/briefings` });
     const allowed = await checkSmsAllowed(business.id, now, smsSegments(body));
     if (!allowed.ok) return 'skipped_cap';
@@ -218,9 +229,12 @@ export async function runDailyBriefings(opts: RunOptions = {}): Promise<JobRepor
 
   // Cheap pass first (pure, no I/O): which tenants are due at all? After 18:00 local a finished tenant costs nothing per tick.
   const due: Array<{ b: JobBusiness; slot: ReturnType<typeof briefingSlot>; claimId: string }> = [];
+  const knobs = await loadTenantOverridesMany(businesses.map((b) => b.id)); // tenant comfort knobs: briefing on / off and hour
   for (const b of businesses) {
-    const slot = briefingSlot(now, b.timezone);
-    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: 'skipped_billing' }); continue; }
+    const o = knobs.get(b.id) ?? {};
+    const slot = briefingSlot(now, b.timezone, knobFrom<number>('jobs.briefing_hour', o));
+    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: b.suspended_at ? 'skipped_suspended' : 'skipped_billing' }); continue; }
+    if (knobFrom<boolean>('jobs.briefing_enabled', o) === false) { report.items.push({ business_id: b.id, outcome: 'skipped_disabled' }); continue; }
     if (!slot.due && !opts.force) continue; // not yet 18:00 there: not worth a report row
     // A manual (forced) run has its own claim so it never uses up the scheduled 18:00 run of that day.
     due.push({ b, slot, claimId: `${b.id}:${slot.date}${opts.force ? ':manual' : ''}` });
@@ -296,11 +310,13 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
   });
   const swept = new Set(sweptRows.map((r) => r.id));
 
+  const knobs = await loadTenantOverridesMany(businesses.map((b) => b.id));
   for (const b of businesses) {
-    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: 'skipped_billing' }); continue; }
+    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: b.suspended_at ? 'skipped_suspended' : 'skipped_billing' }); continue; }
     const claimId = `${bucket}:${b.id}`;
     if (swept.has(claimId)) continue;
-    if (inQuietHours(now, b.timezone)) { report.items.push({ business_id: b.id, outcome: 'skipped_quiet_hours' }); continue; }
+    if (knobFrom<boolean>('jobs.gratitude_enabled', knobs.get(b.id) ?? {}) === false) { report.items.push({ business_id: b.id, outcome: 'skipped_disabled' }); continue; }
+    if (inQuietHours(now, b.timezone, quietFrom(knobs.get(b.id) ?? {}))) { report.items.push({ business_id: b.id, outcome: 'skipped_quiet_hours' }); continue; }
     if (report.processed >= MAX_GRATITUDE_PER_TICK && !dryRun) { report.items.push({ business_id: b.id, outcome: 'deferred_to_next_tick' }); continue; }
     if (dryRun) {
       report.items.push({ business_id: b.id, outcome: 'would_sweep', detail: { candidates: await deps.countGratitudeCandidates(b.id) } });
@@ -365,6 +381,7 @@ export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
       sessions: await deleteExpiredSessions(now),
       email_tokens: await deleteExpiredEmailTokens(now),
       processed_events: await cleanupProcessedEvents(now, true),
+      ...(await cleanupConsoleTables(now)), // job_runs history, instance heartbeats, previous secret envelopes (7 days), expired support grants
       rate_limit_buckets: await cleanupRateLimitBuckets(now),
       webauthn_challenges: await deleteExpiredWebauthnChallenges(now), // expired passkey challenges (kept a day for forensics); no longer a random 2% side effect of issuing one
       briefing_audio: (await pruneBriefingAudio({ now })).removed, // stored briefing clips older than BRIEFING_AUDIO_KEEP_DAYS (default 30); the briefing text stays
@@ -375,6 +392,8 @@ export async function runCleanup(opts: RunOptions = {}): Promise<JobReport> {
     report.items.push({ outcome: 'cleaned', detail: run.value });
     await markRun('cleanup', now);
     if (Object.values(run.value).some((n) => n > 0)) await auditRun(report);
+    // Alert routing (admin console): mail the open critical alerts to the admins / ALERT_EMAIL / platform.alert_recipients (at most once per 6 h per alert). Never throws; off under NODE_ENV=test so no test mails admins.
+    if (process.env.NODE_ENV !== 'test') await dispatchAlertNotices({ now });
   } catch (err) {
     report.errors++;
     report.items.push({ outcome: 'error', detail: { error: errMsg(err) } });
@@ -450,8 +469,12 @@ export async function runGoogleCalendarJob(opts: RunOptions = {}): Promise<JobRe
 
 // ---- dispatch, tick, runner -------------------------------------------------------------------
 
-/** Run one job by name now (admin endpoint and tests). */
+/** Run one job by name now (admin endpoint, the scheduler and tests). EVERY run is recorded in job_runs (dry runs and runs without work too). */
 export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> {
+  return withJobRun(job, { actor: opts.actor, trigger: opts.trigger ?? (opts.force ? 'manual' : 'schedule'), dryRun: opts.dryRun === true }, () => runJobUnrecorded(job, opts));
+}
+
+function runJobUnrecorded(job: JobName, opts: RunOptions): Promise<JobReport> {
   switch (job) {
     case 'daily_briefing': return runDailyBriefings(opts);
     case 'gratitude_sweep': return runGratitudeJob(opts);
@@ -467,7 +490,7 @@ export function runJob(job: JobName, opts: RunOptions = {}): Promise<JobReport> 
 }
 
 /** Which jobs this instance's configuration turns on. */
-export function enabledJobs(env: NodeJS.ProcessEnv = process.env): JobName[] {
+export function enabledJobs(env: NodeJS.ProcessEnv = configEnv()): JobName[] {
   const s = jobsSetting(env);
   const retention = retentionJobEnabled(env.RETENTION_JOB);
   const release = tenantReleaseSetting(env) !== 'off'; // `report` (dry-run report) or `on` (acts): see jobs/tenants.ts
@@ -479,7 +502,7 @@ export function enabledJobs(env: NodeJS.ProcessEnv = process.env): JobName[] {
 /** One scheduler pass: the due jobs, in order. Never throws. */
 export async function runJobTick(opts: { now?: Date; env?: NodeJS.ProcessEnv; jobs?: JobName[]; deps?: Partial<JobDeps> } = {}): Promise<JobReport[]> {
   const now = opts.now ?? new Date();
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   const jobs = opts.jobs ?? enabledJobs(env);
   const reports: JobReport[] = [];
   for (const job of jobs) {
@@ -525,7 +548,7 @@ export interface JobStatus {
   note?: string;
 }
 
-export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv = process.env): Promise<{
+export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv = configEnv()): Promise<{
   runner: { jobs_setting: 'on' | 'off'; explicit: boolean; tick_seconds: number; enabled_jobs: JobName[] };
   jobs: JobStatus[];
 }> {
@@ -539,11 +562,13 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
     let next: Date | null = null;
     let note: string | undefined;
     if (name === 'daily_briefing') {
-      const ids = businesses.map((b) => `${b.id}:${briefingSlot(now, b.timezone).date}`);
+      const knobs = await loadTenantOverridesMany(businesses.map((b) => b.id));
+      const hourOf = (id: string) => knobFrom<number>('jobs.briefing_hour', knobs.get(id) ?? {});
+      const ids = businesses.map((b) => `${b.id}:${briefingSlot(now, b.timezone, hourOf(b.id)).date}`);
       const done = new Set((await prisma.processedEvent.findMany({ where: { source: BRIEFING_CLAIM_SOURCE, id: { in: ids }, status: 'done' }, select: { id: true } })).map((r) => r.id));
       for (const b of businesses) {
-        const slot = briefingSlot(now, b.timezone);
-        const t = slot.due && !done.has(`${b.id}:${slot.date}`) ? now : nextBriefingAt(now, b.timezone);
+        const slot = briefingSlot(now, b.timezone, hourOf(b.id));
+        const t = slot.due && !done.has(`${b.id}:${slot.date}`) ? now : nextBriefingAt(now, b.timezone, hourOf(b.id));
         if (!next || t < next) next = t;
       }
       note = `${businesses.length} live business(es) eligible`;
@@ -593,37 +618,87 @@ export async function jobsStatus(now: Date = new Date(), env: NodeJS.ProcessEnv 
   };
 }
 
-// ---- the process-level runner -----------------------------------------------------------------
+// ---- the process-level runner -----------------------------------------------------------------------------------------------
+//
+// The runner ALWAYS starts (once per process) and decides on EVERY tick, from the live configuration, which jobs are enabled and how often to
+// tick: a console change to JOBS / RETENTION_JOB / TENANT_RELEASE_JOB / JOBS_TICK_SECONDS takes effect on the next pass without a restart.
+// It never holds an env object: `env` is only passed through when a caller (a test) injects one; otherwise `configEnv()` is read per use.
 
 let started = false;
 let ticking = false;
+let timer: ReturnType<typeof setInterval> | null = null;
+let firstTimer: ReturnType<typeof setTimeout> | null = null;
+let armedSeconds = 0;
+let lastSignature = '';
+/** Only a test injects an env; production passes nothing and every pass reads `configEnv()` afresh. */
+let injectedEnv: NodeJS.ProcessEnv | undefined;
 
-/** Start the interval runner once per process. Returns false when nothing is enabled here. */
-export function startJobRunner(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (started) return true;
-  const jobs = enabledJobs(env);
-  if (!retentionJobEnabled(env.RETENTION_JOB)) {
+const runnerEnv = (): NodeJS.ProcessEnv => injectedEnv ?? configEnv();
+
+function armInterval(seconds: number): void {
+  if (timer) clearInterval(timer);
+  armedSeconds = seconds;
+  timer = setInterval(() => { void runnerTick(); }, seconds * 1000);
+  timer.unref?.();
+}
+
+function announce(jobs: JobName[], cur: NodeJS.ProcessEnv): void {
+  if (jobs.length === 0) log.info('disabled', { JOBS: jobsSetting(cur).explicit ? 'off' : 'unset (off outside production)', note: 'set JOBS=on to run the daily briefing, gratitude sweep and cleanup' });
+  else log.info('scheduled', { jobs, tick_seconds: tickSeconds(cur) });
+}
+
+/**
+ * One pass of the process-level runner: re-read the configuration, re-arm the interval when the tick period changed, announce a change of
+ * the enabled set, run the enabled jobs. Exported for tests; the interval calls it.
+ */
+export async function runnerTick(): Promise<void> {
+  if (ticking) return; // a slow pass never overlaps the next one in this process (other processes are fenced by leases)
+  ticking = true;
+  try {
+    const cur = runnerEnv();
+    const secs = tickSeconds(cur);
+    if (secs !== armedSeconds && timer) { log.info('rearmed', { tick_seconds: secs, was: armedSeconds }); armInterval(secs); }
+    const jobs = enabledJobs(cur);
+    const signature = jobs.join(',');
+    if (signature !== lastSignature) { announce(jobs, cur); lastSignature = signature; }
+    if (jobs.length > 0) await runJobTick({ ...(injectedEnv ? { env: injectedEnv } : {}), jobs });
+  } catch (err) {
+    log.error('tick_failed', { err });
+  } finally {
+    ticking = false;
+  }
+}
+
+/**
+ * Start the interval runner once per process. Always schedules the interval (unref'd); a tick with nothing enabled is a no-op.
+ * Returns whether any job is enabled right now (informational: it can change later).
+ */
+export function startJobRunner(env?: NodeJS.ProcessEnv): boolean {
+  if (started) return enabledJobs(runnerEnv()).length > 0;
+  started = true;
+  injectedEnv = env;
+  const first = runnerEnv();
+  if (!retentionJobEnabled(first.RETENTION_JOB)) {
     // Unchanged: while the purge is off, boot logs what it WOULD delete.
     const t = setTimeout(() => { void logRetentionPreview(); }, 15_000);
     t.unref?.();
     log.warn('retention.off_by_default', { hint: 'set RETENTION_JOB=on to delete data past each business\'s retention window; counts that would be purged are logged shortly after boot' });
   }
-  if (jobs.length === 0) {
-    log.info('disabled', { JOBS: jobsSetting(env).explicit ? 'off' : 'unset (off outside production)', note: 'set JOBS=on to run the daily briefing, gratitude sweep and cleanup' });
-    started = true;
-    return false;
-  }
-  started = true;
-  const every = tickSeconds(env) * 1000;
-  const tick = async () => {
-    if (ticking) return; // a slow pass never overlaps the next one in this process (other processes are fenced by leases)
-    ticking = true;
-    try { await runJobTick({ env }); } catch (err) { log.error('tick_failed', { err }); } finally { ticking = false; }
-  };
-  const first = setTimeout(() => { void tick(); }, FIRST_TICK_DELAY_MS);
-  first.unref?.();
-  const timer = setInterval(() => { void tick(); }, every);
-  timer.unref?.();
-  log.info('scheduled', { jobs, tick_seconds: every / 1000 });
-  return true;
+  const initial = enabledJobs(first);
+  lastSignature = initial.join(',');
+  announce(initial, first);
+  firstTimer = setTimeout(() => { void runnerTick(); }, FIRST_TICK_DELAY_MS);
+  firstTimer.unref?.();
+  armInterval(tickSeconds(first));
+  return initial.length > 0;
 }
+
+/** Stop the runner (tests, graceful shutdown). A later `startJobRunner()` starts it again. */
+export function stopJobRunner(): void {
+  if (timer) clearInterval(timer);
+  if (firstTimer) clearTimeout(firstTimer);
+  timer = null; firstTimer = null; started = false; ticking = false; armedSeconds = 0; lastSignature = ''; injectedEnv = undefined;
+}
+
+/** The tick period the runner is armed with (0 = not started). Exposed for tests and the admin diagnostics. */
+export const armedTickSeconds = (): number => armedSeconds;

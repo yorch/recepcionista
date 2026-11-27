@@ -1,3 +1,4 @@
+import { configEnv, verifierSecrets } from '@/lib/config';
 import { ok, fail } from '@/lib/http';
 import { insecureDevAllowed } from '@/lib/auth';
 import { claimEvent, completeEvent, releaseEvent } from '@/lib/db';
@@ -26,9 +27,10 @@ export async function POST(req: Request) {
     return fail(err, 400);
   }
 
-  const secret = process.env.STRIPE_BILLING_WEBHOOK_SECRET?.trim();
+  const secret = configEnv().STRIPE_BILLING_WEBHOOK_SECRET?.trim();
   if (secret) {
-    const verdict = await verifyStripeSignature(raw, req.headers.get('stripe-signature'), secret);
+    let verdict = await verifyStripeSignature(raw, req.headers.get('stripe-signature'), secret);
+    for (const prev of verifierSecrets('stripe.billing_webhook_secret', secret).slice(1)) if (!verdict.ok) verdict = await verifyStripeSignature(raw, req.headers.get('stripe-signature'), prev); // the previous secret, 15 minutes after a console rotation
     if (!verdict.ok) {
       log.warn('signature.rejected', { error: verdict.error });
       return fail('invalid signature', 400);

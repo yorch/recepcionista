@@ -15,13 +15,16 @@
  *     callbacks (the <Dial action> or the <Number statusCallback>) arrives first, frees the live-forward lease, and a voicemail's
  *     recorded seconds likewise.
  */
+import { configEnv } from '@/lib/config';
 import {
-  acquireForwardLease, billingEnforced, checkForwardAllowed, checkVoicemailAllowed, claimEvent, completeEvent, recordForwardSeconds,
+  prisma, acquireForwardLease, billingEnforced, checkForwardAllowed, checkVoicemailAllowed, claimEvent, completeEvent, recordForwardSeconds,
   recordVoicemailSeconds, releaseEvent, releaseForwardLease,
 } from '@/lib/db';
 import { chargeCallBudget, businessBudget, type BudgetContext, type BudgetDenial } from '@/lib/voice/caller-limits';
 import { rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
+import { knobOr } from '@/lib/admin/tenant-knobs';
+import { planAllows, type PlanFeature } from '@/lib/admin/plan-catalog';
 
 const log = logger('voice/forward-metering');
 
@@ -31,20 +34,26 @@ const intEnv = (raw: string | undefined, fallback: number, min: number, max = Nu
 };
 
 /** Longest single forwarded call (seconds), whatever the plan: FORWARD_MAX_CALL_SECONDS (default 3600, at least 60). */
-export const forwardMaxCallSeconds = (env: Record<string, string | undefined> = process.env): number => intEnv(env.FORWARD_MAX_CALL_SECONDS, 3600, 60);
+export const forwardMaxCallSeconds = (env: Record<string, string | undefined> = configEnv()): number => intEnv(env.FORWARD_MAX_CALL_SECONDS, 3600, 60);
 /** Forwarded calls one business may start per hour, ALL callers together: FORWARD_CALLS_PER_HOUR (default 60, at least 1). Each caller has a much lower budget of their own (caller-limits.ts). */
-export const forwardCallsPerHour = (env: Record<string, string | undefined> = process.env): number => businessBudget('forward', env);
+export const forwardCallsPerHour = (env: Record<string, string | undefined> = configEnv()): number => businessBudget('forward', env);
 /** Voicemails one business may take per hour, ALL callers together: VOICEMAIL_PER_HOUR (default 60, at least 1). */
-export const voicemailsPerHour = (env: Record<string, string | undefined> = process.env): number => businessBudget('voicemail', env);
+export const voicemailsPerHour = (env: Record<string, string | undefined> = configEnv()): number => businessBudget('voicemail', env);
 /** Forwarded calls one business may have in progress at the same time: FORWARD_MAX_CONCURRENT (default 3, at least 1). */
-export const forwardMaxConcurrent = (env: Record<string, string | undefined> = process.env): number => intEnv(env.FORWARD_MAX_CONCURRENT, 3, 1, 100);
+export const forwardMaxConcurrent = (env: Record<string, string | undefined> = configEnv()): number => intEnv(env.FORWARD_MAX_CONCURRENT, 3, 1, 100);
 /**
  * A forwarded leg that was "answered" but lasted fewer seconds than this is treated as NOT answered by a person (the owner's carrier
  * voicemail or a hang-up the moment it connected): the caller is offered our voicemail. FORWARD_MIN_ANSWERED_SECONDS, default 6, 0 = off.
  */
-export const forwardMinAnsweredSeconds = (env: Record<string, string | undefined> = process.env): number => intEnv(env.FORWARD_MIN_ANSWERED_SECONDS, 6, 0, 120);
+export const forwardMinAnsweredSeconds = (env: Record<string, string | undefined> = configEnv()): number => intEnv(env.FORWARD_MIN_ANSWERED_SECONDS, 6, 0, 120);
 /** Below this many remaining seconds a forward is not started (a call cut after seconds helps nobody). */
 export const FORWARD_MIN_REMAINING_SECONDS = 30;
+
+/** Does the business's plan include `feature` (admin console plan entitlement)? The context's business row is used when given, else one indexed read; an unknown business / plan allows. */
+async function planIncludes(businessId: string, feature: PlanFeature, ctx?: BudgetContext): Promise<boolean> {
+  const plan = ctx?.business ? ctx.business.plan : (await prisma.business.findUnique({ where: { id: businessId }, select: { plan: true } }))?.plan;
+  return planAllows(plan, feature);
+}
 
 export type ForwardAllowance =
   | { ok: true; timeLimit: number; known?: boolean }
@@ -54,8 +63,9 @@ export type ForwardAllowance =
  * May this business dial the owner for this call? `ctx` (the call's business, CallSid and caller id) switches on the per-caller budgets
  * and the known-customer reservation; without it only the business budget applies (the Phase-1 behaviour).
  */
-export async function forwardAllowance(businessId: string, env: Record<string, string | undefined> = process.env, ctx?: BudgetContext): Promise<ForwardAllowance> {
+export async function forwardAllowance(businessId: string, env: Record<string, string | undefined> = configEnv(), ctx?: BudgetContext): Promise<ForwardAllowance> {
   try {
+    if (!(await planIncludes(businessId, 'call_forwarding', ctx))) return { ok: false, why: 'no_plan' }; // the plan does not include call forwarding
     const gate = await checkForwardAllowed(businessId);
     if (!gate.ok) return { ok: false, why: gate.reason === 'no_plan' ? 'no_plan' : 'cap_reached' };
     const enforced = billingEnforced(env as NodeJS.ProcessEnv);
@@ -67,7 +77,7 @@ export async function forwardAllowance(businessId: string, env: Record<string, s
       known = d.known;
       if (!d.ok) return { ok: false, why: d.why === 'caller_limited' ? 'caller_limited' : d.why === 'check_failed' ? 'check_failed' : 'rate_limited', known };
     } else {
-      const hour = await rateLimit(`voice/forward:hour:${businessId}`, forwardCallsPerHour(env), 60 * 60_000, { failClosed: true });
+      const hour = await rateLimit(`voice/forward:hour:${businessId}`, await knobOr(businessId, 'forward.calls_per_hour', forwardCallsPerHour(env)), 60 * 60_000, { failClosed: true });
       if (!hour.allowed) return { ok: false, why: 'rate_limited' };
     }
 
@@ -87,8 +97,9 @@ export async function forwardAllowance(businessId: string, env: Record<string, s
 export type VoicemailAllowance = { ok: true } | { ok: false; why: BudgetDenial | 'cap_reached' | 'no_plan'; known?: boolean };
 
 /** May this business take another voicemail from this call right now? (Fails closed.) */
-export async function voicemailAllowance(businessId: string, env: Record<string, string | undefined> = process.env, ctx?: BudgetContext): Promise<VoicemailAllowance> {
+export async function voicemailAllowance(businessId: string, env: Record<string, string | undefined> = configEnv(), ctx?: BudgetContext): Promise<VoicemailAllowance> {
   try {
+    if (!(await planIncludes(businessId, 'voicemail', ctx))) return { ok: false, why: 'no_plan' }; // the plan does not include voicemail
     if (billingEnforced(env as NodeJS.ProcessEnv)) {
       const gate = await checkVoicemailAllowed(businessId);
       if (!gate.ok) return { ok: false, why: gate.reason === 'no_plan' ? 'no_plan' : 'cap_reached' };
@@ -97,7 +108,7 @@ export async function voicemailAllowance(businessId: string, env: Record<string,
       const d = await chargeCallBudget('voicemail', ctx, env);
       return d.ok ? { ok: true } : { ok: false, why: d.why, known: d.known };
     }
-    return (await rateLimit(`voice/voicemail:hour:${businessId}`, voicemailsPerHour(env), 60 * 60_000, { failClosed: true })).allowed
+    return (await rateLimit(`voice/voicemail:hour:${businessId}`, await knobOr(businessId, 'voicemail.calls_per_hour', voicemailsPerHour(env)), 60 * 60_000, { failClosed: true })).allowed
       ? { ok: true } : { ok: false, why: 'business_budget' };
   } catch {
     return { ok: false, why: 'check_failed' };
@@ -105,7 +116,7 @@ export async function voicemailAllowance(businessId: string, env: Record<string,
 }
 
 /** Boolean form of `voicemailAllowance` (Phase-1 signature; `ctx` adds the per-caller budgets). */
-export async function allowVoicemail(businessId: string, env: Record<string, string | undefined> = process.env, ctx?: BudgetContext): Promise<boolean> {
+export async function allowVoicemail(businessId: string, env: Record<string, string | undefined> = configEnv(), ctx?: BudgetContext): Promise<boolean> {
   return (await voicemailAllowance(businessId, env, ctx)).ok;
 }
 
@@ -116,7 +127,7 @@ export type DialResult = 'answered' | 'unanswered' | 'canceled';
  * "completed" but is flagged as answered by a machine (`AnsweredBy=machine_*` when Twilio provides it) or lasted fewer than
  * FORWARD_MIN_ANSWERED_SECONDS counts as unanswered: it is the owner's carrier voicemail (or an instant hang-up), not the owner.
  */
-export function classifyDial(form: Record<string, string | undefined>, env: Record<string, string | undefined> = process.env): { result: DialResult; why: string } {
+export function classifyDial(form: Record<string, string | undefined>, env: Record<string, string | undefined> = configEnv()): { result: DialResult; why: string } {
   const status = (form.DialCallStatus ?? '').trim().toLowerCase();
   if (status === 'canceled') return { result: 'canceled', why: 'caller hung up while ringing' };
   if (status === 'completed' || status === 'answered') {

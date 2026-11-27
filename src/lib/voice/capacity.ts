@@ -6,6 +6,7 @@
  * (OUT_OF_SERVICE_MAX_SECONDS) instead of running up to the agent's 15 minute limit, and the owner is texted at most
  * once per 10 minutes and MISSED_CALL_ALERTS_PER_HOUR per hour per business.
  */
+import { configEnv } from '@/lib/config';
 import { checkCallAllowed, type AllowResult } from '@/lib/db';
 import { disclosureFor } from '@/lib/kb/disclosure';
 import { logger } from '@/lib/log';
@@ -102,7 +103,7 @@ export function pausedPrompt(business: Business): string {
 
 export type PausedOverride = { agent: { first_message: string; prompt?: { prompt: string } }; conversation: { max_duration_seconds: number } };
 
-export const pausedOverride = (business: Business, env: NodeJS.ProcessEnv = process.env): PausedOverride => ({
+export const pausedOverride = (business: Business, env: NodeJS.ProcessEnv = configEnv()): PausedOverride => ({
   agent: {
     first_message: pausedFirstMessage(business),
     // A prompt override must first be ENABLED on the agent (docs/runbook.md); off by default so an agent that was not re-provisioned

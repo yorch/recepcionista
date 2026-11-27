@@ -10,6 +10,7 @@
  * but post-call data has to be captured another way.
  */
 
+import { configEnv } from '@/lib/config';
 import { appUrl } from '@/lib/providers/stripe';
 import { meterForwardedCall } from '@/lib/voice/forward-metering';
 import { splitTransferSeconds, transferOutcomeFromTranscript } from '@/lib/voice/transfer';
@@ -30,7 +31,7 @@ const log = logger('postcall');
 const API = 'https://api.elevenlabs.io/v1';
 
 function apiKey(): string {
-  return process.env.ELEVENLABS_API_KEY as string;
+  return configEnv().ELEVENLABS_API_KEY as string;
 }
 
 function headers(): Record<string, string> {
@@ -38,7 +39,7 @@ function headers(): Record<string, string> {
 }
 
 function hasKey(): boolean {
-  return Boolean(process.env.ELEVENLABS_API_KEY);
+  return Boolean(configEnv().ELEVENLABS_API_KEY);
 }
 
 function postCallWebhookUrl(): string {
@@ -155,7 +156,7 @@ export async function ensurePostCallWebhook(opts: EnsureWebhookOptions = {}): Pr
       };
     }
     const json = (await createRes.json()) as { webhook_id?: string; webhook_secret?: string };
-    if (!process.env.ELEVENLABS_WEBHOOK_SECRET) {
+    if (!configEnv().ELEVENLABS_WEBHOOK_SECRET) {
       log.warn('webhook.secret_unsaved', {
         webhook: json.webhook_id ?? null,
         action: 'the signing secret is returned ONCE in the ADMIN provision response (webhook_secret): store it as ELEVENLABS_WEBHOOK_SECRET and redeploy. It is never logged.',

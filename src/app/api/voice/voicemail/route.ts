@@ -9,6 +9,7 @@
  * (the owner's carrier voicemail) counts as unanswered; a caller who hung up while it rang gets nothing and costs nothing.
  * No tenant data is taken from the request: the call is found by its CallSid and the business comes from that row.
  */
+import { configEnv } from '@/lib/config';
 import { getBusiness, getCallBySid, recordDialSeconds, updateCall } from '@/lib/db';
 import { verifyTwilioSignature } from '@/lib/providers/twilio';
 import { classifyDial, meterForwardedCall, meterVoicemail, parseSeconds, voicemailAllowance } from '@/lib/voice/forward-metering';
@@ -70,7 +71,7 @@ export async function POST(req: Request): Promise<Response> {
         return twimlResponse(emptyHangupTwiml());
       }
       // Nobody picked up (or only a machine / an instant hang-up did): fall back to the voicemail (the notice below is spoken before the beep).
-      const vm = await voicemailAllowance(business.id, process.env, { business, callSid: call.call_sid ?? callSid, from: call.caller_phone, stirStatus: call.stir_status ?? null });
+      const vm = await voicemailAllowance(business.id, configEnv(), { business, callSid: call.call_sid ?? callSid, from: call.caller_phone, stirStatus: call.stir_status ?? null });
       if (!vm.ok) {
         log.warn('voicemail_refused', { business: business.id, call: call.id, why: vm.why });
         const callerCaused = vm.why === 'caller_limited' || vm.why === 'unknown_reserved';

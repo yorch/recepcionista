@@ -7,6 +7,7 @@
  * Provider shape (UNVERIFIED against the live API, documented in docs/known-limitations.md): POST /v1/text-to-speech/{voice_id}?output_format=mp3_44100_128
  * with { text, model_id, voice_settings } -> audio/mpeg bytes.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 import { BRIEFING_AUDIO_MAX_BYTES } from '@/lib/business-config';
 import { DEFAULT_VOICE_ID } from '@/lib/voice/elevenlabs';
@@ -25,11 +26,11 @@ export type TtsResult =
   | { ok: false; reason: Exclude<TtsFailure, 'store_failed'> };
 
 export function hasElevenLabsTts(): boolean {
-  return Boolean(process.env.ELEVENLABS_API_KEY?.trim());
+  return Boolean(configEnv().ELEVENLABS_API_KEY?.trim());
 }
 
 /** The voice used for a business: its own choice, else the platform ELEVENLABS_VOICE_ID, else the default id. Ids that are not plain tokens are skipped. */
-export function briefingVoiceId(business: { voice_id?: string | null } | null | undefined, env: NodeJS.ProcessEnv = process.env): string {
+export function briefingVoiceId(business: { voice_id?: string | null } | null | undefined, env: NodeJS.ProcessEnv = configEnv()): string {
   for (const v of [business?.voice_id, env.ELEVENLABS_VOICE_ID, DEFAULT_VOICE_ID]) {
     const id = typeof v === 'string' ? v.trim() : '';
     if (VOICE_ID_RE.test(id)) return id;
@@ -49,7 +50,7 @@ export async function synthesizeBriefing(text: string, opts: { voiceId?: string 
   try {
     const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?output_format=mp3_44100_128`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'xi-api-key': process.env.ELEVENLABS_API_KEY as string, accept: 'audio/mpeg' },
+      headers: { 'content-type': 'application/json', 'xi-api-key': configEnv().ELEVENLABS_API_KEY as string, accept: 'audio/mpeg' },
       body: JSON.stringify({ text: script, model_id: 'eleven_multilingual_v2', voice_settings: { stability: 0.4, similarity_boost: 0.75 } }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

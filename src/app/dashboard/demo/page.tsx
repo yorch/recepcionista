@@ -1,3 +1,4 @@
+import { configEnv } from '@/lib/config';
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { demoModeEnabled } from '@/lib/auth';
@@ -77,8 +78,8 @@ export default async function DemoPage() {
               <Badge tone={hasTwilio() ? 'routine' : 'unsure'}>
                 Twilio {hasTwilio() ? t('demo.live') : t('demo.mock')}
               </Badge>
-              <Badge tone={process.env.STRIPE_SECRET_KEY ? 'routine' : 'unsure'}>
-                Stripe {process.env.STRIPE_SECRET_KEY ? t('demo.live') : t('demo.mock')}
+              <Badge tone={configEnv().STRIPE_SECRET_KEY ? 'routine' : 'unsure'}>
+                Stripe {configEnv().STRIPE_SECRET_KEY ? t('demo.live') : t('demo.mock')}
               </Badge>
               <Badge tone={hasLlm() ? 'routine' : 'unsure'}>
                 LLM {hasLlm() ? t('demo.live') : t('demo.mock')}

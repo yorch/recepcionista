@@ -2,6 +2,7 @@
  * Self-service signup helpers: body parsing/validation (pure), optional Cloudflare Turnstile
  * verification, the global hourly cap, and account creation. Node runtime only.
  */
+import { configEnv } from '@/lib/config';
 import { EmailTakenError, createBusiness, createUser, getUserByEmail, normalizeEmail, prisma } from '@/lib/db';
 import { peekRateLimit, rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
@@ -42,14 +43,14 @@ export function parseSignupBody(body: unknown): SignupInput {
 }
 
 /** The Turnstile secret key is configured (the server COULD verify tokens). Whether it MUST is `captchaRequired`. */
-export const turnstileEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => Boolean((env.TURNSTILE_SECRET_KEY ?? '').trim());
+export const turnstileEnabled = (env: NodeJS.ProcessEnv = configEnv()): boolean => Boolean((env.TURNSTILE_SECRET_KEY ?? '').trim());
 
 /**
  * Must this signup carry a verified Turnstile token? Only when BOTH halves are configured (secret + public site key): without the
  * site key the page shows no widget, so no client can produce a token and demanding one would fail every signup (e.g.
  * SIGNUP_ALLOW_WITHOUT_CAPTCHA=true next to a leftover secret). In production this is exactly `signupAvailability().captcha === 'turnstile'`.
  */
-export const captchaRequired = (env: NodeJS.ProcessEnv = process.env): boolean => turnstileFullyConfigured(env);
+export const captchaRequired = (env: NodeJS.ProcessEnv = configEnv()): boolean => turnstileFullyConfigured(env);
 
 /**
  * Server-side Turnstile check. Only called when enabled; FAILS CLOSED (missing token, network error,
@@ -60,7 +61,7 @@ export async function verifyTurnstile(
   ip: string | null,
   deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv } = {},
 ): Promise<boolean> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const secret = (env.TURNSTILE_SECRET_KEY ?? '').trim();
   if (!secret || !token) return false;
   try {
@@ -82,7 +83,7 @@ export async function verifyTurnstile(
 }
 
 /** SIGNUP_MAX_PER_HOUR: accounts the whole platform will create per hour (default 60, minimum 1). */
-export function signupMaxPerHour(env: NodeJS.ProcessEnv = process.env): number {
+export function signupMaxPerHour(env: NodeJS.ProcessEnv = configEnv()): number {
   const n = Number.parseInt(env.SIGNUP_MAX_PER_HOUR ?? '', 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 100_000) : DEFAULT_SIGNUP_MAX_PER_HOUR;
 }
@@ -111,7 +112,7 @@ export type SignupGate =
  *    an alert is logged. Turnstile (when configured) is required on every signup, so a bot farm needs a solved challenge per account.
  *  - Only at 100% is signup refused for everyone (with a loud log line), until the sliding hour decays.
  */
-export async function checkSignupCapacity(client: string, env: NodeJS.ProcessEnv = process.env): Promise<SignupGate> {
+export async function checkSignupCapacity(client: string, env: NodeJS.ProcessEnv = configEnv()): Promise<SignupGate> {
   const cap = signupMaxPerHour(env);
   const clientCap = Math.max(1, Math.floor(cap * (client === 'untrusted' ? SIGNUP_UNTRUSTED_SHARE : SIGNUP_CLIENT_SHARE)));
   const [global, mine] = await Promise.all([peekRateLimit(GLOBAL_CREATED_KEY, 60 * 60_000), peekRateLimit(clientCreatedKey(client), 60 * 60_000)]);

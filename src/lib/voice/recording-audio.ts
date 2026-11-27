@@ -9,6 +9,7 @@
  * MAX_CONCURRENT_DOWNLOADS run at once (503 + Retry-After beyond), and the TTL cache is capped by TOTAL BYTES. Nothing is written to disk.
  * The cache is only reachable after the route's checks, and is dropped on erasure (`forgetCachedConversationAudio`).
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 import type { Call } from '@/lib/types';
 
@@ -130,7 +131,7 @@ export async function fetchConversationAudio(conversationId: string, range: stri
   const hit = cache.get(conversationId);
   if (hit && Date.now() - hit.at <= RECORDING_CACHE_TTL_MS) return { ok: true, response: serveBody(hit.body, hit.type, range) };
   dropEntry(conversationId);
-  const key = process.env.ELEVENLABS_API_KEY;
+  const key = configEnv().ELEVENLABS_API_KEY;
   if (!key) return { ok: false, status: 503, error: 'recording playback is not configured' };
   // Single flight: parallel requests (seeks, metadata probes) for the same recording share ONE upstream download.
   let p = inflight.get(conversationId);

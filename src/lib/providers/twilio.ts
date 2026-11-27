@@ -2,6 +2,7 @@
  * SMS adapter. Real Twilio when credentials exist; otherwise logs to the local
  * sms_log so the dashboard and demo still show a message being "sent".
  */
+import { configEnv, verifierSecrets } from '@/lib/config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { insecureDevAllowed } from '@/lib/auth';
 import { mockSmsAllowed, SMS_PROVIDER_NOT_CONFIGURED } from '@/lib/messaging/delivery';
@@ -9,6 +10,7 @@ import { validateRecipient } from '@/lib/messaging/recipient';
 import { toE164 } from '@/lib/phone';
 import { lineKind } from '@/lib/voice/line';
 import { logger } from '@/lib/log';
+import { absoluteBaseUrl, configuredBaseUrl } from '@/lib/base-url';
 
 export interface SendSmsResult {
   id: string;
@@ -26,17 +28,17 @@ export interface SendSmsResult {
 const log = logger('twilio');
 
 export const hasTwilio = () =>
-  Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_PHONE_NUMBER);
+  Boolean(configEnv().TWILIO_ACCOUNT_SID && configEnv().TWILIO_AUTH_TOKEN && configEnv().TWILIO_PHONE_NUMBER);
 
 const MOCK_DELAY_MS = 60;
 const TWILIO_TIMEOUT_MS = 15_000;
 
 /**
- * Public origin Twilio signed. Prefer PUBLIC_BASE_URL (behind a proxy the
- * request's own host can differ), then APP_URL, then the request URL.
+ * Public origin Twilio signed: the single resolver (src/lib/base-url.ts: APP_URL, else PUBLIC_BASE_URL). Behind a proxy the
+ * request's own host can differ, so the configured origin wins; '' falls back to the request URL.
  */
 function publicBase(): string {
-  return (process.env.PUBLIC_BASE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || '').replace(/\/+$/, '');
+  return configuredBaseUrl();
 }
 
 /**
@@ -51,7 +53,7 @@ export function verifyTwilioSignature(
   req: Request,
   params: Record<string, string>,
 ): { ok: true; skipped?: boolean } | { ok: false; error: string } {
-  const token = process.env.TWILIO_AUTH_TOKEN;
+  const token = configEnv().TWILIO_AUTH_TOKEN;
   if (!token) {
     if (!insecureDevAllowed()) {
       log.error('signature.no_token', { reason: 'TWILIO_AUTH_TOKEN unset (set it, or ALLOW_INSECURE_DEV=true for local dev)' });
@@ -71,9 +73,11 @@ export function verifyTwilioSignature(
 
   const data = Object.keys(params).sort().reduce((acc, k) => acc + k + params[k], '');
   const given = Buffer.from(header);
-  for (const url of urls) {
-    const expected = Buffer.from(createHmac('sha1', token).update(url + data, 'utf8').digest('base64'));
-    if (expected.length === given.length && timingSafeEqual(expected, given)) return { ok: true };
+  for (const candidate of verifierSecrets('twilio.auth_token', token)) { // the current token, and the previous one for 15 minutes after a console rotation
+    for (const url of urls) {
+      const expected = Buffer.from(createHmac('sha1', candidate).update(url + data, 'utf8').digest('base64'));
+      if (expected.length === given.length && timingSafeEqual(expected, given)) return { ok: true };
+    }
   }
   return { ok: false, error: 'invalid signature' };
 }
@@ -89,20 +93,20 @@ const MESSAGING_SERVICE_RE = /^MG[0-9a-fA-F]{32}$/;
  * TWILIO_MESSAGING_SERVICE_SID (optional, `MG...`): the Twilio Messaging Service whose sender pool holds the tenant numbers registered under ONE platform A2P 10DLC
  * campaign. When set, customer-facing texts are sent with `MessagingServiceSid` (no From). A value that is not an `MG` sid is ignored (and reported by `smsSenderProblem`).
  */
-export function messagingServiceSid(env: NodeJS.ProcessEnv = process.env): string | null {
+export function messagingServiceSid(env: NodeJS.ProcessEnv = configEnv()): string | null {
   const v = (env.TWILIO_MESSAGING_SERVICE_SID ?? '').trim();
   return MESSAGING_SERVICE_RE.test(v) ? v : null;
 }
 
 /** TWILIO_MESSAGING_SERVICE_PIN_SENDER=on: ALSO pass the tenant's own number as `From` with the Messaging Service (Twilio accepts a pool member there: UNVERIFIED), so the sender is known and replies route exactly. Default off. */
-export const messagingServicePinsSender = (env: NodeJS.ProcessEnv = process.env): boolean => (env.TWILIO_MESSAGING_SERVICE_PIN_SENDER ?? '').trim().toLowerCase() === 'on';
+export const messagingServicePinsSender = (env: NodeJS.ProcessEnv = configEnv()): boolean => (env.TWILIO_MESSAGING_SERVICE_PIN_SENDER ?? '').trim().toLowerCase() === 'on';
 
 const E164_RE = /^\+[1-9]\d{7,14}$/;
 
 /** Where Twilio posts the delivery status of every text we send (null without a public base URL). */
-export function smsStatusCallbackUrl(env: NodeJS.ProcessEnv = process.env): string | null {
-  const base = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
-  return /^https?:\/\//i.test(base) ? `${base}/api/sms/status` : null;
+export function smsStatusCallbackUrl(env: NodeJS.ProcessEnv = configEnv()): string | null {
+  const base = absoluteBaseUrl(env);
+  return base ? `${base}/api/sms/status` : null;
 }
 
 export interface SendSmsOptions {
@@ -123,7 +127,7 @@ export interface SendSmsOptions {
 }
 
 export async function sendSms(to: string, body: string, opts: SendSmsOptions = {}): Promise<SendSmsResult> {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   // Single enforcement point for E.164 + SMS_ALLOWED_COUNTRY_CODES: every text
   // (tools, confirmations, payment links, alerts, routes) ends up here.
   const check = validateRecipient(to, undefined, { anyCountry: opts.anyCountry });
@@ -222,9 +226,9 @@ async function postMessage(to: string, sender: SendFields, body: string, env: No
  * owner YES codes). The Voice URL is ours ONLY on the 'webhook' line (forward / voicemail); on the native ElevenLabs line the number is
  * imported into ElevenLabs, which owns the Voice URL, so it is never touched. `null` when no public base URL is configured.
  */
-export function numberWebhooks(env: NodeJS.ProcessEnv = process.env): { SmsUrl: string; SmsMethod: 'POST'; VoiceUrl?: string; VoiceMethod?: 'POST' } | null {
-  const base = (env.PUBLIC_BASE_URL || env.APP_URL || env.NEXT_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
-  if (!/^https?:\/\//i.test(base)) return null;
+export function numberWebhooks(env: NodeJS.ProcessEnv = configEnv()): { SmsUrl: string; SmsMethod: 'POST'; VoiceUrl?: string; VoiceMethod?: 'POST' } | null {
+  const base = absoluteBaseUrl(env);
+  if (!base) return null;
   const hooks: { SmsUrl: string; SmsMethod: 'POST'; VoiceUrl?: string; VoiceMethod?: 'POST' } = { SmsUrl: `${base}/api/sms/inbound`, SmsMethod: 'POST' };
   if (lineKind(env) === 'webhook') { hooks.VoiceUrl = `${base}/api/voice/incoming`; hooks.VoiceMethod = 'POST'; }
   return hooks;
@@ -241,7 +245,7 @@ export async function configureNumberWebhooks(
   e164: string,
   opts: { dryRun?: boolean; fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv; /** The number is an imported ElevenLabs line: ElevenLabs owns its Voice URL, never write it. */ skipVoiceUrl?: boolean } = {},
 ): Promise<NumberWebhookResult> {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   const doFetch = opts.fetchImpl ?? fetch;
   const sid = env.TWILIO_ACCOUNT_SID;
   const token = env.TWILIO_AUTH_TOKEN;
@@ -299,7 +303,7 @@ function poolSkipReason(e164: string, env: NodeJS.ProcessEnv): string | null {
  * The messaging.twilio.com request shapes are UNVERIFIED against a live account (docs/known-limitations.md).
  */
 export async function ensureNumberInMessagingService(e164: string, opts: PoolOptions = {}): Promise<PoolResult> {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   const why = poolSkipReason(e164, env);
   if (why) return { outcome: 'skipped', detail: why };
   const doFetch = opts.fetchImpl ?? fetch;
@@ -328,7 +332,7 @@ export async function ensureNumberInMessagingService(e164: string, opts: PoolOpt
 
 /** Remove the number from the Messaging Service pool (before it is released). IDEMPOTENT: not a member (404) is success. Never throws. */
 export async function removeNumberFromMessagingService(e164: string, opts: PoolOptions = {}): Promise<PoolResult> {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? configEnv();
   const why = poolSkipReason(e164, env);
   if (why) return { outcome: 'skipped', detail: why };
   const doFetch = opts.fetchImpl ?? fetch;
@@ -394,7 +398,7 @@ export type ProvisionNumberResult =
  * outside production AND with no Twilio credentials at all. In production, or whenever Twilio is configured, a failed
  * purchase must fail the provisioning step instead: a fake line would silently take no calls while the business shows 'live'.
  */
-export function fakeNumberAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+export function fakeNumberAllowed(env: NodeJS.ProcessEnv = configEnv()): boolean {
   const configured = Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER);
   return env.NODE_ENV !== 'production' && !configured;
 }
@@ -414,7 +418,7 @@ function sameE164(a: string | null | undefined, b: string | null | undefined): b
  * Is `number` the platform's own SMS sender? TRUE when TWILIO_PHONE_NUMBER is set and either matches it as E.164 or is
  * itself unparseable (fail closed: with a garbled sender we cannot prove a number is NOT the sender).
  */
-export function isPlatformNumber(number: string, env: NodeJS.ProcessEnv = process.env): boolean {
+export function isPlatformNumber(number: string, env: NodeJS.ProcessEnv = configEnv()): boolean {
   const platform = (env.TWILIO_PHONE_NUMBER ?? '').trim();
   if (!platform) return false;
   if (toE164(platform) === null) return true;
@@ -442,7 +446,7 @@ export async function provisionNumber(
   areaCode = '305',
   deps: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv; attempts?: NumberAttemptStore; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<ProvisionNumberResult> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const doFetch = deps.fetchImpl ?? fetch;
   const sleep = deps.sleep ?? defaultSleep;
   const attempts = deps.attempts;
@@ -614,7 +618,7 @@ export async function releaseNumber(
     heldByOther?: (e164: string, callerBusinessId: string | null | undefined) => Promise<boolean>;
   } = {},
 ): Promise<ReleaseNumberResult> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const doFetch = deps.fetchImpl ?? fetch;
   const number = (e164 || '').trim();
   if (!/^\+[1-9]\d{6,14}$/.test(number)) return { ok: false, error: 'not an E.164 number' };

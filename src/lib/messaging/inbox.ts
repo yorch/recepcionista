@@ -10,6 +10,7 @@
  *      `sendAndLog`, so it obeys the opt-out list, the plan cap and is logged as `inbox_autoreply`).
  * Nothing here throws on a provider failure: the text is already stored, which is the part that must not be lost.
  */
+import { configEnv } from '@/lib/config';
 import {
   claimEvent, countryForBusiness, getInboundMessageBySid, isOptedOut, linkInboundToBooking, markInboundAutoReplied, setInboundStatus, markInboundForwarded, prisma, recordInboundMessage, releaseEvent,
 } from '@/lib/db';
@@ -27,6 +28,7 @@ import { looksLikeRevocation, normalizeInbound } from '@/lib/messaging/keywords'
 import { highRateNanpDestination } from '@/lib/voice/forward-number';
 import { alertOwner } from '@/lib/voice/owner-alert';
 import type { Business, InboundMessage } from '@/lib/types';
+import { quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 const log = logger('sms/inbox');
 
@@ -41,7 +43,7 @@ export const DEFAULT_INBOX_FORWARD_HOURLY_LIMIT = 10;
 export const INBOX_SENDER_FORWARD_HOURLY_LIMIT = 2;
 
 /** INBOX_FORWARD_HOURLY_LIMIT: owner texts about customer messages per business per hour (default 10, at least 1). */
-export function inboxForwardHourlyLimit(env: NodeJS.ProcessEnv = process.env): number {
+export function inboxForwardHourlyLimit(env: NodeJS.ProcessEnv = configEnv()): number {
   const raw = (env.INBOX_FORWARD_HOURLY_LIMIT ?? '').trim();
   const n = Number(raw);
   return raw !== '' && Number.isInteger(n) && n >= 1 ? n : DEFAULT_INBOX_FORWARD_HOURLY_LIMIT;
@@ -134,7 +136,7 @@ async function forwardToOwner(business: Business, message: InboundMessage, now: 
   const status = ownerAlertStatus(business);
   if (status !== 'ok') return status === 'no_owner_phone' ? 'no_owner_phone' : 'owner_unverified';
   // Not at night: the message waits in the dashboard inbox (the badge counts it) instead of waking the owner.
-  if (isQuietHour(now, tzOf(business))) return 'quiet_hours';
+  if (isQuietHour(now, tzOf(business), await quietWindowFor(business.id))) return 'quiet_hours';
   // At most 2 owner texts per sender per hour: the rest waits in the inbox (and the badge), and the business budget below is not spent on it.
   const perSender = await rateLimit(`inbox-forward:sender:${business.id}:${message.from_e164}`, INBOX_SENDER_FORWARD_HOURLY_LIMIT, HOUR_MS, { failClosed: true });
   if (!perSender.allowed) return 'sender_budget';

@@ -172,6 +172,7 @@ owner Jorge `+13055550199`.
 | `POST /api/voice/screen` | Twilio signature; call-screening whisper on the owner's forward leg (`<Number url>`): prompt (Gather), `Digits=1` bridges, else hang up that leg |
 | `POST /api/voice/tools/transfer_to_human` | tool-secret; (native line, `NATIVE_TRANSFER=on` AND the business's `native_transfer_enabled`) re-checks verified number / hours / caps and answers `approved` (call -> `transfer_status=attempted`) or takes a callback (handoff) |
 | `POST /api/voice/initiation` (extended) | dynamic variables now include `transfer_mode` (`off\|available\|forward`) and `transfer_destination` (E.164 or ''), per call |
+| `POST /api/admin/*` (step-up) | every admin WRITE needs `requireRecentAuth` for a cookie session (403 `reauth_required`; Bearer `ADMIN_TOKEN` unchanged): `billing`, `users` always; `jobs/run`, `release-tenant`, `repair-numbers`, `resync-agents`, `retention` when `dry_run:false`. `GET admin/jobs` 60/min, `POST admin/jobs/run` 12/min, `POST admin/retention` 6/min (audited `admin.retention_run` `{dry_run, counts}`); `billing.admin_override` meta `{changed, from, to}` where from/to = `{billing_status, plan, trial_ends_at, current_period_end, sms_cap_override, call_minutes_cap_override}` |
 | `POST /api/admin/resync-agents` | admin; `{dry_run?: true (default), business_ids?: string[<=25], limit?: 1..25 (10), cursor?}` -> `{dry_run, configured, tools[], items:[{business_id, agent_id, outcome: would_sync\|synced\|created\|mock\|failed\|skipped, detail?}], next_cursor}`; dry run makes no provider call; 6 req/min; audited `admin.resync_agents`; 503 for a real run without `ELEVENLABS_API_KEY` |
 | `POST /api/admin/repair-numbers` | admin; `{dry_run?: true (default), business_ids?: string[<=25], limit?: 1..25 (10), cursor?, refresh_credentials?: boolean}` -> `{dry_run, webhooks, items:[{business_id, phone, outcome: ok\|would_update\|updated\|not_found\|skipped\|failed, changed?, detail?, line?: {outcome: ok\|would_import\|would_bind\|imported\|adopted\|bound\|would_refresh\|refreshed\|skipped\|failed, detail?}}], next_cursor}`; a business that already imported its number never has its Voice URL written (whatever the deployment kind), and a forward-mode tenant is `skipped` with `would_change_behaviour`; `refresh_credentials` re-sends the current Twilio credentials to the provider for imported numbers (after a token rotation); repairs the Twilio SMS URL (Voice URL only on a webhook line) and imports/binds each business's own number into ElevenLabs (native line); 6 req/min; audited `admin.repair_numbers` |
 | `POST /api/integrations/google/mock-event` | owner; local/e2e only (404 unless `GOOGLE_OAUTH_MOCK=true` outside production); `{start, end, summary?, transparency?}` -> `{id, sync}` or `{delete_id}` -> `{deleted, sync}` |
@@ -226,3 +227,52 @@ Function contracts (signatures unchanged, options added): `slotsForDate(business
 `too_soon` (inside the notice) and `too_far` (beyond the horizon) next to the old reasons; `createBooking(input, { enforce, max_per_call, ownerInitiated })` and
 `rescheduleBooking(input, { enforce, ownerInitiated })`: `ownerInitiated` skips the notice and the horizon only (dashboard bookings; customer moves by the voice agent do not), the
 buffer is kept clear in code (and around Google blocks), crews are assigned per `bookings_no_overlap (business, crew, range)`. `slotsForMove(..., nowMs, { customer })` applies notice + horizon to customer moves.
+
+## Phase 0 contracts (hardening before the admin console)
+
+- **Public origin**: `src/lib/base-url.ts` is the only resolver (`APP_URL`, else `PUBLIC_BASE_URL`; `NEXT_PUBLIC_APP_URL` is not read). Consumers: Twilio signature + number webhooks + status callback, ElevenLabs tool / initiation / post-call URLs (`appUrl()`), Stripe return URLs and payment links, email links, Google redirect, sitemap, CSRF allowlist, WebAuthn default, CSP upgrade decision.
+- **`PUT /api/businesses/:id/knowledge`**: more than `KB_LIMITS.services` / `KB_LIMITS.faqs` (200 / 200, `src/lib/kb/limits.ts`) is `422` (it used to cut silently to 20 / 15). Website extraction keeps `EXTRACTION_LIMITS` (20 services / 15 FAQs) when it builds the first draft.
+- **`require2faForAdmins()`** (`src/lib/admin-2fa.ts`): true in production always; outside production only with `REQUIRE_2FA_FOR_ADMINS=true`.
+- `internalAuthHeaders()` was removed (it had no caller).
+
+
+## Phase 2/4/5/7/8 contracts (admin console backend)
+
+Full list in `docs/design/admin-console-contracts.md`. The ones other code depends on:
+
+- **Settings store**: only `src/lib/admin/settings-store.ts` writes `platform_settings`; every write is a change set (`applyChanges`) with revisions, a `settings.change` audit row (redacted BY KIND, `recordAudit({ meta_trusted: true })`) and a `settings_state.global_version` bump. Readers never query the tables: they call `setting()` / `configEnv()` (the snapshot).
+- **Snapshot**: `src/lib/admin/loader.ts` is the only `setSnapshotSource` implementation; `bootSettings()` runs in `instrumentation.ts` before the banner and the job runner; `/api/health` gates on it. Secrets never leave `ConfigSnapshot.secrets` (non-enumerable).
+- **Verifiers** accept `verifierSecrets(key, primary)` (current + previous for 15 minutes): Twilio signature, Stripe deposit and billing webhooks, ElevenLabs post-call HMAC, tool secret.
+- **Caps**: `smsCapFor(b)`, `callMinutesCapFor(b)`, `forwardMinutesCapFor(b)`, `voicemailMinutesCap(env, plan)` take the business's `plan`; business override > env pin > plan row > platform setting. `isCompedPlan(plan, COMP_PLANS)` replaces the direct `COMP_PLANS.includes`.
+- **Suspension**: `businesses.suspended_at` makes `checkCallAllowed` / `checkSmsAllowed` / `checkForwardAllowed` / `checkVoicemailAllowed` / `reserveSms` answer `{ ok: false, reason: 'no_plan', suspended: true }` and `isProvisioningAllowed` false, even when billing is not enforced.
+- **Admin routes**: every `/api/admin/*` handler uses `guardAdminRoute(req, { permission, write?, rate? })`; permissions live in `src/lib/admin/permissions.ts` (`can(principal, permission)`); `Principal` admin variants carry `user.platform_role`.
+- **Job history**: `runJob()` records every run in `job_runs` (`opts.actor`, `opts.trigger`); call `runJob`, not the `runX` functions, from anything that should appear in the history.
+- **Plans**: `businesses.plan` references `plans.key`; a trigger registers unknown strings as hidden plans; `createUser({ role: 'admin' })` defaults `platform_role` to `owner`.
+
+## Providers and secrets page (agent B)
+
+`/admin/providers` (`src/app/admin/providers/page.tsx`, `src/components/admin/provider-*.tsx`, `secret-field.tsx`) is built on the existing console JSON routes plus: `GET /api/admin/providers`,
+`POST /api/admin/providers/{provider}/test`, `GET /api/admin/selftest?live=1`. Server modules: `src/lib/admin/provider-tests.ts` (real connection tests, `secretVerifier`, `providerWriteChecks`, `liveSelftest`),
+`provider-meta.ts` (pure: cards, pairs, webhook paths, follow-up arithmetic), `provider-ui.ts` (pure page model), `provider-provision.ts` (provisioning stores the ElevenLabs webhook secret). Details in
+`docs/design/admin-console-contracts.md` section "Agent B".
+
+## Console UI contracts (agent A)
+
+Full list in the Agent A section of `docs/design/admin-console-contracts.md`. The ones other code depends on:
+
+- **Console pages**: every `/admin/**` page calls `requireAdminPage(permission?)` (`src/lib/admin-ui/server.ts`); navigation entries live in `ADMIN_NAV` (`src/components/admin/nav.ts`); client components use `useAdmin()` (`me`, `can`, `guard`). Strings of the console use the `ac.` prefix (`src/lib/i18n/catalog/adminConsole.ts`).
+- **Settings forms** are generated from the registry: a key's page is decided in `src/lib/admin-ui/model.ts`; a new console-editable registry key needs its Spanish label / help in `src/lib/admin-ui/setting-text.ts` (CI enforces it) and appears on its page without UI code.
+- **`adopt: true`** on `POST /api/admin/settings/{preview,apply}`: only for an environment-pinned non-secret key and only with exactly the pinned value (dormant console copy); everything else on a pinned key is still `409 locked_by_env`.
+- **Legal links**: `legalLinks()` (async) / `legalFooterLinks()` (sync, templates) = `legal.*_url` setting, else the built-in page when published, else null. Never hard-code `/terms`.
+- **Markdown**: untrusted text goes through `parseMarkdown` / `MarkdownView` (`src/lib/markdown.ts`): no HTML, no images, links via `safeHref` only.
+- **Maintenance**: `platform.maintenance_mode` makes `maintenanceRefuses()` (proxy) answer `503 { code: 'maintenance' }` to user-cookie writes on `/api/**` (not `/api/admin/*`, `/api/auth/*`, webhooks, Bearer); `PlatformBanner` shows the notices.
+
+## Tenants, plans, administrators and support mode (agent C)
+
+`/admin/tenants`, `/admin/tenants/{id}`, `/admin/plans`, `/admin/admins` (`src/components/admin/{tenants-page,tenant-*,plans-page,admins-page}.tsx`) on the existing console routes plus `POST /api/admin/tenants/{id}/support-view`, `POST /api/admin/tenants/{id}/actions`, `GET /api/admin/plans/prices`.
+Contracts other code depends on: `authenticate()` refuses a tenant write from an admin USER without an open support grant (`403 support_write_required`, `src/lib/admin/support-gate.ts`); `planAllows / planAllowsLocation / planPriceId` (plan-catalog.ts) gate the features and checkout prices;
+`knobOr / knobFrom / quietWindowFor` (tenant-knobs.ts) are how feature code reads a per-business value; `isQuietHour(now, tz, window?)`, `briefingSlot(now, tz, hour?)` and `resolveDepositAmount({ plan })` take the tenant value as an optional argument. Details: `docs/design/admin-console-contracts.md` section "Agent C".
+
+## Operations views and Phase 6 (agent D)
+
+Full list in the Agent D section of `docs/design/admin-console-contracts.md`. The ones other code depends on: `refuseIfMaintenance()` / `maintenanceState()` (`src/lib/admin/maintenance.ts`) for any public write route the proxy rule cannot see (never a webhook); `impactsFor(changes)` and `IMPACT_KEYS` (`impact.ts`): a new registry key that needs a "what would this affect" count adds a preview function there; `evaluateAlerts()` / `dispatchAlertNotices()` (`alerts.ts`): a new alert kind is added to `ALERT_KINDS`, `ALERT_HREF`, the catalog (`ao.alert.<kind>.title|line|help`) and the evaluator; `recordProviderHealth()` after any provider test; **never** read `process.env.NEXT_PUBLIC_*` (Phase 6: `BUILD_TIME_ENV` is empty and CI fails on it): a value the browser needs is read on the server (`setting()` / `configEnv()`) and passed to the client component as a prop.

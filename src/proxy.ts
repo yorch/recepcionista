@@ -3,6 +3,8 @@ import { API_CSP, cspHeadersFor, newNonce } from '@/lib/csp';
 import {
   authConfig, checkSameOrigin, hasAdminCredentials, hasBearer, hasSessionCookie, isPublicPath, SAFE_METHODS, userSessionTokenFrom,
 } from '@/lib/auth';
+import { setting } from '@/lib/config';
+import { MAINTENANCE_RETRY_AFTER_SECONDS, maintenanceRefuses } from '@/lib/maintenance';
 
 /**
  * Cheap gate only. The proxy cannot reach the database, so it checks that a request CARRIES a
@@ -41,6 +43,11 @@ export async function proxy(req: NextRequest) {
 
   if (!SAFE_METHODS.has(req.method) && !hasBearer(req.headers) && hasSessionCookie(req.headers) && !checkSameOrigin(req.headers, { requirePresent: true })) {
     return NextResponse.json({ ok: false, error: 'cross-site request refused' }, { status: 403 });
+  }
+
+  // Maintenance mode (registry platform.maintenance_mode): the tenant dashboard is read-only; the console, sign-in, webhooks and the Bearer are untouched (src/lib/maintenance.ts).
+  if (maintenanceRefuses({ enabled: setting('platform.maintenance_mode') === true, method: req.method, pathname, bearer: hasBearer(req.headers), userCookie: Boolean(userSessionTokenFrom(req.headers)) })) {
+    return withCsp(NextResponse.json({ ok: false, error: 'maintenance', code: 'maintenance' }, { status: 503, headers: { 'Retry-After': String(MAINTENANCE_RETRY_AFTER_SECONDS) } }));
   }
 
   if (cfg.mode === 'open') return next();

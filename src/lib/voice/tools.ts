@@ -6,6 +6,7 @@
  * Locale: English and Spanish for every path. Times are always rendered in
  * America/New_York, which is where the demo business lives.
  */
+import { configEnv } from '@/lib/config';
 import { emitBookingChanged } from '@/lib/booking-hooks';
 import {
   getBusiness, getKnowledgeBase, getBooking, createCall, findActiveCall, upsertCallForConversation,
@@ -235,7 +236,7 @@ async function resolveCall(
 
 /** Policy knob: text the model-relayed booking phone when NO verified caller number exists. Default: never. */
 function allowUnverifiedBookingSms(): boolean {
-  return process.env.ALLOW_UNVERIFIED_BOOKING_SMS === 'true';
+  return configEnv().ALLOW_UNVERIFIED_BOOKING_SMS === 'true';
 }
 
 export type { OwnerAlert };
@@ -672,7 +673,7 @@ export async function createPaymentLink(args: CreatePaymentLinkArgs): Promise<To
     const listed = kb ? matchService(kb.services, booking.service)[0] : undefined;
     const catalogCents = listed?.base_price != null && listed.base_price > 0 ? dollarsToCents(listed.base_price) : null;
     const decision = resolveDepositAmount({
-      policy: depositPolicyOf(business), priceEstimateCents: catalogCents, actor: 'ai',
+      policy: depositPolicyOf(business), priceEstimateCents: catalogCents, actor: 'ai', plan: business.plan ?? null,
     });
     if (!decision.ok) {
       return {

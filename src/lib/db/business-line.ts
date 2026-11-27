@@ -2,6 +2,7 @@
  * Per-tenant AI line. Each business can own its ElevenLabs phone-number id (phnum_...) and Twilio phone sid (PN...); both are UNIQUE across
  * businesses. The shared env ELEVENLABS_PHONE_NUMBER_ID is only a FALLBACK for tenants that have no line of their own (see resolveElevenLabsPhoneNumberId).
  */
+import { configEnv } from '@/lib/config';
 import { prisma } from './client';
 import { validateElevenLabsPhoneNumberId, validateTwilioPhoneSid } from '@/lib/business-config';
 import type { Business, ID } from '@/lib/types';
@@ -57,7 +58,7 @@ export async function getBusinessIdByTwilioPhoneSid(sid: string): Promise<ID | n
  * `source` says which, so callers can refuse to REASSIGN the shared number away from another tenant.
  */
 export function resolveElevenLabsPhoneNumberId(
-  business: Pick<Business, 'elevenlabs_phone_number_id'> | null | undefined, env: NodeJS.ProcessEnv = process.env,
+  business: Pick<Business, 'elevenlabs_phone_number_id'> | null | undefined, env: NodeJS.ProcessEnv = configEnv(),
 ): { id: string; source: 'business' | 'env' } | null {
   const own = business?.elevenlabs_phone_number_id?.trim();
   if (own) return { id: own, source: 'business' };

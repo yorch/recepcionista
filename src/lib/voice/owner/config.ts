@@ -3,12 +3,13 @@
  * change is applied only after a second channel (an SMS to the verified owner phone) confirms it. See docs/owner-call-in.md.
  */
 
+import { configEnv } from '@/lib/config';
 /** OWNER_CALLIN_ENABLED (default true): set to "false" to turn the whole feature off (owner calls then behave like any caller). */
-export const ownerCallinEnabled = (env: Record<string, string | undefined> = process.env): boolean => (env.OWNER_CALLIN_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+export const ownerCallinEnabled = (env: Record<string, string | undefined> = configEnv()): boolean => (env.OWNER_CALLIN_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 
 export const OWNER_CALL_MAX_SECONDS_DEFAULT = 300;
 /** OWNER_CALL_MAX_SECONDS: hard length of an owner session, 30..300 (never longer than 5 minutes). */
-export function ownerCallMaxSeconds(env: Record<string, string | undefined> = process.env): number {
+export function ownerCallMaxSeconds(env: Record<string, string | undefined> = configEnv()): number {
   const n = Number((env.OWNER_CALL_MAX_SECONDS ?? '').trim());
   return Number.isInteger(n) && n >= 30 ? Math.min(n, OWNER_CALL_MAX_SECONDS_DEFAULT) : OWNER_CALL_MAX_SECONDS_DEFAULT;
 }

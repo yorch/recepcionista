@@ -75,6 +75,9 @@ export interface Business {
   /** Billing. Absent/'none' on legacy and demo tenants (only enforced when BILLING_ENFORCED=true). */
   billing_status?: BillingStatus;
   plan?: string | null;
+  /** Platform suspension (admin console): a suspended business answers "out of service" and cannot send, whatever its billing state. */
+  suspended_at?: string | null;
+  suspended_reason?: string | null;
   stripe_customer_id?: string | null;
   stripe_subscription_id?: string | null;
   trial_ends_at?: string | null;
@@ -335,6 +338,8 @@ export interface User {
   totp_enabled: boolean;
   /** UI/text language (default 'en'). */
   locale?: Locale;
+  /** Platform role of an admin user (owner | ops | support | read_only); null for owners/staff. See src/lib/admin/permissions.ts. */
+  platform_role?: 'owner' | 'ops' | 'support' | 'read_only' | null;
 }
 
 export type MembershipRole = 'owner' | 'staff';

@@ -8,6 +8,8 @@
  * count after a usage write depends on the business-local hour: daytime sends the warning, night defers it. Tests must pin the clock.
  * A new month is a new usage row, so warnings re-arm themselves.
  */
+import { configEnv } from '@/lib/config';
+import { loadTenantOverrides } from '@/lib/admin/tenant-knobs';
 import {
   billingEnforced, callMinutesCapFor, forwardMinutesCapFor, getBusiness, getUsage, getUsageWarnings, listBusinessUsers, markWarned, smsCapFor,
   unmarkWarned, usagePercent,
@@ -38,8 +40,8 @@ const LABEL: Record<WarnKind, { en: string; unit: 'texts' | 'minutes' }> = {
 
 /** Current usage as a percent of each cap (pure given the inputs). Caps of 0 yield 100 when anything was used. */
 export function usageLines(
-  business: Pick<Business, 'billing_status'> & { sms_cap_override?: number | null; call_minutes_cap_override?: number | null },
-  usage: { sms_count: number; call_seconds: number; forward_seconds: number }, env: NodeJS.ProcessEnv = process.env,
+  business: Pick<Business, 'billing_status'> & { sms_cap_override?: number | null; call_minutes_cap_override?: number | null; plan?: string | null; tenant_overrides?: Record<string, unknown> | null },
+  usage: { sms_count: number; call_seconds: number; forward_seconds: number }, env: NodeJS.ProcessEnv = configEnv(),
 ): UsageLine[] {
   const sms = smsCapFor(business, env);
   const ai = callMinutesCapFor(business, env) * 60;
@@ -107,9 +109,9 @@ export async function checkUsageWarnings(businessId: string, deps: WarningDeps =
   const results: WarningResult[] = [];
   try {
     if (!opts.force && !billingEnforced()) return results;
-    const [business, usage, sent] = await Promise.all([getBusiness(businessId), getUsage(businessId, now), getUsageWarnings(businessId, now)]);
+    const [business, usage, sent, tenantOverrides] = await Promise.all([getBusiness(businessId), getUsage(businessId, now), getUsageWarnings(businessId, now), loadTenantOverrides(businessId)]);
     if (!business || !usage) return results;
-    const due = dueWarnings(usageLines(business, usage), sent);
+    const due = dueWarnings(usageLines({ ...business, tenant_overrides: tenantOverrides }, usage), sent);
     for (const w of due) {
       // A single day's jump straight to 100% also uses up the 80% warning: silently claim it so it never fires later.
       if (w.level === 100) await markWarned(businessId, w.kind, 80, now).catch(() => false);
@@ -157,9 +159,9 @@ export interface UsageWarningView extends UsageLine { level: 80 | 100; label: st
  */
 export async function usageWarningsFor(businessId: string, now: Date = new Date()): Promise<UsageWarningView[]> {
   try {
-    const [business, usage, sent] = await Promise.all([getBusiness(businessId), getUsage(businessId, now), getUsageWarnings(businessId, now)]);
+    const [business, usage, sent, tenantOverrides] = await Promise.all([getBusiness(businessId), getUsage(businessId, now), getUsageWarnings(businessId, now), loadTenantOverrides(businessId)]);
     if (!business || !usage) return [];
-    return usageLines(business, usage).filter((l) => l.percent >= 80).map((l) => {
+    return usageLines({ ...business, tenant_overrides: tenantOverrides }, usage).filter((l) => l.percent >= 80).map((l) => {
       const level: 80 | 100 = l.percent >= 100 ? 100 : 80;
       return { ...l, level, label: LABEL[l.kind].en, sent_at: sent?.[`${l.kind}_${level}`] ?? null };
     });

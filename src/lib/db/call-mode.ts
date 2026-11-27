@@ -8,6 +8,7 @@
  * Every function returns the state BEFORE and AFTER the write so callers audit and announce each transition, including the implicit
  * ones (a new number drops 'forward' back to 'ai').
  */
+import { configEnv } from '@/lib/config';
 import { prisma } from './client';
 import { logger } from '@/lib/log';
 import { defaultPhoneCountry, phoneCountry } from '@/lib/phone';
@@ -80,7 +81,7 @@ export async function setCallMode(
     if (!cur) return { ok: false as const, reason: 'not_found' as const };
     const target = mode ?? (cur.callMode as CallMode);
     if (mode === 'forward') {
-      if (!forwardingSupported(opts.line ?? effectiveLineKindFor({ elevenlabs_phone_number_id: cur.elevenlabsPhoneNumberId }), process.env, { native_transfer_enabled: cur.nativeTransferEnabled })) return { ok: false as const, reason: 'forward_unsupported' as const };
+      if (!forwardingSupported(opts.line ?? effectiveLineKindFor({ elevenlabs_phone_number_id: cur.elevenlabsPhoneNumberId }), configEnv(), { native_transfer_enabled: cur.nativeTransferEnabled })) return { ok: false as const, reason: 'forward_unsupported' as const };
       if (!dialable(cur).ok) return { ok: false as const, reason: 'forward_number_unverified' as const };
     }
     const row = await tx.business.update({

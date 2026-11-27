@@ -16,6 +16,7 @@ import { MANUAL_TEXT_MAX } from '@/lib/messaging/manual-limits';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { highRateNanpDestination } from '@/lib/voice/forward-number';
 import type { Business, SmsLog } from '@/lib/types';
+import { quietWindowFor } from '@/lib/admin/tenant-knobs';
 
 export { MANUAL_TEXT_MAX };
 
@@ -69,7 +70,7 @@ export async function sendManualText(input: ManualTextInput): Promise<ManualText
     return { ok: false, reason: 'high_rate_destination' };
   }
   // Quiet hours apply to every owner-typed text (the policy itself only blocks kind 'manual'; replies are held to the same rule here).
-  if (isQuietHour(now, tzOf(business))) return { ok: false, reason: 'quiet_hours' };
+  if (isQuietHour(now, tzOf(business), await quietWindowFor(business.id))) return { ok: false, reason: 'quiet_hours' };
 
   const biz = await rateLimit(`manual-sms:biz:${business.id}`, MANUAL_BUSINESS_HOURLY_LIMIT, HOUR_MS, { failClosed: true });
   const to = await rateLimit(`manual-sms:to:${business.id}:${e164}`, MANUAL_RECIPIENT_HOURLY_LIMIT, HOUR_MS, { failClosed: true });

@@ -206,9 +206,12 @@ function SidebarBody({
   }
 
   function switchBusiness(id: string) {
-    // UI preference only: the server re-validates it against the real business list on every render.
-    document.cookie = `${BUSINESS_COOKIE}=${encodeURIComponent(id)}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax`;
-    router.refresh();
+    // Through the AUDITED support view (POST /api/admin/tenants/{id}/support-view): it logs the visit and selects the business; writes then need support write mode.
+    // Break-glass sessions (no personal account) keep the plain cookie preference: their use is audited per request.
+    void fetch(`/api/admin/tenants/${encodeURIComponent(id)}/support-view`, { method: 'POST' }).then((res) => {
+      if (!res.ok) document.cookie = `${BUSINESS_COOKIE}=${encodeURIComponent(id)}; path=/; max-age=${60 * 60 * 24 * 30}; samesite=lax`;
+      router.refresh();
+    }).catch(() => router.refresh());
   }
 
   return (

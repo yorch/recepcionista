@@ -1,6 +1,7 @@
 /**
  * Which billing banner (if any) to show. Pure: unit-tested without a database.
  */
+import { configEnv } from '@/lib/config';
 import { billingEnforced, billingStateAllows, pastDueGraceDays } from '@/lib/db/usage';
 import { makeT } from '@/lib/i18n';
 import type { Locale } from '@/lib/i18n/core';
@@ -40,7 +41,7 @@ export function bannerFor(
   usage: BannerUsage | null,
   canManage: boolean,
   now: Date = new Date(),
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = configEnv(),
   locale: Locale = 'en',
 ): BannerState | null {
   const t = makeT(locale);

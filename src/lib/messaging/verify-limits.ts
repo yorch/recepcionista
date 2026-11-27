@@ -12,6 +12,7 @@
  * (ownerVerificationText): nothing a tenant typed is ever interpolated.
  * Node runtime only.
  */
+import { configEnv } from '@/lib/config';
 import { clientKey } from '@/lib/auth';
 import { billingEnforced, checkSmsAllowed } from '@/lib/db/usage';
 import { prisma } from '@/lib/db/client';
@@ -55,7 +56,7 @@ export async function checkVerificationStart(i: VerifyStartInput): Promise<Verif
     [`owner-phone/start:num:${i.e164}`, 3],
     [`owner-phone/start:ip:${ip}`, ipLimit],
     ...(i.userId ? [[`owner-phone/start:user:${i.userId}`, 10] as [string, number]] : []),
-    ['owner-phone/start:global', intEnv(process.env.OWNER_VERIFY_GLOBAL_PER_HOUR, 300)],
+    ['owner-phone/start:global', intEnv(configEnv().OWNER_VERIFY_GLOBAL_PER_HOUR, 300)],
   ];
   for (const [key, limit] of buckets) {
     const r = await rateLimit(key, limit, HOUR, { failClosed: true });
@@ -74,7 +75,7 @@ export async function checkVerificationStart(i: VerifyStartInput): Promise<Verif
   ]);
   if (perNumber >= 5) return { status: 429, error: 'too many verification texts to that number today', retryAfterS: 3600 };
   if (perBusiness >= 15) return { status: 429, error: 'too many verification texts today; try again tomorrow', retryAfterS: 3600 };
-  if (global >= intEnv(process.env.OWNER_VERIFY_GLOBAL_PER_DAY, 2000)) {
+  if (global >= intEnv(configEnv().OWNER_VERIFY_GLOBAL_PER_DAY, 2000)) {
     return { status: 503, error: 'phone verification is temporarily unavailable', retryAfterS: 3600 };
   }
 

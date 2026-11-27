@@ -3,12 +3,14 @@
  * All "what day is it / is it 6 PM" questions are answered in the BUSINESS time zone, never the process zone, so DST
  * transitions and zones far from the server behave.
  */
+import { configEnv } from '@/lib/config';
 import { isQuietHour } from '@/lib/messaging/policy';
 import { addDaysToDateKey, localDateKey, tzOf, zonedTimeToUtc } from '@/lib/time';
 
 /** Local wall-clock hour the end-of-day briefing is generated. */
 export const BRIEFING_HOUR = 18;
 export const BRIEFING_TIME = `${BRIEFING_HOUR}:00`;
+const timeOf = (hour: number | undefined): string => (hour === undefined ? BRIEFING_TIME : `${Math.min(23, Math.max(0, Math.trunc(hour)))}:00`);
 
 export const DEFAULT_TICK_SECONDS = 60;
 export const MIN_TICK_SECONDS = 5;
@@ -25,7 +27,7 @@ const falsy = new Set(['off', 'false', '0', 'no']);
  * JOBS=on|off. Unset (or anything else) => ON in production, OFF in development and test. Returns whether the
  * runner is configured explicitly (`explicit`) so an unset dev run can still honour RETENTION_JOB=on on its own.
  */
-export function jobsSetting(env: NodeJS.ProcessEnv = process.env): { enabled: boolean; explicit: boolean } {
+export function jobsSetting(env: NodeJS.ProcessEnv = configEnv()): { enabled: boolean; explicit: boolean } {
   const v = (env.JOBS ?? '').trim().toLowerCase();
   if (truthy.has(v)) return { enabled: true, explicit: true };
   if (falsy.has(v)) return { enabled: false, explicit: true };
@@ -33,7 +35,7 @@ export function jobsSetting(env: NodeJS.ProcessEnv = process.env): { enabled: bo
 }
 
 /** JOBS_TICK_SECONDS (default 60), clamped to [5, 3600]; garbage falls back to the default. */
-export function tickSeconds(env: NodeJS.ProcessEnv = process.env): number {
+export function tickSeconds(env: NodeJS.ProcessEnv = configEnv()): number {
   const raw = (env.JOBS_TICK_SECONDS ?? '').trim();
   if (!raw) return DEFAULT_TICK_SECONDS;
   const n = Number(raw);
@@ -50,23 +52,24 @@ export interface BriefingSlot {
   due: boolean;
 }
 
-export function briefingSlot(now: Date, timezone: string | null | undefined): BriefingSlot {
+/** `hour`: the business's effective briefing hour (tenant override, `jobs.briefing_hour`); 18 when absent. */
+export function briefingSlot(now: Date, timezone: string | null | undefined, hour?: number): BriefingSlot {
   const tz = tzOf(timezone);
   const date = localDateKey(now, tz);
-  const scheduled = zonedTimeToUtc(date, BRIEFING_TIME, tz);
+  const scheduled = zonedTimeToUtc(date, timeOf(hour), tz);
   return { date, scheduled_at: scheduled, due: now.getTime() >= scheduled.getTime() };
 }
 
 /** The next 18:00 local instant strictly after `now` that has not passed (today's if still ahead, else tomorrow's). */
-export function nextBriefingAt(now: Date, timezone: string | null | undefined): Date {
+export function nextBriefingAt(now: Date, timezone: string | null | undefined, hour?: number): Date {
   const tz = tzOf(timezone);
-  const today = briefingSlot(now, tz);
+  const today = briefingSlot(now, tz, hour);
   if (!today.due) return today.scheduled_at;
-  return zonedTimeToUtc(addDaysToDateKey(today.date, 1), BRIEFING_TIME, tz);
+  return zonedTimeToUtc(addDaysToDateKey(today.date, 1), timeOf(hour), tz);
 }
 
 /** Texts to the owner (briefing-ready notice) respect the same 9pm-8am quiet window as every other text. */
-export const inQuietHours = (now: Date, timezone: string | null | undefined): boolean => isQuietHour(now, tzOf(timezone));
+export const inQuietHours = (now: Date, timezone: string | null | undefined, window?: { start: number; end: number }): boolean => isQuietHour(now, tzOf(timezone), window);
 
 /** Hour bucket used to claim "this business was swept this hour" (UTC, so two instances always agree). */
 export const hourBucket = (now: Date): string => now.toISOString().slice(0, 13); // 2027-03-14T18

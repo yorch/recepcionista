@@ -10,6 +10,7 @@
  *  - Retention: purge / erase QUEUE the provider-side recording for deletion in the same transaction as the call-row DELETE
  *    (db/recording-deletions.ts); the jobs runner deletes it with retries (voice/recording-deletion.ts).
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 import type { Call } from '@/lib/types';
 
@@ -38,8 +39,8 @@ export function publicCall(c: Call): PublicCall {
 }
 
 const authHeader = (): string | null => {
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
+  const sid = configEnv().TWILIO_ACCOUNT_SID;
+  const token = configEnv().TWILIO_AUTH_TOKEN;
   return sid && token ? `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}` : null;
 };
 
@@ -114,7 +115,7 @@ export async function fetchVoicemailAudio(recordingUrl: string, range: string | 
   const ref = parseRecordingUrl(recordingUrl);
   if (!ref) return { ok: false, status: 404, error: 'no voicemail' };
   const auth = authHeader();
-  if (!auth || process.env.TWILIO_ACCOUNT_SID !== ref.accountSid) return { ok: false, status: 503, error: 'voicemail playback is not configured' };
+  if (!auth || configEnv().TWILIO_ACCOUNT_SID !== ref.accountSid) return { ok: false, status: 503, error: 'voicemail playback is not configured' };
   const cached = cacheGet(ref);
   if (cached) {
     const hit = sliceRange(cached, range);
@@ -159,7 +160,7 @@ export type RecordingDeleteResult = { ok: true } | { ok: false; error: string };
  */
 export async function deleteTwilioRecording(ref: RecordingRef, fetchImpl: typeof fetch = fetch): Promise<RecordingDeleteResult> {
   const auth = authHeader();
-  if (!auth || process.env.TWILIO_ACCOUNT_SID !== ref.accountSid) { log.warn('delete_skipped', { reason: 'no matching Twilio credentials' }); return { ok: false, error: 'no matching Twilio credentials' }; }
+  if (!auth || configEnv().TWILIO_ACCOUNT_SID !== ref.accountSid) { log.warn('delete_skipped', { reason: 'no matching Twilio credentials' }); return { ok: false, error: 'no matching Twilio credentials' }; }
   try {
     const res = await fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${ref.accountSid}/Recordings/${ref.recordingSid}.json`, {
       method: 'DELETE', headers: { authorization: auth }, signal: AbortSignal.timeout(15_000),

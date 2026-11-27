@@ -2,6 +2,7 @@
  * Owner alerts from the voice side (emergency, handoff, out-of-service notices). Honest by construction: `notified`
  * is true ONLY if the text really went out (or demo mode), and an alert is only attempted to a VERIFIED owner phone.
  */
+import { configEnv } from '@/lib/config';
 import crypto from 'node:crypto';
 import { claimEvent, completeEvent, prisma, releaseEvent } from '@/lib/db';
 import { sendAndLog } from '@/lib/messaging';
@@ -11,6 +12,7 @@ import { isGsm7 } from '@/lib/messaging/policy';
 import { rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
 import type { Business, SmsLog } from '@/lib/types';
+import { knobOr } from '@/lib/admin/tenant-knobs';
 
 const log = logger('owner-alert');
 
@@ -35,7 +37,7 @@ const DEDUPE_LEASE_MS = 10 * 60_000;
 const FIRST_OF_CALL_LEASE_MS = 24 * 60 * 60_000;
 
 /** OWNER_ALERT_HOURLY_LIMIT: emergency+handoff texts per business per hour (default 6, at least 1). */
-export function ownerAlertHourlyLimit(env: NodeJS.ProcessEnv = process.env): number {
+export function ownerAlertHourlyLimit(env: NodeJS.ProcessEnv = configEnv()): number {
   const raw = (env.OWNER_ALERT_HOURLY_LIMIT ?? '').trim();
   const n = Number(raw);
   return raw !== '' && Number.isInteger(n) && n >= 1 ? n : DEFAULT_OWNER_ALERT_HOURLY_LIMIT;
@@ -129,7 +131,7 @@ export async function alertOwner(business: Business, body: string, opts: AlertOp
         return { notified: state === 'done', reason: state === 'done' ? 'sent' : 'duplicate', sms: null };
       }
       claimedFirst = firstId ? await claimEvent('owner-alert-first', firstId, FIRST_OF_CALL_LEASE_MS) : false;
-      const limit = ownerAlertHourlyLimit();
+      const limit = await knobOr(business.id, 'owner.alert_hourly_limit', ownerAlertHourlyLimit());
       const hour = await rateLimit(`owner-alert:hour:${business.id}`, limit, ALERT_WINDOW_MS, { failClosed: true });
       if (!hour.allowed) {
         // Budget spent. The FIRST emergency of a call still goes out (life safety), up to a hard ceiling; everything else waits.

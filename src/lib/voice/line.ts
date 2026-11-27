@@ -15,6 +15,7 @@
  * line: lineKindMismatch); unset, a deployment with ELEVENLABS_API_KEY and ELEVENLABS_PHONE_NUMBER_ID is
  * 'native' and everything else (development, tests, demo) is 'webhook'. Pure.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 export type LineKind = 'native' | 'webhook';
@@ -22,7 +23,7 @@ export type LineKind = 'native' | 'webhook';
 const log = logger('voice/line');
 let warnedMismatch = false;
 
-export function lineKind(env: Record<string, string | undefined> = process.env): LineKind {
+export function lineKind(env: Record<string, string | undefined> = configEnv()): LineKind {
   const forced = (env.VOICE_LINE_KIND ?? '').trim().toLowerCase();
   // A native (ElevenLabs-imported) number is answered by ElevenLabs whatever this variable says: nothing here can dial a human on it. A
   // contradicting VOICE_LINE_KIND=webhook would only make the dashboard promise forwarding that never happens, so the SAFE reading wins.
@@ -38,11 +39,11 @@ export function lineKind(env: Record<string, string | undefined> = process.env):
  * Per-tenant imported lines (voice/tenant-line.ts): with ELEVENLABS_API_KEY set and ELEVENLABS_TENANT_LINES not `off`, every purchased number is
  * imported into ElevenLabs, so an unforced deployment is 'native' even without the shared ELEVENLABS_PHONE_NUMBER_ID.
  */
-export const tenantLinesDefault = (env: Record<string, string | undefined> = process.env): boolean =>
+export const tenantLinesDefault = (env: Record<string, string | undefined> = configEnv()): boolean =>
   Boolean((env.ELEVENLABS_API_KEY ?? '').trim()) && (env.ELEVENLABS_TENANT_LINES ?? '').trim().toLowerCase() !== 'off';
 
 /** The line kind for ONE business: a tenant that owns an imported ElevenLabs number is always native (ElevenLabs answers it). */
-export const lineKindFor = (business: { elevenlabs_phone_number_id?: string | null } | null | undefined, env: Record<string, string | undefined> = process.env): LineKind =>
+export const lineKindFor = (business: { elevenlabs_phone_number_id?: string | null } | null | undefined, env: Record<string, string | undefined> = configEnv()): LineKind =>
   business?.elevenlabs_phone_number_id ? 'native' : lineKind(env);
 
 /**
@@ -52,7 +53,7 @@ export const lineKindFor = (business: { elevenlabs_phone_number_id?: string | nu
  *    has OUR Voice URL (voice/incoming), so it answers on the webhook line and keeps forwarding until `repair-numbers` imports it.
  * `lineKindFor` stays the TARGET (should this number be imported?): provisioning, agent creation and repair use that one.
  */
-export const effectiveLineKindFor = (business: { elevenlabs_phone_number_id?: string | null } | null | undefined, env: Record<string, string | undefined> = process.env): LineKind => {
+export const effectiveLineKindFor = (business: { elevenlabs_phone_number_id?: string | null } | null | undefined, env: Record<string, string | undefined> = configEnv()): LineKind => {
   if (business?.elevenlabs_phone_number_id) return 'native';
   const kind = lineKind(env);
   if (kind === 'native' && (env.VOICE_LINE_KIND ?? '').trim().toLowerCase() !== 'native' && !nativeLineConfigured(env)) return 'webhook';
@@ -60,14 +61,14 @@ export const effectiveLineKindFor = (business: { elevenlabs_phone_number_id?: st
 };
 
 /** Is a native ElevenLabs phone line configured (the API key AND the imported phone number id)? */
-export const nativeLineConfigured = (env: Record<string, string | undefined> = process.env): boolean =>
+export const nativeLineConfigured = (env: Record<string, string | undefined> = configEnv()): boolean =>
   Boolean((env.ELEVENLABS_API_KEY ?? '').trim() && (env.ELEVENLABS_PHONE_NUMBER_ID ?? '').trim());
 
 /**
  * A human-readable problem when VOICE_LINE_KIND=webhook contradicts a configured native line (ELEVENLABS_PHONE_NUMBER_ID set), else null.
  * `lineKind()` then answers 'native' (callers hear the paused script, nothing is forwarded, and the dashboard says so).
  */
-export function lineKindMismatch(env: Record<string, string | undefined> = process.env): string | null {
+export function lineKindMismatch(env: Record<string, string | undefined> = configEnv()): string | null {
   const forced = (env.VOICE_LINE_KIND ?? '').trim().toLowerCase();
   return forced === 'webhook' && nativeLineConfigured(env)
     ? 'VOICE_LINE_KIND=webhook, but ELEVENLABS_PHONE_NUMBER_ID is set: that number is answered by ElevenLabs, which can never forward a call here. Treating the line as native (forwarding is NOT available). Unset VOICE_LINE_KIND, or remove the ElevenLabs phone number settings if this deployment really uses a Twilio Voice URL.'
@@ -80,7 +81,7 @@ export function lineKindMismatch(env: Record<string, string | undefined> = proce
  * AND, when the business is given, its own `native_transfer_enabled` opt-in.
  */
 export const forwardingSupported = (
-  line: LineKind = lineKind(), env: Record<string, string | undefined> = process.env, business?: { native_transfer_enabled?: boolean | null } | null,
+  line: LineKind = lineKind(), env: Record<string, string | undefined> = configEnv(), business?: { native_transfer_enabled?: boolean | null } | null,
 ): boolean => {
   if (line === 'webhook') return true;
   if ((env.NATIVE_TRANSFER ?? '').trim().toLowerCase() !== 'on') return false;

@@ -29,6 +29,7 @@
  *  - a phone-number id that another business owns is never adopted, rebound or deleted (`isOwnedElsewhere` is injected by the caller);
  *  - every function returns a result, never throws, and every error text is short and free of secrets.
  */
+import { configEnv } from '@/lib/config';
 import { logger } from '@/lib/log';
 
 const log = logger('elevenlabs/phone');
@@ -62,7 +63,7 @@ export function parseRemoteNumber(raw: unknown): RemoteNumber | null {
 
 /** All numbers imported into the workspace. */
 export async function listRemoteNumbers(deps: PhoneDeps = {}): Promise<PhoneResult<{ numbers: RemoteNumber[] }>> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const key = apiKeyOf(env);
   if (!key) return fail('ELEVENLABS_API_KEY is not set');
   try {
@@ -78,7 +79,7 @@ export async function listRemoteNumbers(deps: PhoneDeps = {}): Promise<PhoneResu
 }
 
 export async function getRemoteNumber(phoneNumberId: string, deps: PhoneDeps = {}): Promise<PhoneResult<{ number: RemoteNumber | null }>> {
-  const key = apiKeyOf(deps.env ?? process.env);
+  const key = apiKeyOf(deps.env ?? configEnv());
   if (!key) return fail('ELEVENLABS_API_KEY is not set');
   try {
     const res = await (deps.fetchImpl ?? fetch)(`${ELEVENLABS_API}/convai/phone-numbers/${encodeURIComponent(phoneNumberId)}`, { headers: hdrs(key), signal: AbortSignal.timeout(TIMEOUT_MS) });
@@ -102,7 +103,7 @@ export async function importTwilioNumber(
   },
   deps: PhoneDeps = {},
 ): Promise<PhoneResult<{ phone_number_id: string; adopted: boolean }>> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const key = apiKeyOf(env);
   if (!key) return fail('ELEVENLABS_API_KEY is not set');
   const twilioSid = (env.TWILIO_ACCOUNT_SID ?? '').trim();
@@ -147,7 +148,7 @@ export async function importTwilioNumber(
 
 /** Bind (agent id) or detach (null) an imported number. */
 export async function setNumberAgent(phoneNumberId: string, agentId: string | null, deps: PhoneDeps = {}): Promise<PhoneResult<{ bound: true }>> {
-  const key = apiKeyOf(deps.env ?? process.env);
+  const key = apiKeyOf(deps.env ?? configEnv());
   if (!key) return fail('ELEVENLABS_API_KEY is not set');
   try {
     const res = await (deps.fetchImpl ?? fetch)(`${ELEVENLABS_API}/convai/phone-numbers/${encodeURIComponent(phoneNumberId)}`, {
@@ -166,7 +167,7 @@ export async function setNumberAgent(phoneNumberId: string, agentId: string | nu
  * UNVERIFIED shape (see the header): on a refusal the runbook's fallback is delete + import again.
  */
 export async function refreshNumberCredentials(phoneNumberId: string, deps: PhoneDeps = {}): Promise<PhoneResult<{ refreshed: true }>> {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? configEnv();
   const key = apiKeyOf(env);
   if (!key) return fail('ELEVENLABS_API_KEY is not set');
   const sid = (env.TWILIO_ACCOUNT_SID ?? '').trim();
@@ -185,7 +186,7 @@ export async function refreshNumberCredentials(phoneNumberId: string, deps: Phon
 
 /** Delete an imported number (404 = already gone = success). Detaches the agent first (a bound number can keep an agent alive). */
 export async function deleteRemoteNumber(phoneNumberId: string, deps: PhoneDeps = {}): Promise<PhoneResult<{ already_deleted: boolean }>> {
-  const key = apiKeyOf(deps.env ?? process.env);
+  const key = apiKeyOf(deps.env ?? configEnv());
   if (!key) return fail('ELEVENLABS_API_KEY is not set');
   try {
     await setNumberAgent(phoneNumberId, null, deps); // best-effort: the delete below is what matters
@@ -206,7 +207,7 @@ export async function registerTwilioCall(
   input: { agentId: string; from: string; to: string; dynamicVariables?: Record<string, string>; configOverride?: Record<string, unknown> },
   deps: PhoneDeps = {},
 ): Promise<PhoneResult<{ twiml: string }>> {
-  const key = apiKeyOf(deps.env ?? process.env);
+  const key = apiKeyOf(deps.env ?? configEnv());
   if (!key) return fail('ELEVENLABS_API_KEY is not set');
   if (!input.agentId || input.agentId.startsWith('mock_')) return fail('no real agent');
   try {

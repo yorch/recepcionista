@@ -30,7 +30,7 @@ function back(result: string, extra: Record<string, string> = {}): NextResponse 
  */
 export async function GET(req: Request) {
   if (googleMockRefused()) return fail('GOOGLE_OAUTH_MOCK is not allowed in production', 503);
-  const r = await scoped(req, 'owner');
+  const r = await scoped(req, 'owner', { stateChanging: true });
   if (!r.ok) return r.response;
   const { s } = r;
   const q = new URL(req.url).searchParams;

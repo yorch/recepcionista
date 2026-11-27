@@ -1,6 +1,6 @@
 import { ok, fail, readJson } from '@/lib/http';
-import { authenticate } from '@/lib/session';
-import { limitRequest } from '@/lib/ratelimit';
+import { requireRecentAuth } from '@/lib/session';
+import { guardAdminRoute } from '@/lib/admin/guard';
 import { prisma, getBusiness, getKnowledgeBase, recordAudit } from '@/lib/db';
 import { expectedToolNames, hasElevenLabs, resetInitiationCache, syncAgent } from '@/lib/voice/elevenlabs';
 import { finishCreatedAgent } from '@/lib/voice/agent-created';
@@ -34,10 +34,9 @@ export interface ResyncResult {
  *  - Rate limited (6 requests/minute per client); audited as `admin.resync_agents` (counts + business ids, never prompts or keys).
  */
 export async function POST(req: Request) {
-  const auth = await authenticate(req, { role: 'admin' });
-  if (!auth.ok) return auth.response;
-  const limited = await limitRequest(req, 'admin/resync-agents', 6);
-  if (limited) return limited;
+  const g = await guardAdminRoute(req, { permission: 'providers.resync', rate: { name: 'resync-agents', max: 6 } }); // permission providers.resync
+  if (!g.ok) return g.response;
+  const auth = g.ctx.auth;
   try {
     const raw = await readJson<unknown>(req).catch(() => ({}));
     if (raw !== null && raw !== undefined && (typeof raw !== 'object' || Array.isArray(raw))) return fail('invalid body', 422);
@@ -45,6 +44,10 @@ export async function POST(req: Request) {
     for (const k of Object.keys(body)) if (!['dry_run', 'business_ids', 'limit', 'cursor'].includes(k)) return fail(`unknown field "${k}"`, 422);
     if (body.dry_run !== undefined && typeof body.dry_run !== 'boolean') return fail('dry_run must be true or false', 422);
     const dryRun = body.dry_run !== false;
+    if (!dryRun) { // pushes prompts / tools to the provider: step-up for a cookie session (a dry run makes no provider call)
+      const stale = requireRecentAuth(auth);
+      if (stale) return stale;
+    }
     let limit = RESYNC_DEFAULT_BATCH;
     if (body.limit !== undefined) {
       if (typeof body.limit !== 'number' || !Number.isInteger(body.limit) || body.limit < 1 || body.limit > RESYNC_MAX_BATCH) return fail(`limit must be an integer between 1 and ${RESYNC_MAX_BATCH}`, 422);

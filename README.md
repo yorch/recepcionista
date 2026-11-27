@@ -23,6 +23,9 @@ parallel work plan.
 | [docs/billing.md](docs/billing.md) | Stripe subscriptions, trials, plan caps, grandfathering, releasing canceled tenants |
 | [docs/compliance.md](docs/compliance.md) | recording/AI disclosure, SMS consent and opt-out, retention and erasure, operator duties |
 | [docs/env-vars.md](docs/env-vars.md) | every environment variable: required, default, secret |
+| [docs/design/admin-console-architecture.md](docs/design/admin-console-architecture.md) | the platform admin console: owner decisions, the settings registry (`src/lib/config`), precedence env pin > console > default, tiers, the runtime config module, the phase plan |
+| [docs/design/admin-console-contracts.md](docs/design/admin-console-contracts.md) | the admin console backend (Phases 2, 4, 5, 7, 8): tables, helpers, every `/api/admin/*` route with its permission, role matrix, semantic rules (tiers, secrets, rotation, freeze, break-glass), error codes, what the Phase 3 UI can rely on, residuals |
+| `/admin` UI (agent A) | the console shell, the settings pages generated from the registry, history / rollback / import-export, system, overview, "Move to console", the legal page editor and the public `/terms` `/privacy` `/sms-terms`, banners and maintenance mode: see the **Agent A** section of [docs/design/admin-console-contracts.md](docs/design/admin-console-contracts.md) and the runbook section "Platform console" |
 | [docs/runbook.md](docs/runbook.md) | pre-deploy checklist, live test call, `verify:deploy`, rollback, provider checklist, release of canceled tenants |
 | [docs/security-headers.md](docs/security-headers.md) | nonce-based CSP, other response headers, rollout switches |
 | [docs/testing.md](docs/testing.md) | what runs where, the scratch database, destructive scripts |
@@ -159,10 +162,15 @@ success; `DEMO_MODE` is ignored in production (reset, simulated calls and the mo
 404). Without `ELEVENLABS_API_KEY` there is no voice agent (see the table below).
 
 **ElevenLabs webhook secret.** The first provision creates the post-call
-webhook and returns its signing secret once, in the admin-only provision
-response (`webhook_secret`). The app does not store or log it: copy it to
+webhook. When an **owner admin** (an individual account with the owner platform role) provisions,
+the signing secret goes straight into the encrypted console store (`elevenlabs.webhook_secret`,
+critical tier, audited, every admin mailed) and the response says `webhook_secret_stored: true`.
+In every other case (the break-glass Bearer token, `ELEVENLABS_WEBHOOK_SECRET` pinned in the
+environment, a frozen console, no console storage) the old behaviour applies: the secret is shown once in the
+admin-only provision response (`webhook_secret`), the app does not store or log it, and you copy it to
 `ELEVENLABS_WEBHOOK_SECRET` in `.env` and redeploy. If you lose it, delete the
-webhook in the ElevenLabs workspace and re-provision.
+webhook in the ElevenLabs workspace and re-provision. Providers, secrets, connection tests and the
+`APP_SECRET_KEY` rotation are managed at `/admin/providers`.
 
 **Login throttling.** `X-Forwarded-For` is trusted only with `TRUSTED_PROXY=true`
 (set it only behind Traefik; behind a CDN *and* Traefik also set `TRUSTED_PROXY_HOPS=2` so the key is
@@ -373,3 +381,6 @@ the browser.
 - Every function in `src/lib/db/` is async and returns plain domain objects from
   `@/lib/types` —
   no caller ever imports a Prisma type.
+
+| `/admin` tenants, plans, administrators (agent C) | `/admin/tenants` (directory, detail, billing / comp, suspension, per-business operations, support view and write mode), `/admin/plans` (plan editor with live Stripe prices, entitlements), `/admin/admins`; plan features, `max_locations` and per-plan Stripe prices are enforced; tenant overrides are read by the feature code; the owner's comfort card is in Settings | `docs/design/admin-console-contracts.md` section "Agent C" |
+| `/admin/operations/*` (agent D) | alerts center with acknowledgement and e-mail routing, jobs (dry-run preview then Apply, run history, tenant release and grandfather reports), audit log with filters and export, SMS delivery failures, webhook / event claims, provider health history, instances, usage and revenue (MRR estimate); impact previews in the settings review (`src/lib/admin/impact.ts`); maintenance helper (`src/lib/admin/maintenance.ts`); Phase 6 (no build-time `NEXT_PUBLIC_*`, no Docker build args); `verify:deploy` / `smoke` read the server's selftest. See the Agent D section of `docs/design/admin-console-contracts.md`. |

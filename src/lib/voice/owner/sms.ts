@@ -14,6 +14,7 @@ import { codesEqual, ownerCode, parseOwnerSms, undoBucket, undoScope, withinTtl 
 import { handleBareReplyAnswer, handleReplyCode } from './reply-sms';
 import { applyOwnerChange, auditOwnerKb, rejectOwnerChange, revertOwnerChange, type ChangeActor } from './apply';
 import type { Business, OwnerKbChange } from '@/lib/types';
+import { planAllows } from '@/lib/admin/plan-catalog';
 
 const log = logger('owner-sms');
 const ATTEMPT_LIMIT = 10;
@@ -52,7 +53,7 @@ async function findByCode(businessId: string, code: string, now: Date): Promise<
 }
 
 export async function handleOwnerSms(business: Business, from: string, body: string | null | undefined, now: Date = new Date()): Promise<string | null> {
-  if (!ownerCallinEnabled()) return null;
+  if (!ownerCallinEnabled() || !planAllows(business.plan, 'owner_callin')) return null;
   const cmd = parseOwnerSms(body);
   if (!cmd) {
     // A bare NO / YES from the owner phone while a drafted customer reply is waiting (the spoof warning's cancel path). Strangers get nothing.

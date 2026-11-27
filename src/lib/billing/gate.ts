@@ -1,6 +1,7 @@
 /**
  * Billing gates shared by routes. Node runtime only (imports session/db).
  */
+import { configEnv } from '@/lib/config';
 import { NextResponse } from 'next/server';
 import { isProvisioningAllowed } from '@/lib/db';
 import type { Principal } from '@/lib/session';
@@ -26,7 +27,7 @@ export function assertProvisioningAllowed(
   principal: Principal,
   business: Pick<Business, 'billing_status' | 'past_due_since'>,
   now: Date = new Date(),
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = configEnv(),
 ): void {
   if (principal.kind === 'admin') return;
   if (!isProvisioningAllowed(business, now, env)) throw new BillingRequiredError();

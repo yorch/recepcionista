@@ -1,23 +1,24 @@
 /**
  * Owner VOICE REPLY settings ("owner calls back, the assistant relays by text"). Kept apart from config.ts on purpose. See docs/owner-call-in.md "Voice reply".
  */
+import { configEnv } from '@/lib/config';
 import { ownerCallinEnabled } from './config';
 
 /** OWNER_REPLY_ENABLED: defaults to whatever OWNER_CALLIN_ENABLED says (the reply channel needs the owner line); "false" turns only replies off. */
-export function ownerReplyEnabled(env: Record<string, string | undefined> = process.env): boolean {
+export function ownerReplyEnabled(env: Record<string, string | undefined> = configEnv()): boolean {
   if (!ownerCallinEnabled(env)) return false;
   const raw = (env.OWNER_REPLY_ENABLED ?? '').trim().toLowerCase();
   return raw === '' ? true : raw !== 'false';
 }
 
 /** OWNER_REPLY_DAILY_LIMIT: texts to customers sent through the owner line per business per rolling 24 h (default 10, 1..100). Drafts are budgeted at the same number per identity class. */
-export function ownerReplyDailyLimit(env: Record<string, string | undefined> = process.env): number {
+export function ownerReplyDailyLimit(env: Record<string, string | undefined> = configEnv()): number {
   const n = Number((env.OWNER_REPLY_DAILY_LIMIT ?? '').trim());
   return Number.isInteger(n) && n >= 1 ? Math.min(n, 100) : 10;
 }
 
 /** OWNER_REPLY_REQUIRE_ATTESTATION=true: lead tools and replies work only on a call the carrier vouched for (STIR/SHAKEN attestation A). Default off. */
-export const ownerReplyRequiresAttestation = (env: Record<string, string | undefined> = process.env): boolean => (env.OWNER_REPLY_REQUIRE_ATTESTATION ?? '').trim().toLowerCase() === 'true';
+export const ownerReplyRequiresAttestation = (env: Record<string, string | undefined> = configEnv()): boolean => (env.OWNER_REPLY_REQUIRE_ATTESTATION ?? '').trim().toLowerCase() === 'true';
 
 /** Longest message the owner can relay (characters). The owner's confirmation text must show it in full (it is 1-2 segments). */
 export const OWNER_REPLY_MAX_CHARS = 120;
