@@ -399,11 +399,13 @@ export async function applyChanges(opts: ApplyOptions): Promise<ApplyResult> {
         await tx.platformSetting.deleteMany({ where: { key } });
       } else if (secret) {
         const envelope = encryptSetting(p.newSecret as string, key, keys);
-        newFp = fingerprintOf(p.newSecret as string);
+        newFp = fingerprintOf(p.newSecret as string, keys);
+        const previousEnvelope = p.row?.secretEnvelope ?? null;
+        const previousUntil = p.row?.secretEnvelope ? new Date(now.getTime() + DUAL_SECRET_WINDOW_MS) : null;
         const data = {
           value: Prisma.DbNull, secretEnvelope: envelope, secretFingerprint: newFp, secretLast4: last4Of(p.newSecret as string),
-          previousEnvelope: p.row?.secretEnvelope ?? null, previousUntil: p.row?.secretEnvelope ? new Date(now.getTime() + DUAL_SECRET_WINDOW_MS) : null,
-          version: BigInt(version), integrityMac: settingMac(key, macPayload({ secretEnvelope: envelope }), version, keys), updatedBy: opts.actor.user_id, updatedVia: opts.actor.via, updatedAt: now,
+          previousEnvelope, previousUntil,
+          version: BigInt(version), integrityMac: settingMac(key, macPayload({ secretEnvelope: envelope, previousEnvelope, previousUntil }), version, keys), updatedBy: opts.actor.user_id, updatedVia: opts.actor.via, updatedAt: now,
         };
         await tx.platformSetting.upsert({ where: { key }, create: { key, ...data }, update: data });
       } else {

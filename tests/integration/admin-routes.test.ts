@@ -247,10 +247,13 @@ integration('admin console: routes, roles, bearer rules, tenants, plans, legal (
       expect([frozen.status, frozen.data.frozen]).toEqual([200, true]);
       expect((await call(R.apply.POST, 'POST', '/api/admin/settings/apply', owner, { changes: [{ key: 'platform.announcement', value: 'x' }] })).code).toBe('settings_frozen');
       expect((await call(R.freeze.POST, 'POST', '/api/admin/settings/freeze', 'bearer', { frozen: false, reason: 'incident over, all clear' })).data.frozen).toBe(false);
-      const created = await call(R.admins.POST, 'POST', '/api/admin/admins', 'bearer', { email: `${uniq('rec')}@example.test`, platform_role: 'owner', password: 'a long recovery passphrase' });
+      // the token is recovery, not a way to mint standing owners: while an enabled owner exists it creates the lesser roles only (an owner needs ADMIN_TOKEN_ALLOW_SETTINGS=true or a lock-out)
+      const refusedOwner = await call(R.admins.POST, 'POST', '/api/admin/admins', 'bearer', { email: `${uniq('rec')}@example.test`, platform_role: 'owner', password: 'a long recovery passphrase' });
+      expect([refusedOwner.status, refusedOwner.code]).toEqual([403, 'owner_requires_owner']);
+      const created = await call(R.admins.POST, 'POST', '/api/admin/admins', 'bearer', { email: `${uniq('rec')}@example.test`, platform_role: 'ops', password: 'a long recovery passphrase' });
       expect(created.status).toBe(201);
       userIds.push(created.data.admin.id);
-      expect(created.data.admin.platform_role).toBe('owner');
+      expect(created.data.admin.platform_role).toBe('ops');
       await prisma.user.update({ where: { id: owner.user.id }, data: { disabledAt: new Date() } });
       expect((await call(R.admin.PATCH, 'PATCH', `/api/admin/admins/${owner.user.id}`, 'bearer', { disabled: false }, { id: owner.user.id })).status).toBe(200); // unlock
       expect((await call(R.adminSessions.DELETE, 'DELETE', `/api/admin/admins/${owner.user.id}/sessions`, 'bearer', undefined, { id: owner.user.id })).data.revoked).toBeGreaterThanOrEqual(1);
@@ -302,7 +305,7 @@ integration('admin console: routes, roles, bearer rules, tenants, plans, legal (
     const put = await call(R.secret.PUT, 'PUT', '/api/admin/secrets/stripe.secret_key', owner, { value: SECRET, reason: 'first live key', confirm: 'stripe.secret_key' }, { key: 'stripe.secret_key' });
     expect(put.status).toBe(200);
     const info = await call(R.secret.GET, 'GET', '/api/admin/secrets/stripe.secret_key', owner, undefined, { key: 'stripe.secret_key' });
-    expect(info.data).toMatchObject({ set: true, source: 'console', fingerprint: crypto.createHash('sha256').update(SECRET).digest('hex').slice(0, 8), last4: SECRET.slice(-4) });
+    expect(info.data).toMatchObject({ set: true, source: 'console', fingerprint: (await import('@/lib/admin/crypto')).fingerprintOf(SECRET), last4: SECRET.slice(-4) });
     const ro = await mk('read_only');
     expect((await call(R.secret.GET, 'GET', '/api/admin/secrets/stripe.secret_key', ro, undefined, { key: 'stripe.secret_key' })).data).toEqual({ key: 'stripe.secret_key', set: true, source: 'console' });
     const dump = [put.text, info.text, (await call(R.settings.GET, 'GET', '/api/admin/settings', owner)).text, (await call(R.history.GET, 'GET', '/api/admin/settings/history', owner)).text, (await call(R.sExport.GET, 'GET', '/api/admin/settings/export', owner)).text,
@@ -420,9 +423,10 @@ integration('admin console: routes, roles, bearer rules, tenants, plans, legal (
     expect(d1b.data.version).toBe(1); // the same draft is updated in place
     expect((await call(R.legalPublish.POST, 'POST', '/api/admin/legal/terms/en/publish', ops, { reason: 'ops tries to publish it' }, P)).status).toBe(403);
     expect((await call(R.legalPublish.POST, 'POST', '/api/admin/legal/terms/en/publish', owner, { reason: 'x' }, P)).status).toBe(422);
-    const pub = await call(R.legalPublish.POST, 'POST', '/api/admin/legal/terms/en/publish', owner, { reason: 'approved by counsel on the 3rd' }, P);
+    const review = { confirm: 'publish terms/en', version: d1b.data.version, hash: d1b.data.hash };
+    const pub = await call(R.legalPublish.POST, 'POST', '/api/admin/legal/terms/en/publish', owner, { reason: 'approved by counsel on the 3rd', ...review }, P);
     expect([pub.status, pub.data.version, pub.data.draft]).toEqual([200, 1, false]);
-    expect((await call(R.legalPublish.POST, 'POST', '/api/admin/legal/terms/en/publish', owner, { reason: 'nothing left to publish' }, P)).code).toBe('no_draft');
+    expect((await call(R.legalPublish.POST, 'POST', '/api/admin/legal/terms/en/publish', owner, { reason: 'nothing left to publish', ...review }, P)).code).toBe('no_draft');
     await call(R.legalPage.PUT, 'PUT', '/api/admin/legal/terms/en', ops, { body: '# Terms v2' }, P);
     const page = await call(R.legalPage.GET, 'GET', '/api/admin/legal/terms/en', ro, undefined, P);
     expect([page.data.page.published_version, page.data.page.draft_version, page.data.version.body]).toEqual([1, 2, '# Terms v2']); // default: the draft
@@ -480,8 +484,8 @@ integration('admin console: routes, roles, bearer rules, tenants, plans, legal (
     expect((await call(R.suspend.POST, 'POST', '/api/admin/tenants/nope/suspend', ops, { reason: 'unknown tenant here' }, { id: 'nope' })).status).toBe(404);
     const before = await usage.checkSmsAllowed(a.id);
     expect(before.ok).toBe(true); // billing is not enforced in tests: counting only
-    expect((await call(R.suspend.POST, 'POST', `/api/admin/tenants/${a.id}/suspend`, ops, { reason: 'abuse reports from carriers' }, { id: a.id })).status).toBe(200);
-    expect((await call(R.suspend.POST, 'POST', `/api/admin/tenants/${a.id}/suspend`, ops, { reason: 'abuse reports from carriers' }, { id: a.id })).code).toBe('already_suspended');
+    expect((await call(R.suspend.POST, 'POST', `/api/admin/tenants/${a.id}/suspend`, ops, { reason: 'abuse reports from carriers', confirm: `suspend ${a.name}` }, { id: a.id })).status).toBe(200);
+    expect((await call(R.suspend.POST, 'POST', `/api/admin/tenants/${a.id}/suspend`, ops, { reason: 'abuse reports from carriers', confirm: `suspend ${a.name}` }, { id: a.id })).code).toBe('already_suspended');
     // the rule: suspended tenants are out of service and cannot send, even with billing not enforced
     const sms = await usage.checkSmsAllowed(a.id);
     expect([sms.ok, sms.reason, sms.suspended]).toEqual([false, 'no_plan', true]);
@@ -687,7 +691,7 @@ integration('admin console: routes, roles, bearer rules, tenants, plans, legal (
       expect((await call(R.adminSessions.DELETE, 'DELETE', `/api/admin/admins/${v2.user.id}/sessions`, owner, undefined, { id: v2.user.id })).data.revoked).toBe(1);
       const v3 = await mk('ops');
       expect((await call(R.adminTwoFactor.DELETE, 'DELETE', `/api/admin/admins/${v3.user.id}/two-factor`, ops, undefined, { id: v3.user.id })).status).toBe(403);
-      expect((await call(R.adminTwoFactor.DELETE, 'DELETE', `/api/admin/admins/${v3.user.id}/two-factor`, owner, undefined, { id: v3.user.id })).status).toBe(200);
+      expect((await call(R.adminTwoFactor.DELETE, 'DELETE', `/api/admin/admins/${v3.user.id}/two-factor`, owner, { reason: 'lost device, verified by call', confirm: v3.user.email }, { id: v3.user.id })).status).toBe(200);
       const after = await prisma.user.findUniqueOrThrow({ where: { id: v3.user.id } });
       expect([after.totpEnabledAt, after.totpSecretEnc]).toEqual([null, null]);
       expect(await prisma.userSession.count({ where: { userId: v3.user.id } })).toBe(0);

@@ -9,14 +9,14 @@ import { Problems } from './tenant-errors';
 
 /**
  * One guarded console action with its own inline form: optional extra fields (children), a REQUIRED reason and, for the critical tier, the exact phrase to type.
- * `run(reason)` performs the call; a `reauth_required` answer opens the console's step-up panel and retries once (AdminProvider.guard). The button is hidden by
+ * `run(reason, typed)` performs the call (the server checks the typed phrase again); a `reauth_required` answer opens the console's step-up panel and retries once (AdminProvider.guard). The button is hidden by
  * the caller when the role lacks the permission; the server enforces it anyway.
  */
 export function ReasonAction({
   label, title, description, phrase = null, variant = 'outline', run, onDone, children, disabled = false, ready = true, doneMessage,
 }: {
   label: string; title?: string; description?: string; phrase?: string | null; variant?: 'outline' | 'danger' | 'primary';
-  run: (reason: string) => Promise<unknown>; onDone?: () => void; children?: React.ReactNode; disabled?: boolean; ready?: boolean; doneMessage?: string;
+  run: (reason: string, typed: string) => Promise<unknown>; onDone?: () => void; children?: React.ReactNode; disabled?: boolean; ready?: boolean; doneMessage?: string;
 }) {
   const t = useT();
   const { guard } = useAdmin();
@@ -31,7 +31,7 @@ export function ReasonAction({
     if (busy) return;
     setBusy(true); setError(null);
     try {
-      await guard(async () => { await run(reason.trim()); });
+      await guard(async () => { await run(reason.trim(), typed.trim()); });
       toast.success(doneMessage ?? t('at.action.done'));
       setOpen(false); setReason(''); setTyped('');
       onDone?.();

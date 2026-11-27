@@ -384,7 +384,7 @@ export async function listAllBusinesses(): Promise<Business[]> {
 }
 
 /** The few columns the background jobs need to decide whether a tenant is due (never the whole row: hours, KB-sized json, tokens...). */
-export type JobBusiness = Pick<Business, 'id' | 'timezone' | 'billing_status' | 'past_due_since' | 'status'>;
+export type JobBusiness = Pick<Business, 'id' | 'timezone' | 'billing_status' | 'past_due_since' | 'status' | 'suspended_at'>;
 
 /**
  * Live businesses for the job runner, narrow columns only, keyset-paged (indexed on status; walks every page so tenant #1001 is
@@ -396,13 +396,13 @@ export async function listLiveBusinessesForJobs(opts: { businessId?: ID } = {}):
   // not end the walk (Prisma returns an empty page for a cursor row that no longer exists, skipping every later tenant).
   let cursor: { at: Date; id: string } | null = null;
   for (;;) {
-    const rows: { id: string; createdAt: Date; timezone: string; billingStatus: string; pastDueSince: Date | null }[] = await prisma.business.findMany({
+    const rows: { id: string; createdAt: Date; timezone: string; billingStatus: string; pastDueSince: Date | null; suspendedAt: Date | null }[] = await prisma.business.findMany({
       where: {
         status: 'live',
         ...(opts.businessId ? { id: opts.businessId } : {}),
         ...(cursor ? { OR: [{ createdAt: { gt: cursor.at } }, { createdAt: cursor.at, id: { gt: cursor.id } }] } : {}),
       },
-      select: { id: true, createdAt: true, timezone: true, billingStatus: true, pastDueSince: true },
+      select: { id: true, createdAt: true, timezone: true, billingStatus: true, pastDueSince: true, suspendedAt: true },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: MAX_PAGE_SIZE_RANGE,
     });
@@ -411,6 +411,7 @@ export async function listLiveBusinessesForJobs(opts: { businessId?: ID } = {}):
         id: r.id, status: 'live', timezone: r.timezone,
         billing_status: r.billingStatus as Business['billing_status'],
         past_due_since: r.pastDueSince ? r.pastDueSince.toISOString() : null,
+        suspended_at: r.suspendedAt ? r.suspendedAt.toISOString() : null, // a suspended tenant is skipped by every job (isProvisioningAllowed refuses it)
       });
     }
     if (rows.length < MAX_PAGE_SIZE_RANGE) break;

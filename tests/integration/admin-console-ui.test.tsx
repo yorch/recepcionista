@@ -129,10 +129,10 @@ integration('admin console UI: move to console, legal pages (postgres)', () => {
     expect(before).toEqual({ terms: null, privacy: null, sms_terms: null });
     expect(await legal.getPublishedLegal('terms', 'en')).toBeNull();
 
-    await legal.saveLegalDraft({ slug: 'terms', locale: 'en', body: '# Terms\n\nBe kind. [privacy](/privacy) <script>alert(1)</script>', actor: owner });
+    const termsDraft = await legal.saveLegalDraft({ slug: 'terms', locale: 'en', body: '# Terms\n\nBe kind. [privacy](/privacy) <script>alert(1)</script>', actor: owner });
     await legal.saveLegalDraft({ slug: 'terms', locale: 'es', body: '# Términos\n\nSea amable.', actor: owner });
     expect(await legal.getPublishedLegal('terms', 'en')).toBeNull(); // a draft is not public
-    await legal.publishLegal({ slug: 'terms', locale: 'en', reason: 'first version of the terms', actor: owner });
+    await legal.publishLegal({ slug: 'terms', locale: 'en', reason: 'first version of the terms', confirm: 'publish terms/en', version: termsDraft.version, hash: termsDraft.hash, actor: owner });
     links.resetLegalLinksCache();
     expect((await links.legalLinks()).terms).toBe('/terms');
     expect((await links.legalLinks()).privacy).toBeNull();
@@ -160,8 +160,8 @@ integration('admin console UI: move to console, legal pages (postgres)', () => {
   });
 
   test('an external URL in the console replaces the built-in link; the maintenance switch is readable by the banner', async () => {
-    await legal.saveLegalDraft({ slug: 'privacy', locale: 'en', body: 'Privacy text', actor: owner });
-    await legal.publishLegal({ slug: 'privacy', locale: 'en', reason: 'first privacy version here', actor: owner });
+    const privDraft = await legal.saveLegalDraft({ slug: 'privacy', locale: 'en', body: 'Privacy text', actor: owner });
+    await legal.publishLegal({ slug: 'privacy', locale: 'en', reason: 'first privacy version here', confirm: 'publish privacy/en', version: privDraft.version, hash: privDraft.hash, actor: owner });
     links.resetLegalLinksCache();
     expect((await links.legalLinks()).privacy).toBe('/privacy');
     await store.applyChanges({ changes: [{ key: 'legal.privacy_url', value: 'https://legal.example.test/privacy' }, { key: 'platform.maintenance_mode', value: true }, { key: 'platform.announcement', value: 'Planned work <b>tonight</b>' }], reason: 'point to the external page and announce', actor: owner });

@@ -1,6 +1,6 @@
 /**
  * Migration 20261211120000_admin_console_schema: upgrades a POPULATED database that is at the previous migration (businesses on known and unknown plan strings, admin and owner users),
- * keeps every row, maps unknown plan strings to 'legacy' (recording the original in audit_events), migrates admins to platform_role 'owner', seeds plans and settings_state, validates
+ * keeps every row, REGISTERS unknown plan strings as hidden non-comped plans with NULL caps exactly like the trigger (no remap to the comped 'legacy'; recorded in audit_events), migrates admins to platform_role 'owner', seeds plans and settings_state, validates
  * every constraint it adds, registers unknown plans through the trigger afterwards, is re-runnable, and leaves zero drift between prisma/migrations and schema.prisma.
  *
  * Skipped unless TEST_DATABASE_URL names a disposable database containing "test" or "scratch" (it creates and drops scratch_mig_* databases on the same server).
@@ -83,14 +83,19 @@ suite('migration admin_console_schema (postgres)', () => {
       // nothing lost
       expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM businesses`)).toEqual([{ n: 7 }]);
       expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE id='pre_audit'`)).toEqual([{ n: 1 }]);
-      // plan strings: known stay, unknown -> legacy, NULL stays NULL
+      // plan strings: every string stays AS IS (no remap: a tenant on an unknown plan name is not silently comped), NULL stays NULL
       const plans = Object.fromEntries((await d.$queryRawUnsafe(`SELECT id, plan FROM businesses`)).map((r: any) => [r.id, r.plan]));
-      expect(plans).toEqual({ b_std: 'standard', b_comp: 'legacy', b_x: 'legacy', b_cap: 'legacy', b_legacy: 'legacy', b_null: null, b_demo: 'demo' });
-      // every remap is recorded with the original string
-      const mig = await d.$queryRawUnsafe(`SELECT business_id, meta->>'from' AS f, meta->>'to' AS t FROM audit_events WHERE action='plans.migrated' ORDER BY business_id`);
-      expect(mig).toEqual([{ business_id: 'b_cap', f: 'Plan', t: 'legacy' }, { business_id: 'b_comp', f: 'comp', t: 'legacy' }, { business_id: 'b_x', f: 'x', t: 'legacy' }]);
+      expect(plans).toEqual({ b_std: 'standard', b_comp: 'comp', b_x: 'x', b_cap: 'Plan', b_legacy: 'legacy', b_null: null, b_demo: 'demo' });
+      // the unknown strings are registered exactly as the trigger does: hidden, NOT comped, NULL caps (inherit the platform), never the comped 'legacy'
+      expect(await d.$queryRawUnsafe(`SELECT key, public, is_comped, sms_cap, call_minutes_cap, voicemail_minutes_cap, forward_minutes_cap, sort FROM plans WHERE key IN ('comp','x','Plan') ORDER BY key`)).toEqual([
+        { key: 'Plan', public: false, is_comped: false, sms_cap: null, call_minutes_cap: null, voicemail_minutes_cap: null, forward_minutes_cap: null, sort: 1000 },
+        { key: 'comp', public: false, is_comped: false, sms_cap: null, call_minutes_cap: null, voicemail_minutes_cap: null, forward_minutes_cap: null, sort: 1000 },
+        { key: 'x', public: false, is_comped: false, sms_cap: null, call_minutes_cap: null, voicemail_minutes_cap: null, forward_minutes_cap: null, sort: 1000 },
+      ]);
+      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE action='plans.migrated'`)).toEqual([{ n: 0 }]);
+      expect(await d.$queryRawUnsafe(`SELECT meta->>'plan' AS p, (meta->>'businesses')::int AS n FROM audit_events WHERE action='plans.registered' ORDER BY 1`)).toEqual([{ p: 'Plan', n: 1 }, { p: 'comp', n: 1 }, { p: 'x', n: 1 }]);
       // seeds
-      expect(await d.$queryRawUnsafe(`SELECT key, is_comped, public, sms_cap, call_minutes_cap, voicemail_minutes_cap, forward_minutes_cap FROM plans ORDER BY sort`)).toEqual([
+      expect(await d.$queryRawUnsafe(`SELECT key, is_comped, public, sms_cap, call_minutes_cap, voicemail_minutes_cap, forward_minutes_cap FROM plans WHERE key IN ('standard','legacy','grandfathered','demo') ORDER BY sort`)).toEqual([
         { key: 'standard', is_comped: false, public: true, sms_cap: 500, call_minutes_cap: 300, voicemail_minutes_cap: 60, forward_minutes_cap: 600 },
         { key: 'legacy', is_comped: true, public: false, sms_cap: 500, call_minutes_cap: 300, voicemail_minutes_cap: 60, forward_minutes_cap: 600 },
         { key: 'grandfathered', is_comped: true, public: false, sms_cap: 500, call_minutes_cap: 300, voicemail_minutes_cap: 60, forward_minutes_cap: 600 },
@@ -136,11 +141,11 @@ suite('migration admin_console_schema (postgres)', () => {
       expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM tenant_setting_overrides`)).toEqual([{ n: 0 }]);
 
       // re-runnable: applying the migration SQL again changes nothing and fails nowhere (no duplicate audit rows, no second seed, admins untouched)
-      const auditBefore = await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE action='plans.migrated'`);
+      const auditBefore = await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE action='plans.registered'`);
       const file = path.join(MIGRATIONS, NEW, 'migration.sql');
       const again = rawPrisma(['db', 'execute', '--file', file, '--schema', path.join(ROOT, 'prisma/schema.prisma')], dbUrl(name));
       expect(again.code).toBe(0);
-      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE action='plans.migrated'`)).toEqual(auditBefore);
+      expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM audit_events WHERE action='plans.registered'`)).toEqual(auditBefore);
       expect(await d.$queryRawUnsafe(`SELECT count(*)::int AS n FROM plans WHERE key IN ('standard','legacy','grandfathered','demo')`)).toEqual([{ n: 4 }]);
       expect(await d.$queryRawUnsafe(`SELECT global_version::int AS v FROM settings_state`)).toEqual([{ v: 0 }]);
       expect(await d.$queryRawUnsafe(`SELECT conname FROM pg_constraint WHERE NOT convalidated`)).toEqual([]);

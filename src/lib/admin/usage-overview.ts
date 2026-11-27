@@ -5,6 +5,7 @@
  */
 import { configEnv } from '@/lib/config';
 import { prisma } from '@/lib/db/client';
+import { loadTenantOverridesMany } from './tenant-knobs';
 import { callMinutesCapFor, forwardMinutesCapFor, smsCapFor, usagePercent, voicemailMinutesCap } from '@/lib/db/usage';
 import { fetchPlanPrice, type PlanPriceInfo } from '@/lib/billing/price';
 import { annualPriceId } from '@/lib/providers/stripe-billing';
@@ -100,15 +101,16 @@ export async function usageOverview(deps: UsageDeps = {}): Promise<UsageOverview
   const sms = cap(); const ai = cap(); const fwd = cap(); const vm = cap();
   const top: UsageOverview['top_usage'] = [];
   let periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const overridesOf = await loadTenantOverridesMany(rows.map((r) => r.business_id));
   for (const r of rows) {
-    const subject = { billing_status: r.billing_status, plan: r.plan };
+    const subject = { billing_status: r.billing_status, plan: r.plan, tenant_overrides: overridesOf.get(r.business_id) ?? null };
     const smsCap = smsCapFor({ ...subject, sms_cap_override: r.sms_o }, env);
     const aiCap = callMinutesCapFor({ ...subject, call_minutes_cap_override: r.call_o }, env);
     const aiMin = Math.floor(r.call_s / 60);
     bump(sms, r.sms, smsCap);
     bump(ai, aiMin, aiCap);
     bump(fwd, Math.floor(r.fwd_s / 60), forwardMinutesCapFor(subject, env));
-    bump(vm, Math.floor(r.vm_s / 60), voicemailMinutesCap(env, r.plan));
+    bump(vm, Math.floor(r.vm_s / 60), voicemailMinutesCap(env, r.plan, subject.tenant_overrides));
     top.push({ business_id: r.business_id, name: r.name, sms: r.sms, sms_cap: smsCap, ai_minutes: aiMin, ai_cap: aiCap });
     if (r.period_start.toISOString().slice(0, 10) > periodStart) periodStart = r.period_start.toISOString().slice(0, 10);
   }

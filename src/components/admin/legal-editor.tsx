@@ -122,7 +122,7 @@ function DraftEditor({ slug, locale, page, loaded, startText, max, onSaved }: {
   }
   const save = () => run(async () => { await apiRequest(`/api/admin/legal/${slug}/${locale}`, { method: 'PUT', body: { body: text, note: note.trim() || undefined } }); onSaved(); }, t('ac.legal.saved'));
   const discard = () => run(async () => { await apiRequest(`/api/admin/legal/${slug}/${locale}`, { method: 'DELETE' }); onSaved(); }, t('ac.legal.discarded'));
-  const publish = () => run(async () => { await apiRequest(`/api/admin/legal/${slug}/${locale}/publish`, { body: { reason: reason.trim() } }); setPublishing(false); setReason(''); setTyped(''); onSaved(); }, t('ac.legal.published'));
+  const publish = () => run(async () => { await apiRequest(`/api/admin/legal/${slug}/${locale}/publish`, { body: { reason: reason.trim(), confirm: typed, version: loaded?.version, hash: loaded?.hash } }); setPublishing(false); setReason(''); setTyped(''); onSaved(); }, t('ac.legal.published'));
 
   return (
     <>
@@ -153,7 +153,7 @@ function DraftEditor({ slug, locale, page, loaded, startText, max, onSaved }: {
         <div className="flex flex-wrap items-center gap-2">
           <Button disabled={busy || !text.trim() || (!dirty && Boolean(draftId))} onClick={() => void save()}>{busy ? t('common.loading') : t('ac.legal.saveDraft')}</Button>
           {draftId ? <Button variant="outline" disabled={busy} onClick={() => void discard()}>{t('ac.legal.discard')}</Button> : null}
-          {publisher && draftId && !publishing ? <Button variant="outline" disabled={busy || dirty} onClick={() => setPublishing(true)}>{t('ac.legal.publish')}</Button> : null}
+          {publisher && draftId && loaded?.draft && !publishing ? <Button variant="outline" disabled={busy || dirty} onClick={() => setPublishing(true)}>{t('ac.legal.publish')}</Button> : null}
           {dirty ? <span role="status" className="text-xs text-warn">{t('ac.legal.unsaved')}</span> : null}
           {draftId && !publisher ? <span className="text-xs text-dim">{t('ac.legal.ownerPublishes')}</span> : null}
         </div>

@@ -1,4 +1,5 @@
 import { ok } from '@/lib/http';
+import { requireRecentAuth } from '@/lib/session';
 import { guardAdminRoute, adminFail, readBody } from '@/lib/admin/guard';
 import { can } from '@/lib/admin/permissions';
 import { SettingsError } from '@/lib/admin/settings-store';
@@ -28,7 +29,7 @@ const ALLOWED: Record<string, readonly string[]> = {
  * POST { candidate?: { "<registry key>": "<value>" } } tests ONE provider against the real provider API and answers a COARSE result
  * (`outcome`: ok | auth_failed | unreachable | misconfigured, a few enumerated sub-checks, for Stripe the test / live and account comparison with the current key and how many
  * businesses would be orphaned). Without `candidate` it tests what is configured now. A candidate is NOT saved and never stored, logged or echoed; remote error text is never returned.
- * Writes nothing (read-only POST, so no step-up: the saving of a tested value is a separate, step-up protected write). Provider API addresses are fixed in code. 6 requests per minute. Permission: settings.secrets.write (owner) for a candidate, providers.repair (ops, owner) for the stored configuration.
+ * Writes nothing. A candidate test needs a recent sign-in (step-up) because the server then uses typed credentials and, for SMTP, connects to a typed host; a candidate that names the SMTP target (url / host / port) never inherits the STORED login. Provider API addresses are fixed in code. 6 requests per minute. Permission: settings.secrets.write (owner) for a candidate, providers.repair (ops, owner) for the stored configuration.
  */
 export async function POST(req: Request, { params }: Ctx) {
   const g = await guardAdminRoute(req, { permission: ['settings.secrets.write', 'providers.repair'], rate: { name: 'provider-test', max: 6 } });
@@ -40,6 +41,8 @@ export async function POST(req: Request, { params }: Ctx) {
     let candidate: Record<string, string> | undefined;
     if (body.candidate !== undefined) {
       if (!can(g.ctx.principal, 'settings.secrets.write')) throw new SettingsError(403, 'forbidden', 'testing a new value needs the secrets permission');
+      const stale = requireRecentAuth(g.ctx.auth); // a candidate makes the server send the typed credentials (and, for SMTP, connect to the typed host): step-up like the save itself
+      if (stale) return stale;
       const c = body.candidate;
       if (!c || typeof c !== 'object' || Array.isArray(c)) throw new SettingsError(422, 'invalid_body', 'candidate must be an object');
       candidate = {};

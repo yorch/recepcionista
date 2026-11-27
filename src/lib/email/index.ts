@@ -12,7 +12,8 @@
  * pretending the mail went out. Any send failure throws EmailSendError.
  */
 import { configEnv, pinnedByEnv } from '@/lib/config';
-import { assertPublicSmtpTarget, smtpTargetOfUrl } from '@/lib/admin/ssrf';
+import net from 'node:net';
+import { resolvePublicSmtpTarget, smtpTargetOfUrl } from '@/lib/admin/ssrf';
 import { logger } from '@/lib/log';
 
 const log = logger('email');
@@ -135,25 +136,38 @@ async function sendSmtp(msg: EmailMessage, env: NodeJS.ProcessEnv): Promise<Emai
   try {
     // SSRF (24e T3): a relay set from the CONSOLE must be a public address on an SMTP port, re-checked at every connect (DNS may have changed since it was saved).
     // An operator's own SMTP_HOST / SMTP_URL (environment pin, e.g. a local relay) is trusted as before.
-    if (!pinnedByEnv('SMTP_HOST') && !pinnedByEnv('SMTP_URL')) {
-      const rawUrl = (env.SMTP_URL ?? '').trim();
-      const target = rawUrl ? smtpTargetOfUrl(rawUrl) : { host: env.SMTP_HOST ?? '', port: Number(env.SMTP_PORT) || 587 };
-      if (!target) throw new Error('smtp target refused');
-      await assertPublicSmtpTarget(target.host, target.port);
+    let pinnedIp: string | null = null; // the address validated below: the connection goes to IT, so a second lookup (DNS rebinding) never happens
+    let urlTarget: { host: string; port: number; secure: boolean; user: string | null; pass: string | null } | null = null;
+    const rawUrl = (env.SMTP_URL ?? '').trim();
+    const trusted = pinnedByEnv('SMTP_HOST') || pinnedByEnv('SMTP_URL');
+    if (rawUrl) {
+      const t = smtpTargetOfUrl(rawUrl);
+      if (!t) throw new Error('smtp target refused');
+      const u = new URL(rawUrl);
+      urlTarget = { host: t.host, port: t.port ?? 587, secure: u.protocol === 'smtps:' || env.SMTP_SECURE === 'true', user: u.username ? decodeURIComponent(u.username) : null, pass: u.password ? decodeURIComponent(u.password) : null };
     }
+    const target = urlTarget ?? { host: env.SMTP_HOST ?? '', port: Number(env.SMTP_PORT) || 587, secure: env.SMTP_SECURE === 'true', user: env.SMTP_USER || null, pass: env.SMTP_PASS ?? '' };
+    if (!trusted) pinnedIp = await resolvePublicSmtpTarget(target.host, target.port);
     const nodemailer = await import('nodemailer');
     const timeouts = { connectionTimeout: SEND_TIMEOUT_MS, greetingTimeout: SEND_TIMEOUT_MS, socketTimeout: SEND_TIMEOUT_MS * 2 };
-    const url = (env.SMTP_URL ?? '').trim();
-    const transport = url
-      // nodemailer parses a `url` option like a connection string and still honours the timeouts beside it
-      ? nodemailer.createTransport({ url, ...timeouts } as unknown as import('nodemailer').TransportOptions)
-      : nodemailer.createTransport({
-          host: env.SMTP_HOST,
-          port: Number(env.SMTP_PORT) || 587,
-          secure: env.SMTP_SECURE === 'true',
-          ...(env.SMTP_USER ? { auth: { user: env.SMTP_USER, pass: env.SMTP_PASS ?? '' } } : {}),
+    const transport = pinnedIp
+      // connect to the validated address; the certificate is still checked against the original NAME
+      ? nodemailer.createTransport({
+          host: pinnedIp, port: target.port, secure: target.secure || target.port === 465,
+          ...(target.user ? { auth: { user: target.user, pass: target.pass ?? '' } } : {}),
+          tls: { servername: net.isIP(target.host.replace(/^\[|\]$/g, '')) ? undefined : target.host },
           ...timeouts,
-        });
+        } as unknown as import('nodemailer').TransportOptions)
+      : rawUrl
+        // an operator's own pinned SMTP_URL: nodemailer parses a `url` option like a connection string and still honours the timeouts beside it
+        ? nodemailer.createTransport({ url: rawUrl, ...timeouts } as unknown as import('nodemailer').TransportOptions)
+        : nodemailer.createTransport({
+            host: env.SMTP_HOST,
+            port: Number(env.SMTP_PORT) || 587,
+            secure: env.SMTP_SECURE === 'true',
+            ...(env.SMTP_USER ? { auth: { user: env.SMTP_USER, pass: env.SMTP_PASS ?? '' } } : {}),
+            ...timeouts,
+          });
     const info = await transport.sendMail({ from: env.EMAIL_FROM, to: msg.to, subject: msg.subject, text: msg.text, ...(msg.html ? { html: msg.html } : {}) });
     transport.close();
     return { provider: 'smtp', id: typeof info.messageId === 'string' ? info.messageId : null };

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { auditIp, limitIp } from '@/lib/account-flows';
 import { recordAudit, setSessionActiveBusiness } from '@/lib/db';
-import { createBusinessForOwner, maxBusinessesPerUser } from '@/lib/db/locations';
+import { createBusinessForOwner, maxBusinessesFor } from '@/lib/db/locations';
 import { rateLimit } from '@/lib/ratelimit';
 import { authenticate } from '@/lib/session';
 import { validateBusinessName } from '@/lib/user-policy';
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
   try {
     const r = await createBusinessForOwner(principal.user.id, { name: name.value });
     if (!r.ok) {
-      if (r.reason === 'limit_reached') return fail(409, `you can manage at most ${maxBusinessesPerUser()} businesses`, 'limit_reached');
+      if (r.reason === 'limit_reached') return fail(409, `you can manage at most ${await maxBusinessesFor(principal.user.id)} businesses`, 'limit_reached');
       return fail(403, 'only an owner can add another location', r.reason);
     }
     if (auth.sessionId) await setSessionActiveBusiness(auth.sessionId, r.business.id);

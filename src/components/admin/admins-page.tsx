@@ -119,7 +119,7 @@ function AdminRow({ a, all, roles, reload }: { a: AdminView; all: AdminView[]; r
         {can('admins.recover') && a.disabled ? <Button variant="outline" onClick={() => void noReason(() => patch({ disabled: false }))}>{t('at.admins.enable')}</Button> : null}
         {can('admins.recover') && a.sessions > 0 ? <Button variant="outline" onClick={() => void noReason(() => apiRequest(`/api/admin/admins/${a.id}/sessions`, { method: 'DELETE' }))}>{t('at.admins.revoke')}</Button> : null}
         {can('admins.manage') && a.two_factor ? (
-          <ReasonAction label={t('at.admins.reset2fa')} description={t('at.admins.reset2faHint')} variant="danger" phrase={a.email.toLowerCase()} run={() => apiRequest(`/api/admin/admins/${a.id}/two-factor`, { method: 'DELETE' })} onDone={reload} />
+          <ReasonAction label={t('at.admins.reset2fa')} description={t('at.admins.reset2faHint')} variant="danger" phrase={a.email.toLowerCase()} run={(reason, typed) => apiRequest(`/api/admin/admins/${a.id}/two-factor`, { method: 'DELETE', body: { reason, confirm: typed } })} onDone={reload} />
         ) : null}
       </div>
       {last ? <p className="text-xs text-mute">{t('at.admins.lastOwnerHint')}</p> : null}

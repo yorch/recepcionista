@@ -7,7 +7,7 @@
 import { setting } from '@/lib/config';
 import { settingDef } from '@/lib/config/registry';
 import { prisma } from '@/lib/db/client';
-import { effectiveFor } from './tenant-overrides';
+import { effectiveFor } from './tenant-effective';
 
 type Overrides = Record<string, unknown>;
 

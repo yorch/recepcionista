@@ -162,7 +162,7 @@ integration('admin console: providers, connection tests and secrets (postgres)',
     expect(await prisma.platformSetting.count({ where: { key: { in: ['twilio.account_sid', 'twilio.auth_token'] } } })).toBe(2);
     expect(await prisma.settingChangeSet.count({ where: { id: saved.data.change_set_id } })).toBe(1);
     const info = await call(R.secret.GET, 'GET', '/api/admin/secrets/twilio.auth_token', owner, undefined, { key: 'twilio.auth_token' });
-    expect(info.data).toMatchObject({ set: true, source: 'console', fingerprint: crypto.createHash('sha256').update(TOKEN).digest('hex').slice(0, 8), last4: TOKEN.slice(-4) });
+    expect(info.data).toMatchObject({ set: true, source: 'console', fingerprint: (await import('@/lib/admin/crypto')).fingerprintOf(TOKEN), last4: TOKEN.slice(-4) });
     // rotate: the previous one is accepted for the window and the listing says until when
     const next = `tok_${crypto.randomBytes(12).toString('hex')}`;
     const second = await put(next, { confirm: 'twilio.auth_token' }); // the unchanged account sid is a no-op: one live key, so the phrase is the key itself
@@ -270,7 +270,7 @@ integration('admin console: providers, connection tests and secrets (postgres)',
     // an owner: stored, critical, audited with a fingerprint only
     expect(await prov.storeProvisionedWebhookSecret(principal(owner.user), SECRET, '203.0.113.5')).toBe(true);
     const info = await store.secretInfo('elevenlabs.webhook_secret');
-    expect(info).toMatchObject({ set: true, source: 'console', fingerprint: crypto.createHash('sha256').update(SECRET).digest('hex').slice(0, 8) });
+    expect(info).toMatchObject({ set: true, source: 'console', fingerprint: (await import('@/lib/admin/crypto')).fingerprintOf(SECRET) });
     const row = await prisma.auditEvent.findFirst({ where: { action: 'settings.change', actorUserId: owner.user.id }, orderBy: { at: 'desc' } });
     expect((row?.meta as any).tier).toBe('critical');
     expect(JSON.stringify(row)).not.toContain(SECRET);
@@ -312,7 +312,7 @@ integration('admin console: providers, connection tests and secrets (postgres)',
         expect(data.webhook_secret_stored).toBe(true);
         expect(stored.text).not.toContain(WSEC);
         expect(stored.text).not.toContain('webhook_secret"');
-        expect(await store.secretInfo('elevenlabs.webhook_secret')).toMatchObject({ set: true, source: 'console', fingerprint: crypto.createHash('sha256').update(WSEC).digest('hex').slice(0, 8) });
+        expect(await store.secretInfo('elevenlabs.webhook_secret')).toMatchObject({ set: true, source: 'console', fingerprint: (await import('@/lib/admin/crypto')).fingerprintOf(WSEC) });
         const audit = await prisma.auditEvent.findFirst({ where: { action: 'settings.change', actorUserId: owner.user.id }, orderBy: { at: 'desc' } });
         expect((audit?.meta as any).tier).toBe('critical');
         expect(JSON.stringify(audit)).not.toContain(WSEC);

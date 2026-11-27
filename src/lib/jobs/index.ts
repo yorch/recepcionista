@@ -233,7 +233,7 @@ export async function runDailyBriefings(opts: RunOptions = {}): Promise<JobRepor
   for (const b of businesses) {
     const o = knobs.get(b.id) ?? {};
     const slot = briefingSlot(now, b.timezone, knobFrom<number>('jobs.briefing_hour', o));
-    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: 'skipped_billing' }); continue; }
+    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: b.suspended_at ? 'skipped_suspended' : 'skipped_billing' }); continue; }
     if (knobFrom<boolean>('jobs.briefing_enabled', o) === false) { report.items.push({ business_id: b.id, outcome: 'skipped_disabled' }); continue; }
     if (!slot.due && !opts.force) continue; // not yet 18:00 there: not worth a report row
     // A manual (forced) run has its own claim so it never uses up the scheduled 18:00 run of that day.
@@ -312,7 +312,7 @@ export async function runGratitudeJob(opts: RunOptions = {}): Promise<JobReport>
 
   const knobs = await loadTenantOverridesMany(businesses.map((b) => b.id));
   for (const b of businesses) {
-    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: 'skipped_billing' }); continue; }
+    if (!isProvisioningAllowed(b, now, opts.env)) { report.items.push({ business_id: b.id, outcome: b.suspended_at ? 'skipped_suspended' : 'skipped_billing' }); continue; }
     const claimId = `${bucket}:${b.id}`;
     if (swept.has(claimId)) continue;
     if (knobFrom<boolean>('jobs.gratitude_enabled', knobs.get(b.id) ?? {}) === false) { report.items.push({ business_id: b.id, outcome: 'skipped_disabled' }); continue; }

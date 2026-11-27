@@ -409,7 +409,7 @@ integration('admin console operations views (postgres)', () => {
     const dry = await call(R.jobsRun, 'POST', '/api/admin/jobs/run', ops, { job: 'tenant_release' });
     expect(dry.status).toBe(200); // a dry run (the default) never needs a reason
     expect(dry.data.dry_run).toBe(true);
-    const refused = await call(R.jobsRun, 'POST', '/api/admin/jobs/run', ops, { job: 'tenant_release', dry_run: false, reason: 'cleaning up canceled tenants' });
+    const refused = await call(R.jobsRun, 'POST', '/api/admin/jobs/run', ops, { job: 'tenant_release', dry_run: false, reason: 'cleaning up canceled tenants', confirm: 'run tenant_release' });
     expect(refused.status).toBe(200);
     expect(refused.data.dry_run).toBe(true); // TENANT_RELEASE_JOB is not "on": reported as a dry run
     expect(refused.data.items.some((i: any) => i.outcome === 'refused_not_enabled')).toBe(true);

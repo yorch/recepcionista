@@ -15,7 +15,8 @@ import { resetPasswordTemplate, emailLink, RESET_PATH } from '@/lib/email/templa
 import { sendEmail } from '@/lib/email';
 import { validateEmail, validateNewPassword } from '@/lib/user-policy';
 import { logger } from '@/lib/log';
-import { isPlatformRole, roleCan, type AdminRole, type PlatformRole } from './permissions';
+import { adminSettingsViaToken, isPlatformRole, roleCan, type AdminRole, type PlatformRole } from './permissions';
+import { requireConfirmPhrase, requireReason } from './confirm';
 import { SettingsError, type StoreActor } from './settings-store';
 
 const log = logger('admins');
@@ -49,6 +50,11 @@ export async function inviteAdmin(opts: { email: unknown; platform_role: unknown
   if (bad) throw new SettingsError(422, 'invalid_email', bad);
   if (!isPlatformRole(opts.platform_role)) throw new SettingsError(422, 'invalid_role', 'platform_role must be owner, ops, support or read_only');
   if (withPassword) { const pw = validateNewPassword(opts.password); if (pw) throw new SettingsError(422, 'invalid_password', pw); }
+  // The break-glass token is recovery, not a way to mint standing owners: it may create an OWNER only when no enabled owner exists (lock-out recovery) or ADMIN_TOKEN_ALLOW_SETTINGS=true.
+  // Otherwise it limits itself to unlocking (enable, revoke sessions) and inviting the lesser roles.
+  if (opts.actor.via === 'bearer' && opts.platform_role === 'owner' && !adminSettingsViaToken() && (await enabledOwners()) > 0) {
+    throw new SettingsError(403, 'owner_requires_owner', 'the break-glass token cannot create an owner while an enabled owner exists (an owner invites owners; ADMIN_TOKEN_ALLOW_SETTINGS=true lifts this)');
+  }
   const email = normalizeEmail(opts.email as string);
   let user;
   try {
@@ -103,12 +109,14 @@ export async function revokeAdminUserSessions(opts: { id: string; actor: StoreAc
 }
 
 /** Clear the second factor (and every session): the admin must enrol again at the next sign-in (always required while the console is active). */
-export async function resetAdminTwoFactor(opts: { id: string; actor: StoreActor }): Promise<{ revoked: number }> {
+export async function resetAdminTwoFactor(opts: { id: string; reason: unknown; confirm: unknown; actor: StoreActor }): Promise<{ revoked: number }> {
   need(opts.actor, 'admins.manage');
   const u = await target(opts.id);
+  const reason = requireReason(opts.reason);
+  requireConfirmPhrase(opts.confirm, [u.email]); // the console asks for the administrator's e-mail address
   const revoked = await disableTotp(u.id);
   await prisma.passkeyCredential.deleteMany({ where: { userId: u.id } });
-  await audit(opts.actor, 'admin.two_factor_reset', u.id, { revoked });
+  await audit(opts.actor, 'admin.two_factor_reset', u.id, { revoked, reason });
   return { revoked };
 }
 

@@ -1,6 +1,7 @@
 import { configEnv } from '@/lib/config';
 import Link from 'next/link';
 import { getLocale, getT } from '@/lib/i18n/server';
+import { loadTenantOverrides } from '@/lib/admin/tenant-knobs';
 import { getUsage, callMinutesCapFor, smsCapFor } from '@/lib/db';
 import { bannerFor, type BannerTone } from '@/lib/billing/banner-state';
 import { usageWarningsFor } from '@/lib/billing/warnings';
@@ -29,8 +30,9 @@ export async function BillingBanner({ business, canManage }: { business: Busines
   const status = business.billing_status ?? 'none';
   if (status === 'trialing' || status === 'active') {
     try {
-      const u = await getUsage(business.id);
-      if (u) usage = { sms_count: u.sms_count, call_seconds: u.call_seconds, sms_cap: smsCapFor(business), call_minutes_cap: callMinutesCapFor(business) };
+      const [u, tenantOverrides] = await Promise.all([getUsage(business.id), loadTenantOverrides(business.id)]);
+      const cb = { ...business, tenant_overrides: tenantOverrides };
+      if (u) usage = { sms_count: u.sms_count, call_seconds: u.call_seconds, sms_cap: smsCapFor(cb), call_minutes_cap: callMinutesCapFor(cb) };
     } catch {
       usage = null; // a usage lookup failure must never break the dashboard
     }

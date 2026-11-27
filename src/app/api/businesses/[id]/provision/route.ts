@@ -1,7 +1,8 @@
 import { configEnv } from '@/lib/config';
 import { NextResponse } from 'next/server';
 import { ok, fail } from '@/lib/http';
-import { authenticate, authErrorResponse, requireBusinessAccess } from '@/lib/session';
+import { can } from '@/lib/admin/permissions';
+import { authenticate, authErrorResponse, requireBusinessAccess, requireRecentAuth } from '@/lib/session';
 import { getBusiness, updateBusiness, getKnowledgeBase, upsertKnowledgeBase, recordAudit, createNumberAttemptStore, numberHeldByBusiness } from '@/lib/db';
 import { areaCodeForBusiness } from '@/lib/phone';
 import crypto from 'node:crypto';
@@ -92,7 +93,13 @@ export async function POST(
   if (!auth.ok) return auth.response as ReturnType<typeof fail>;
   const { id } = await params;
   try {
-    requireBusinessAccess(auth.principal, id); // another tenant's business is a 404, never confirmed
+    // An admin (not the owner) buying a number / creating an agent is an operator action on the providers: platform permission + step-up, not a tenant grant.
+    if (auth.principal.kind === 'admin') {
+      if (!can(auth.principal, 'providers.repair')) return fail('forbidden', 403) as ReturnType<typeof fail>;
+      const stale = requireRecentAuth(auth);
+      if (stale) return stale as unknown as ReturnType<typeof fail>;
+    }
+    requireBusinessAccess(auth.principal, id, { platformAction: true }); // another tenant's business is a 404, never confirmed
   } catch (err) {
     return (authErrorResponse(err) ?? fail(err, 500)) as ReturnType<typeof fail>;
   }

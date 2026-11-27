@@ -8,7 +8,7 @@ import {
   PERMISSIONS, PLATFORM_ROLES, SUPPORT_WRITE_SCOPE, adminRoleOf, can, permissionMatrix, roleCan, type AdminLike, type Permission,
 } from '../src/lib/admin/permissions';
 import {
-  CANARY_KEY, SettingsCryptoError, canonicalJson, decryptSetting, encryptSetting, envelopeKid, fingerprintOf, kidOf, last4Of, macPayload, masterKeys, needsReencrypt, settingMac, verifySettingMac,
+  CANARY_KEY, SettingsCryptoError, canonicalJson, decryptSetting, encryptSetting, envelopeKid, fingerprintOf, kidOf, last4Of, legacyFingerprintOf, macPayload, masterKeys, needsReencrypt, settingMac, verifySettingMac,
 } from '../src/lib/admin/crypto';
 import { assertPublicSmtpTarget, isPrivateAddress, smtpTargetOfUrl } from '../src/lib/admin/ssrf';
 import { auditCsv, csvCell } from '../src/lib/admin/audit-search';
@@ -119,8 +119,14 @@ describe('envelope v2', () => {
     expect(canonicalJson([1, { z: null, a: 'x' }])).toBe('[1,{"a":"x","z":null}]');
     expect(CANARY_KEY).toBe('_canary');
   });
-  test('fingerprint is sha256[0..8]; last4 only for long secrets', () => {
-    expect(fingerprintOf('abc')).toBe(crypto.createHash('sha256').update('abc').digest('hex').slice(0, 8));
+  test('fingerprint is a KEYED HMAC (HKDF-derived key) prefix, never the bare sha256 an attacker could test guesses against; last4 only for long secrets', () => {
+    const k = keysOf({ APP_SECRET_KEY: MASTER });
+    expect(fingerprintOf('abc', k)).toMatch(/^[0-9a-f]{8}$/);
+    expect(fingerprintOf('abc', k)).not.toBe(crypto.createHash('sha256').update('abc').digest('hex').slice(0, 8));
+    expect(fingerprintOf('abc', k)).toBe(fingerprintOf('abc', k));
+    expect(fingerprintOf('abc', k)).not.toBe(fingerprintOf('abd', k));
+    expect(fingerprintOf('abc', keysOf({ APP_SECRET_KEY: OTHER }))).not.toBe(fingerprintOf('abc', k)); // another master key, another fingerprint (recomputed on re-encryption)
+    expect(legacyFingerprintOf('abc')).toBe(crypto.createHash('sha256').update('abc').digest('hex').slice(0, 8)); // the form stored before: still computable for compatibility checks
     expect(last4Of('0123456789abcdef')).toBe('cdef');
     expect(last4Of('short-secret')).toBeNull();
     expect(kidOf(Buffer.alloc(32))).toHaveLength(8);

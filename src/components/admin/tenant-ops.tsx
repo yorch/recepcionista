@@ -16,7 +16,7 @@ interface PreviewItem { business_id?: string; outcome?: string; detail?: unknown
 /** A dry-run preview, then the real run (with its own reason / phrase). `call(dry)` performs the request; the preview is shown as a short list. */
 function ProviderAction({ title, hint, permission, previewLabel, runLabel, phrase, call, onDone }: {
   title: string; hint: string; permission: 'providers.repair' | 'providers.resync' | 'tenants.release'; previewLabel: string; runLabel: string; phrase: string | null;
-  call: (dry: boolean, reason: string) => Promise<unknown>; onDone: () => void;
+  call: (dry: boolean, reason: string, typed: string) => Promise<unknown>; onDone: () => void;
 }) {
   const t = useT();
   const { can, guard } = useAdmin();
@@ -26,7 +26,7 @@ function ProviderAction({ title, hint, permission, previewLabel, runLabel, phras
   if (!can(permission)) return null;
   async function runPreview() {
     setBusy(true); setError(null);
-    try { await guard(async () => { setPreview(await call(true, '')); }); } catch (err) { setError(err); setPreview(null); } finally { setBusy(false); }
+    try { await guard(async () => { setPreview(await call(true, '', '')); }); } catch (err) { setError(err); setPreview(null); } finally { setBusy(false); }
   }
   return (
     <div className="flex flex-col gap-3 border-t border-line pt-4 first:border-0 first:pt-0">
@@ -37,7 +37,7 @@ function ProviderAction({ title, hint, permission, previewLabel, runLabel, phras
       <div className="flex flex-wrap items-start gap-2">
         <Button variant="outline" onClick={() => void runPreview()} disabled={busy}>{busy ? t('common.loading') : previewLabel}</Button>
         {preview ? (
-          <ReasonAction label={runLabel} variant="danger" phrase={phrase} run={(reason) => call(false, reason)} onDone={() => { setPreview(null); onDone(); }} description={t('at.ops.realRunHint')} />
+          <ReasonAction label={runLabel} variant="danger" phrase={phrase} run={(reason, typed) => call(false, reason, typed)} onDone={() => { setPreview(null); onDone(); }} description={t('at.ops.realRunHint')} />
         ) : null}
       </div>
       {error ? <Problems error={error} /> : null}
@@ -80,7 +80,7 @@ export function TenantOps({ d, reload }: { d: TenantDetail; reload: () => void }
           {can('tenants.suspend') ? (
             s.suspended
               ? <ReasonAction label={t('at.status.reactivate')} run={(reason) => post('reactivate', { reason })} onDone={reload} variant="primary" />
-              : <ReasonAction label={t('at.status.suspend')} variant="danger" phrase={tenantPhrase(t('at.verb.suspend'), d.name)} description={t('at.status.suspendConfirm')} run={(reason) => post('suspend', { reason })} onDone={reload} />
+              : <ReasonAction label={t('at.status.suspend')} variant="danger" phrase={tenantPhrase(t('at.verb.suspend'), d.name)} description={t('at.status.suspendConfirm')} run={(reason, typed) => post('suspend', { reason, confirm: typed })} onDone={reload} />
           ) : <p className="text-[13px] text-mute">{t('at.noPermission')}</p>}
         </div>
       </Card>
@@ -108,7 +108,7 @@ export function TenantOps({ d, reload }: { d: TenantDetail; reload: () => void }
             <ProviderAction
               title={t('at.ops.release')} hint={releasable ? t('at.ops.releaseHint') : t('at.ops.releaseNotApplicable')} permission="tenants.release" previewLabel={t('at.ops.preview')} runLabel={t('at.ops.releaseRun')}
               phrase={tenantPhrase(t('at.verb.release'), d.name)} onDone={reload}
-              call={(dry, reason) => apiRequest('/api/admin/release-tenant', { method: 'POST', body: { business_id: d.id, dry_run: dry, ...(dry ? {} : { reason }) }, timeoutMs: 60_000 })}
+              call={(dry, reason, typed) => apiRequest('/api/admin/release-tenant', { method: 'POST', body: { business_id: d.id, dry_run: dry, ...(dry ? {} : { reason, confirm: typed }) }, timeoutMs: 60_000 })}
             />
             <ProviderAction
               title={t('at.ops.repair')} hint={t('at.ops.repairHint')} permission="providers.repair" previewLabel={t('at.ops.preview')} runLabel={t('at.ops.repairRun')} phrase={null} onDone={reload}

@@ -17,13 +17,14 @@
  */
 import { configEnv } from '@/lib/config';
 import {
-  acquireForwardLease, billingEnforced, checkForwardAllowed, checkVoicemailAllowed, claimEvent, completeEvent, recordForwardSeconds,
+  prisma, acquireForwardLease, billingEnforced, checkForwardAllowed, checkVoicemailAllowed, claimEvent, completeEvent, recordForwardSeconds,
   recordVoicemailSeconds, releaseEvent, releaseForwardLease,
 } from '@/lib/db';
 import { chargeCallBudget, businessBudget, type BudgetContext, type BudgetDenial } from '@/lib/voice/caller-limits';
 import { rateLimit } from '@/lib/ratelimit';
 import { logger } from '@/lib/log';
 import { knobOr } from '@/lib/admin/tenant-knobs';
+import { planAllows, type PlanFeature } from '@/lib/admin/plan-catalog';
 
 const log = logger('voice/forward-metering');
 
@@ -48,6 +49,12 @@ export const forwardMinAnsweredSeconds = (env: Record<string, string | undefined
 /** Below this many remaining seconds a forward is not started (a call cut after seconds helps nobody). */
 export const FORWARD_MIN_REMAINING_SECONDS = 30;
 
+/** Does the business's plan include `feature` (admin console plan entitlement)? The context's business row is used when given, else one indexed read; an unknown business / plan allows. */
+async function planIncludes(businessId: string, feature: PlanFeature, ctx?: BudgetContext): Promise<boolean> {
+  const plan = ctx?.business ? ctx.business.plan : (await prisma.business.findUnique({ where: { id: businessId }, select: { plan: true } }))?.plan;
+  return planAllows(plan, feature);
+}
+
 export type ForwardAllowance =
   | { ok: true; timeLimit: number; known?: boolean }
   | { ok: false; why: 'no_plan' | 'cap_reached' | 'rate_limited' | 'caller_limited' | 'concurrent_limit' | 'check_failed'; known?: boolean };
@@ -58,6 +65,7 @@ export type ForwardAllowance =
  */
 export async function forwardAllowance(businessId: string, env: Record<string, string | undefined> = configEnv(), ctx?: BudgetContext): Promise<ForwardAllowance> {
   try {
+    if (!(await planIncludes(businessId, 'call_forwarding', ctx))) return { ok: false, why: 'no_plan' }; // the plan does not include call forwarding
     const gate = await checkForwardAllowed(businessId);
     if (!gate.ok) return { ok: false, why: gate.reason === 'no_plan' ? 'no_plan' : 'cap_reached' };
     const enforced = billingEnforced(env as NodeJS.ProcessEnv);
@@ -91,6 +99,7 @@ export type VoicemailAllowance = { ok: true } | { ok: false; why: BudgetDenial |
 /** May this business take another voicemail from this call right now? (Fails closed.) */
 export async function voicemailAllowance(businessId: string, env: Record<string, string | undefined> = configEnv(), ctx?: BudgetContext): Promise<VoicemailAllowance> {
   try {
+    if (!(await planIncludes(businessId, 'voicemail', ctx))) return { ok: false, why: 'no_plan' }; // the plan does not include voicemail
     if (billingEnforced(env as NodeJS.ProcessEnv)) {
       const gate = await checkVoicemailAllowed(businessId);
       if (!gate.ok) return { ok: false, why: gate.reason === 'no_plan' ? 'no_plan' : 'cap_reached' };

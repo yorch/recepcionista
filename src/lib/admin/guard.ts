@@ -30,7 +30,7 @@ export interface AdminCtx {
   auth: Extract<AuthResult, { ok: true }>;
   /** The open support write grant that authorised this request (support role only). */
   grant: SupportGrantView | null;
-  /** Secret metadata (fingerprint, who, when) is hidden from read_only and support. */
+  /** Secret metadata (fingerprint, last 4, who, when) is shown to an owner only. */
   revealSecretMeta: boolean;
 }
 
@@ -96,7 +96,7 @@ export async function guardAdminRoute(req: Request, opts: GuardOptions): Promise
       void notifyAdmins({ subject: '[Recepcionista] The break-glass ADMIN_TOKEN was used', kind: 'bearer_use', lines: ['The Bearer ADMIN_TOKEN was used.', `request: ${req.method} ${path}`, `permission: ${perms[0]}`, `client: ${ip ?? 'unknown'}`, 'Routine work should use an individual admin account.'] }).catch(() => undefined);
     }
   }
-  return { ok: true, ctx: { principal, role, actor: actorFromPrincipal(principal, ip), ip, sessionId: auth.sessionId, auth, grant, revealSecretMeta: role !== 'read_only' && role !== 'support' } };
+  return { ok: true, ctx: { principal, role, actor: actorFromPrincipal(principal, ip), ip, sessionId: auth.sessionId, auth, grant, revealSecretMeta: role === 'owner' } };
 }
 
 /** JSON body of an object shape, size-capped (1 MB); anything else is a 400. */

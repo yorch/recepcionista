@@ -29,6 +29,17 @@ done
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# Settings the admin console can hold in the DATABASE (docs/design/admin-console-contracts.md): an operator who followed the "move to console" wizard deleted those
+# lines from .env on purpose. A missing .env line for one of them is therefore a WARNING here, remembered in DEFERRED, and re-checked AFTER the stack is up against what the
+# server really holds (GET /api/admin/selftest + /api/admin/settings, from inside the app container): still missing in the console as well -> the deploy fails then.
+# Genuinely env-only keys (DOMAIN, APP_URL, POSTGRES_PASSWORD, ADMIN_TOKEN, APP_SECRET_KEY(_PREVIOUS), the dev/demo switches, malformed values) stay hard failures.
+# defer "<ENV NAME or description>" "<tokens>": tokens are comma separated (ALL needed); a token is a registry key, `a/b` (ANY of), or @llm / @email / @billing / @captcha.
+DEFERRED=()
+defer() {
+  echo "WARNING: $1 is not set in .env. Fine if the admin console holds it (checked after the stack is up); otherwise the deploy fails at that check." >&2
+  DEFERRED+=("$1=$2")
+}
+
 # ---- preconditions -------------------------------------------------------
 [[ -f .env ]] || die ".env is missing. Copy .env.example to .env and fill it in."
 
@@ -46,29 +57,29 @@ set -a; . ./.env; set +a
   || die "APP_URL (${APP_URL}) must be exactly https://${DOMAIN}"
 
 # This script only deploys to production, so these are hard requirements.
-# Without the Stripe secret the webhook can be driven by anyone who finds the URL.
+# Without the Stripe secret the webhook can be driven by anyone who finds the URL (console-held: re-checked after the stack is up).
 [[ -n "${STRIPE_WEBHOOK_SECRET:-}" ]] \
-  || die "STRIPE_WEBHOOK_SECRET is unset in .env. Required in production (Stripe dashboard > Webhooks > signing secret)."
+  || defer "STRIPE_WEBHOOK_SECRET (Stripe dashboard > Webhooks > signing secret)" "stripe.webhook_secret"
 [[ -n "${ADMIN_TOKEN:-}" ]] \
   || die "ADMIN_TOKEN is unset in .env. Required in production: openssl rand -hex 32"
 
 # LLM: REQUIRED in production (owner decision). Website import fails without it, and call summaries / briefing narration would silently fall back to
 # templates. The app health check also reports 503 `llm_not_configured`, so a deploy without a key would never become healthy.
 [[ -n "${OPENAI_API_KEY:-}" || -n "${ANTHROPIC_API_KEY:-}" ]] \
-  || die "No LLM key: set OPENAI_API_KEY or ANTHROPIC_API_KEY in .env. An LLM is required in production (website import, call summaries and briefings)."
+  || defer "OPENAI_API_KEY or ANTHROPIC_API_KEY (an LLM is required in production: website import, call summaries and briefings)" "@llm"
 # Voice/SMS providers: in production the app fails closed without these, so a
 # missing secret would deploy "successfully" and then reject every live call.
 if [[ -n "${ELEVENLABS_API_KEY:-}" ]]; then
   [[ -n "${ELEVENLABS_TOOL_SECRET:-}" ]] \
-    || die "ELEVENLABS_TOOL_SECRET is unset in .env but ELEVENLABS_API_KEY is set. Every voice tool call would 401. openssl rand -hex 32"
+    || defer "ELEVENLABS_TOOL_SECRET (ELEVENLABS_API_KEY is set: every voice tool call would 401; openssl rand -hex 32)" "elevenlabs.tool_secret"
   [[ -n "${ELEVENLABS_WEBHOOK_SECRET:-}" ]] \
-    || die "ELEVENLABS_WEBHOOK_SECRET is unset in .env but ELEVENLABS_API_KEY is set. Post-call webhooks would 401. See README (ElevenLabs webhook secret)."
+    || defer "ELEVENLABS_WEBHOOK_SECRET (ELEVENLABS_API_KEY is set: post-call webhooks would 401; see README)" "elevenlabs.webhook_secret"
 fi
 if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -n "${TWILIO_AUTH_TOKEN:-}" && -n "${TWILIO_PHONE_NUMBER:-}" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
-  die "Twilio is configured but ELEVENLABS_API_KEY is unset in .env: provisioning refuses (503 voice_provider_not_configured) because a purchased number would have no voice agent. Set ELEVENLABS_API_KEY (each purchased number is imported into ElevenLabs and bound to its tenant's agent)."
+  defer "ELEVENLABS_API_KEY (Twilio is configured: provisioning refuses with 503 voice_provider_not_configured because a purchased number would have no voice agent)" "elevenlabs.api_key"
 fi
 if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -z "${TWILIO_AUTH_TOKEN:-}" ]]; then
-  die "TWILIO_AUTH_TOKEN is unset in .env but TWILIO_ACCOUNT_SID is set."
+  defer "TWILIO_AUTH_TOKEN (TWILIO_ACCOUNT_SID is set)" "twilio.auth_token"
 fi
 
 # Account lifecycle (docs/env-vars.md). Without these the deploy "works" and then every signup, password reset and 2FA enrolment
@@ -86,25 +97,27 @@ if [[ -n "${APP_SECRET_KEY_PREVIOUS:-}" ]]; then
 fi
 case "${EMAIL_PROVIDER:-}" in
   resend)
-    [[ -n "${RESEND_API_KEY:-}" ]] || die "EMAIL_PROVIDER=resend but RESEND_API_KEY is unset in .env" ;;
+    [[ -n "${RESEND_API_KEY:-}" ]] || defer "RESEND_API_KEY (EMAIL_PROVIDER=resend)" "email.resend_api_key" ;;
   smtp)
-    [[ -n "${SMTP_URL:-}" || -n "${SMTP_HOST:-}" ]] || die "EMAIL_PROVIDER=smtp but neither SMTP_URL nor SMTP_HOST is set in .env" ;;
+    [[ -n "${SMTP_URL:-}" || -n "${SMTP_HOST:-}" ]] || defer "SMTP_URL or SMTP_HOST (EMAIL_PROVIDER=smtp)" "email.smtp_url/email.smtp_host" ;;
+  "")
+    defer "EMAIL_PROVIDER (verification and reset emails depend on a working provider)" "@email" ;;
   *)
     die "EMAIL_PROVIDER must be 'resend' or 'smtp' in production (got '${EMAIL_PROVIDER:-}'); 'log' is refused. Verification and reset emails depend on it." ;;
 esac
-[[ -n "${EMAIL_FROM:-}" ]] || die "EMAIL_FROM is unset in .env (e.g. 'Recepcionista <no-reply@${DOMAIN}>')"
+[[ -n "${EMAIL_FROM:-}" ]] || defer "EMAIL_FROM (e.g. 'Recepcionista <no-reply@${DOMAIN}>')" "email.from"
 # Google Calendar (docs/integrations/google-calendar.md): all-or-nothing, only when the OAuth client id is set.
 if [[ -n "${GOOGLE_CLIENT_ID:-}" ]]; then
-  [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]] || die "GOOGLE_CLIENT_ID is set but GOOGLE_CLIENT_SECRET is not"
+  [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]] || defer "GOOGLE_CLIENT_SECRET (GOOGLE_CLIENT_ID is set)" "google.client_secret"
   [[ "${APP_URL:-}" == https://* ]] || die "Google Calendar needs APP_URL=https://... (OAuth redirect + push notifications are https only)"
 fi
 [[ "${GOOGLE_OAUTH_MOCK:-}" != "true" ]] || die "GOOGLE_OAUTH_MOCK=true is for local development only; remove it from the production .env"
 # Signup abuse control: the Turnstile site key (public) and secret (server) only work as a pair. Both are runtime settings (the .env file or the admin console): no rebuild is needed to change them.
 if [[ -n "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" && -z "${TURNSTILE_SECRET_KEY:-}" ]]; then
-  die "NEXT_PUBLIC_TURNSTILE_SITE_KEY is set but TURNSTILE_SECRET_KEY is not: the widget would render but nothing would verify it."
+  defer "TURNSTILE_SECRET_KEY (NEXT_PUBLIC_TURNSTILE_SITE_KEY is set: the widget would render but nothing would verify it)" "signup.turnstile_secret_key"
 fi
 if [[ -n "${TURNSTILE_SECRET_KEY:-}" && -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]]; then
-  die "TURNSTILE_SECRET_KEY is set but NEXT_PUBLIC_TURNSTILE_SITE_KEY is not: every signup would fail closed (no token). Set the site key (NEXT_PUBLIC_TURNSTILE_SITE_KEY) in .env, or store the pair in the admin console."
+  defer "NEXT_PUBLIC_TURNSTILE_SITE_KEY (TURNSTILE_SECRET_KEY is set: every signup would fail closed, no token)" "signup.turnstile_site_key"
 fi
 # Open signup REQUIRES a captcha in production (owner decision): the full Turnstile pair, or the explicit, loud opt-out
 # SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Without either the app refuses public signup (503 signup_disabled; invites still work),
@@ -112,7 +125,7 @@ fi
 if [[ -z "${TURNSTILE_SECRET_KEY:-}" || -z "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]]; then
   case "${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" in
     true) ;;
-    *) die "Open signup needs Turnstile in production: set TURNSTILE_SECRET_KEY and NEXT_PUBLIC_TURNSTILE_SITE_KEY, or (not recommended) SIGNUP_ALLOW_WITHOUT_CAPTCHA=true. Without either, /api/auth/signup answers 503 signup_disabled and /signup is invite-only (docs/auth.md)." ;;
+    *) defer "TURNSTILE_SECRET_KEY + NEXT_PUBLIC_TURNSTILE_SITE_KEY (open signup needs Turnstile in production, or the loud opt-out SIGNUP_ALLOW_WITHOUT_CAPTCHA=true; without either /api/auth/signup answers 503 signup_disabled, docs/auth.md)" "@captcha" ;;
   esac
 fi
 # Dev/demo switches must never reach production.
@@ -123,7 +136,7 @@ done
 # Optional annual plan: the price id must look like a Stripe price, and needs the Stripe key to be offered at all.
 if [[ -n "${STRIPE_PRICE_ID_ANNUAL:-}" ]]; then
   [[ "${STRIPE_PRICE_ID_ANNUAL}" =~ ^price_[A-Za-z0-9]+$ ]] || die "STRIPE_PRICE_ID_ANNUAL is not a Stripe price id (price_...). See docs/billing.md."
-  [[ -n "${STRIPE_SECRET_KEY:-}" ]] || die "STRIPE_PRICE_ID_ANNUAL is set but STRIPE_SECRET_KEY is not: the annual plan could never be offered."
+  [[ -n "${STRIPE_SECRET_KEY:-}" ]] || defer "STRIPE_SECRET_KEY (STRIPE_PRICE_ID_ANNUAL is set: the annual plan could never be offered)" "stripe.secret_key"
 fi
 
 # Subscription billing (docs/billing.md). FAIL CLOSED: in production billing is enforced unless BILLING_ENFORCED=false is
@@ -131,8 +144,9 @@ fi
 # So the operator must DECIDE: the variable must be present (true or false); an unset/typo value is refused here.
 case "${BILLING_ENFORCED:-}" in
   true)
-    for v in STRIPE_SECRET_KEY STRIPE_PRICE_ID STRIPE_BILLING_WEBHOOK_SECRET; do
-      [[ -n "${!v:-}" ]] || die "${v} is unset in .env but BILLING_ENFORCED=true. See docs/billing.md."
+    for pair in STRIPE_SECRET_KEY:stripe.secret_key STRIPE_PRICE_ID:stripe.price_id STRIPE_BILLING_WEBHOOK_SECRET:stripe.billing_webhook_secret; do
+      envname="${pair%%:*}"
+      [[ -n "${!envname:-}" ]] || defer "${envname} (BILLING_ENFORCED=true, docs/billing.md)" "${pair#*:}"
     done
     echo "NOTE: BILLING_ENFORCED=true. Existing tenants must be comped first (bun scripts/grandfather-existing.ts --before <deploy time>, docs/billing.md step 5)."
     ;;
@@ -143,8 +157,10 @@ case "${BILLING_ENFORCED:-}" in
     echo "# an active plan. Do not run like this with open signup (docs/billing.md).       #" >&2
     echo "################################################################################" >&2
     ;;
+  "")
+    defer "BILLING_ENFORCED (production fails closed; set true with the Stripe keys, docs/billing.md, or deliberately false: decide it in .env or in the console)" "@billing" ;;
   *)
-    die "BILLING_ENFORCED is '${BILLING_ENFORCED:-}' (unset or invalid) in .env. Production fails closed: set BILLING_ENFORCED=true (with the Stripe keys; docs/billing.md) or, deliberately, BILLING_ENFORCED=false." ;;
+    die "BILLING_ENFORCED is '${BILLING_ENFORCED}' (invalid) in .env. Production fails closed: set BILLING_ENFORCED=true (with the Stripe keys; docs/billing.md) or, deliberately, BILLING_ENFORCED=false." ;;
 esac
 # Owner-phone grandfathering bypasses opt-outs and the country allow-list for unverified numbers: it needs an explicit acknowledgement.
 if [[ "${OWNER_PHONE_GRANDFATHER:-}" == "true" ]]; then
@@ -280,6 +296,57 @@ done
 if [[ "$HEALTHY" != "1" ]]; then
   "${COMPOSE[@]}" logs --tail=40 app >&2
   die "app did not become healthy within 60s (see logs above)"
+fi
+
+# ---- console-held settings the .env no longer carries ---------------------
+# Asks the RUNNING server what it holds (read-only, from inside the container: no DNS or proxy involved; the Bearer ADMIN_TOKEN use is audited and mailed like any other).
+if (( ${#DEFERRED[@]} > 0 )); then
+  echo
+  echo "Verifying ${#DEFERRED[@]} setting(s) that are not in .env are held by the admin console…"
+  VERIFY_JS='
+const specs = (process.env.RC_SPECS || "").split("\n").filter(Boolean);
+const base = "http://127.0.0.1:" + (process.env.PORT || 3000);
+const h = { authorization: "Bearer " + process.env.ADMIN_TOKEN };
+const get = async (p) => { const r = await fetch(base + p, { headers: h }); if (!r.ok) throw new Error(p + " answered " + r.status); return (await r.json()).data; };
+(async () => {
+  const [self, all] = await Promise.all([get("/api/admin/selftest"), get("/api/admin/settings")]);
+  const byKey = new Map(all.settings.map((s) => [s.key, s]));
+  const isSet = (k) => { const s = byKey.get(k); return Boolean(s) && (s.kind === "secret" ? Boolean(s.secret && s.secret.set) : s.source !== "default" && s.value !== null && s.value !== ""); };
+  const card = (n) => (self.providers.find((p) => p.provider === n) || {}).ready === true;
+  const enforced = byKey.get("billing.enforced");
+  const tokenOk = (t) => {
+    if (t === "@llm") return card("llm");
+    if (t === "@email") return card("email");
+    if (t === "@captcha") return process.env.SIGNUP_ALLOW_WITHOUT_CAPTCHA === "true" || (isSet("signup.turnstile_secret_key") && isSet("signup.turnstile_site_key"));
+    if (t === "@billing") {
+      if (!enforced || enforced.source === "default") return false;
+      return enforced.value !== true || ["stripe.secret_key", "stripe.price_id", "stripe.billing_webhook_secret"].every(isSet);
+    }
+    return t.split("/").some(isSet);
+  };
+  let bad = 0;
+  for (const spec of specs) {
+    const i = spec.lastIndexOf("=");
+    const label = spec.slice(0, i), tokens = spec.slice(i + 1).split(",");
+    if (!tokens.every(tokenOk)) { bad++; console.log("MISSING " + label); }
+  }
+  process.exit(bad ? 3 : 0);
+})().catch((e) => { console.log("UNVERIFIED " + e.message); process.exit(4); });
+'
+  SPECS="$(printf '%s\n' "${DEFERRED[@]}")"
+  set +e
+  VERIFY_OUT="$("${COMPOSE[@]}" exec -T -e RC_SPECS="$SPECS" -e SIGNUP_ALLOW_WITHOUT_CAPTCHA="${SIGNUP_ALLOW_WITHOUT_CAPTCHA:-}" app node -e "$VERIFY_JS" 2>&1)"
+  VERIFY_RC=$?
+  set -e
+  if [[ "$VERIFY_RC" == "0" ]]; then
+    echo "OK: every setting missing from .env is held by the admin console."
+  else
+    printf '%s\n' "$VERIFY_OUT" >&2
+    if [[ "$VERIFY_RC" == "3" ]]; then
+      die "the stack is up but the settings listed above are in NEITHER .env NOR the admin console (the lines say what each one breaks). Set them in .env and re-run ./deploy.sh, or in the console (Settings, then Providers)."
+    fi
+    die "the stack is up but the console-held settings could not be verified (see above): check /api/admin/selftest by hand before sending traffic."
+  fi
 fi
 
 "${COMPOSE[@]}" ps

@@ -5,7 +5,9 @@
  *    (a ciphertext cannot be swapped between keys). `kid` = base64url(sha256(derivedKey))[0..8] names the key, so a rotation can decrypt old rows with
  *    APP_SECRET_KEY_PREVIOUS (decrypt only) while new writes use the current key. Domain separation: TOTP keeps its own v1 envelope under the raw key.
  *  - MAC: HMAC-SHA256 with a SECOND derived key (`rc/settings-mac/v1`) over `key|payload|version`. A row that fails it (SQL tampering, a rolled-back version) is ignored.
- *  - Fingerprint: sha256(plaintext) hex [0..8] (+ the last 4 characters of a long secret): all the console ever shows about a secret.
+ *  - Fingerprint: HMAC-SHA256(plaintext) hex [0..8] under a THIRD derived key (`rc/settings-fp/v1`), so a leaked fingerprint cannot be used to test guesses of a low-entropy
+ *    secret offline; plus the last 4 characters of a long secret. All the console ever shows about a secret, and only to an owner. Rows written before the keyed form carry the
+ *    old unkeyed sha256 prefix (`legacyFingerprintOf`): they are recomputed when the secret is next written or re-encrypted.
  */
 import crypto from 'node:crypto';
 import { configEnv } from '@/lib/config';
@@ -14,6 +16,7 @@ import { appSecretKey } from '@/lib/totp';
 export const ENVELOPE_V2 = 'v2';
 const INFO_ENC = 'rc/settings/v1';
 const INFO_MAC = 'rc/settings-mac/v1';
+const INFO_FP = 'rc/settings-fp/v1';
 export const CANARY_KEY = '_canary';
 export const CANARY_PLAINTEXT = 'rc-canary-v1';
 
@@ -29,14 +32,14 @@ export const kidOf = (key: Buffer): string => crypto.createHash('sha256').update
 
 export interface MasterKeys {
   /** Derived encryption key + its id (new writes). */
-  current: { enc: Buffer; mac: Buffer; kid: string };
+  current: { enc: Buffer; mac: Buffer; fp: Buffer; kid: string };
   /** Previous master key during a rotation (decrypt / verify only). */
-  previous: { enc: Buffer; mac: Buffer; kid: string } | null;
+  previous: { enc: Buffer; mac: Buffer; fp: Buffer; kid: string } | null;
 }
 
-function derive(master: Buffer): { enc: Buffer; mac: Buffer; kid: string } {
+function derive(master: Buffer): { enc: Buffer; mac: Buffer; fp: Buffer; kid: string } {
   const enc = hkdf(master, INFO_ENC);
-  return { enc, mac: hkdf(master, INFO_MAC), kid: kidOf(enc) };
+  return { enc, mac: hkdf(master, INFO_MAC), fp: hkdf(master, INFO_FP), kid: kidOf(enc) };
 }
 
 /** The current and (when set) previous derived keys. Throws SecretKeyError in production without a valid APP_SECRET_KEY. */
@@ -84,7 +87,10 @@ export function decryptSetting(envelope: string, settingKey: string, keys: Maste
 /** Does this envelope need re-encrypting (it is not under the current key)? */
 export const needsReencrypt = (envelope: string, keys: MasterKeys = masterKeys()): boolean => envelopeKid(envelope) !== keys.current.kid;
 
-export const fingerprintOf = (plain: string): string => crypto.createHash('sha256').update(plain).digest('hex').slice(0, 8);
+/** Keyed fingerprint (HMAC under the HKDF-derived fingerprint key). */
+export const fingerprintOf = (plain: string, keys: MasterKeys = masterKeys()): string => crypto.createHmac('sha256', keys.current.fp).update(plain).digest('hex').slice(0, 8);
+/** The unkeyed form stored before the keyed one existed (display compatibility only; never written any more). */
+export const legacyFingerprintOf = (plain: string): string => crypto.createHash('sha256').update(plain).digest('hex').slice(0, 8);
 /** Last 4 characters, only for secrets long enough that they reveal little (>= 16 characters). */
 export const last4Of = (plain: string): string | null => (plain.length >= 16 ? plain.slice(-4) : null);
 
@@ -112,5 +118,18 @@ export function verifySettingMac(settingKey: string, payload: string, version: n
   return false;
 }
 
-/** The text a row's MAC covers: the canonical value, or the envelope for a secret. */
-export const macPayload = (row: { value?: unknown; secretEnvelope?: string | null }): string => (row.secretEnvelope ? `enc:${row.secretEnvelope}` : `val:${canonicalJson(row.value)}`);
+const untilMs = (v: Date | string | number | null | undefined): string => {
+  if (v === null || v === undefined) return '';
+  const n = v instanceof Date ? v.getTime() : typeof v === 'number' ? v : Date.parse(v);
+  return Number.isFinite(n) ? String(n) : '';
+};
+
+/**
+ * The text a row's MAC covers: the canonical value, or for a secret the envelope AND the dual-secret window (`previousEnvelope`, `previousUntil`): SQL write access cannot extend
+ * how long a rotated-out secret is still accepted, or plant another previous envelope, without breaking the MAC.
+ */
+export const macPayload = (row: { value?: unknown; secretEnvelope?: string | null; previousEnvelope?: string | null; previousUntil?: Date | string | number | null }): string =>
+  (row.secretEnvelope ? `enc:${row.secretEnvelope}|prev:${row.previousEnvelope ?? ''}|until:${untilMs(row.previousUntil)}` : `val:${canonicalJson(row.value)}`);
+
+/** The payload of a secret row as it was MACed before the dual-secret window was covered. Accepted only for a row with no previous envelope (see the loader). */
+export const legacyMacPayload = (row: { secretEnvelope?: string | null }): string => `enc:${row.secretEnvelope ?? ''}`;

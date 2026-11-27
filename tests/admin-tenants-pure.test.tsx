@@ -84,12 +84,12 @@ describe('page helpers', () => {
     expect(hourLabel(7)).toBe('07:00');
     expect(quietText(21, 8)).toBe('21:00 - 08:00');
   });
-  test('the support gate finds the tenant a request touches (path, query, console cookie)', () => {
+  test('the support gate finds the tenant a request names in its URL (path, query); the console cookie is only a dashboard hint and never a target', () => {
     const id = '0f8fad5b-d9cb-469f-a165-70867728950e';
     expect(targetBusinessOf(new Request(`http://x/api/businesses/${id}/review-url`, { method: 'PUT' }))).toBe(id);
     expect(targetBusinessOf(new Request('http://x/api/businesses/mine', { method: 'POST' }))).toBeNull();
     expect(targetBusinessOf(new Request('http://x/api/knowledge?business_id=b9', { method: 'PUT' }))).toBe('b9');
-    expect(targetBusinessOf(new Request('http://x/api/knowledge', { method: 'PUT', headers: { cookie: 'a=1; rc_business=b7' } }))).toBe('b7');
+    expect(targetBusinessOf(new Request('http://x/api/knowledge', { method: 'PUT', headers: { cookie: 'a=1; rc_business=b7' } }))).toBeNull(); // the exact check happens where the route resolves the business
   });
 });
 

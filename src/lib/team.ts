@@ -7,7 +7,7 @@
 import { NextResponse } from 'next/server';
 import { getBusiness, prisma } from '@/lib/db';
 import { disableMembership, listBusinessMembers, listMembershipsForUser, removeMembership, revokeBusinessForSessions, setMembershipRole } from '@/lib/db/memberships';
-import { authenticate, type AuthenticateOptions, type Principal } from '@/lib/session';
+import { AuthError, authenticate, requireBusinessAccess, type AuthenticateOptions, type Principal } from '@/lib/session';
 import type { Business, BusinessMember, User, UserRole } from '@/lib/types';
 
 export interface PendingInvite {
@@ -165,6 +165,10 @@ export async function authenticateTeam(req: Request, requested: string | null | 
   } else {
     businessId = requested || null;
     if (!businessId) return { ok: false, response: err(422, 'business_id is required') };
+    try { requireBusinessAccess(principal, businessId); } catch (e) { // an admin USER writing needs an open support write grant for exactly this business
+      if (e instanceof AuthError) return { ok: false, response: err(e.status, e.message, e.code) };
+      throw e;
+    }
   }
   const business = await getBusiness(businessId);
   if (!business) return { ok: false, response: err(404, 'business not found') };

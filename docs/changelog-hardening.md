@@ -590,3 +590,30 @@ No migration. `tests/admin-ops-pure.test.tsx`, `tests/integration/admin-ops.test
 | Maintenance: signups refused, webhooks never dropped, helper for the banner | Fixed | `src/lib/admin/maintenance.ts`, `POST /api/auth/signup` |
 | Phase 6: Turnstile site key and price copy read at request time, CSP from the snapshot, no Docker build args, `BUILD_TIME_ENV` empty | Fixed | `site-config.ts`, `signup/page.tsx`, `csp.ts`, `Dockerfile`, `compose.production.yaml`, `deploy.sh`, `env-only.ts` |
 | `verify-deploy` / `smoke` consult the server's selftest (secrets held in the console) | Fixed | `scripts/verify-deploy.ts`, `scripts/smoke.ts` |
+
+## Adversarial review of the admin console branch (two Opus reviews, all reproduced, all fixed)
+
+Tests: `tests/review-fixes-pure.test.ts`, `tests/integration/review-fixes.test.ts`, plus cases added to `tests/integration/admin-settings.test.ts`, `tests/db/admin-console-migration.test.ts`, `tests/admin-console-pure.test.ts`. Behaviour is documented in `docs/design/admin-console-contracts.md` (3, 4.9, Agent C "Support mode", Residuals).
+
+| Id | Finding | State | Where |
+| --- | --- | --- | --- |
+| H1 | A support write grant for tenant A authorised writes to any tenant B (the tenant came only from the URL / cookie; body- and resource-supplied ids were unchecked, and with none found ANY grant passed) | Fixed | `authenticate()` puts the admin's open grants on the principal (`writeGrants`); `requireBusinessAccess` / `scopeBusinessId` / `authenticateTeam` require a grant for EXACTLY the resolved business; the gate no longer reads the `rc_business` cookie; a write naming no business is refused |
+| H2 | Support write mode was full owner write | Fixed | the `support` role may write only `SUPPORT_WRITE_SCOPE`; every tenant route is `403 support_scope` for it (`SUPPORT_WRITE_ROUTES`, empty); owner and ops unchanged |
+| H3 | read_only and support could create tenants and provision (buys a number, creates an agent) | Fixed | `PLATFORM_WRITE_ROUTES`: `tenants.users.create` / `providers.repair`; provisioning by an admin also needs a fresh sign-in |
+| M1 | An SMTP candidate test with a typed host used the STORED password | Fixed | a candidate naming url / host / port never inherits the stored login; candidate tests need a recent sign-in (`provider-tests.ts`, the test route) |
+| M2 | The Bearer token could mint an owner | Fixed | only when no enabled owner exists or `ADMIN_TOKEN_ALLOW_SETTINGS=true` (`403 owner_requires_owner`) |
+| M3 | SSRF classifier bypassed by non-canonical IPv6; send path resolved twice | Fixed | `ssrf.ts` judges parsed groups (mapped, compatible, SIIT, 6to4, Teredo, NAT64, site-local, ULA, link-local, loopback, unspecified, multicast, documentation); `email/index.ts` connects to the one validated address with the name as TLS servername |
+| M4 | Legal publish published whatever draft existed | Fixed | publish carries the draft `version` + content `hash`; `409 draft_changed`; the editor sends them |
+| M5 | Quadratic markdown (`'*a '.repeat(40000)` 23 s) on the public legal pages | Fixed | one stack pass for brackets, a memo for emphasis marks that found no closer, scanned heading / rule detection; milliseconds, timing-bounded tests |
+| M6 | Suspended tenants were not stopped by the job runner | Fixed | `listLiveBusinessesForJobs` selects `suspended_at`; briefings, gratitude and counts skip them (`skipped_suspended`) |
+| M7 | Tenant overrides of the caps and of `limits.max_businesses_per_user` were stored but never enforced | Fixed | `db/usage.ts` (`tenant_overrides`), `db/locations.ts` (`maxBusinessesFor`); precedence column > tenant override > plan > platform |
+| M8 | An owner could switch ON what the platform turned off (briefing, thank-you) | Fixed | `tenant-effective.ts`: `platform && override`; the write is `422 not_stricter` |
+| M9 | The migration remapped every unknown plan string to the comped `legacy` | Fixed | `20261211120000_admin_console_schema` registers them as the trigger does (hidden, non-comped, NULL caps); pre-migration-data test; zero drift re-proved |
+| M10 | Plan features `voicemail` and `call_forwarding` did nothing | Fixed | `voicemailAllowance`, `forwardAllowance`, `resolveCallRoute` (`forward_not_in_plan`) |
+| M11 | `deploy.sh` died when the env lacked console-capable settings; stale build-time claim in the runbook | Fixed | warnings plus a post-up check of what the server holds; `docs/runbook.md`, `docs/billing.md` |
+| L1 | Typed phrase / reason enforced only by the UI | Fixed | `src/lib/admin/confirm.ts`: suspend, release, 2FA reset by e-mail, critical job runs, legal publish |
+| L2 | Unkeyed sha256 secret fingerprints, visible to ops | Fixed | HMAC under an HKDF-derived key, recomputed on write and on re-encryption; owner only |
+| L3 | Ops could create a tenant login with an admin-chosen password | Fixed | owner administrator or the token only (`403 owner_required`), audited |
+| L4 | The MAC of a secret row did not cover the dual-secret window | Fixed | `macPayload` covers `previousEnvelope` / `previousUntil`; legacy rows load their current secret only and are re-signed by the re-encryption pass |
+| L5 | `/api/me` prefix match in the gate | Fixed | `isOpenPath`: `/api/me/locale` exactly, other prefixes on segment boundaries |
+| L8 | `refreshNow` could return a load that started before the commit | Fixed | a call arriving while a load runs shares ONE follow-up load that starts after it |

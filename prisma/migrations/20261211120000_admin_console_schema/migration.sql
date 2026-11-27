@@ -5,8 +5,10 @@
 --  1. Console tables: platform_settings (+ MAC, secret envelope, dual-secret window), setting_change_sets, platform_setting_revisions, tenant_setting_overrides,
 --     settings_state (single row, the global version every instance polls, the incident freeze flag), instance_heartbeats.
 --  2. plans (seeded from today's PLAN_* / COMP_PLANS defaults) and businesses.plan -> plans.key. A BEFORE trigger registers an unknown plan string as a hidden plan so
---     every writer that still stores a free string (Stripe webhook with BILLING_PLAN_NAME, tests, scripts) keeps working. EXISTING unknown strings are mapped to the
---     seeded 'legacy' plan and every remap is recorded in audit_events ('plans.migrated', meta.from) so nothing is lost.
+--     every writer that still stores a free string (Stripe webhook with BILLING_PLAN_NAME, tests, scripts) keeps working. EXISTING unknown strings are REGISTERED exactly
+--     as that trigger does (a hidden, non-comped plan with NULL caps = the platform settings, i.e. what an unknown string always meant) and are NOT remapped: a tenant on a plan
+--     name other than 'standard' (BILLING_PLAN_NAME) must not silently become comped ('legacy'), which would exempt it from billing and release. One audit row per registered
+--     plan ('plans.registered', meta.plan, meta.businesses) records it.
 --  3. job_runs, legal_pages + legal_page_versions, support_grants.
 --  4. businesses.suspended_at / suspended_reason / suspended_by: a suspended tenant answers "out of service" and cannot send (enforced in src/lib/db/usage.ts).
 --  5. users.platform_role (owner | ops | support | read_only); every existing admin user becomes 'owner'.
@@ -157,11 +159,13 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS "businesses_ensure_plan_trg" ON "businesses";
 CREATE TRIGGER "businesses_ensure_plan_trg" BEFORE INSERT OR UPDATE OF "plan" ON "businesses" FOR EACH ROW EXECUTE FUNCTION "businesses_ensure_plan"();
 
--- Existing unknown strings -> 'legacy' (recorded, so nothing is lost). A second run finds none.
-INSERT INTO "audit_events" ("id", "at", "actor_kind", "business_id", "action", "target", "meta")
-SELECT gen_random_uuid()::text, now(), 'system', b."id", 'plans.migrated', 'business:' || b."id", jsonb_build_object('from', b."plan", 'to', 'legacy')
-  FROM "businesses" b WHERE b."plan" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "plans" p WHERE p."key" = b."plan");
-UPDATE "businesses" SET "plan" = 'legacy' WHERE "plan" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "plans" p WHERE p."key" = "businesses"."plan");
+-- Existing unknown strings are REGISTERED as the trigger registers a new one (hidden, non-comped, NULL caps) and the business keeps its string. A second run finds none.
+INSERT INTO "audit_events" ("id", "at", "actor_kind", "action", "target", "meta")
+SELECT gen_random_uuid()::text, now(), 'system', 'plans.registered', 'plan:' || u."plan", jsonb_build_object('plan', u."plan", 'businesses', u."n")
+  FROM (SELECT b."plan", count(*) AS "n" FROM "businesses" b WHERE b."plan" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "plans" p WHERE p."key" = b."plan") GROUP BY b."plan") u;
+INSERT INTO "plans" ("key", "name", "public", "sort")
+SELECT DISTINCT b."plan", left(b."plan", 120), false, 1000 FROM "businesses" b WHERE b."plan" IS NOT NULL
+ON CONFLICT ("key") DO NOTHING;
 
 -- ---- 3. job_runs, legal pages, support grants --------------------------------------------------------------------------------------------------
 

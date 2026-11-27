@@ -6,6 +6,7 @@
 import crypto from 'node:crypto';
 import { prisma } from '@/lib/db/client';
 import { auditRowData } from '@/lib/db/audit';
+import { requireConfirmPhrase } from './confirm';
 import { roleCan } from './permissions';
 import { assertSettingsWritable, MAX_REASON, MIN_REASON, SettingsError, type StoreActor } from './settings-store';
 
@@ -20,14 +21,19 @@ export const isLegalLocale = (v: unknown): v is LegalLocale => typeof v === 'str
 
 export interface LegalVersionView {
   version: number; draft: boolean; note: string | null; created_by: string | null; created_at: string; published_at: string | null; published_by: string | null; chars: number;
+  /** sha256 (hex) of the body: a publication names the exact draft (version + hash) that was reviewed. */
+  hash: string;
   /** Only when asked for (the list omits bodies). */
   body?: string;
 }
 export interface LegalPageView { slug: LegalSlug; locale: LegalLocale; published_version: number | null; draft_version: number | null; versions: LegalVersionView[] }
 
+/** Content hash a publication must carry. */
+export const legalHash = (body: string): string => crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+
 const vv = (r: { version: number; draft: boolean; note: string | null; createdBy: string | null; createdAt: Date; publishedAt: Date | null; publishedBy: string | null; body: string }, withBody: boolean): LegalVersionView => ({
   version: r.version, draft: r.draft, note: r.note, created_by: r.createdBy, created_at: r.createdAt.toISOString(), published_at: r.publishedAt?.toISOString() ?? null, published_by: r.publishedBy,
-  chars: r.body.length, ...(withBody ? { body: r.body } : {}),
+  chars: r.body.length, hash: legalHash(r.body), ...(withBody ? { body: r.body } : {}),
 });
 
 const need = (a: StoreActor, perm: 'legal.write' | 'legal.publish') => { if (a.role !== 'system' && !roleCan(a.role, perm)) throw new SettingsError(403, 'forbidden', `not allowed to ${perm === 'legal.write' ? 'edit' : 'publish'} legal pages`); };
@@ -88,18 +94,22 @@ export async function saveLegalDraft(opts: { slug: unknown; locale: unknown; bod
 }
 
 /** Publish the current draft: it is frozen as a numbered version and becomes the page's published version. */
-export async function publishLegal(opts: { slug: unknown; locale: unknown; reason: unknown; actor: StoreActor }): Promise<LegalVersionView> {
+export async function publishLegal(opts: { slug: unknown; locale: unknown; reason: unknown; confirm: unknown; version: unknown; hash: unknown; actor: StoreActor }): Promise<LegalVersionView> {
   need(opts.actor, 'legal.publish');
   if (!isLegalSlug(opts.slug)) throw new SettingsError(422, 'invalid_slug', `slug must be one of ${LEGAL_SLUGS.join(', ')}`);
   if (!isLegalLocale(opts.locale)) throw new SettingsError(422, 'invalid_locale', `locale must be one of ${LEGAL_LOCALES.join(', ')}`);
   const reason = typeof opts.reason === 'string' ? opts.reason.trim() : '';
   if (reason.length < MIN_REASON || reason.length > MAX_REASON) throw new SettingsError(422, 'reason_required', `a reason of ${MIN_REASON} to ${MAX_REASON} characters is required`);
+  if (opts.actor.role !== 'system') requireConfirmPhrase(opts.confirm, [`publish ${opts.slug}/${opts.locale}`]); // the console asks for it; so does the server
+  // The publication names the draft that was REVIEWED (version + content hash): a draft edited by someone else after the review is refused, never silently published.
+  if (!Number.isInteger(opts.version) || typeof opts.hash !== 'string' || !/^[0-9a-f]{64}$/.test(opts.hash)) throw new SettingsError(422, 'review_required', 'publish needs the version and content hash of the draft that was reviewed');
   await assertSettingsWritable();
   const { slug, locale } = { slug: opts.slug, locale: opts.locale };
   const row = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT 1 FROM legal_pages WHERE slug = ${slug} AND locale = ${locale} FOR UPDATE`;
     const draft = await tx.legalPageVersion.findFirst({ where: { slug, locale, draft: true } });
     if (!draft) throw new SettingsError(409, 'no_draft', 'there is no draft to publish');
+    if (draft.version !== opts.version || legalHash(draft.body) !== opts.hash) throw new SettingsError(409, 'draft_changed', 'the draft changed after you reviewed it: reload it, review it again and publish that version');
     const now = new Date();
     const pub = await tx.legalPageVersion.update({ where: { id: draft.id }, data: { draft: false, publishedAt: now, publishedBy: opts.actor.user_id } });
     await tx.legalPage.update({ where: { slug_locale: { slug, locale } }, data: { publishedVersion: pub.version, updatedAt: now } });

@@ -57,14 +57,20 @@ export function safeHref(raw: string): string | null {
 const isExternal = (href: string): boolean => /^https?:/i.test(href);
 const ESCAPABLE = /[\\`*_{}[\]()#+\-.!<>|~]/;
 
-function findClose(s: string, from: number, open: string, close: string): number {
-  let depth = 1;
-  for (let i = from; i < s.length; i++) {
-    if (s[i] === '\\') { i++; continue; }
-    if (s[i] === open) depth++;
-    else if (s[i] === close && --depth === 0) return i;
+/**
+ * For every `open` character of `src` the index of the `close` that balances it (-1 when none), by ONE stack pass (a backslash escapes the next character). This is what a
+ * per-bracket forward scan computes, in O(n) for the whole string instead of O(n) per bracket (`'['.repeat(40000)` was quadratic).
+ */
+function matchPairs(src: string, open: string, close: string): Int32Array {
+  const match = new Int32Array(src.length).fill(-1);
+  const stack: number[] = [];
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '\\') { i++; continue; }
+    if (ch === open) stack.push(i);
+    else if (ch === close && stack.length > 0) match[stack.pop()!] = i;
   }
-  return -1;
+  return match;
 }
 
 export function parseInline(src: string, depth = 0): Inline[] {
@@ -73,6 +79,11 @@ export function parseInline(src: string, depth = 0): Inline[] {
   const flush = () => { if (buf) { out.push({ t: 'text', v: buf }); buf = ''; } };
   let i = 0;
   const n = src.length;
+  // Linear time on adversarial input: bracket / parenthesis partners are computed once per call, and an emphasis mark that found no closer once cannot find one later
+  // (a later opener has fewer candidate closers), so the failed scan is never repeated.
+  let squares: Int32Array | null = null;
+  let parens: Int32Array | null = null;
+  const noCloser = new Set<string>();
   while (i < n) {
     const c = src[i];
     if (c === '\\' && i + 1 < n && ESCAPABLE.test(src[i + 1])) { buf += src[i + 1]; i += 2; continue; }
@@ -81,9 +92,11 @@ export function parseInline(src: string, depth = 0): Inline[] {
       if (j > i + 1) { flush(); out.push({ t: 'code', v: src.slice(i + 1, j) }); i = j + 1; continue; }
     }
     if (c === '[' && depth < MAX_INLINE_DEPTH) {
-      const close = findClose(src, i + 1, '[', ']');
+      squares ??= matchPairs(src, '[', ']');
+      const close = squares[i];
       if (close !== -1 && src[close + 1] === '(') {
-        const end = findClose(src, close + 2, '(', ')');
+        parens ??= matchPairs(src, '(', ')');
+        const end = parens[close + 1];
         if (end !== -1) {
           const target = src.slice(close + 2, end).trim().split(/\s+/)[0] ?? '';
           const label = parseInline(src.slice(i + 1, close), depth + 1);
@@ -104,13 +117,14 @@ export function parseInline(src: string, depth = 0): Inline[] {
     if ((c === '*' || c === '_') && depth < MAX_INLINE_DEPTH) {
       const prev = i > 0 ? src[i - 1] : ' ';
       const intraword = c === '_' && /[A-Za-z0-9]/.test(prev);
-      if (!intraword) {
-        const dbl = src.startsWith(c + c, i);
-        const mark = dbl ? c + c : c;
+      const dbl = !intraword && src.startsWith(c + c, i);
+      const mark = dbl ? c + c : c;
+      if (!intraword && !/\s/.test(src[i + mark.length] ?? ' ') && !noCloser.has(mark)) { // an opener is never followed by whitespace
         let j = src.indexOf(mark, i + mark.length);
         // a closer must not be preceded by whitespace and (for _) not followed by a word character
         while (j !== -1 && (/\s/.test(src[j - 1] ?? ' ') || (c === '_' && /[A-Za-z0-9]/.test(src[j + mark.length] ?? ' ')))) j = src.indexOf(mark, j + 1);
-        if (j > i + mark.length && !/\s/.test(src[i + mark.length] ?? ' ')) {
+        if (j === -1) noCloser.add(mark);
+        if (j > i + mark.length) {
           flush();
           out.push({ t: dbl ? 'strong' : 'em', c: parseInline(src.slice(i + mark.length, j), depth + 1) });
           i = j + mark.length;
@@ -125,8 +139,39 @@ export function parseInline(src: string, depth = 0): Inline[] {
   return out;
 }
 
-const HEADING = /^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/;
-const HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+/** ATX heading by a single forward scan (the regex form, `(.*?)[ \t]*#*[ \t]*$`, backtracks quadratically on a long run of spaces). */
+const HEADING = {
+  exec(line: string): [string, string, string] | null {
+    let i = 0;
+    while (i < 3 && line[i] === ' ') i++;
+    let h = 0;
+    while (line[i + h] === '#') h++;
+    if (h < 1 || h > 6 || (line[i + h] !== ' ' && line[i + h] !== '\t')) return null;
+    let from = i + h;
+    while (line[from] === ' ' || line[from] === '\t') from++;
+    let end = line.length;
+    while (end > from && (line[end - 1] === ' ' || line[end - 1] === '\t')) end--;
+    while (end > from && line[end - 1] === '#') end--;
+    while (end > from && (line[end - 1] === ' ' || line[end - 1] === '\t')) end--;
+    return [line, '#'.repeat(h), line.slice(from, end)];
+  },
+  test(line: string): boolean { return HEADING.exec(line) !== null; },
+};
+/** Thematic break: three or more of one of - * _ with only spaces or tabs between (a forward scan, no backtracking). */
+const HR = {
+  test(line: string): boolean {
+    let i = 0;
+    while (i < 3 && line[i] === ' ') i++;
+    const m = line[i];
+    if (m !== '-' && m !== '*' && m !== '_') return false;
+    let count = 0;
+    for (; i < line.length; i++) {
+      if (line[i] === m) count++;
+      else if (line[i] !== ' ' && line[i] !== '\t') return false;
+    }
+    return count >= 3;
+  },
+};
 const BULLET = /^ {0,3}[-*+][ \t]+(.*)$/;
 const ORDERED = /^ {0,3}(\d{1,9})[.)][ \t]+(.*)$/;
 const FENCE = /^ {0,3}(```|~~~)/;

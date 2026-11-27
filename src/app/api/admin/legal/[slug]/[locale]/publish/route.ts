@@ -13,7 +13,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
   try {
     const { slug, locale } = await params;
     const b = await readBody(req);
-    const published = await publishLegal({ slug, locale, reason: b.reason, actor: g.ctx.actor });
+    const published = await publishLegal({ slug, locale, reason: b.reason, confirm: b.confirm, version: b.version, hash: b.hash, actor: g.ctx.actor });
     resetLegalLinksCache(); // the footers of THIS instance link the new page at once (others within the 60 s cache)
     return ok(published);
   } catch (err) { return adminFail(err); }

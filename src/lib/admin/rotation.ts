@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db/client';
 import { auditRowData } from '@/lib/db/audit';
 import { decryptSecret, encryptSecret, isUnderCurrentKey } from '@/lib/totp';
-import { CANARY_KEY, decryptSetting, encryptSetting, macPayload, masterKeys, needsReencrypt, settingMac, verifySettingMac } from './crypto';
+import { CANARY_KEY, decryptSetting, encryptSetting, fingerprintOf, legacyMacPayload, macPayload, masterKeys, needsReencrypt, settingMac, verifySettingMac } from './crypto';
 import { loaderStarted, refreshNow } from './loader';
 import { assertSettingsWritable, SettingsError, type StoreActor } from './settings-store';
 import { roleCan } from './permissions';
@@ -63,14 +63,19 @@ export async function reencryptAll(opts: { actor: StoreActor; reason: string; cu
       for (const r of rows) {
         if (!r.secretEnvelope) continue;
         const stale = needsReencrypt(r.secretEnvelope, keys) || (r.previousEnvelope !== null && needsReencrypt(r.previousEnvelope, keys));
-        if (!stale) continue;
+        // a row MACed before the dual-secret window was covered (legacy payload) is re-signed here with the full payload; its previous envelope is dropped (the loader ignored it)
+        const legacyMac = r.key !== CANARY_KEY && !verifySettingMac(r.key, macPayload({ secretEnvelope: r.secretEnvelope, previousEnvelope: r.previousEnvelope, previousUntil: r.previousUntil }), r.version, r.integrityMac, keys)
+          && verifySettingMac(r.key, legacyMacPayload({ secretEnvelope: r.secretEnvelope }), r.version, r.integrityMac, keys);
+        if (!stale && !legacyMac) continue;
         try {
           const plain = decryptSetting(r.secretEnvelope, r.key, keys);
           const envelope = encryptSetting(plain, r.key, keys);
-          let previous: string | null = r.previousEnvelope;
+          let previous: string | null = legacyMac ? null : r.previousEnvelope;
           if (previous) { try { previous = encryptSetting(decryptSetting(previous, r.key, keys), r.key, keys); } catch { previous = null; } }
           // the canary keeps its placeholder MAC; every real secret gets a fresh MAC under the current key and the new version
-          await tx.platformSetting.update({ where: { key: r.key }, data: { secretEnvelope: envelope, previousEnvelope: previous, version: BigInt(version), integrityMac: r.key === CANARY_KEY ? '-' : settingMac(r.key, macPayload({ secretEnvelope: envelope }), version, keys) } });
+          const until = previous ? r.previousUntil : null;
+          // the fingerprint is keyed by the master key, so it is recomputed with the secret (a canary has none)
+          await tx.platformSetting.update({ where: { key: r.key }, data: { secretEnvelope: envelope, previousEnvelope: previous, previousUntil: until, ...(r.key === CANARY_KEY ? {} : { secretFingerprint: fingerprintOf(plain, keys) }), version: BigInt(version), integrityMac: r.key === CANARY_KEY ? '-' : settingMac(r.key, macPayload({ secretEnvelope: envelope, previousEnvelope: previous, previousUntil: until }), version, keys) } });
           progress.settings.done++;
         } catch { progress.settings.failed++; }
       }

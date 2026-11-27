@@ -2,6 +2,7 @@
  * Billing summary for a business (status route + dashboard page). Node runtime only.
  */
 import { configEnv } from '@/lib/config';
+import { loadTenantOverrides } from '@/lib/admin/tenant-knobs';
 import { billingEnforced, isProvisioningAllowed, callMinutesCapFor, forwardMinutesCapFor, getUsage, pastDueGraceDays, smsCapFor, voicemailMinutesCap } from '@/lib/db';
 import { annualAvailable } from '@/lib/providers/stripe-billing';
 import { usageWarningsFor, type UsageWarningView } from '@/lib/billing/warnings';
@@ -44,7 +45,8 @@ export function graceEndsAt(b: Pick<Business, 'billing_status' | 'past_due_since
 }
 
 export async function billingSummary(b: Business, now: Date = new Date()): Promise<BillingSummary> {
-  const usage = await getUsage(b.id, now);
+  const [usage, tenantOverrides] = await Promise.all([getUsage(b.id, now), loadTenantOverrides(b.id)]);
+  const cb = { ...b, tenant_overrides: tenantOverrides };
   const status = b.billing_status ?? 'none';
   const seconds = usage?.call_seconds ?? 0;
   const forward = usage?.forward_seconds ?? 0;
@@ -64,10 +66,10 @@ export async function billingSummary(b: Business, now: Date = new Date()): Promi
     usage_warnings: await usageWarningsFor(b.id, now).catch(() => []),
     usage: {
       period_start: usage?.period_start ?? null,
-      sms: { used: usage?.sms_count ?? 0, cap: smsCapFor(b) },
-      call_minutes: { used: Math.floor(seconds / 60), used_seconds: seconds, cap: callMinutesCapFor(b) },
-      forward_minutes: { used: Math.floor(forward / 60), used_seconds: forward, cap: forwardMinutesCapFor(b) },
-      voicemail_minutes: { used: Math.floor(voicemail / 60), used_seconds: voicemail, cap: voicemailMinutesCap(undefined, b.plan) },
+      sms: { used: usage?.sms_count ?? 0, cap: smsCapFor(cb) },
+      call_minutes: { used: Math.floor(seconds / 60), used_seconds: seconds, cap: callMinutesCapFor(cb) },
+      forward_minutes: { used: Math.floor(forward / 60), used_seconds: forward, cap: forwardMinutesCapFor(cb) },
+      voicemail_minutes: { used: Math.floor(voicemail / 60), used_seconds: voicemail, cap: voicemailMinutesCap(undefined, b.plan, tenantOverrides) },
     },
   };
 }

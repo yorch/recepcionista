@@ -171,7 +171,7 @@ function RunPanel({ job, data, onClose, onRan }: { job: OpsJobName; data: JobsDa
     if (!previewed) return;
     setBusy('apply'); setError(null);
     try {
-      await guard(async () => { setResult(await apiRequest<JobReportView>('/api/admin/jobs/run', { method: 'POST', body: { ...params, dry_run: false, ...(reason.trim() ? { reason: reason.trim() } : {}) } })); });
+      await guard(async () => { setResult(await apiRequest<JobReportView>('/api/admin/jobs/run', { method: 'POST', body: { ...params, dry_run: false, ...(reason.trim() ? { reason: reason.trim() } : {}), ...(critical ? { confirm: typed.trim() } : {}) } })); });
       toast.success(t('ao.jobs.applied')); setPreview(null); setReason(''); setTyped(''); onRan();
     } catch (err) { setError(err); } finally { setBusy(null); }
   }

@@ -57,6 +57,13 @@ const BEARER_SETTINGS: readonly Permission[] = ['settings.write', 'settings.writ
 
 /** What a support user may do while a write grant (SupportGrant, 30 min, with a reason) is open for the tenant. Everything else stays read-only. */
 export const SUPPORT_WRITE_SCOPE: ReadonlySet<Permission> = new Set<Permission>(['tenants.overrides.write']);
+/**
+ * Tenant ROUTES (outside /api/admin) a support user may write while a grant is open. The scope above is `tenants.overrides.write`, which is exercised through the console route
+ * /api/admin/tenant-overrides (its own permission check with the grant), so NO tenant route is open: refunds, invites, privacy erase, call forwarding, payments, SMS and bookings are
+ * owner / ops actions. Add an entry here (method + path regex) only together with a permission in SUPPORT_WRITE_SCOPE.
+ */
+export const SUPPORT_WRITE_ROUTES: ReadonlyArray<{ method: string; re: RegExp }> = [];
+export const supportMayWriteRoute = (method: string, path: string): boolean => SUPPORT_WRITE_ROUTES.some((r) => r.method === method && r.re.test(path));
 export const SUPPORT_WRITE_MS = 30 * 60_000;
 
 /** The structural part of a principal the matrix needs (the real `Principal` in session.ts satisfies it). */

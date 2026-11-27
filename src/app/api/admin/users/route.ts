@@ -1,3 +1,4 @@
+import { NextResponse } from 'next/server';
 import { ok, fail, readJson } from '@/lib/http';
 import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
 import { createUser, EmailTakenError, getBusiness, recordAudit } from '@/lib/db';
@@ -14,6 +15,8 @@ export async function POST(req: Request) {
   const g = await guardAdminRoute(req, { permission: 'tenants.users.create', write: true, rate: { name: 'users', max: 20 } }); // permission tenants.users.create
   if (!g.ok) return g.response;
   const auth = g.ctx.auth;
+  // An admin-chosen password has no time box and no owner confirmation: only an owner admin (or the break-glass token / dev mode) may set one. Everyone else invites the person (POST /api/team/invite: a link, the person chooses the password).
+  if (g.ctx.role !== 'owner' && g.ctx.role !== 'bearer') return NextResponse.json({ ok: false as const, error: 'only an owner administrator may create a login with a chosen password; invite the person instead (team invitation)', code: 'owner_required' }, { status: 403 });
   try {
     const body = await readJson<{ email?: unknown; password?: unknown; role?: unknown; business_id?: unknown }>(req);
     const bad = validateEmail(body.email) ?? validateNewPassword(body.password);
@@ -32,7 +35,7 @@ export async function POST(req: Request) {
     await recordAudit({
       actor_kind: auth.principal.kind === 'admin' && auth.principal.user ? 'user' : 'admin_token',
       actor_user_id: auth.principal.kind === 'admin' ? auth.principal.user?.id ?? null : null,
-      business_id: body.business_id, action: 'user.create', target: `user:${user.id}`, ip: auditIp(req), meta: { role: body.role },
+      business_id: body.business_id, action: 'user.create', target: `user:${user.id}`, ip: auditIp(req), meta: { role: body.role, login_set_by_admin: true, admin_role: g.ctx.role, via: g.ctx.actor.via },
     });
     return ok<User>(user, 201); // User has no password_hash
   } catch (err) {

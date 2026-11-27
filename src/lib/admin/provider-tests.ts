@@ -263,18 +263,23 @@ async function testResend(get: ReturnType<typeof reader>, deps: TestDeps): Promi
 }
 
 /** The SMTP target of a candidate: the URL form wins (like the sender), else host / port / user / pass / secure. Credentials stay inside this function. */
-export function smtpTargetOf(get: ReturnType<typeof reader>): Omit<SmtpTarget, 'ip' | 'timeoutMs'> | null {
+export function smtpTargetOf(get: ReturnType<typeof reader>, candidate: Candidate = {}): Omit<SmtpTarget, 'ip' | 'timeoutMs'> | null {
+  // A candidate that names the TARGET (url / host / port) never inherits the STORED login: the stored password would be sent to whatever host the tester typed.
+  // It is tested with the credentials the candidate itself carries (the URL's, or smtp_user + smtp_pass), else unauthenticated.
+  const targetGiven = ['email.smtp_url', 'email.smtp_host', 'email.smtp_port'].some((k) => Object.prototype.hasOwnProperty.call(candidate, k));
+  const own = (k: string): string => (Object.prototype.hasOwnProperty.call(candidate, k) ? String(candidate[k] ?? '').trim() : targetGiven ? '' : get(k as SettingKey));
   const url = get('email.smtp_url');
   if (url) {
     const t = smtpTargetOfUrl(url);
     if (!t) return null;
     const u = new URL(url);
+    // The URL form carries its own login. A STORED url is the stored login; a candidate url is whatever it contains.
     return { host: t.host, port: t.port ?? 587, secure: u.protocol === 'smtps:' || get('email.smtp_secure') === 'true', user: u.username ? decodeURIComponent(u.username) : null, pass: u.password ? decodeURIComponent(u.password) : null };
   }
   const host = get('email.smtp_host');
   if (!host) return null;
   const port = Number(get('email.smtp_port')) || 587;
-  return { host, port, secure: get('email.smtp_secure') === 'true' || port === 465, user: get('email.smtp_user') || null, pass: get('email.smtp_pass') || null };
+  return { host, port, secure: get('email.smtp_secure') === 'true' || port === 465, user: own('email.smtp_user') || null, pass: own('email.smtp_pass') || null };
 }
 
 async function nodemailerVerify(o: SmtpTarget): Promise<'ok' | 'auth_failed' | 'unreachable'> {
@@ -296,8 +301,8 @@ async function nodemailerVerify(o: SmtpTarget): Promise<'ok' | 'auth_failed' | '
   }
 }
 
-async function testSmtp(get: ReturnType<typeof reader>, deps: TestDeps): Promise<Pick<ProviderTestResult, 'outcome' | 'checks'>> {
-  const t = smtpTargetOf(get);
+async function testSmtp(get: ReturnType<typeof reader>, deps: TestDeps, candidate: Candidate = {}): Promise<Pick<ProviderTestResult, 'outcome' | 'checks'>> {
+  const t = smtpTargetOf(get, candidate);
   if (!t) return { outcome: 'misconfigured' };
   const resolve = deps.resolve ?? defaultResolver;
   try {
@@ -369,7 +374,7 @@ export async function testProvider(provider: ProviderId, opts: { candidate?: Can
       case 'openai': body = await testOpenAi(get, deps); break;
       case 'anthropic': body = await testAnthropic(get, deps); break;
       case 'resend': body = await testResend(get, deps); break;
-      case 'smtp': body = await testSmtp(get, deps); break;
+      case 'smtp': body = await testSmtp(get, deps, opts.candidate ?? {}); break;
       case 'google': body = await testGoogle(get, deps); break;
       case 'turnstile': body = await testTurnstile(get, deps); break;
     }

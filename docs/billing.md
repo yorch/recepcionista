@@ -85,7 +85,7 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 | `STRIPE_SECRET_KEY` | `sk_test_...` until you have gone live. Shared with deposit links. |
 | `STRIPE_PRICE_ID` | recurring monthly price |
 | `STRIPE_PRICE_ID_ANNUAL` | optional recurring annual price (see "Annual plan") |
-| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | text for the annual choice, e.g. `$1,490/year (2 months free)` (build time) |
+| `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL` | text for the annual choice, e.g. `$1,490/year (2 months free)` (runtime setting: console or `.env` + restart, no rebuild) |
 | `STRIPE_BILLING_WEBHOOK_SECRET` | billing endpoint signing secret |
 | `BILLING_TRIAL_DAYS` | 0-90, default 7 |
 | `BILLING_ENFORCED` | production: REQUIRED, `true` (enforce) or deliberately `false`; unset/invalid is refused by deploy.sh and compose. Outside production only `true` enforces |
@@ -101,7 +101,7 @@ Settings > Billing > Customer portal: enable it, then allow customers to update 
 
 #### Annual plan (optional)
 
-Create a second recurring price (yearly) on the same product and put its id in `STRIPE_PRICE_ID_ANNUAL` (+ `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL`, rebuild).
+Create a second recurring price (yearly) on the same product and put its id in `STRIPE_PRICE_ID_ANNUAL` (+ `NEXT_PUBLIC_PLAN_PRICE_DISPLAY_ANNUAL`; a runtime setting, no rebuild).
 When it is set (and `STRIPE_SECRET_KEY` is), the Billing page's "Start free trial" offers Monthly / Annual and `POST /api/billing/checkout` accepts
 `interval: 'month' | 'year'` (anything else is 422; `year` without the env is 422). The trial, the one-trial-per-card rule and the caps are the same for both.
 The cadence is stored in `businesses.billing_interval` by the subscription webhook, from the subscription's price (the annual price id, else the price's

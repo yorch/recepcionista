@@ -6,6 +6,7 @@ import { isJobName, JOB_NAMES, runJob } from '@/lib/jobs';
 import { isBreakGlass } from '@/lib/admin/permissions';
 import { notifyAdmins } from '@/lib/admin/notify';
 import { SettingsError } from '@/lib/admin/settings-store';
+import { requireConfirmPhrase } from '@/lib/admin/confirm';
 
 /** Jobs that delete data or act on tenants (critical tier in the console): a real run from a console session needs a written reason and notifies every admin. */
 export const CRITICAL_JOBS: readonly string[] = ['retention', 'tenant_release', 'grandfather'];
@@ -36,6 +37,7 @@ export async function POST(req: Request) {
     if ((body as { reason?: unknown }).reason !== undefined && (typeof (body as { reason?: unknown }).reason !== 'string' || reason.length > 500)) return fail('reason must be text of at most 500 characters', 422);
     const consoleSession = !isBreakGlass(g.ctx.principal); // the break-glass Bearer is recovery and already audited + mailed per use; a console session carries the critical-tier rules
     if (!dryRun && consoleSession && CRITICAL_JOBS.includes(body.job) && reason.length < 8) throw new SettingsError(422, 'reason_required', 'a reason of at least 8 characters is required to run this job for real');
+    if (!dryRun && consoleSession && CRITICAL_JOBS.includes(body.job)) requireConfirmPhrase((body as { confirm?: unknown }).confirm, [`run ${body.job}`]);
     if (!dryRun) { // a real run sends texts / deletes data: step-up for a cookie session (a dry run changes nothing)
       const stale = requireRecentAuth(auth);
       if (stale) return stale;

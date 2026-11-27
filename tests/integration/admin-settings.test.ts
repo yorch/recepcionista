@@ -631,4 +631,89 @@ integration('admin console: settings store, loader, secrets (postgres)', () => {
     expect(by('security.password_min_chars').ratchet).toBe('tighten_only_in_ui');
     expect(by('forward.ring_seconds').tenant).toMatchObject({ editableBy: 'owner' });
   });
+
+  test('L2: the secret fingerprint is a keyed HMAC and is shown to an owner only; a fingerprint stored before the keyed form is still displayed and is recomputed on re-encryption', async () => {
+    const SECRET = 'sk-fingerprint-material-0001';
+    await store.setSecret({ key: 'llm.openai_api_key', value: SECRET, reason: 'fingerprint test secret', confirm: 'llm.openai_api_key', actor: actor() });
+    const row = await prisma.platformSetting.findUniqueOrThrow({ where: { key: 'llm.openai_api_key' } });
+    expect(row.secretFingerprint).toBe(crypt.fingerprintOf(SECRET));
+    expect(row.secretFingerprint).not.toBe(crypt.legacyFingerprintOf(SECRET)); // not the bare sha256 an attacker could test guesses against
+    // owner-only visibility (ops, support, read_only and the break-glass token never see fingerprint / last4)
+    const { guardAdminRoute } = await import('@/lib/admin/guard');
+    const seen: Record<string, boolean> = {};
+    for (const role of ['owner', 'ops', 'support', 'read_only'] as const) {
+      const a = await mkAdmin(role);
+      await prisma.user.update({ where: { id: a.id }, data: { totpSecretEnc: 'v1.a.b.c', totpEnabledAt: new Date() } });
+      const sess = await users.createSession(a.id); await users.markSessionMfaVerified(sess.session.id);
+      const g = await guardAdminRoute(new Request('https://app.example.test/api/admin/settings', { headers: { cookie: `rc_user_session=${sess.token}` } }), { permission: 'settings.read' });
+      seen[role] = g.ok && g.ctx.revealSecretMeta;
+    }
+    expect(seen).toEqual({ owner: true, ops: false, support: false, read_only: false });
+    // a row written before the keyed form: shown as stored, and the next re-encryption replaces it with the keyed value
+    await prisma.platformSetting.update({ where: { key: 'llm.openai_api_key' }, data: { secretFingerprint: crypt.legacyFingerprintOf(SECRET) } });
+    expect((await store.secretInfo('llm.openai_api_key')).fingerprint).toBe(crypt.legacyFingerprintOf(SECRET));
+    setEnv('APP_SECRET_KEY', OTHER); setEnv('APP_SECRET_KEY_PREVIOUS', MASTER); // a rotation: the secret is under the previous key now
+    await rotation.reencryptAll({ actor: actor(), reason: 're-encrypt after the rotation' });
+    const after = await prisma.platformSetting.findUniqueOrThrow({ where: { key: 'llm.openai_api_key' } });
+    expect(after.secretFingerprint).toBe(crypt.fingerprintOf(SECRET, crypt.masterKeys()));
+    expect(after.secretFingerprint).not.toBe(crypt.legacyFingerprintOf(SECRET));
+  });
+
+  test('L4: the dual-secret window is covered by the MAC: extending previousUntil or planting a previous envelope in SQL breaks it; a pre-change (legacy) row loads its current secret, ignores its previous one and is re-signed', async () => {
+    await store.setSecret({ key: 'llm.anthropic_api_key', value: 'first-token-value-000000', reason: 'first token of the test', confirm: 'llm.anthropic_api_key', actor: actor() });
+    await store.setSecret({ key: 'llm.anthropic_api_key', value: 'second-token-value-00000', reason: 'rotate the test token', confirm: 'llm.anthropic_api_key', actor: actor() });
+    await loader.refreshNow();
+    expect(loader.loaderStatus().problems).toEqual([]);
+    expect(cfg.acceptedSecrets('llm.anthropic_api_key')).toContain('first-token-value-000000'); // the window is open
+    const row = await prisma.platformSetting.findUniqueOrThrow({ where: { key: 'llm.anthropic_api_key' } });
+    // SQL tampering: keep the window open for a year
+    await prisma.platformSetting.update({ where: { key: 'llm.anthropic_api_key' }, data: { previousUntil: new Date(Date.now() + 365 * 86_400_000) } });
+    await loader.refreshNow();
+    expect(loader.loaderStatus().problems).toEqual([{ key: 'llm.anthropic_api_key', code: 'bad_mac' }]);
+    expect(cfg.acceptedSecrets('llm.anthropic_api_key')).not.toContain('first-token-value-000000');
+    // a row MACed before the window was covered (legacy payload): the current secret loads, the previous envelope is NOT honoured
+    const keys = crypt.masterKeys();
+    await prisma.platformSetting.update({ where: { key: 'llm.anthropic_api_key' }, data: { previousUntil: row.previousUntil, integrityMac: crypt.settingMac('llm.anthropic_api_key', crypt.legacyMacPayload({ secretEnvelope: row.secretEnvelope }), row.version, keys) } });
+    await loader.refreshNow();
+    expect(loader.loaderStatus().problems).toEqual([]);
+    expect(cfg.setting('llm.anthropic_api_key')).toBe('second-token-value-00000');
+    expect(cfg.acceptedSecrets('llm.anthropic_api_key')).not.toContain('first-token-value-000000');
+    // the re-encryption pass re-signs it with the full payload (and drops the unsigned window)
+    await rotation.reencryptAll({ actor: actor(), reason: 're-encrypt after the rotation' });
+    const fixed = await prisma.platformSetting.findUniqueOrThrow({ where: { key: 'llm.anthropic_api_key' } });
+    expect(crypt.verifySettingMac('llm.anthropic_api_key', crypt.macPayload({ secretEnvelope: fixed.secretEnvelope, previousEnvelope: fixed.previousEnvelope, previousUntil: fixed.previousUntil }), fixed.version, fixed.integrityMac, keys)).toBe(true);
+    expect(fixed.previousEnvelope).toBeNull();
+  });
+
+  test('L8: refreshNow after a commit never returns a load that started before it', async () => {
+    const key = `l8-${Math.random().toString(36).slice(2, 8)}`;
+    const orig = prisma.platformSetting.findMany.bind(prisma.platformSetting);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let started!: () => void;
+    const firstRead = new Promise<void>((r) => { started = r; });
+    let calls = 0;
+    (prisma.platformSetting as any).findMany = async (...args: any[]) => { if (++calls === 1) { started(); await gate; } return (orig as any)(...args); };
+    try {
+      const a = loader.refreshNow(); // a load is in flight: it has read the plans already, and waits on the settings read
+      await firstRead;
+      await prisma.plan.create({ data: { key, name: key, public: false } }); // the commit
+      const b = loader.refreshNow(); // must start AFTER the commit
+      release();
+      await Promise.all([a, b]);
+      const { planRow } = await import('@/lib/admin/plan-catalog');
+      expect(planRow(key)).not.toBeNull(); // before the fix B was A, and the snapshot never saw the commit
+      expect(calls).toBeGreaterThanOrEqual(2); // a second load really ran
+      // concurrent callers while a load runs share ONE follow-up load, not one each
+      calls = 100;
+      const before = calls;
+      const c = [loader.refreshNow(), loader.refreshNow(), loader.refreshNow(), loader.refreshNow()];
+      await Promise.all(c);
+      expect(calls - before).toBeLessThanOrEqual(2);
+    } finally {
+      (prisma.platformSetting as any).findMany = orig;
+      await prisma.plan.deleteMany({ where: { key } });
+      await loader.refreshNow();
+    }
+  });
 });

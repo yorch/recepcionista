@@ -1,7 +1,9 @@
 import { ok, fail, readJson } from '@/lib/http';
 import { requireRecentAuth } from '@/lib/session';
-import { guardAdminRoute } from '@/lib/admin/guard';
-import { recordAudit } from '@/lib/db';
+import { adminFail, guardAdminRoute } from '@/lib/admin/guard';
+import { getBusiness, recordAudit } from '@/lib/db';
+import { isBreakGlass } from '@/lib/admin/permissions';
+import { requireConfirmPhrase, requireReason, tenantPhraseOf, TENANT_VERBS } from '@/lib/admin/confirm';
 import { DEFAULT_GRACE_DAYS, DEFAULT_NOTIFY_DAYS, processBusiness } from '@/lib/billing/release';
 
 export const dynamic = 'force-dynamic';
@@ -16,7 +18,7 @@ const int = (v: unknown, dflt: number): number | null => (v === undefined ? dflt
  * and nothing is sent, deleted or written; only `"dry_run": false` acts. It applies the same safety rules as
  * scripts/release-canceled-tenants.ts (only canceled/unpaid, not comped, no recent calls, never a shared number or agent);
  * with `dry_run:false` one call performs ONE step (send the heads-up, or release when due). `skip_notice: true` is the explicit admin
- * override of the heads-up wait (audited). Audited as billing.release_notice / billing.tenant_released.
+ * override of the heads-up wait (audited). A real release from a console session needs `reason` and `confirm` (the phrase `release <business name>`); the Bearer token does not. Audited as billing.release_notice / billing.tenant_released.
  */
 export async function POST(req: Request) {
   const g = await guardAdminRoute(req, { permission: 'tenants.release', rate: { name: 'release-tenant', max: 20 } }); // permission tenants.release
@@ -36,6 +38,12 @@ export async function POST(req: Request) {
       const stale = requireRecentAuth(auth);
       if (stale) return stale;
     }
+    if (!dryRun && !isBreakGlass(g.ctx.principal)) { // a console session: a written reason and the typed phrase `release <business name>`, enforced here (the Bearer script is audited and mailed per use)
+      requireReason(body.reason);
+      const biz = await getBusiness(body.business_id);
+      if (!biz) return fail('business not found', 404);
+      requireConfirmPhrase(body.confirm, TENANT_VERBS.release.map((v) => tenantPhraseOf(v, biz.name)));
+    }
     const user = auth.principal.kind === 'admin' ? auth.principal.user : null;
     const report = await processBusiness(body.business_id, {
       apply: !dryRun, graceDays, notifyDays, includeRecent: body.include_recent === true, skipNotice: body.skip_notice === true,
@@ -48,6 +56,6 @@ export async function POST(req: Request) {
     }
     return ok({ dry_run: dryRun, ...report });
   } catch (err) {
-    return fail(err, 500);
+    return adminFail(err);
   }
 }

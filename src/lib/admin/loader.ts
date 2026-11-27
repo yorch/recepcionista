@@ -18,7 +18,7 @@ import { prisma } from '@/lib/db/client';
 import { recordAudit } from '@/lib/db/audit';
 import { logger } from '@/lib/log';
 import { setConsoleActive } from './console-state';
-import { CANARY_KEY, CANARY_PLAINTEXT, SettingsCryptoError, decryptSetting, encryptSetting, macPayload, masterKeys, needsReencrypt, verifySettingMac, type MasterKeys } from './crypto';
+import { CANARY_KEY, CANARY_PLAINTEXT, SettingsCryptoError, decryptSetting, encryptSetting, legacyMacPayload, macPayload, masterKeys, needsReencrypt, verifySettingMac, type MasterKeys } from './crypto';
 import { notifyAdmins } from './notify';
 import { setPlanCatalog, type PlanRow } from './plan-catalog';
 
@@ -48,6 +48,11 @@ interface LoaderState {
   lastHeartbeat: { at: number; version: number } | null;
   alerted: Set<string>;
   inflight: Promise<LoadResult> | null;
+  /** Calls of refreshNow so far, and the call count when the in-flight load STARTED (a load that started before a call may have read data from before that call's commit). */
+  reqSeq?: number;
+  inflightSeq?: number;
+  /** The one follow-up load waiting for the in-flight one to finish (every call that arrived after the in-flight load started joins it). */
+  queued?: Promise<LoadResult> | null;
   gen: number;
   appliedGen: number;
 }
@@ -108,14 +113,19 @@ async function doLoad(): Promise<LoadResult> {
       const bad = (code: ProblemCode, detail?: string) => problems.push({ key: row.key, code, ...(detail ? { detail } : {}) });
       if (!def) { bad('unknown_key'); continue; }
       if (def.envOnlyLoosen) { bad('env_only_key'); continue; }
-      if (!keys || !verifySettingMac(row.key, macPayload({ value: row.value, secretEnvelope: row.secretEnvelope }), row.version, row.integrityMac, keys)) { bad('bad_mac'); continue; }
+      // A secret's MAC covers its dual-secret window. A row MACed before that was covered (legacy payload) is still accepted for the CURRENT secret, but its previous envelope is
+      // NOT honoured (an unsigned window could have been extended or planted); the next write or re-encryption re-signs it.
+      if (!keys) { bad('bad_mac'); continue; }
+      const fullMac = verifySettingMac(row.key, macPayload({ value: row.value, secretEnvelope: row.secretEnvelope, previousEnvelope: row.previousEnvelope, previousUntil: row.previousUntil }), row.version, row.integrityMac, keys);
+      const legacyMac = !fullMac && !!row.secretEnvelope && verifySettingMac(row.key, legacyMacPayload({ secretEnvelope: row.secretEnvelope }), row.version, row.integrityMac, keys);
+      if (!fullMac && !legacyMac) { bad('bad_mac'); continue; }
       if (def.kind === 'secret') {
         if (!row.secretEnvelope) { bad('kind_mismatch'); continue; }
         try {
           secrets[row.key] = decryptSetting(row.secretEnvelope, row.key, keys);
           if (needsReencrypt(row.secretEnvelope, keys)) stale++;
         } catch (err) { bad('decrypt_failed', err instanceof SettingsCryptoError ? err.code : 'error'); continue; }
-        if (row.previousEnvelope && row.previousUntil && row.previousUntil.getTime() > nowMs) {
+        if (fullMac && row.previousEnvelope && row.previousUntil && row.previousUntil.getTime() > nowMs) {
           try { previousSecrets[row.key] = { value: decryptSetting(row.previousEnvelope, row.key, keys), until: row.previousUntil.getTime() }; } catch { /* an undecryptable previous value is simply not accepted */ }
         }
         continue;
@@ -162,16 +172,31 @@ async function doLoad(): Promise<LoadResult> {
   }
 }
 
-/** (Re)load now, coalescing concurrent calls. The writer calls it right after a commit; the poll calls it when the version moved. */
+/** Start one load (abandoned after LOAD_TIMEOUT_MS; its late result is still applied if newer) and make it THE in-flight load. */
+function startLoad(): Promise<LoadResult> {
+  const s = st();
+  const timeout = new Promise<LoadResult>((resolve) => { const t = setTimeout(() => resolve({ ok: false, version: s.version, rows: s.rows, ignored: s.problems.length, error: 'load timed out' }), LOAD_TIMEOUT_MS); t.unref?.(); });
+  s.inflightSeq = s.reqSeq ?? 0;
+  const p = Promise.race([doLoad(), timeout]).finally(() => { if (s.inflight === p) s.inflight = null; });
+  s.inflight = p;
+  return p;
+}
+
+/**
+ * (Re)load now. The writer calls it right after its commit, so the load it returns must START after that commit: a load that was already in flight when this call
+ * arrived may have read the rows before the commit and is not good enough. Calls that arrive while a load runs therefore share ONE follow-up load that starts when the running one
+ * ends (never one load per call); a call that arrives with nothing running starts a load.
+ */
 export function refreshNow(): Promise<LoadResult> {
   const s = st();
-  if (!s.inflight) {
-    // A load that never answers (a wedged connection) must not block every later refresh: it is abandoned after LOAD_TIMEOUT_MS (its late result is still applied if newer).
-    const timeout = new Promise<LoadResult>((resolve) => { const t = setTimeout(() => resolve({ ok: false, version: s.version, rows: s.rows, ignored: s.problems.length, error: 'load timed out' }), LOAD_TIMEOUT_MS); t.unref?.(); });
-    const p = Promise.race([doLoad(), timeout]).finally(() => { if (s.inflight === p) s.inflight = null; });
-    s.inflight = p;
+  const seq = (s.reqSeq = (s.reqSeq ?? 0) + 1);
+  if (!s.inflight) return startLoad();
+  if ((s.inflightSeq ?? 0) >= seq) return s.inflight; // started after this call (cannot happen today; kept for the invariant)
+  if (!s.queued) {
+    const q: Promise<LoadResult> = s.inflight.catch(() => undefined).then(() => { s.queued = null; return s.inflight ?? startLoad(); });
+    s.queued = q;
   }
-  return s.inflight;
+  return s.queued;
 }
 
 /** Create the canary row once (`INSERT .. ON CONFLICT DO NOTHING`): any instance may win the race. Never throws. */
